@@ -1,0 +1,7 @@
+id=ternak_tt
+name=Ternak TT — TikTok Zygisk Fresh Persona
+version=v1.0.0
+versionCode=100
+author=diru768
+description=TikTok-focused Zygisk device spoofer. 6-layer hook, auto app-data wipe, Pixel-only pool (SDK 33-36). Fork slim dari Ternak v5.0.
+updateJson=https://raw.githubusercontent.com/diru768/ternak-tt/main/update.json
