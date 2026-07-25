@@ -6,7 +6,7 @@ on:
       - main
       - master
   workflow_dispatch:
-  
+
 permissions:
   contents: write
 
@@ -22,25 +22,31 @@ jobs:
       - name: Get version
         id: version
         run: |
-          # Ambil tag terakhir atau mulai dari v0.0.0
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
           echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-          
-          # Parse versi (menghilangkan huruf 'v' jika ada)
+
           VERSION=${LATEST_TAG#v}
           MAJOR=$(echo $VERSION | cut -d. -f1)
           MINOR=$(echo $VERSION | cut -d. -f2)
           PATCH=$(echo $VERSION | cut -d. -f3)
-          
-          # Fallback jika PATCH kosong (misal tag sebelumnya hanya v1.0)
           if [ -z "$PATCH" ]; then PATCH=0; fi
-          
-          # Increment patch version
+
           NEW_PATCH=$((PATCH + 1))
           NEW_VERSION="v${MAJOR}.${MINOR}.${NEW_PATCH}"
-          
+          NEW_CODE="${MAJOR}${MINOR}${NEW_PATCH}"
+
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "📦 Version: $LATEST_TAG → $NEW_VERSION"
+          echo "new_code=$NEW_CODE"       >> $GITHUB_OUTPUT
+          echo "📦 Version: $LATEST_TAG → $NEW_VERSION (code=$NEW_CODE)"
+
+      - name: Sync module.prop with tag
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          NEW_CODE="${{ steps.version.outputs.new_code }}"
+          sed -i "s/^version=.*/version=${NEW_VERSION}/"     module.prop
+          sed -i "s/^versionCode=.*/versionCode=${NEW_CODE}/" module.prop
+          echo "---- module.prop ----"
+          cat module.prop
 
       - name: Setup NDK
         uses: nttld/setup-ndk@v1
@@ -59,50 +65,69 @@ jobs:
           mkdir -p prebuilt
           echo "# placeholder" > prebuilt/resetprop-rs.README
 
-      - name: Build
+      - name: Build (release + debug)
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          VARIANT: both
         run: |
           chmod +x build.sh
           ./build.sh
 
+      - name: List artifacts
+        run: |
+          ls -lh dist/
+
       - name: Generate checksums
         run: |
-          # Pastikan folder dist ada sebelum masuk
-          mkdir -p dist 
+          mkdir -p dist
           cd dist
-          
-          # Buat checksum hanya jika ada file zip, untuk menghindari error bash
           if ls *.zip 1> /dev/null 2>&1; then
             sha256sum *.zip > checksums.sha256
+            cat checksums.sha256
           else
-            echo "Tidak ada file zip ditemukan" > checksums.sha256
+            echo "No zip found" > checksums.sha256
           fi
 
       - name: Create Release Notes
         run: |
-          NEW_VERSION=${{ steps.version.outputs.new_version }}
-          echo "## Release $NEW_VERSION" > release_notes.md
-          echo "**Build Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> release_notes.md
-          echo "**Commit:** ${{ github.sha }}" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Artifacts" >> release_notes.md
-          echo "\`\`\`text" >> release_notes.md
-          
-          # Tulis checksum ke release notes dengan aman
-          if [ -s dist/checksums.sha256 ]; then
-            cat dist/checksums.sha256 >> release_notes.md
-          else
-            echo "No artifacts generated." >> release_notes.md
-          fi
-          
-          echo "\`\`\`" >> release_notes.md
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          {
+            echo "## Release $NEW_VERSION"
+            echo ""
+            echo "**Build Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "**Commit:** ${{ github.sha }}"
+            echo ""
+            echo "### Variants"
+            echo "- \`ternak-tt-${NEW_VERSION}-release.zip\` — production, LOGD compiled out, stripped binaries"
+            echo "- \`ternak-tt-${NEW_VERSION}-debug.zip\` — verbose \`[D]\` logs in \`logcat -s TernakTT:V TernakTTCompanion:V\`, symbols kept"
+            echo ""
+            echo "### Debug tips"
+            echo '```bash'
+            echo 'su -c "logcat -c && logcat -v time -s TernakTT:V TernakTTCompanion:V"'
+            echo '```'
+            echo ""
+            echo "### SHA256"
+            echo '```text'
+            if [ -s dist/checksums.sha256 ]; then
+              cat dist/checksums.sha256
+            else
+              echo "No artifacts generated."
+            fi
+            echo '```'
+          } > release_notes.md
 
-      - name: Upload artifacts
+      - name: Upload artifacts (release)
         uses: actions/upload-artifact@v4
         with:
-          name: ternak-tt-zip
-          path: dist/*.zip
+          name: ternak-tt-release
+          path: dist/*-release.zip
+          if-no-files-found: warn
+
+      - name: Upload artifacts (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ternak-tt-debug
+          path: dist/*-debug.zip
           if-no-files-found: warn
 
       - name: Create Tag & Release

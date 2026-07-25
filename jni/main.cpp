@@ -20,6 +20,8 @@
 #include <vector>
 #include <sstream>
 #include <cstdlib>
+#include <signal.h>
+#include <ctime>
 #include "zygisk.hpp"
 
 // memfd_create wrapper (not in older NDK headers)
@@ -45,6 +47,14 @@ static inline int tt_memfd_create(const char* name, unsigned flags) {
 #define LOG_TAG "TernakTT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+// LOGD = verbose debug traces; zero-cost in release builds.
+#ifdef TT_DEBUG
+#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
+#define TT_VARIANT_TAG "debug"
+#else
+#define LOGD(...) ((void)0)
+#define TT_VARIANT_TAG "release"
+#endif
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
@@ -82,6 +92,7 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
     const char* raw = env->GetStringUTFChars(j_key, nullptr);
     std::string k(raw ? raw : "");
     env->ReleaseStringUTFChars(j_key, raw);
+    LOGD("L2 native_get('%s') requested", k.c_str());
 
     static const std::map<std::string, std::string> map = {
         {"ro.serialno",              "SERIAL"},
@@ -107,11 +118,17 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
     auto it = map.find(k);
     if (it != map.end()) {
         const std::string& v = val(it->second);
-        if (!v.empty()) return env->NewStringUTF(v.c_str());
+        if (!v.empty()) {
+            LOGD("L2 SPOOF '%s' -> '%s'", k.c_str(), v.c_str());
+            return env->NewStringUTF(v.c_str());
+        }
     }
     char buf[PROP_VALUE_MAX] = {0};
-    if (__system_property_get(k.c_str(), buf) > 0)
+    if (__system_property_get(k.c_str(), buf) > 0) {
+        LOGD("L2 LEAK  '%s' -> '%s' (unhooked, real value returned)", k.c_str(), buf);
         return env->NewStringUTF(buf);
+    }
+    LOGD("L2 MISS  '%s' -> default", k.c_str());
     return j_def;
 }
 
@@ -127,9 +144,18 @@ static jstring hook_secure_get(JNIEnv* env, jclass c, jobject cr, jstring name) 
         const char* raw = env->GetStringUTFChars(name, nullptr);
         std::string n(raw ? raw : "");
         env->ReleaseStringUTFChars(name, raw);
+        LOGD("L3 Settings.Secure.getString('%s')", n.c_str());
         if (n == "android_id") {
             const std::string& aid = val("ANDROID_ID");
-            if (!aid.empty()) return env->NewStringUTF(aid.c_str());
+            if (!aid.empty()) {
+                LOGD("L3 SPOOF android_id -> '%s'", aid.c_str());
+                return env->NewStringUTF(aid.c_str());
+            }
+        }
+        // known leak surfaces on this class:
+        if (n == "bluetooth_address" || n == "bluetooth_name" ||
+            n == "advertising_id"   || n == "install_non_market_apps") {
+            LOGD("L3 LEAK  Settings.Secure '%s' queried (unhooked)", n.c_str());
         }
     }
     return orig_secure_get ? orig_secure_get(env, c, cr, name) : nullptr;
@@ -162,9 +188,11 @@ static void install_gaid_hook(JNIEnv* env) {
 // L5: WifiInfo.getMacAddress / getBSSID hook
 // ============================================================
 static jstring hook_wifi_mac(JNIEnv* env, jobject) {
+    LOGD("L5 WifiInfo.getMacAddress -> 02:00:00:00:00:00 (spoofed)");
     return env->NewStringUTF("02:00:00:00:00:00");
 }
 static jstring hook_wifi_bssid(JNIEnv* env, jobject) {
+    LOGD("L5 WifiInfo.getBSSID -> 02:00:00:00:00:00 (spoofed)");
     return env->NewStringUTF("02:00:00:00:00:00");
 }
 
@@ -187,22 +215,177 @@ static void install_wifi_hook(JNIEnv* env) {
 // ============================================================
 static jstring hook_null_str(JNIEnv*, jobject) { return nullptr; }
 
+#ifdef TT_DEBUG
+// Debug wrappers so we can identify WHICH telephony method got called.
+static jstring hook_tel_deviceId(JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getDeviceId() -> null"); return nullptr; }
+static jstring hook_tel_imei    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getImei() -> null");     return nullptr; }
+static jstring hook_tel_subId   (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getSubscriberId() -> null"); return nullptr; }
+static jstring hook_tel_meid    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getMeid() -> null");     return nullptr; }
+#endif
+
+// ============================================================
+// L7 (debug-only): LEAK SENSORS — hook surfaces we don't spoof,
+//                  just to log what target queries beyond our coverage.
+// ============================================================
+#ifdef TT_DEBUG
+static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
+    if (j_key) {
+        const char* r = env->GetStringUTFChars(j_key, nullptr);
+        LOGD("L7 SPI native_get_int('%s') def=%d [LEAK — returning def]", r ? r : "", def);
+        env->ReleaseStringUTFChars(j_key, r);
+    }
+    return def;
+}
+static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
+    if (j_key) {
+        const char* r = env->GetStringUTFChars(j_key, nullptr);
+        LOGD("L7 SPL native_get_long('%s') def=%lld [LEAK]", r ? r : "", (long long)def);
+        env->ReleaseStringUTFChars(j_key, r);
+    }
+    return def;
+}
+static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean def) {
+    if (j_key) {
+        const char* r = env->GetStringUTFChars(j_key, nullptr);
+        LOGD("L7 SPB native_get_boolean('%s') def=%d [LEAK]", r ? r : "", def);
+        env->ReleaseStringUTFChars(j_key, r);
+    }
+    return def;
+}
+static jstring hook_build_radio(JNIEnv* env, jclass) {
+    LOGD("L7 Build.getRadioVersion() called [LEAK — returning empty]");
+    return env->NewStringUTF("");
+}
+static void install_leak_sensors(JNIEnv* env) {
+    // SystemProperties variants
+    {
+        jclass sp = env->FindClass("android/os/SystemProperties");
+        if (sp) {
+            JNINativeMethod m[] = {
+                {const_cast<char*>("native_get_int"),
+                 const_cast<char*>("(Ljava/lang/String;I)I"),
+                 reinterpret_cast<void*>(hook_prop_get_int)},
+                {const_cast<char*>("native_get_long"),
+                 const_cast<char*>("(Ljava/lang/String;J)J"),
+                 reinterpret_cast<void*>(hook_prop_get_long)},
+                {const_cast<char*>("native_get_boolean"),
+                 const_cast<char*>("(Ljava/lang/String;Z)Z"),
+                 reinterpret_cast<void*>(hook_prop_get_bool)},
+            };
+            env->RegisterNatives(sp, m, 3);
+            env->ExceptionClear();
+            env->DeleteLocalRef(sp);
+            LOGD("L7 leak sensors installed on SystemProperties (int/long/bool)");
+        } else env->ExceptionClear();
+    }
+    // Build.getRadioVersion
+    {
+        jclass b = env->FindClass("android/os/Build");
+        if (b) {
+            JNINativeMethod m = {
+                const_cast<char*>("getRadioVersion"),
+                const_cast<char*>("()Ljava/lang/String;"),
+                reinterpret_cast<void*>(hook_build_radio)};
+            env->RegisterNatives(b, &m, 1);
+            env->ExceptionClear();
+            env->DeleteLocalRef(b);
+            LOGD("L7 leak sensor installed on Build.getRadioVersion");
+        } else env->ExceptionClear();
+    }
+}
+#endif // TT_DEBUG
+
 static void install_telephony_hook(JNIEnv* env) {
     jclass c = env->FindClass("android/telephony/TelephonyManager");
     if (!c) { env->ExceptionClear(); return; }
+#ifdef TT_DEBUG
     JNINativeMethod m[] = {
-        {const_cast<char*>("getDeviceId"),     const_cast<char*>("()Ljava/lang/String;"),
-         reinterpret_cast<void*>(hook_null_str)},
-        {const_cast<char*>("getImei"),         const_cast<char*>("()Ljava/lang/String;"),
-         reinterpret_cast<void*>(hook_null_str)},
-        {const_cast<char*>("getSubscriberId"), const_cast<char*>("()Ljava/lang/String;"),
-         reinterpret_cast<void*>(hook_null_str)},
-        {const_cast<char*>("getMeid"),         const_cast<char*>("()Ljava/lang/String;"),
-         reinterpret_cast<void*>(hook_null_str)},
+        {const_cast<char*>("getDeviceId"),     const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_deviceId)},
+        {const_cast<char*>("getImei"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_imei)},
+        {const_cast<char*>("getSubscriberId"), const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_subId)},
+        {const_cast<char*>("getMeid"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_meid)},
     };
+#else
+    JNINativeMethod m[] = {
+        {const_cast<char*>("getDeviceId"),     const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
+        {const_cast<char*>("getImei"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
+        {const_cast<char*>("getSubscriberId"), const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
+        {const_cast<char*>("getMeid"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
+    };
+#endif
     env->RegisterNatives(c, m, 4);
     env->ExceptionClear();
     env->DeleteLocalRef(c);
+}
+
+// ============================================================
+// Crash / signal watchdog
+//   • Always active (LOGE — visible in both variants) so we ALWAYS see
+//     when the target dies while Ternak TT is loaded.
+//   • Debug variant additionally logs siginfo (fault address, sender pid).
+//   • Chains to the previous (ART/libc) handler so we don't break ART's
+//     tombstone generation.
+// ============================================================
+static struct sigaction g_prev_sig[NSIG];
+static std::string g_watchdog_pkg;
+static long        g_load_time_ms = 0;
+
+static long tt_now_ms() {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)(ts.tv_sec * 1000L + ts.tv_nsec / 1000000L);
+}
+static const char* tt_sig_name(int sig) {
+    switch (sig) {
+        case SIGSEGV: return "SIGSEGV";
+        case SIGABRT: return "SIGABRT";
+        case SIGBUS:  return "SIGBUS";
+        case SIGILL:  return "SIGILL";
+        case SIGFPE:  return "SIGFPE";
+        case SIGTERM: return "SIGTERM";
+        case SIGPIPE: return "SIGPIPE";
+        case SIGSYS:  return "SIGSYS";
+        default:      return "?";
+    }
+}
+static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
+    long alive = tt_now_ms() - g_load_time_ms;
+    // async-signal-safe-ish; __android_log_print is technically not, but
+    // ART already uses it in its own signal handler, so best-effort here.
+    LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%ldms",
+         TT_VARIANT_TAG,
+         g_watchdog_pkg.c_str(), getpid(),
+         sig, tt_sig_name(sig),
+         info ? info->si_code : 0,
+         info ? info->si_addr : nullptr,
+         info ? info->si_pid  : 0,
+         alive);
+#ifdef TT_DEBUG
+    // Extra: which signal-firing FDs are open? First 3 mount lines?
+    // (Kept simple; more forensics is easy to add later.)
+#endif
+    // Chain to previous handler so tombstone / ART crash reporter still runs.
+    if (sig >= 0 && sig < NSIG) {
+        struct sigaction* p = &g_prev_sig[sig];
+        if (p->sa_flags & SA_SIGINFO) {
+            if (p->sa_sigaction) p->sa_sigaction(sig, info, ctx);
+            else                 signal(sig, SIG_DFL), raise(sig);
+        } else {
+            if (p->sa_handler == SIG_DFL) { signal(sig, SIG_DFL); raise(sig); }
+            else if (p->sa_handler != SIG_IGN && p->sa_handler) p->sa_handler(sig);
+        }
+    }
+}
+static void install_crash_watchdog(const std::string& pkg) {
+    g_watchdog_pkg  = pkg;
+    g_load_time_ms  = tt_now_ms();
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
+    sa.sa_sigaction = tt_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    static const int sigs[] = { SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE, SIGTERM, SIGPIPE, SIGSYS };
+    for (int s : sigs) sigaction(s, &sa, &g_prev_sig[s]);
+    LOGD("crash watchdog armed for %s (8 signals)", pkg.c_str());
 }
 
 // ============================================================
@@ -409,7 +592,11 @@ static void install_proc_sanitizer(Api* api) {
 // ============================================================
 class TernakTT : public zygisk::ModuleBase {
 public:
-    void onLoad(Api* api, JNIEnv* env) override { api_ = api; env_ = env; }
+    void onLoad(Api* api, JNIEnv* env) override {
+        api_ = api; env_ = env;
+        LOGD("onLoad build=%s api=%p env=%p pid=%d uid=%d",
+             TT_VARIANT_TAG, api, env, getpid(), getuid());
+    }
 
     void preAppSpecialize(AppSpecializeArgs* args) override {
         std::string pkg;
@@ -418,10 +605,15 @@ public:
             pkg = raw ? raw : "";
             env_->ReleaseStringUTFChars(args->nice_name, raw);
         }
-        if (!is_target_pkg(pkg)) { unload(); return; }
+        LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
+        if (!is_target_pkg(pkg)) {
+            LOGD("pkg='%s' not a target, unloading", pkg.c_str());
+            unload(); return;
+        }
 
         int fd = api_->connectCompanion();
-        if (fd < 0) { unload(); return; }
+        LOGD("connectCompanion() -> fd=%d", fd);
+        if (fd < 0) { LOGE("companion connect failed for pkg='%s'", pkg.c_str()); unload(); return; }
 
         uint8_t cmd = CMD_GET_IDENTITY;
         write(fd, &cmd, 1);
@@ -440,7 +632,10 @@ public:
         if (got != len) { unload(); return; }
 
         active_ = true;
-        LOGI("target: %s (%u B)", pkg.c_str(), len);
+        pkg_ = pkg;
+        LOGI("target: %s (%u B) [%s]", pkg.c_str(), len, TT_VARIANT_TAG);
+        LOGD("identity blob head='%.120s'",
+             std::string(blob_.begin(), blob_.begin() + (len < 120 ? len : 120)).c_str());
 
         // v1.0.6: request companion to fork a child that setns+mounts our
         // overlay into this TT process's mount namespace.
@@ -453,7 +648,14 @@ public:
     void postAppSpecialize(const AppSpecializeArgs*) override {
         if (!active_) return;
         parse_blob();
+        LOGD("parse_blob: %zu identity keys loaded", g_id.size());
+#ifdef TT_DEBUG
+        for (auto& kv : g_id) {
+            LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
+        }
+#endif
         install_build_hook(env_);
+        LOGD("L1 install_build_hook done");
         // L2: SystemProperties.native_get
         {
             jclass sp = env_->FindClass("android/os/SystemProperties");
@@ -471,6 +673,10 @@ public:
         install_gaid_hook(env_);
         install_wifi_hook(env_);
         install_telephony_hook(env_);
+#ifdef TT_DEBUG
+        install_leak_sensors(env_);
+#endif
+        install_crash_watchdog(pkg_);
         // v1.0.6: PLT sanitizer disabled. Hooking openat in libc.so's PLT
         // only intercepts calls made FROM inside libc (libc never calls its
         // own openat). To sanitize /proc/self/mountinfo reads by TT/analytics
@@ -484,6 +690,7 @@ public:
 
 private:
     Api* api_ = nullptr;
+    std::string pkg_;
     JNIEnv* env_ = nullptr;
     bool active_ = false;
     std::vector<uint8_t> blob_;

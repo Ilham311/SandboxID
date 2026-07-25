@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # ============================================================
-# Ternak TT v1.0 - Build script (all ABIs -> flashable zip)
+# Ternak TT - Build script
+#
+# Produces two flashable zips per invocation (unless VARIANT set):
+#   dist/ternak-tt-<version>-release.zip  (LOGD compiled out, stripped)
+#   dist/ternak-tt-<version>-debug.zip    (LOGD active, symbols kept)
+#
+# Env overrides:
+#   VARIANT=release     build only release
+#   VARIANT=debug       build only debug
+#   VARIANT=both        build both (default)
+#   MIN_SDK=33          Android platform target
 # ============================================================
 set -euo pipefail
 
@@ -9,12 +19,15 @@ cd "$ROOT"
 
 : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to your NDK path (r26+)}"
 MIN_SDK="${MIN_SDK:-33}"
+VARIANT="${VARIANT:-both}"
 VERSION="$(grep '^version=' module.prop | cut -d= -f2)"
 OUT="$ROOT/dist"
-PKG="$ROOT/pkg"
+
+ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
 
 echo "==> Ternak TT $VERSION"
 echo "==> NDK: $ANDROID_NDK_HOME"
+echo "==> Variant(s): $VARIANT"
 
 # 1. Fetch zygisk.hpp if missing
 if [ ! -f jni/zygisk.hpp ]; then
@@ -23,52 +36,81 @@ if [ ! -f jni/zygisk.hpp ]; then
     https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
 fi
 
-# 2. Build per ABI
-ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
-for ABI in "${ABIS[@]}"; do
-  echo "==> Building $ABI"
-  BUILD="build/$ABI"
-  rm -rf "$BUILD"
-  mkdir -p "$BUILD"
-  cmake -S jni -B "$BUILD" \
-    -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-    -DANDROID_ABI="$ABI" \
-    -DANDROID_PLATFORM="android-$MIN_SDK" \
-    -DCMAKE_BUILD_TYPE=Release
-  cmake --build "$BUILD" -j
-done
+mkdir -p "$OUT"
 
-# 3. Assemble package
-rm -rf "$PKG" "$OUT"
-mkdir -p "$PKG/zygisk" "$PKG/bin" "$OUT"
+# ------------------------------------------------------------
+# build_variant <variant-name>  ->  produces dist/ternak-tt-<ver>-<variant>.zip
+# ------------------------------------------------------------
+build_variant() {
+  local V="$1"
+  local DBG_FLAG
+  case "$V" in
+    debug)   DBG_FLAG="-DTERNAK_TT_DEBUG=ON"  ;;
+    release) DBG_FLAG="-DTERNAK_TT_DEBUG=OFF" ;;
+    *) echo "unknown variant: $V" >&2; return 1 ;;
+  esac
 
-# module scripts
-cp module.prop action.sh service.sh customize.sh "$PKG/"
+  local PKG="$ROOT/pkg-$V"
+  echo ""
+  echo "============================================================"
+  echo "  Building variant: $V"
+  echo "============================================================"
 
-# .so per ABI (Zygisk expects zygisk/<abi>.so)
-cp build/arm64-v8a/libternak_tt.so    "$PKG/zygisk/arm64-v8a.so"
-cp build/armeabi-v7a/libternak_tt.so  "$PKG/zygisk/armeabi-v7a.so"
-cp build/x86_64/libternak_tt.so       "$PKG/zygisk/x86_64.so"
-cp build/x86/libternak_tt.so          "$PKG/zygisk/x86.so"
+  # Compile every ABI for this variant
+  for ABI in "${ABIS[@]}"; do
+    echo "  ==> [$V] $ABI"
+    local BUILD="build/$V/$ABI"
+    rm -rf "$BUILD"
+    mkdir -p "$BUILD"
+    cmake -S jni -B "$BUILD" \
+      -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+      -DANDROID_ABI="$ABI" \
+      -DANDROID_PLATFORM="android-$MIN_SDK" \
+      -DCMAKE_BUILD_TYPE=Release \
+      $DBG_FLAG >/dev/null
+    cmake --build "$BUILD" -j
+  done
 
-# CLI per ABI
-cp build/arm64-v8a/ternak-tt    "$PKG/bin/ternak-tt-arm64"
-cp build/armeabi-v7a/ternak-tt  "$PKG/bin/ternak-tt-arm"
-cp build/x86_64/ternak-tt       "$PKG/bin/ternak-tt-x86_64"
-cp build/x86/ternak-tt          "$PKG/bin/ternak-tt-x86"
+  # Assemble package tree for this variant
+  rm -rf "$PKG"
+  mkdir -p "$PKG/zygisk" "$PKG/bin"
+  cp module.prop action.sh service.sh customize.sh "$PKG/"
 
-# resetprop-rs (must be provided)
-if [ -f prebuilt/resetprop-rs ]; then
-  cp prebuilt/resetprop-rs "$PKG/bin/resetprop-rs"
-else
-  echo "WARN: prebuilt/resetprop-rs missing; native prop apply will be skipped at runtime"
-fi
+  # Stamp variant into module.prop so it's visible in KernelSU Manager
+  if [ "$V" = "debug" ]; then
+    sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"
+  fi
 
-# 4. Zip (flashable format: files at zip root)
-cd "$PKG"
-zip -r9 "$OUT/ternak-tt-$VERSION.zip" . -x "*.DS_Store"
-cd "$ROOT"
+  for ABI in "${ABIS[@]}"; do
+    cp "build/$V/$ABI/libternak_tt.so" "$PKG/zygisk/$ABI.so"
+  done
+
+  cp "build/$V/arm64-v8a/ternak-tt"    "$PKG/bin/ternak-tt-arm64"
+  cp "build/$V/armeabi-v7a/ternak-tt"  "$PKG/bin/ternak-tt-arm"
+  cp "build/$V/x86_64/ternak-tt"       "$PKG/bin/ternak-tt-x86_64"
+  cp "build/$V/x86/ternak-tt"          "$PKG/bin/ternak-tt-x86"
+
+  if [ -f prebuilt/resetprop-rs ]; then
+    cp prebuilt/resetprop-rs "$PKG/bin/resetprop-rs"
+  else
+    echo "  WARN: prebuilt/resetprop-rs missing; native prop apply will be skipped at runtime"
+  fi
+
+  local ZIP="$OUT/ternak-tt-$VERSION-$V.zip"
+  (cd "$PKG" && zip -r9 "$ZIP" . -x "*.DS_Store" >/dev/null)
+  echo "  ==> Built: $ZIP ($(du -h "$ZIP" | cut -f1))"
+}
+
+# ------------------------------------------------------------
+# Dispatch
+# ------------------------------------------------------------
+case "$VARIANT" in
+  release) build_variant release ;;
+  debug)   build_variant debug   ;;
+  both)    build_variant release; build_variant debug ;;
+  *) echo "Invalid VARIANT: $VARIANT (expected: release|debug|both)" >&2; exit 1 ;;
+esac
 
 echo ""
-echo "==> Built: $OUT/ternak-tt-$VERSION.zip"
-ls -lh "$OUT/ternak-tt-$VERSION.zip"
+echo "==> All artifacts:"
+ls -lh "$OUT"/*.zip

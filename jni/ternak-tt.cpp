@@ -172,11 +172,21 @@ static Identity gen_identity() {
     return id;
 }
 
+// v1.0.8: variant tag + debug stderr traces (compiled out in release)
+#ifdef TT_DEBUG
+#define TT_VARIANT_TAG "debug"
+#define DBG(fmt, ...) fprintf(stderr, "[D] " fmt "\n", ##__VA_ARGS__)
+#else
+#define TT_VARIANT_TAG "release"
+#define DBG(...) ((void)0)
+#endif
+
 // ---- Apply native + wipe ----
 // v1.0.2: cover full Build.* mapping + partitioned props (Android 12+)
 // biar app yang bypass Java Build.* via JNI __system_property_get langsung
 // tetap ke-spoof, dan gak ada mismatch antara Java view vs native view.
 static void apply_native(const Identity& id) {
+    DBG("apply_native: enter (identity has %zu kv pairs)", id.kv.size());
     auto get = [&](const char* k) -> std::string {
         auto it = id.kv.find(k);
         return it != id.kv.end() ? it->second : std::string();
@@ -318,6 +328,7 @@ static void apply_native(const Identity& id) {
 // Files are consumed by main.cpp:do_bind_mounts() at TT app launch.
 // ============================================================
 static void generate_mount_files(const Identity& id) {
+    DBG("generate_mount_files: MOUNTDIR=%s", MOUNTDIR);
     auto g = [&](const char* k) -> std::string {
         auto it = id.kv.find(k);
         return it != id.kv.end() ? it->second : std::string();
@@ -484,6 +495,7 @@ static bool ensure_root() {
 
 // ---- Command handlers ----
 static int cmd_freshen() {
+    DBG("cmd_freshen: build=%s", TT_VARIANT_TAG);
     if (!ensure_root()) return 1;
 
     std::string mode = trim(read_file(MODE_FILE));

@@ -21,11 +21,25 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <thread>
+#include <chrono>
+#include <signal.h>
+#include <time.h>
 #include <android/log.h>
 
 #define LOG_TAG "TernakTTCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#ifdef TT_DEBUG
+#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
+#define TT_VARIANT_TAG "debug"
+#else
+#define LOGD(...) ((void)0)
+#define TT_VARIANT_TAG "release"
+#endif
+
+// Forward decls
+static void watch_target_death(uint32_t pid);
 
 enum : uint8_t {
     CMD_CHECK_TT     = 1,
@@ -75,10 +89,12 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     if (child == 0) {
         // Child — single-threaded, so setns(CLONE_NEWNS) works.
         ::close(pipefd[0]);
+        LOGD("child: pid=%d parent_target=%u", getpid(), target_pid);
 
         char path[64];
         ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
         int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
+        LOGD("child: open %s -> fd=%d errno=%d", path, tgt_ns, errno);
         uint32_t ok = 0, fail = 0, skip = 0;
 
         if (tgt_ns < 0) {
@@ -87,20 +103,27 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
             LOGE("child: setns->target failed errno=%d", errno);
             ::close(tgt_ns);
         } else {
+            LOGD("child: setns OK, entering %u bind loop",
+                 (unsigned)(sizeof(BIND_ENTRIES)/sizeof(BIND_ENTRIES[0])));
             for (const auto& e : BIND_ENTRIES) {
                 std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
-                if (::access(src.c_str(), F_OK) != 0) { skip++; continue; }
-                if (::access(e.dst,        F_OK) != 0) { skip++; continue; }
-                if (::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr) == 0) {
+                bool src_ok = (::access(src.c_str(), F_OK) == 0);
+                bool dst_ok = (::access(e.dst,        F_OK) == 0);
+                LOGD("  bind check: src=%s(%d) dst=%s(%d)",
+                     src.c_str(), src_ok, e.dst, dst_ok);
+                if (!src_ok || !dst_ok) { skip++; continue; }
+                int rc = ::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr);
+                if (rc == 0) {
                     ok++;
+                    LOGD("  bind OK: %s -> %s", src.c_str(), e.dst);
                 } else {
                     fail++;
                     LOGE("child: bind fail %s -> %s errno=%d",
                          src.c_str(), e.dst, errno);
                 }
             }
-            LOGI("child mount for pid=%u: %u ok, %u fail, %u skip",
-                 target_pid, ok, fail, skip);
+            LOGI("child mount for pid=%u: %u ok, %u fail, %u skip [%s]",
+                 target_pid, ok, fail, skip, TT_VARIANT_TAG);
             ::close(tgt_ns);
         }
 
@@ -114,6 +137,10 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     uint32_t ok = 0;
     ssize_t n = ::read(pipefd[0], &ok, sizeof(ok));
     ::close(pipefd[0]);
+    // Arm death watcher in PARENT (companion daemon) — not in child which
+    // _exit()s immediately. Watcher runs regardless of mount outcome so we
+    // capture every target exit (crash, SIGKILL, LMK, normal close).
+    watch_target_death(target_pid);
     int status = 0;
     ::waitpid(child, &status, 0);
     if (n != (ssize_t)sizeof(ok)) {
@@ -123,10 +150,39 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     return ok;
 }
 
+// ============================================================
+// Death watcher: after a successful mount request we spawn a
+// detached thread that polls kill(pid,0) until the target dies.
+// This surfaces OOM / LMK / SIGKILL kills that the in-process
+// signal handler CANNOT see (SIGKILL is uncatchable).
+// ============================================================
+static void watch_target_death(uint32_t pid) {
+    std::thread([pid]() {
+        struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+        // Poll every 500ms, give up after 30 min (target likely user-closed).
+        for (int i = 0; i < 3600; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (::kill((pid_t)pid, 0) == 0) continue;         // still alive
+            if (errno != ESRCH) continue;                     // EPERM etc — keep polling
+            struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
+            long ms = (t1.tv_sec - t0.tv_sec) * 1000L +
+                      (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+            LOGI("DEATH target pid=%u disappeared after %ldms "
+                 "(uncatchable exit: SIGKILL / LMK / normal exit) [%s]",
+                 pid, ms, TT_VARIANT_TAG);
+            return;
+        }
+        LOGD("death watcher for pid=%u timed out after 30min", pid);
+    }).detach();
+}
+
 extern "C" void ternak_tt_companion(int client) {
+    LOGD("companion invoked: client=%d pid=%d [%s]",
+         client, getpid(), TT_VARIANT_TAG);
     while (true) {
         uint8_t cmd = 0;
         if (::read(client, &cmd, 1) != 1) break;
+        LOGD("recv cmd=%u", cmd);
 
         if (cmd == CMD_GET_IDENTITY) {
             std::string d = read_file(IDENTITY_FILE);
