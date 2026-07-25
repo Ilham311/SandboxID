@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -341,29 +342,62 @@ static int hook_openat(int dirfd, const char* path, int flags, ...) {
     return mfd;
 }
 
+// v1.0.5: real Zygisk-Next pltHookRegister takes (dev_t, ino_t, symbol, ...).
+// Parse /proc/self/maps to resolve libc.so's dev+inode.
+static bool find_libc_dev_inode(dev_t* dev_out, ino_t* ino_out) {
+    FILE* f = ::fopen("/proc/self/maps", "r");
+    if (!f) return false;
+    char line[512];
+    bool found = false;
+    while (::fgets(line, sizeof(line), f)) {
+        // Line format:
+        //   addr1-addr2 perms offset dev inode path
+        //   7f...-7f... r-xp 00000000 fd:00 12345 /apex/.../libc.so
+        char* nl = ::strchr(line, '\n');
+        if (nl) *nl = 0;
+        // Path is the last space-separated token; make sure it ends with /libc.so
+        char* sp = ::strrchr(line, ' ');
+        if (!sp) continue;
+        char* path = sp + 1;
+        size_t plen = ::strlen(path);
+        if (plen < 8) continue;
+        if (::strcmp(path + plen - 8, "/libc.so") != 0) continue;
+        // Parse fields
+        unsigned long a1, a2, off;
+        char perms[8] = {0};
+        unsigned int dmaj = 0, dmin = 0;
+        unsigned long ino = 0;
+        if (::sscanf(line, "%lx-%lx %7s %lx %x:%x %lu",
+                     &a1, &a2, perms, &off, &dmaj, &dmin, &ino) == 7) {
+            *dev_out = (dev_t)((dmaj << 8) | dmin);
+            *ino_out = (ino_t)ino;
+            found = true;
+            break;
+        }
+    }
+    ::fclose(f);
+    return found;
+}
+
 static void install_proc_sanitizer(Api* api) {
     if (!api) return;
-    // v1.0.4: try multiple patterns — HMA-OSS Zygisk expects specific format.
-    // Register for both openat and __openat (Bionic internal alias).
-    // If ALL hooks fail to bind, commit returns false — log as INFO not
-    // ERROR because sanitizer is best-effort defense-in-depth.
-    const char* patterns[] = {
-        "libc.so",              // Bare name
-        ".*/libc\\.so",         // Path suffix
-        "/apex/.*/libc\\.so",   // Apex path (Android 10+)
-    };
-    for (const char* p : patterns) {
-        api->pltHookRegister(p, "openat",
-                             reinterpret_cast<void*>(hook_openat),
-                             reinterpret_cast<void**>(&orig_openat));
-        api->pltHookRegister(p, "__openat",
-                             reinterpret_cast<void*>(hook_openat),
-                             reinterpret_cast<void**>(&orig_openat));
+    dev_t dev = 0;
+    ino_t ino = 0;
+    if (!find_libc_dev_inode(&dev, &ino)) {
+        LOGI("proc sanitizer: libc.so not found in maps (skip)");
+        return;
     }
+    api->pltHookRegister(dev, ino, "openat",
+                         reinterpret_cast<void*>(hook_openat),
+                         reinterpret_cast<void**>(&orig_openat));
+    api->pltHookRegister(dev, ino, "__openat",
+                         reinterpret_cast<void*>(hook_openat),
+                         reinterpret_cast<void**>(&orig_openat));
     if (!api->pltHookCommit()) {
-        LOGI("proc sanitizer: no PLT hooks applied (best-effort skipped)");
+        LOGI("proc sanitizer: PLT commit false (best-effort skipped)");
     } else {
-        LOGI("proc sanitizer installed");
+        LOGI("proc sanitizer installed (dev=%lu ino=%lu)",
+             (unsigned long)dev, (unsigned long)ino);
     }
 }
 
