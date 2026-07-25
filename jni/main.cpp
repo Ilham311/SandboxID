@@ -57,10 +57,13 @@ enum : uint8_t {
 };
 
 // TT package hardcoded (fork focused, no whitelist file)
-static bool is_tt_pkg(const std::string& p) {
+// v1.0.7: expanded target set. Same spoofed identity applied to Grab
+// (driver/passenger apps do heavy device fingerprinting for fraud).
+static bool is_target_pkg(const std::string& p) {
     return p == "com.zhiliaoapp.musically"        // TT Global
-        || p == "com.ss.android.ugc.trill"        // TT Asia (some regions)
-        || p == "com.zhiliaoapp.musically.go";    // TT Lite
+        || p == "com.ss.android.ugc.trill"        // TT Asia
+        || p == "com.zhiliaoapp.musically.go"     // TT Lite
+        || p == "com.grabtaxi.passenger";         // Grab Passenger
 }
 
 static std::map<std::string, std::string> g_id;
@@ -415,7 +418,7 @@ public:
             pkg = raw ? raw : "";
             env_->ReleaseStringUTFChars(args->nice_name, raw);
         }
-        if (!is_tt_pkg(pkg)) { unload(); return; }
+        if (!is_target_pkg(pkg)) { unload(); return; }
 
         int fd = api_->connectCompanion();
         if (fd < 0) { unload(); return; }
@@ -437,11 +440,13 @@ public:
         if (got != len) { unload(); return; }
 
         active_ = true;
-        LOGI("TT target: %s (%u B)", pkg.c_str(), len);
+        LOGI("target: %s (%u B)", pkg.c_str(), len);
 
-        // v1.0.4: request companion to setns+mount our overlay into this
-        // TT process's mount namespace. In-process mount fails EACCES on
-        // modern Zygisk-Next forks (caps stripped in preAppSpecialize).
+        // v1.0.6: request companion to fork a child that setns+mounts our
+        // overlay into this TT process's mount namespace.
+        //   • In-process mount: EACCES (caps stripped in preAppSpecialize)
+        //   • In-companion mount: EINVAL (companion is multithreaded)
+        //   • Fork-then-setns from companion: works (child single-threaded)
         request_companion_mounts(api_);
     }
 
@@ -466,8 +471,13 @@ public:
         install_gaid_hook(env_);
         install_wifi_hook(env_);
         install_telephony_hook(env_);
-        // v1.0.3: hide bind mounts from /proc/self/mountinfo|mounts|maps
-        install_proc_sanitizer(api_);
+        // v1.0.6: PLT sanitizer disabled. Hooking openat in libc.so's PLT
+        // only intercepts calls made FROM inside libc (libc never calls its
+        // own openat). To sanitize /proc/self/mountinfo reads by TT/analytics
+        // libs we'd need per-library PLT hooks or inline hooking
+        // (shadowhook/dobby). Deferred to v1.1. Bind mount is the critical
+        // spoof; mountinfo exposure is defense-in-depth only.
+        // install_proc_sanitizer(api_);
     }
 
     void preServerSpecialize(ServerSpecializeArgs*) override { unload(); }

@@ -13,9 +13,11 @@
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -52,56 +54,72 @@ static std::string read_file(const char* p) {
     return ss.str();
 }
 
-// setns into target PID's mount namespace, do bind mounts, setns back.
-// Returns number of successful mounts (0..6).
-static uint32_t do_mounts_in_ns(uint32_t target_pid) {
-    // Save our own mount ns so we can return
-    int self_ns = ::open("/proc/self/ns/mnt", O_RDONLY | O_CLOEXEC);
-    if (self_ns < 0) {
-        LOGE("open self ns failed: errno=%d", errno);
+// v1.0.6: setns(CLONE_NEWNS) requires single-threaded caller (EINVAL otherwise).
+// Zygisk-Next companion runtime is multithreaded, so we fork a child. Post-fork
+// child is guaranteed single-threaded → setns works. Result piped back to parent.
+// Same pattern used by Shamiko / PlayIntegrityFork.
+static uint32_t do_mounts_via_fork(uint32_t target_pid) {
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) {
+        LOGE("pipe failed: errno=%d", errno);
         return 0;
     }
 
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
-    int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
-    if (tgt_ns < 0) {
-        LOGE("open target ns (%s) failed: errno=%d", path, errno);
-        ::close(self_ns);
+    pid_t child = ::fork();
+    if (child < 0) {
+        LOGE("fork failed: errno=%d", errno);
+        ::close(pipefd[0]); ::close(pipefd[1]);
         return 0;
     }
 
-    // Enter target's mount namespace
-    if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
-        LOGE("setns->target failed: errno=%d", errno);
-        ::close(tgt_ns); ::close(self_ns);
-        return 0;
-    }
+    if (child == 0) {
+        // Child — single-threaded, so setns(CLONE_NEWNS) works.
+        ::close(pipefd[0]);
 
-    uint32_t ok = 0, fail = 0, skip = 0;
-    for (const auto& e : BIND_ENTRIES) {
-        std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
-        if (::access(src.c_str(), F_OK) != 0) { skip++; continue; }
-        if (::access(e.dst,        F_OK) != 0) { skip++; continue; }
-        if (::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr) == 0) {
-            ok++;
+        char path[64];
+        ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
+        int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
+        uint32_t ok = 0, fail = 0, skip = 0;
+
+        if (tgt_ns < 0) {
+            LOGE("child: open %s failed errno=%d", path, errno);
+        } else if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
+            LOGE("child: setns->target failed errno=%d", errno);
+            ::close(tgt_ns);
         } else {
-            fail++;
-            LOGE("bind fail (in ns): %s -> %s errno=%d",
-                 src.c_str(), e.dst, errno);
+            for (const auto& e : BIND_ENTRIES) {
+                std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
+                if (::access(src.c_str(), F_OK) != 0) { skip++; continue; }
+                if (::access(e.dst,        F_OK) != 0) { skip++; continue; }
+                if (::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr) == 0) {
+                    ok++;
+                } else {
+                    fail++;
+                    LOGE("child: bind fail %s -> %s errno=%d",
+                         src.c_str(), e.dst, errno);
+                }
+            }
+            LOGI("child mount for pid=%u: %u ok, %u fail, %u skip",
+                 target_pid, ok, fail, skip);
+            ::close(tgt_ns);
         }
-    }
-    LOGI("companion mount for pid=%u: %u ok, %u fail, %u skip",
-         target_pid, ok, fail, skip);
 
-    // Return to our own mount namespace
-    if (::setns(self_ns, CLONE_NEWNS) != 0) {
-        // Not fatal (companion process is short-lived anyway), but log it
-        LOGE("setns->self failed: errno=%d", errno);
+        ::write(pipefd[1], &ok, sizeof(ok));
+        ::close(pipefd[1]);
+        ::_exit(0);
     }
-    ::close(tgt_ns);
-    ::close(self_ns);
 
+    // Parent — wait for result
+    ::close(pipefd[1]);
+    uint32_t ok = 0;
+    ssize_t n = ::read(pipefd[0], &ok, sizeof(ok));
+    ::close(pipefd[0]);
+    int status = 0;
+    ::waitpid(child, &status, 0);
+    if (n != (ssize_t)sizeof(ok)) {
+        LOGE("parent: read from child failed (n=%zd)", n);
+        return 0;
+    }
     return ok;
 }
 
@@ -119,7 +137,7 @@ extern "C" void ternak_tt_companion(int client) {
             uint32_t pid = 0;
             if (::read(client, &pid, sizeof(pid)) != (ssize_t)sizeof(pid)) break;
             if (pid == 0) { uint32_t z = 0; ::write(client, &z, sizeof(z)); break; }
-            uint32_t ok = do_mounts_in_ns(pid);
+            uint32_t ok = do_mounts_via_fork(pid);
             ::write(client, &ok, sizeof(ok));
         } else {
             break;
