@@ -52,6 +52,7 @@ using zygisk::ServerSpecializeArgs;
 enum : uint8_t {
     CMD_CHECK_TT     = 1,
     CMD_GET_IDENTITY = 2,
+    CMD_DO_MOUNTS    = 3,  // v1.0.4: companion-side mount agent
 };
 
 // TT package hardcoded (fork focused, no whitelist file)
@@ -262,23 +263,29 @@ static const BindEntry BIND_ENTRIES[] = {
     {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
 };
 
-static void do_bind_mounts() {
-    // Zygisk-spawned app children already sit in their own mount namespace
-    // (zygote does unshare(CLONE_NEWNS) per-child post-fork on Android P+).
-    // Bind mounts here therefore only affect this TT process tree.
-    int ok = 0, fail = 0, skip = 0;
-    for (const auto& e : BIND_ENTRIES) {
-        std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
-        if (::access(src.c_str(), F_OK) != 0) { skip++; continue; }
-        if (::access(e.dst,        F_OK) != 0) { skip++; continue; }
-        if (::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr) == 0) {
-            ok++;
-        } else {
-            fail++;
-            LOGE("bind fail: %s -> %s (errno=%d)", src.c_str(), e.dst, errno);
-        }
+// v1.0.4: mount() dari preAppSpecialize gagal EACCES di Zygisk-Next fork
+// (HMA-OSS) karena caps di-drop. Solusi: minta companion (yang masih root
+// + full caps) untuk setns() masuk ns kita + mount di sana.
+static void request_companion_mounts(zygisk::Api* api) {
+    if (!api) return;
+    int fd = api->connectCompanion();
+    if (fd < 0) { LOGE("companion connect for mounts failed"); return; }
+
+    uint8_t cmd = CMD_DO_MOUNTS;
+    uint32_t pid = (uint32_t)::getpid();
+    if (::write(fd, &cmd, 1) != 1 ||
+        ::write(fd, &pid, sizeof(pid)) != (ssize_t)sizeof(pid)) {
+        LOGE("companion write failed");
+        ::close(fd); return;
     }
-    LOGI("bind-mount: %d ok, %d fail, %d skip", ok, fail, skip);
+    uint32_t ok = 0;
+    ssize_t n = ::read(fd, &ok, sizeof(ok));
+    ::close(fd);
+    if (n != (ssize_t)sizeof(ok)) {
+        LOGE("companion read ack failed");
+        return;
+    }
+    LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
 // PLT hook openat to sanitize /proc/self/{mountinfo,mounts,maps}
@@ -336,18 +343,27 @@ static int hook_openat(int dirfd, const char* path, int flags, ...) {
 
 static void install_proc_sanitizer(Api* api) {
     if (!api) return;
-    // Get dev_t and ino_t of libc.so
-    struct stat sb;
-    if (::stat("/system/lib64/libc.so", &sb) != 0 && 
-        ::stat("/system/lib/libc.so", &sb) != 0) {
-        LOGE("proc sanitizer: could not stat libc.so");
-        return;
+    // v1.0.4: try multiple patterns — HMA-OSS Zygisk expects specific format.
+    // Register for both openat and __openat (Bionic internal alias).
+    // If ALL hooks fail to bind, commit returns false — log as INFO not
+    // ERROR because sanitizer is best-effort defense-in-depth.
+    const char* patterns[] = {
+        "libc.so",              // Bare name
+        ".*/libc\\.so",         // Path suffix
+        "/apex/.*/libc\\.so",   // Apex path (Android 10+)
+    };
+    for (const char* p : patterns) {
+        api->pltHookRegister(p, "openat",
+                             reinterpret_cast<void*>(hook_openat),
+                             reinterpret_cast<void**>(&orig_openat));
+        api->pltHookRegister(p, "__openat",
+                             reinterpret_cast<void*>(hook_openat),
+                             reinterpret_cast<void**>(&orig_openat));
     }
-    api->pltHookRegister(sb.st_dev, sb.st_ino, "openat",
-                         reinterpret_cast<void*>(hook_openat),
-                         reinterpret_cast<void**>(&orig_openat));
     if (!api->pltHookCommit()) {
-        LOGE("proc sanitizer hook commit failed");
+        LOGI("proc sanitizer: no PLT hooks applied (best-effort skipped)");
+    } else {
+        LOGI("proc sanitizer installed");
     }
 }
 
@@ -389,9 +405,10 @@ public:
         active_ = true;
         LOGI("TT target: %s (%u B)", pkg.c_str(), len);
 
-        // v1.0.3: bind-mount fake build.prop + settings_secure.xml into
-        // this TT process's private mount namespace. Real files untouched.
-        do_bind_mounts();
+        // v1.0.4: request companion to setns+mount our overlay into this
+        // TT process's mount namespace. In-process mount fails EACCES on
+        // modern Zygisk-Next forks (caps stripped in preAppSpecialize).
+        request_companion_mounts(api_);
     }
 
     void postAppSpecialize(const AppSpecializeArgs*) override {

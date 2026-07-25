@@ -1,7 +1,7 @@
 id=ternak_tt
 name=Ternak TT — TikTok Zygisk Fresh Persona
-version=v1.0.3
-versionCode=103
+version=v1.0.4
+versionCode=104
 author=diru768
-description=TikTok-focused Zygisk device spoofer. 6-layer Java hook + full native prop coverage + mount namespace overlay (build.prop x5 partitions + settings_secure.xml) + /proc sanitizer. Pixel-only pool (SDK 33-36).
+description=TikTok-focused Zygisk device spoofer. 6-layer Java hook + 59 native prop + companion-side setns bind mount overlay (build.prop x5 + settings_secure.xml) + /proc sanitizer. Works on Zygisk-Next / HMA-OSS. Pixel-only pool (SDK 33-36).
 updateJson=https://raw.githubusercontent.com/diru768/ternak-tt/main/update.json
