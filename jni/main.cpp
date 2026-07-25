@@ -5,6 +5,13 @@
 // ============================================================
 #include <jni.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <cstdarg>
+#include <cstring>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/system_properties.h>
 #include <android/log.h>
 #include <string>
@@ -13,6 +20,26 @@
 #include <sstream>
 #include <cstdlib>
 #include "zygisk.hpp"
+
+// memfd_create wrapper (not in older NDK headers)
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#include <sys/syscall.h>
+#ifndef __NR_memfd_create
+  #if defined(__aarch64__)
+    #define __NR_memfd_create 279
+  #elif defined(__arm__)
+    #define __NR_memfd_create 385
+  #elif defined(__x86_64__)
+    #define __NR_memfd_create 319
+  #elif defined(__i386__)
+    #define __NR_memfd_create 356
+  #endif
+#endif
+static inline int tt_memfd_create(const char* name, unsigned flags) {
+    return (int)syscall(__NR_memfd_create, name, flags);
+}
 
 #define LOG_TAG "TernakTT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -221,6 +248,103 @@ static void install_build_hook(JNIEnv* env) {
 }
 
 // ============================================================
+// v1.0.3: Mount namespace overlay + /proc sanitizer
+// ============================================================
+static const char* MOUNTDIR = "/data/adb/modules/ternak_tt/mount";
+
+struct BindEntry { const char* src_rel; const char* dst; };
+static const BindEntry BIND_ENTRIES[] = {
+    {"system/build.prop",     "/system/build.prop"},
+    {"vendor/build.prop",     "/vendor/build.prop"},
+    {"odm/build.prop",        "/odm/build.prop"},
+    {"product/build.prop",    "/product/build.prop"},
+    {"system_ext/build.prop", "/system_ext/build.prop"},
+    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
+};
+
+static void do_bind_mounts() {
+    // Zygisk-spawned app children already sit in their own mount namespace
+    // (zygote does unshare(CLONE_NEWNS) per-child post-fork on Android P+).
+    // Bind mounts here therefore only affect this TT process tree.
+    int ok = 0, fail = 0, skip = 0;
+    for (const auto& e : BIND_ENTRIES) {
+        std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
+        if (::access(src.c_str(), F_OK) != 0) { skip++; continue; }
+        if (::access(e.dst,        F_OK) != 0) { skip++; continue; }
+        if (::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr) == 0) {
+            ok++;
+        } else {
+            fail++;
+            LOGE("bind fail: %s -> %s (errno=%d)", src.c_str(), e.dst, errno);
+        }
+    }
+    LOGI("bind-mount: %d ok, %d fail, %d skip", ok, fail, skip);
+}
+
+// PLT hook openat to sanitize /proc/self/{mountinfo,mounts,maps}
+// so anti-detect can't see our bind mounts by grepping mountinfo.
+using openat_t = int (*)(int, const char*, int, ...);
+static openat_t orig_openat = nullptr;
+
+static bool is_sensitive_proc_path(const char* p) {
+    if (!p) return false;
+    if (!strstr(p, "/proc/")) return false;
+    if (strstr(p, "/mountinfo")) return true;
+    if (strstr(p, "/mounts"))    return true;
+    if (strstr(p, "/maps"))      return true;
+    return false;
+}
+
+static int hook_openat(int dirfd, const char* path, int flags, ...) {
+    mode_t mode = 0;
+    if (flags & (O_CREAT | O_TMPFILE)) {
+        va_list ap; va_start(ap, flags);
+        mode = va_arg(ap, int);
+        va_end(ap);
+    }
+    if (!orig_openat || !is_sensitive_proc_path(path)) {
+        return orig_openat ? orig_openat(dirfd, path, flags, mode)
+                           : ::openat(dirfd, path, flags, mode);
+    }
+    int real_fd = orig_openat(dirfd, path, flags, mode);
+    if (real_fd < 0) return real_fd;
+
+    std::string content;
+    char buf[4096];
+    ssize_t n;
+    while ((n = ::read(real_fd, buf, sizeof(buf))) > 0) content.append(buf, n);
+    ::close(real_fd);
+
+    std::string filtered;
+    std::istringstream iss(content);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.find("ternak_tt") != std::string::npos) continue;
+        if (line.find("ternak-tt") != std::string::npos) continue;
+        filtered.append(line);
+        filtered.push_back('\n');
+    }
+
+    int mfd = tt_memfd_create("clean", MFD_CLOEXEC);
+    if (mfd < 0) return orig_openat(dirfd, path, flags, mode);
+    if (!filtered.empty()) {
+        ::write(mfd, filtered.data(), filtered.size());
+    }
+    ::lseek(mfd, 0, SEEK_SET);
+    return mfd;
+}
+
+static void install_proc_sanitizer(Api* api) {
+    if (!api) return;
+    api->pltHookRegister(".*/libc\\.so$", "openat",
+                         reinterpret_cast<void*>(hook_openat),
+                         reinterpret_cast<void**>(&orig_openat));
+    if (!api->pltHookCommit()) {
+        LOGE("proc sanitizer hook commit failed");
+    }
+}
+
+// ============================================================
 // Zygisk Module
 // ============================================================
 class TernakTT : public zygisk::ModuleBase {
@@ -257,6 +381,10 @@ public:
 
         active_ = true;
         LOGI("TT target: %s (%u B)", pkg.c_str(), len);
+
+        // v1.0.3: bind-mount fake build.prop + settings_secure.xml into
+        // this TT process's private mount namespace. Real files untouched.
+        do_bind_mounts();
     }
 
     void postAppSpecialize(const AppSpecializeArgs*) override {
@@ -280,6 +408,8 @@ public:
         install_gaid_hook(env_);
         install_wifi_hook(env_);
         install_telephony_hook(env_);
+        // v1.0.3: hide bind mounts from /proc/self/mountinfo|mounts|maps
+        install_proc_sanitizer(api_);
     }
 
     void preServerSpecialize(ServerSpecializeArgs*) override { unload(); }

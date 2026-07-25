@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <string>
 #include <vector>
 #include <map>
@@ -26,6 +28,7 @@ static const char* IDENTITY_FILE  = "/data/adb/modules/ternak_tt/identity.prop";
 static const char* IDENTITY_BAK   = "/data/adb/modules/ternak_tt/identity.prop.bak";
 static const char* MODE_FILE      = "/data/adb/modules/ternak_tt/identity.mode";
 static const char* RESETPROP      = "/data/adb/modules/ternak_tt/bin/resetprop-rs";
+static const char* MOUNTDIR       = "/data/adb/modules/ternak_tt/mount";  // v1.0.3
 
 static const char* TT_PACKAGES[] = {
     "com.zhiliaoapp.musically",
@@ -308,6 +311,148 @@ static void apply_native(const Identity& id) {
     }
 }
 
+// ============================================================
+// v1.0.3: Generate fake files for Zygisk bind-mount overlay
+// - 5 build.prop per partition (system, vendor, odm, product, system_ext)
+// - 1 settings_secure.xml with spoofed android_id + advertising_id
+// Files are consumed by main.cpp:do_bind_mounts() at TT app launch.
+// ============================================================
+static void generate_mount_files(const Identity& id) {
+    auto g = [&](const char* k) -> std::string {
+        auto it = id.kv.find(k);
+        return it != id.kv.end() ? it->second : std::string();
+    };
+
+    ::mkdir(MOUNTDIR, 0755);
+    for (const char* sub : {"system", "vendor", "odm", "product", "system_ext"}) {
+        std::string d = std::string(MOUNTDIR) + "/" + sub;
+        ::mkdir(d.c_str(), 0755);
+    }
+
+    const std::string SERIAL       = g("SERIAL");
+    const std::string MODEL        = g("MODEL");
+    const std::string BRAND        = g("BRAND");
+    const std::string MANUFACTURER = g("MANUFACTURER");
+    const std::string DEVICE       = g("DEVICE");
+    const std::string PRODUCT      = g("PRODUCT");
+    const std::string BOARD        = g("BOARD");
+    const std::string ID_          = g("ID");
+    const std::string FP           = g("FINGERPRINT");
+    const std::string DISPLAY      = g("DISPLAY");
+    const std::string DESC         = g("DESCRIPTION");
+    const std::string RELEASE      = g("RELEASE");
+    const std::string SDK          = g("SDK_INT");
+    const std::string SECPATCH     = g("SECURITY_PATCH");
+    const std::string INCREMENTAL  = g("INCREMENTAL");
+    const std::string RADIO        = g("RADIO");
+    const std::string TAGS         = g("TAGS");
+    const std::string TYPE         = g("TYPE");
+    const std::string USER_        = g("USER");
+    const std::string HOST         = g("HOST");
+
+    // Base build.prop (all key=value lines)
+    std::string base;
+    base += "# Ternak TT synthetic build.prop (v1.0.3)\n";
+    auto add = [&](const char* k, const std::string& v) {
+        if (!v.empty()) { base += k; base += '='; base += v; base += '\n'; }
+    };
+    add("ro.serialno",                        SERIAL);
+    add("ro.boot.serialno",                   SERIAL);
+    add("ro.build.fingerprint",               FP);
+    add("ro.bootimage.build.fingerprint",     FP);
+    add("ro.system.build.fingerprint",        FP);
+    add("ro.vendor.build.fingerprint",        FP);
+    add("ro.odm.build.fingerprint",           FP);
+    add("ro.product.build.fingerprint",       FP);
+    add("ro.system_ext.build.fingerprint",    FP);
+    add("ro.product.model",                   MODEL);
+    add("ro.product.brand",                   BRAND);
+    add("ro.product.manufacturer",            MANUFACTURER);
+    add("ro.product.device",                  DEVICE);
+    add("ro.product.name",                    PRODUCT);
+    add("ro.product.board",                   BOARD);
+    add("ro.build.id",                        ID_);
+    add("ro.build.display.id",                DISPLAY);
+    add("ro.build.description",               DESC);
+    add("ro.build.tags",                      TAGS);
+    add("ro.build.type",                      TYPE);
+    add("ro.build.user",                      USER_);
+    add("ro.build.host",                      HOST);
+    add("ro.build.version.release",           RELEASE);
+    add("ro.build.version.release_or_codename", RELEASE);
+    add("ro.build.version.sdk",               SDK);
+    add("ro.build.version.security_patch",    SECPATCH);
+    add("ro.build.version.incremental",       INCREMENTAL);
+    add("ro.bootloader",                      std::string("unknown"));
+    add("ro.boot.bootloader",                 std::string("unknown"));
+    add("ro.build.product",                   DEVICE);
+    add("gsm.version.baseband",               RADIO);
+    add("ro.build.expect.baseband",           RADIO);
+
+    struct { const char* dir; const char* pfx; } parts[] = {
+        {"system",     "ro.product.system."},
+        {"vendor",     "ro.product.vendor."},
+        {"odm",        "ro.product.odm."},
+        {"product",    "ro.product.product."},
+        {"system_ext", "ro.product.system_ext."},
+    };
+    for (const auto& p : parts) {
+        std::string c = base;
+        std::string pfx = p.pfx;
+        c += "# Partition alias (" + std::string(p.dir) + ")\n";
+        if (!MODEL.empty())        c += pfx + "model="        + MODEL        + "\n";
+        if (!BRAND.empty())        c += pfx + "brand="        + BRAND        + "\n";
+        if (!MANUFACTURER.empty()) c += pfx + "manufacturer=" + MANUFACTURER + "\n";
+        if (!DEVICE.empty())       c += pfx + "device="       + DEVICE       + "\n";
+        if (!PRODUCT.empty())      c += pfx + "name="         + PRODUCT      + "\n";
+        std::string path = std::string(MOUNTDIR) + "/" + p.dir + "/build.prop";
+        atomic_write(path, c);
+        ::chmod(path.c_str(), 0644);
+    }
+
+    // settings_secure.xml — minimal Android SettingsProvider format
+    std::string aid  = g("ANDROID_ID");
+    std::string gaid = g("GOOGLE_AID");
+    if (aid.empty()) aid = "0000000000000000";
+
+    std::string xml;
+    xml += "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n";
+    xml += "<settings version=\"217\">\n";
+    xml += "  <setting id=\"1\" name=\"android_id\" value=\"" + aid
+         + "\" package=\"android\" defaultValue=\"" + aid
+         + "\" defaultSysSet=\"true\" />\n";
+    if (!gaid.empty()) {
+        xml += "  <setting id=\"2\" name=\"advertising_id\" value=\"" + gaid
+             + "\" package=\"com.google.android.gms\" />\n";
+        xml += "  <setting id=\"3\" name=\"limit_ad_tracking\" value=\"0\" "
+               "package=\"com.google.android.gms\" />\n";
+    }
+    xml += "</settings>\n";
+
+    std::string xml_path = std::string(MOUNTDIR) + "/settings_secure.xml";
+    atomic_write(xml_path, xml);
+    // Mirror real DAC (0600 system:system). TT can't read even our fake
+    // via normal file APIs, but if a privesc exploit lets them, they get
+    // spoofed data instead of the real ANDROID_ID.
+    ::chmod(xml_path.c_str(), 0600);
+    ::chown(xml_path.c_str(), 1000, 1000);  // system:system
+
+    // Restore SELinux labels so bind mount doesn't get denied on target read.
+    run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_file:s0",
+            (std::string(MOUNTDIR) + "/system/build.prop").c_str()});
+    run_bin("/system/bin/chcon", {"chcon", "u:object_r:vendor_file:s0",
+            (std::string(MOUNTDIR) + "/vendor/build.prop").c_str()});
+    for (const char* sub : {"odm", "product", "system_ext"}) {
+        std::string p = std::string(MOUNTDIR) + "/" + sub + "/build.prop";
+        run_bin("/system/bin/chcon",
+                {"chcon", "u:object_r:system_file:s0", p.c_str()});
+    }
+    run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_data_file:s0",
+            xml_path.c_str()});
+
+    printf("  Mount overlay: 5 build.prop + settings_secure.xml -> %s\n", MOUNTDIR);
+}
+
 static void wipe_tt_data() {
     for (const char* pkg : TT_PACKAGES) {
         run_bin("/system/bin/pm", {"pm", "clear", pkg});
@@ -357,6 +502,7 @@ static int cmd_freshen() {
     }
 
     apply_native(id);
+    generate_mount_files(id);  // v1.0.3: refresh Zygisk overlay files
     wipe_tt_data();
 
     printf("OK - fresh TT persona ready\n");
@@ -383,7 +529,9 @@ static int cmd_status() {
     return 0;
 }
 
-static int cmd_apply_boot() {
+static int cmd_apply_boot_impl();
+static int cmd_apply_boot() { return cmd_apply_boot_impl(); }
+static int cmd_apply_boot_impl() {
     if (!ensure_root()) return 1;
     Identity id = load_identity();
     if (id.kv.empty()) {
@@ -391,7 +539,8 @@ static int cmd_apply_boot() {
         return 0;
     }
     apply_native(id);
-    printf("OK: native prop re-applied\n");
+    generate_mount_files(id);  // v1.0.3: refresh overlay on boot
+    printf("OK: native prop re-applied + mount overlay refreshed\n");
     return 0;
 }
 
@@ -417,7 +566,9 @@ static int cmd_rollback() {
         return 1;
     }
     atomic_write(IDENTITY_FILE, d);
-    apply_native(load_identity());
+    Identity rid = load_identity();
+    apply_native(rid);
+    generate_mount_files(rid);  // v1.0.3: refresh overlay after rollback
     wipe_tt_data();
     printf("OK: rolled back + wiped\n");
     return 0;

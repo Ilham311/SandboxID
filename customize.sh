@@ -1,8 +1,10 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0"
-ui_print "- TikTok-focused Zygisk fresh persona"
+ui_print "- Ternak TT v1.0.3"
+ui_print "- TikTok Zygisk fresh persona"
+ui_print "- + mount namespace overlay (build.prop x5 + settings_secure.xml)"
+ui_print "- + /proc/self/{mountinfo,mounts,maps} sanitizer"
 ui_print ""
 
 ABI=$(getprop ro.product.cpu.abi)
@@ -35,6 +37,15 @@ esac
 
 echo "fresh" > $MODPATH/identity.mode
 set_perm $MODPATH/identity.mode 0 0 0644
+
+# v1.0.3: pre-create mount overlay tree so bind-mount sources exist
+# (real content generated on first `ternak-tt freshen`)
+mkdir -p $MODPATH/mount/system
+mkdir -p $MODPATH/mount/vendor
+mkdir -p $MODPATH/mount/odm
+mkdir -p $MODPATH/mount/product
+mkdir -p $MODPATH/mount/system_ext
+set_perm_recursive $MODPATH/mount 0 0 0755 0644
 
 ui_print ""
 ui_print "- Install complete. Reboot then tap Action to freshen."
