@@ -6,12 +6,16 @@ on:
       - main
       - master
   workflow_dispatch:
+  
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -22,11 +26,14 @@ jobs:
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
           echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
           
-          # Parse versi
+          # Parse versi (menghilangkan huruf 'v' jika ada)
           VERSION=${LATEST_TAG#v}
           MAJOR=$(echo $VERSION | cut -d. -f1)
           MINOR=$(echo $VERSION | cut -d. -f2)
           PATCH=$(echo $VERSION | cut -d. -f3)
+          
+          # Fallback jika PATCH kosong (misal tag sebelumnya hanya v1.0)
+          if [ -z "$PATCH" ]; then PATCH=0; fi
           
           # Increment patch version
           NEW_PATCH=$((PATCH + 1))
@@ -34,8 +41,6 @@ jobs:
           
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "📦 Version: $LATEST_TAG → $NEW_VERSION"
-
-      - uses: actions/checkout@v4
 
       - name: Setup NDK
         uses: nttld/setup-ndk@v1
@@ -45,6 +50,7 @@ jobs:
 
       - name: Fetch Zygisk header
         run: |
+          mkdir -p jni
           curl -fsSL -o jni/zygisk.hpp \
             https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
 
@@ -62,8 +68,16 @@ jobs:
 
       - name: Generate checksums
         run: |
+          # Pastikan folder dist ada sebelum masuk
+          mkdir -p dist 
           cd dist
-          sha256sum *.zip > checksums.sha256
+          
+          # Buat checksum hanya jika ada file zip, untuk menghindari error bash
+          if ls *.zip 1> /dev/null 2>&1; then
+            sha256sum *.zip > checksums.sha256
+          else
+            echo "Tidak ada file zip ditemukan" > checksums.sha256
+          fi
 
       - name: Create Release Notes
         run: |
@@ -73,8 +87,15 @@ jobs:
           echo "**Commit:** ${{ github.sha }}" >> release_notes.md
           echo "" >> release_notes.md
           echo "### Artifacts" >> release_notes.md
-          echo "\`\`\`" >> release_notes.md
-          cd dist && sha256sum *.zip >> ../release_notes.md && cd ..
+          echo "\`\`\`text" >> release_notes.md
+          
+          # Tulis checksum ke release notes dengan aman
+          if [ -s dist/checksums.sha256 ]; then
+            cat dist/checksums.sha256 >> release_notes.md
+          else
+            echo "No artifacts generated." >> release_notes.md
+          fi
+          
           echo "\`\`\`" >> release_notes.md
 
       - name: Upload artifacts
@@ -82,14 +103,15 @@ jobs:
         with:
           name: ternak-tt-zip
           path: dist/*.zip
+          if-no-files-found: warn
 
       - name: Create Tag & Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.new_version }}
+          body_path: release_notes.md
           files: |
             dist/*.zip
             dist/checksums.sha256
-          body_path: release_notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
