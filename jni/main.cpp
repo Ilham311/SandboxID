@@ -336,7 +336,14 @@ static int hook_openat(int dirfd, const char* path, int flags, ...) {
 
 static void install_proc_sanitizer(Api* api) {
     if (!api) return;
-    api->pltHookRegister(".*/libc\\.so$", "openat",
+    // Get dev_t and ino_t of libc.so
+    struct stat sb;
+    if (::stat("/system/lib64/libc.so", &sb) != 0 && 
+        ::stat("/system/lib/libc.so", &sb) != 0) {
+        LOGE("proc sanitizer: could not stat libc.so");
+        return;
+    }
+    api->pltHookRegister(sb.st_dev, sb.st_ino, "openat",
                          reinterpret_cast<void*>(hook_openat),
                          reinterpret_cast<void**>(&orig_openat));
     if (!api->pltHookCommit()) {
