@@ -1,8 +1,4 @@
-// ============================================================
-// Ternak TT v1.0 — TikTok-focused Zygisk hook
-// 6 hook layers: Build.*, native_get, Settings.Secure,
-//                GAID, WiFi MAC, Telephony
-// ============================================================
+
 #include <jni.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -24,7 +20,6 @@
 #include <ctime>
 #include "zygisk.hpp"
 
-// memfd_create wrapper (not in older NDK headers)
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif
@@ -47,7 +42,7 @@ static inline int tt_memfd_create(const char* name, unsigned flags) {
 #define LOG_TAG "TernakTT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-// LOGD = verbose debug traces; zero-cost in release builds.
+
 #ifdef TT_DEBUG
 #define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
 #define TT_VARIANT_TAG "debug"
@@ -63,14 +58,8 @@ using zygisk::ServerSpecializeArgs;
 enum : uint8_t {
     CMD_CHECK_TT     = 1,
     CMD_GET_IDENTITY = 2,
-    CMD_DO_MOUNTS    = 3,  // v1.0.4: companion-side mount agent
+    CMD_DO_MOUNTS    = 3,
 };
-
-// v1.0.15: target whitelist moved out of code into
-// /data/adb/modules/ternak_tt/target.txt (loaded by companion).
-// Zygisk .so no longer knows the list — it just sends the pkg
-// name to the companion, which rejects with blob_len=0 for
-// any pkg not in target.txt. See companion.cpp reload_targets_if_changed().
 
 static std::map<std::string, std::string> g_id;
 
@@ -78,35 +67,31 @@ static const std::string& val(const std::string& k) {
     static const std::string empty;
     auto it = g_id.find(k);
     if (it != g_id.end() && !it->second.empty()) return it->second;
-    // v1.0.12: fallback defaults for keys typically absent from identity.prop
-    // but heavily queried by TT/Grab (sourced from real leak telemetry).
+
     static const std::map<std::string, std::string> defaults = {
         {"SYS_BOOT_COMPLETED",    "1"},
-        {"GSM_OPERATOR_NUMERIC",  "51010"},           // Telkomsel ID
+        {"GSM_OPERATOR_NUMERIC",  "51010"},
         {"GSM_OPERATOR_ALPHA",    "Telkomsel"},
         {"GSM_OPERATOR_ISO",      "id"},
         {"BUILD_CHARACTERISTICS", "default"},
         {"PERSIST_TIMEZONE",      "Asia/Jakarta"},
         {"CPU_ABI",               "arm64-v8a"},
-        {"CPU_ABI2",              ""},                // empty is legit on arm64
+        {"CPU_ABI2",              ""},
         {"CPU_ABILIST",           "arm64-v8a,armeabi-v7a,armeabi"},
         {"CPU_ABILIST64",         "arm64-v8a"},
         {"CPU_ABILIST32",         "armeabi-v7a,armeabi"},
         {"DALVIK_HEAPGROWTHLIMIT","256m"},
         {"MEDIACODEC_MIN_RATE",   "8000"},
         {"MEDIACODEC_MAX_RATE",   "192000"},
-        // v1.0.13:
+
         {"DEBUG_FORCE_RTL",       "false"},
-        {"MULTISIM_CONFIG",       ""},                 // single-SIM Pixel-alike
+        {"MULTISIM_CONFIG",       ""},
     };
     auto d = defaults.find(k);
     if (d != defaults.end()) return d->second;
     return empty;
 }
 
-// ============================================================
-// L2: SystemProperties.native_get hook
-// ============================================================
 static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
     const char* raw = env->GetStringUTFChars(j_key, nullptr);
@@ -133,14 +118,11 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         {"ro.build.version.security_patch", "SECURITY_PATCH"},
         {"ro.build.version.incremental",    "INCREMENTAL"},
         {"gsm.version.baseband",     "RADIO"},
-        // v1.0.12: top LEAK surfaces from v1.0.11 telemetry (session-20260726).
-        // These were querying 800+, 30+, and 5-10x per session in-app. Adding
-        // them to spoof map turns LEAK spam into SPOOF hits and prevents
-        // real-device values from being returned to fingerprinting SDKs.
+
         {"sys.boot_completed",       "SYS_BOOT_COMPLETED"},
-        // v1.0.13: LEAK surfaces still hot in v1.0.12 telemetry:
-        {"debug.force_rtl",          "DEBUG_FORCE_RTL"},          // 456x
-        {"persist.radio.multisim.config", "MULTISIM_CONFIG"},      // 5x
+
+        {"debug.force_rtl",          "DEBUG_FORCE_RTL"},
+        {"persist.radio.multisim.config", "MULTISIM_CONFIG"},
         {"gsm.operator.numeric",     "GSM_OPERATOR_NUMERIC"},
         {"gsm.sim.operator.numeric", "GSM_OPERATOR_NUMERIC"},
         {"gsm.operator.alpha",       "GSM_OPERATOR_ALPHA"},
@@ -176,11 +158,6 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
     return j_def;
 }
 
-// ============================================================
-// L3: Settings.Secure.getString hook (ANDROID_ID)
-// NOTE: getString is Java-implemented; RegisterNatives alone won't take.
-// For v1.0 POC we still register; v1.1 will bundle lsplant for real hook.
-// ============================================================
 static jstring (*orig_secure_get)(JNIEnv*, jclass, jobject, jstring) = nullptr;
 
 static jstring hook_secure_get(JNIEnv* env, jclass c, jobject cr, jstring name) {
@@ -196,7 +173,7 @@ static jstring hook_secure_get(JNIEnv* env, jclass c, jobject cr, jstring name) 
                 return env->NewStringUTF(aid.c_str());
             }
         }
-        // known leak surfaces on this class:
+
         if (n == "bluetooth_address" || n == "bluetooth_name" ||
             n == "advertising_id"   || n == "install_non_market_apps") {
             LOGD("L3 LEAK  Settings.Secure '%s' queried (unhooked)", n.c_str());
@@ -218,19 +195,13 @@ static void install_secure_hook(JNIEnv* env) {
     env->DeleteLocalRef(c);
 }
 
-// ============================================================
-// L4: AdvertisingIdClient.Info.getId hook (GAID) — stub for v1.1 lsplant
-// ============================================================
 static void install_gaid_hook(JNIEnv* env) {
     jclass c = env->FindClass("com/google/android/gms/ads/identifier/AdvertisingIdClient$Info");
     if (!c) { env->ExceptionClear(); return; }
-    // TODO(v1.1): replace with lsplant::Hook for reliable Java bytecode hook
+
     env->DeleteLocalRef(c);
 }
 
-// ============================================================
-// L5: WifiInfo.getMacAddress / getBSSID hook
-// ============================================================
 static jstring hook_wifi_mac(JNIEnv* env, jobject) {
     LOGD("L5 WifiInfo.getMacAddress -> 02:00:00:00:00:00 (spoofed)");
     return env->NewStringUTF("02:00:00:00:00:00");
@@ -254,30 +225,19 @@ static void install_wifi_hook(JNIEnv* env) {
     env->DeleteLocalRef(c);
 }
 
-// ============================================================
-// L6: TelephonyManager hook (IMEI/DeviceId/Subscriber → null)
-// ============================================================
 static jstring hook_null_str(JNIEnv*, jobject) { return nullptr; }
 
 #ifdef TT_DEBUG
-// Debug wrappers so we can identify WHICH telephony method got called.
+
 static jstring hook_tel_deviceId(JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getDeviceId() -> null"); return nullptr; }
 static jstring hook_tel_imei    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getImei() -> null");     return nullptr; }
 static jstring hook_tel_subId   (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getSubscriberId() -> null"); return nullptr; }
 static jstring hook_tel_meid    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getMeid() -> null");     return nullptr; }
 #endif
 
-// ============================================================
-// L7 (debug-only): LEAK SENSORS — hook surfaces we don't spoof,
-//                  just to log what target queries beyond our coverage.
-// ============================================================
-// v1.0.13: L7 was only logging. In v1.0.12 telemetry the SPB hook
-// received sys.boot_completed 1388x and returned def=false, which breaks
-// app boot-detection retry loops. Now L7 consults typed spoof tables
-// first, so hot keys get real values and get labeled SPOOF instead of LEAK.
 static const std::map<std::string, jboolean>& tt_bool_spoof() {
     static const std::map<std::string, jboolean> m = {
-        {"sys.boot_completed",                    JNI_TRUE},  // CRITICAL
+        {"sys.boot_completed",                    JNI_TRUE},
         {"debug.force_rtl",                       JNI_FALSE},
         {"framework.pause_bg_animations.enabled", JNI_FALSE},
         {"dalvik.vm.dexopt.secondary",            JNI_TRUE},
@@ -310,22 +270,18 @@ static const std::map<std::string, jint>& tt_int_spoof() {
 }
 static const std::map<std::string, jlong>& tt_long_spoof() {
     static const std::map<std::string, jlong> m = {
-        {"ro.gfx.driver_build_time",              1704067200LL},  // 2024-01-01 UTC
+        {"ro.gfx.driver_build_time",              1704067200LL},
     };
     return m;
 }
 
-// v1.0.15: log-noise suppressor. Android emits log.looper.<pid>.<class>.slow
-// probes hundreds of times per session; def is always -1 and no app actually
-// consumes the value, so labelling these as LEAK just floods the summarizer.
-// We still return def (behavior unchanged) but tag the trace line SUPPRESS.
 static bool tt_should_suppress_key(const std::string& k) {
-    // log.looper.*.slow
+
     if (k.size() >= 11 + 5 &&
         k.compare(0, 11, "log.looper.") == 0 &&
         k.compare(k.size() - 5, 5, ".slow") == 0)
         return true;
-    // debug.watson.* (Xiaomi telemetry, always def)
+
     if (k.compare(0, 13, "debug.watson.") == 0)
         return true;
     return false;
@@ -384,7 +340,7 @@ static jstring hook_build_radio(JNIEnv* env, jclass) {
     return env->NewStringUTF("");
 }
 static void install_leak_sensors(JNIEnv* env) {
-    // SystemProperties variants
+
     {
         jclass sp = env->FindClass("android/os/SystemProperties");
         if (sp) {
@@ -405,7 +361,7 @@ static void install_leak_sensors(JNIEnv* env) {
             LOGD("L7 leak sensors installed on SystemProperties (int/long/bool)");
         } else env->ExceptionClear();
     }
-    // Build.getRadioVersion
+
     {
         jclass b = env->FindClass("android/os/Build");
         if (b) {
@@ -420,7 +376,7 @@ static void install_leak_sensors(JNIEnv* env) {
         } else env->ExceptionClear();
     }
 }
-#endif // TT_DEBUG
+#endif
 
 static void install_telephony_hook(JNIEnv* env) {
     jclass c = env->FindClass("android/telephony/TelephonyManager");
@@ -445,25 +401,10 @@ static void install_telephony_hook(JNIEnv* env) {
     env->DeleteLocalRef(c);
 }
 
-// ============================================================
-// Crash / signal watchdog
-//   • Always active (LOGE — visible in both variants) so we ALWAYS see
-//     when the target dies while Ternak TT is loaded.
-//   • Debug variant additionally logs siginfo (fault address, sender pid).
-//   • Chains to the previous (ART/libc) handler so we don't break ART's
-//     tombstone generation.
-// ============================================================
 static struct sigaction g_prev_sig[NSIG];
 static std::string g_watchdog_pkg;
 static long        g_load_time_ms = 0;
-// v1.0.12: per-signal counter to bound crash-log spam.
-// v1.0.9-v1.0.11 caused 42,944 CRASH events on a single pid because we
-// installed handlers for SIGSEGV/SIGBUS and chained to SIG_DFL via function
-// pointer (a no-op on Bionic). Kernel re-executed the faulting instruction
-// forever until LMK reaped. v1.0.12 fix: (a) remove SEGV/BUS/TERM/PIPE from
-// the watched set — ART needs them for JIT/page-fault/mmap; (b) after
-// logging, install SIG_DFL via sigaction so kernel actually terminates on
-// the next hit; (c) cap logs per signal to CRASH_LIMIT.
+
 static volatile sig_atomic_t g_crash_count[NSIG] = {0};
 static const int CRASH_LIMIT = 3;
 
@@ -490,8 +431,7 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
 
     if (n <= CRASH_LIMIT) {
         long alive = tt_now_ms() - g_load_time_ms;
-        // async-signal-safe-ish; __android_log_print is technically not, but
-        // ART already uses it in its own signal handler, so best-effort here.
+
         LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%ldms hit=%d/%d",
              TT_VARIANT_TAG,
              g_watchdog_pkg.c_str(), getpid(),
@@ -502,15 +442,8 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
              alive, n, CRASH_LIMIT);
     }
 
-    // v1.0.12: chain-to-SIG_DFL via function pointer is a no-op on Bionic,
-    // so we install the actual default handler via sigaction and let the
-    // kernel resume the faulting instruction. The next fault (or the same
-    // one, if the PC hasn't moved) hits SIG_DFL and the kernel terminates
-    // + generates the tombstone via debuggerd. This breaks the crash loop
-    // that produced 42k events per pid in v1.0.11.
     if (sig >= 0 && sig < NSIG) {
-        // If the previous handler was a real function (ART tombstone hook,
-        // libsigchain, etc.) restore it so ART crash reporter still runs.
+
         struct sigaction* p = &g_prev_sig[sig];
         bool prev_is_real =
             ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction != nullptr) ||
@@ -526,8 +459,7 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
             sigaction(sig, &dfl, nullptr);
         }
     }
-    // Do NOT invoke the previous handler here — returning lets the kernel
-    // re-run the faulting instruction under the newly-restored handler.
+
 }
 static void install_crash_watchdog(const std::string& pkg) {
     g_watchdog_pkg  = pkg;
@@ -537,11 +469,7 @@ static void install_crash_watchdog(const std::string& pkg) {
     sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
     sa.sa_sigaction = tt_signal_handler;
     sigemptyset(&sa.sa_mask);
-    // v1.0.12: reduced from 8 to 4 signals. Removed:
-    //   SIGSEGV, SIGBUS  — ART/JIT + mmap page faults trigger these normally.
-    //                       Catching without reliably terminating = crash loop.
-    //   SIGTERM, SIGPIPE — not fatal; broken pipe & normal shutdown are noise.
-    // Kept: real programmer errors that ART won't recover from.
+
     static const int sigs[] = { SIGABRT, SIGFPE, SIGILL, SIGSYS };
     for (int s : sigs) {
         g_crash_count[s] = 0;
@@ -551,9 +479,6 @@ static void install_crash_watchdog(const std::string& pkg) {
          pkg.c_str(), CRASH_LIMIT);
 }
 
-// ============================================================
-// L1: Build.* static field override
-// ============================================================
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
     jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
@@ -598,9 +523,6 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 }
 
-// ============================================================
-// v1.0.3: Mount namespace overlay + /proc sanitizer
-// ============================================================
 static const char* MOUNTDIR = "/data/adb/modules/ternak_tt/mount";
 
 struct BindEntry { const char* src_rel; const char* dst; };
@@ -613,9 +535,6 @@ static const BindEntry BIND_ENTRIES[] = {
     {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
 };
 
-// v1.0.4: mount() dari preAppSpecialize gagal EACCES di Zygisk-Next fork
-// (HMA-OSS) karena caps di-drop. Solusi: minta companion (yang masih root
-// + full caps) untuk setns() masuk ns kita + mount di sana.
 static void request_companion_mounts(zygisk::Api* api) {
     if (!api) return;
     int fd = api->connectCompanion();
@@ -638,8 +557,6 @@ static void request_companion_mounts(zygisk::Api* api) {
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
-// PLT hook openat to sanitize /proc/self/{mountinfo,mounts,maps}
-// so anti-detect can't see our bind mounts by grepping mountinfo.
 using openat_t = int (*)(int, const char*, int, ...);
 static openat_t orig_openat = nullptr;
 
@@ -691,27 +608,23 @@ static int hook_openat(int dirfd, const char* path, int flags, ...) {
     return mfd;
 }
 
-// v1.0.5: real Zygisk-Next pltHookRegister takes (dev_t, ino_t, symbol, ...).
-// Parse /proc/self/maps to resolve libc.so's dev+inode.
 static bool find_libc_dev_inode(dev_t* dev_out, ino_t* ino_out) {
     FILE* f = ::fopen("/proc/self/maps", "r");
     if (!f) return false;
     char line[512];
     bool found = false;
     while (::fgets(line, sizeof(line), f)) {
-        // Line format:
-        //   addr1-addr2 perms offset dev inode path
-        //   7f...-7f... r-xp 00000000 fd:00 12345 /apex/.../libc.so
+
         char* nl = ::strchr(line, '\n');
         if (nl) *nl = 0;
-        // Path is the last space-separated token; make sure it ends with /libc.so
+
         char* sp = ::strrchr(line, ' ');
         if (!sp) continue;
         char* path = sp + 1;
         size_t plen = ::strlen(path);
         if (plen < 8) continue;
         if (::strcmp(path + plen - 8, "/libc.so") != 0) continue;
-        // Parse fields
+
         unsigned long a1, a2, off;
         char perms[8] = {0};
         unsigned int dmaj = 0, dmin = 0;
@@ -750,9 +663,6 @@ static void install_proc_sanitizer(Api* api) {
     }
 }
 
-// ============================================================
-// Zygisk Module
-// ============================================================
 class TernakTT : public zygisk::ModuleBase {
 public:
     void onLoad(Api* api, JNIEnv* env) override {
@@ -769,12 +679,8 @@ public:
             env_->ReleaseStringUTFChars(args->nice_name, raw);
         }
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
-        if (pkg.empty()) { unload(); return; }  // system_server etc.
+        if (pkg.empty()) { unload(); return; }
 
-        // v1.0.15: companion holds the target whitelist (target.txt).
-        // We send our pkg name; companion returns len=0 for non-targets.
-        // This costs 1 UDS round-trip per app spawn but centralizes the
-        // target list in a single user-editable file (no rebuild needed).
         int fd = api_->connectCompanion();
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { LOGD("companion connect failed for pkg='%s'", pkg.c_str()); unload(); return; }
@@ -790,7 +696,7 @@ public:
             close(fd); unload(); return;
         }
         if (len == 0) {
-            // Companion rejected: pkg is not in target.txt.
+
             LOGD("pkg='%s' not a target (companion), unloading", pkg.c_str());
             close(fd); unload(); return;
         }
@@ -810,11 +716,6 @@ public:
         LOGD("identity blob head='%.120s'",
              std::string(blob_.begin(), blob_.begin() + (len < 120 ? len : 120)).c_str());
 
-        // v1.0.6: request companion to fork a child that setns+mounts our
-        // overlay into this TT process's mount namespace.
-        //   • In-process mount: EACCES (caps stripped in preAppSpecialize)
-        //   • In-companion mount: EINVAL (companion is multithreaded)
-        //   • Fork-then-setns from companion: works (child single-threaded)
         request_companion_mounts(api_);
     }
 
@@ -829,7 +730,7 @@ public:
 #endif
         install_build_hook(env_);
         LOGD("L1 install_build_hook done");
-        // L2: SystemProperties.native_get
+
         {
             jclass sp = env_->FindClass("android/os/SystemProperties");
             if (sp) {
@@ -850,13 +751,7 @@ public:
         install_leak_sensors(env_);
 #endif
         install_crash_watchdog(pkg_);
-        // v1.0.6: PLT sanitizer disabled. Hooking openat in libc.so's PLT
-        // only intercepts calls made FROM inside libc (libc never calls its
-        // own openat). To sanitize /proc/self/mountinfo reads by TT/analytics
-        // libs we'd need per-library PLT hooks or inline hooking
-        // (shadowhook/dobby). Deferred to v1.1. Bind mount is the critical
-        // spoof; mountinfo exposure is defense-in-depth only.
-        // install_proc_sanitizer(api_);
+
     }
 
     void preServerSpecialize(ServerSpecializeArgs*) override { unload(); }

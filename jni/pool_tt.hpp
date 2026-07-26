@@ -1,7 +1,4 @@
-// ============================================================
-// Ternak TT v1.0 - Pixel-only device pool (SDK 33-36)
-// TT-friendly baseline: no OEM anti-tamper, security patch <= 60d
-// ============================================================
+
 #pragma once
 
 struct PixelEntry {

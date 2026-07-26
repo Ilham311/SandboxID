@@ -1,17 +1,4 @@
 #!/usr/bin/env bash
-# ============================================================
-# Ternak TT - Build script
-#
-# Produces two flashable zips per invocation (unless VARIANT set):
-#   dist/ternak-tt-<version>-release.zip  (LOGD compiled out, stripped)
-#   dist/ternak-tt-<version>-debug.zip    (LOGD active, symbols kept)
-#
-# Env overrides:
-#   VARIANT=release     build only release
-#   VARIANT=debug       build only debug
-#   VARIANT=both        build both (default)
-#   MIN_SDK=33          Android platform target
-# ============================================================
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -29,7 +16,6 @@ echo "==> Ternak TT $VERSION"
 echo "==> NDK: $ANDROID_NDK_HOME"
 echo "==> Variant(s): $VARIANT"
 
-# 1. Fetch zygisk.hpp if missing
 if [ ! -f jni/zygisk.hpp ]; then
   echo "==> Fetching zygisk.hpp"
   curl -fsSL -o jni/zygisk.hpp \
@@ -38,9 +24,6 @@ fi
 
 mkdir -p "$OUT"
 
-# ------------------------------------------------------------
-# build_variant <variant-name>  ->  produces dist/ternak-tt-<ver>-<variant>.zip
-# ------------------------------------------------------------
 build_variant() {
   local V="$1"
   local DBG_FLAG
@@ -56,7 +39,6 @@ build_variant() {
   echo "  Building variant: $V"
   echo "============================================================"
 
-  # Compile every ABI for this variant
   for ABI in "${ABIS[@]}"; do
     echo "  ==> [$V] $ABI"
     local BUILD="build/$V/$ABI"
@@ -71,28 +53,19 @@ build_variant() {
     cmake --build "$BUILD" -j
   done
 
-  # Assemble package tree for this variant
   rm -rf "$PKG"
   mkdir -p "$PKG/zygisk" "$PKG/bin"
   cp module.prop action.sh service.sh customize.sh "$PKG/"
-  # v1.0.11: bundle summarizer so action.sh can auto-digest debug logs
   [ -f summarize.sh ] && cp summarize.sh "$PKG/"
-  # v1.0.14: bundle post-fs-data.sh for early-boot mount overlay seed
   [ -f post-fs-data.sh ] && cp post-fs-data.sh "$PKG/"
-  # v1.0.15: bundle default target.txt (user-editable whitelist).
-  # customize.sh will preserve any existing live target.txt on upgrade.
   [ -f target.txt ] && cp target.txt "$PKG/"
 
-  # Stamp variant into module.prop so it's visible in KernelSU Manager
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"
-    # v1.0.10: marker file consumed by service.sh + customize.sh + action.sh
-    # to enable auto-log-capture without any user setup.
     echo "variant=debug" >  "$PKG/debug_variant"
     echo "created=$(date -u +%FT%TZ)" >> "$PKG/debug_variant"
     echo "version=$VERSION" >> "$PKG/debug_variant"
     mkdir -p "$PKG/debug"
-    # placeholder so zip preserves the empty directory
     echo "# Auto-populated by service.sh on boot. Latest session-<ts>.log lives here." \
       > "$PKG/debug/README.txt"
   fi
@@ -117,9 +90,6 @@ build_variant() {
   echo "  ==> Built: $ZIP ($(du -h "$ZIP" | cut -f1))"
 }
 
-# ------------------------------------------------------------
-# Dispatch
-# ------------------------------------------------------------
 case "$VARIANT" in
   release) build_variant release ;;
   debug)   build_variant debug   ;;

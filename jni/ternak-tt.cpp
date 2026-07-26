@@ -1,9 +1,4 @@
-// ============================================================
-// Ternak TT v1.0.1 - Standalone CLI (no daemon required)
-//
-// Semua logic freshen jalan di sini. Dipanggil user via `su`,
-// jadi udah root. Gak butuh UDS/daemon lagi.
-// ============================================================
+
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -28,13 +23,9 @@ static const char* IDENTITY_FILE  = "/data/adb/modules/ternak_tt/identity.prop";
 static const char* IDENTITY_BAK   = "/data/adb/modules/ternak_tt/identity.prop.bak";
 static const char* MODE_FILE      = "/data/adb/modules/ternak_tt/identity.mode";
 static const char* RESETPROP      = "/data/adb/modules/ternak_tt/bin/resetprop-rs";
-static const char* MOUNTDIR       = "/data/adb/modules/ternak_tt/mount";  // v1.0.3
-static const char* TARGET_FILE    = "/data/adb/modules/ternak_tt/target.txt";  // v1.0.15
+static const char* MOUNTDIR       = "/data/adb/modules/ternak_tt/mount";
+static const char* TARGET_FILE    = "/data/adb/modules/ternak_tt/target.txt";
 
-// v1.0.15: target list is no longer hardcoded. `wipe_tt_data()` reads
-// target.txt so `ternak-tt freshen` clears the exact same apps the Zygisk
-// companion accepts. If target.txt is missing or empty we fall back to the
-// built-in defaults (matches companion behavior).
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
     std::ifstream f(TARGET_FILE);
@@ -63,7 +54,6 @@ static std::vector<std::string> load_targets() {
     return out;
 }
 
-// ---- Helpers ----
 static std::string random_hex(int bytes, bool upper) {
     std::random_device rd;
     std::mt19937_64 gen(rd() ^ (uint64_t)std::chrono::steady_clock::now()
@@ -114,7 +104,6 @@ static void run_bin(const char* path, std::vector<const char*> argv) {
     }
 }
 
-// ---- Identity ----
 struct Identity {
     std::map<std::string, std::string> kv;
     std::string serialize() const {
@@ -193,13 +182,12 @@ static Identity gen_identity() {
     snprintf(rad, sizeof(rad), "g5300q-%s-%s-B-%s", date, date, p.incremental);
     id.kv["RADIO"] = rad;
 
-    id.kv["SERIAL"]     = random_hex(8, true);   // 16 hex upper
-    id.kv["ANDROID_ID"] = random_hex(8, false);  // 16 hex lower
+    id.kv["SERIAL"]     = random_hex(8, true);
+    id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
     return id;
 }
 
-// v1.0.8: variant tag + debug stderr traces (compiled out in release)
 #ifdef TT_DEBUG
 #define TT_VARIANT_TAG "debug"
 #define DBG(fmt, ...) fprintf(stderr, "[D] " fmt "\n", ##__VA_ARGS__)
@@ -208,10 +196,6 @@ static Identity gen_identity() {
 #define DBG(...) ((void)0)
 #endif
 
-// ---- Apply native + wipe ----
-// v1.0.2: cover full Build.* mapping + partitioned props (Android 12+)
-// biar app yang bypass Java Build.* via JNI __system_property_get langsung
-// tetap ke-spoof, dan gak ada mismatch antara Java view vs native view.
 static void apply_native(const Identity& id) {
     DBG("apply_native: enter (identity has %zu kv pairs)", id.kv.size());
     auto get = [&](const char* k) -> std::string {
@@ -243,11 +227,10 @@ static void apply_native(const Identity& id) {
     const std::string HOST         = get("HOST");
 
     std::vector<Rp> rp = {
-        // Serial
+
         {"ro.serialno",                        SERIAL},
         {"ro.boot.serialno",                   SERIAL},
 
-        // Fingerprint (main + partition aliases)
         {"ro.build.fingerprint",               FP},
         {"ro.bootimage.build.fingerprint",     FP},
         {"ro.system.build.fingerprint",        FP},
@@ -256,8 +239,6 @@ static void apply_native(const Identity& id) {
         {"ro.product.build.fingerprint",       FP},
         {"ro.system_ext.build.fingerprint",    FP},
 
-        // Model / Brand / Manufacturer / Device / Product / Board
-        // (top-level + all partition aliases Android 12+)
         {"ro.product.model",                   MODEL},
         {"ro.product.system.model",            MODEL},
         {"ro.product.vendor.model",            MODEL},
@@ -296,7 +277,6 @@ static void apply_native(const Identity& id) {
         {"ro.product.board",                   BOARD},
         {"ro.build.product",                   DEVICE},
 
-        // Build.ID / DISPLAY / DESCRIPTION / TAGS / TYPE / USER / HOST
         {"ro.build.id",                        ID_},
         {"ro.build.display.id",                DISPLAY},
         {"ro.build.description",               DESC},
@@ -305,7 +285,6 @@ static void apply_native(const Identity& id) {
         {"ro.build.user",                      USER_},
         {"ro.build.host",                      HOST},
 
-        // Version
         {"ro.build.version.release",           RELEASE},
         {"ro.build.version.release_or_codename", RELEASE},
         {"ro.build.version.sdk",               SDK_INT},
@@ -315,11 +294,9 @@ static void apply_native(const Identity& id) {
         {"ro.vendor.build.security_patch",     SECPATCH},
         {"ro.build.version.incremental",       INCREMENTAL},
 
-        // Radio / baseband
         {"gsm.version.baseband",               RADIO},
         {"ro.build.expect.baseband",           RADIO},
 
-        // Bootloader (Pixel-style)
         {"ro.bootloader",                      std::string("unknown")},
         {"ro.boot.bootloader",                 std::string("unknown")},
     };
@@ -336,7 +313,6 @@ static void apply_native(const Identity& id) {
         fprintf(stderr, "! resetprop-rs missing at %s (native prop skipped)\n", RESETPROP);
     }
 
-    // Settings provider (survives reboot)
     std::string aid = get("ANDROID_ID");
     if (!aid.empty()) {
         run_bin("/system/bin/settings",
@@ -348,12 +324,6 @@ static void apply_native(const Identity& id) {
     }
 }
 
-// ============================================================
-// v1.0.3: Generate fake files for Zygisk bind-mount overlay
-// - 5 build.prop per partition (system, vendor, odm, product, system_ext)
-// - 1 settings_secure.xml with spoofed android_id + advertising_id
-// Files are consumed by main.cpp:do_bind_mounts() at TT app launch.
-// ============================================================
 static void generate_mount_files(const Identity& id) {
     DBG("generate_mount_files: MOUNTDIR=%s", MOUNTDIR);
     auto g = [&](const char* k) -> std::string {
@@ -388,7 +358,6 @@ static void generate_mount_files(const Identity& id) {
     const std::string USER_        = g("USER");
     const std::string HOST         = g("HOST");
 
-    // Base build.prop (all key=value lines)
     std::string base;
     base += "# Ternak TT synthetic build.prop (v1.0.3)\n";
     auto add = [&](const char* k, const std::string& v) {
@@ -448,7 +417,6 @@ static void generate_mount_files(const Identity& id) {
         ::chmod(path.c_str(), 0644);
     }
 
-    // settings_secure.xml — minimal Android SettingsProvider format
     std::string aid  = g("ANDROID_ID");
     std::string gaid = g("GOOGLE_AID");
     if (aid.empty()) aid = "0000000000000000";
@@ -469,13 +437,10 @@ static void generate_mount_files(const Identity& id) {
 
     std::string xml_path = std::string(MOUNTDIR) + "/settings_secure.xml";
     atomic_write(xml_path, xml);
-    // Mirror real DAC (0600 system:system). TT can't read even our fake
-    // via normal file APIs, but if a privesc exploit lets them, they get
-    // spoofed data instead of the real ANDROID_ID.
-    ::chmod(xml_path.c_str(), 0600);
-    ::chown(xml_path.c_str(), 1000, 1000);  // system:system
 
-    // Restore SELinux labels so bind mount doesn't get denied on target read.
+    ::chmod(xml_path.c_str(), 0600);
+    ::chown(xml_path.c_str(), 1000, 1000);
+
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_file:s0",
             (std::string(MOUNTDIR) + "/system/build.prop").c_str()});
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:vendor_file:s0",
@@ -499,7 +464,6 @@ static void wipe_tt_data() {
     }
 }
 
-// v1.0.15: user-facing dump of the runtime target whitelist.
 static int cmd_targets() {
     auto pkgs = load_targets();
     struct stat st{};
@@ -525,7 +489,6 @@ static Identity load_identity() {
     return id;
 }
 
-// ---- Root check ----
 static bool ensure_root() {
     if (geteuid() != 0) {
         fprintf(stderr, "! ternak-tt must run as root. Use: su -c ternak-tt <cmd>\n");
@@ -534,7 +497,6 @@ static bool ensure_root() {
     return true;
 }
 
-// ---- Command handlers ----
 static int cmd_freshen() {
     DBG("cmd_freshen: build=%s", TT_VARIANT_TAG);
     if (!ensure_root()) return 1;
@@ -555,7 +517,7 @@ static int cmd_freshen() {
     }
 
     apply_native(id);
-    generate_mount_files(id);  // v1.0.3: refresh Zygisk overlay files
+    generate_mount_files(id);
     wipe_tt_data();
 
     printf("OK - fresh TT persona ready\n");
@@ -568,7 +530,7 @@ static int cmd_freshen() {
     printf("  ANDROID_ID  : %s\n", id.kv["ANDROID_ID"].c_str());
     printf("  GAID        : %s\n", id.kv["GOOGLE_AID"].c_str());
     printf("  SEC PATCH   : %s\n", id.kv["SECURITY_PATCH"].c_str());
-    // v1.0.15: report the exact wiped list from target.txt
+
     auto pkgs = load_targets();
     printf("  Wiped: %zu pkg(s) from target.txt\n", pkgs.size());
     for (const auto& p : pkgs) printf("    - %s\n", p.c_str());
@@ -595,19 +557,11 @@ static int cmd_apply_boot_impl() {
         return 0;
     }
     apply_native(id);
-    generate_mount_files(id);  // v1.0.3: refresh overlay on boot
+    generate_mount_files(id);
     printf("OK: native prop re-applied + mount overlay refreshed\n");
     return 0;
 }
 
-// v1.0.14: seed = early-boot bootstrap for post-fs-data.sh.
-// Runs BEFORE Android userspace / Zygisk. Only does file writes:
-//   * generate identity.prop if missing (reuse existing otherwise)
-//   * regenerate mount/*/build.prop tree so companion bind-mount has
-//     valid sources on the very first target spawn.
-// Deliberately DOES NOT call apply_native() or wipe_tt_data(): resetprop
-// and pm/am/settings binaries are unusable this early. apply-boot picks
-// those up later from service.sh once boot_completed.
 static int cmd_seed() {
     if (!ensure_root()) return 1;
     Identity id;
@@ -652,7 +606,7 @@ static int cmd_rollback() {
     atomic_write(IDENTITY_FILE, d);
     Identity rid = load_identity();
     apply_native(rid);
-    generate_mount_files(rid);  // v1.0.3: refresh overlay after rollback
+    generate_mount_files(rid);
     wipe_tt_data();
     printf("OK: rolled back + wiped\n");
     return 0;
@@ -683,8 +637,8 @@ int main(int argc, char** argv) {
     if (!strcmp(c, "lock"))       return cmd_lock();
     if (!strcmp(c, "unlock"))     return cmd_unlock();
     if (!strcmp(c, "apply-boot")) return cmd_apply_boot();
-    if (!strcmp(c, "seed"))       return cmd_seed();     // v1.0.14: early bootstrap
-    if (!strcmp(c, "targets"))    return cmd_targets();  // v1.0.15: runtime whitelist dump
+    if (!strcmp(c, "seed"))       return cmd_seed();
+    if (!strcmp(c, "targets"))    return cmd_targets();
     usage(argv[0]);
     return 1;
 }

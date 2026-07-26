@@ -12,10 +12,6 @@ ui_print "- + mount overlay (build.prop x5 + settings_secure.xml)"
 ui_print "- + crash watchdog + auto-summarize on Action tap"
 ui_print ""
 
-# v1.0.15: preserve user's custom target.txt across reinstalls.
-# KernelSU / Magisk stage the new module under MODPATH and swap it in
-# on reboot. If the live install already has target.txt, copy it into
-# MODPATH BEFORE ui_print reports so the user's edits survive upgrade.
 LIVE_TARGET="/data/adb/modules/ternak_tt/target.txt"
 if [ -s "$LIVE_TARGET" ]; then
     ui_print "- Preserving existing target.txt from previous install"
@@ -24,7 +20,6 @@ else
     ui_print "- Installing default target.txt (4 packages)"
 fi
 
-# Detect debug variant marker (dropped by build.sh)
 if [ -f "$MODPATH/debug_variant" ]; then
     ui_print "- ! DEBUG variant detected"
     ui_print "-   Auto-log will start on next boot."
@@ -49,14 +44,10 @@ ZOK=0
 set_perm_recursive $MODPATH 0 0 0755 0644
 set_perm $MODPATH/action.sh                 0 0 0755
 set_perm $MODPATH/service.sh                0 0 0755
-# v1.0.14: post-fs-data.sh runs early to seed mount overlay before Zygisk.
 [ -f $MODPATH/post-fs-data.sh ] && set_perm $MODPATH/post-fs-data.sh 0 0 0755
 [ -f $MODPATH/summarize.sh ] && set_perm $MODPATH/summarize.sh 0 0 0755
-# v1.0.15: target.txt must be world-readable (companion runs as root so
-# 0644 is fine; user can `su -c 'nano /data/adb/modules/ternak_tt/target.txt'`).
 [ -f $MODPATH/target.txt ] && set_perm $MODPATH/target.txt 0 0 0644
 
-# v1.0.10: prepare debug/ dir so background logcat can write on first boot
 if [ -f "$MODPATH/debug_variant" ]; then
     mkdir -p "$MODPATH/debug"
     set_perm_recursive $MODPATH/debug 0 0 0755 0644
@@ -79,8 +70,6 @@ esac
 echo "fresh" > $MODPATH/identity.mode
 set_perm $MODPATH/identity.mode 0 0 0644
 
-# v1.0.3: pre-create mount overlay tree so bind-mount sources exist
-# (real content generated on first `ternak-tt freshen`)
 mkdir -p $MODPATH/mount/system
 mkdir -p $MODPATH/mount/vendor
 mkdir -p $MODPATH/mount/odm

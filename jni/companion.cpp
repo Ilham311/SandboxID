@@ -1,12 +1,4 @@
-// ============================================================
-// Ternak TT v1.0.4 - Zygisk companion (identity reader + mount agent)
-//
-// v1.0.3 bind mount dari preAppSpecialize gagal EACCES di
-// Zygisk-Next fork (HMA-OSS) karena CAP_SYS_ADMIN di-drop.
-// v1.0.4: companion (yang masih root+caps) yang lakuin mount.
-// Companion setns() masuk mount ns TT, mount, setns() balik.
-// Teknik ini dipake Shamiko / PlayIntegrityFork.
-// ============================================================
+
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -39,26 +31,18 @@
 #define TT_VARIANT_TAG "release"
 #endif
 
-// Forward decls
 static void watch_target_death(uint32_t pid);
 
 enum : uint8_t {
     CMD_CHECK_TT     = 1,
     CMD_GET_IDENTITY = 2,
-    CMD_DO_MOUNTS    = 3,  // v1.0.4: setns into caller mnt ns + bind mount
+    CMD_DO_MOUNTS    = 3,
 };
 
 static const char* IDENTITY_FILE = "/data/adb/modules/ternak_tt/identity.prop";
 static const char* MOUNTDIR      = "/data/adb/modules/ternak_tt/mount";
-static const char* TARGET_FILE   = "/data/adb/modules/ternak_tt/target.txt";  // v1.0.15
+static const char* TARGET_FILE   = "/data/adb/modules/ternak_tt/target.txt";
 
-// ------------------------------------------------------------
-// v1.0.15: target package whitelist loaded from target.txt.
-// Previously hardcoded in is_target_pkg() (main.cpp) — moved
-// here so the whitelist is a single, user-editable file that
-// doesn't require a rebuild. Cached in-memory with mtime
-// reload so runtime edits take effect on next app spawn.
-// ------------------------------------------------------------
 static std::vector<std::string> g_targets;
 static time_t                   g_targets_mtime = 0;
 
@@ -84,7 +68,7 @@ static void reload_targets_if_changed() {
     std::vector<std::string> next;
     std::string line;
     while (std::getline(f, line)) {
-        // strip inline comment (# ...) and trailing whitespace
+
         size_t hash = line.find('#');
         if (hash != std::string::npos) line.erase(hash);
         while (!line.empty() &&
@@ -119,21 +103,16 @@ static bool is_target(const std::string& pkg) {
 }
 
 struct BindEntry { const char* src_rel; const char* dst; };
-// v1.0.14: added alternate destination paths for odm/product/system_ext.
-// POCO F3 (MIUI15, tested) uses Android 11+ canonical layout where
-// partition build.prop lives at /<part>/etc/build.prop, not /<part>/build.prop.
-// v1.0.12 telemetry showed 3 skip on those partitions because the legacy
-// dst path didn't exist. Trying both paths per partition; at most one dst
-// exists per partition so the alternate is a silent skip on other ROMs.
+
 static const BindEntry BIND_ENTRIES[] = {
     {"system/build.prop",     "/system/build.prop"},
     {"vendor/build.prop",     "/vendor/build.prop"},
-    {"odm/build.prop",        "/odm/etc/build.prop"},           // Android 11+
-    {"odm/build.prop",        "/odm/build.prop"},               // legacy
-    {"product/build.prop",    "/product/etc/build.prop"},       // Android 11+
-    {"product/build.prop",    "/product/build.prop"},           // legacy
-    {"system_ext/build.prop", "/system_ext/etc/build.prop"},    // Android 11+
-    {"system_ext/build.prop", "/system_ext/build.prop"},        // legacy
+    {"odm/build.prop",        "/odm/etc/build.prop"},
+    {"odm/build.prop",        "/odm/build.prop"},
+    {"product/build.prop",    "/product/etc/build.prop"},
+    {"product/build.prop",    "/product/build.prop"},
+    {"system_ext/build.prop", "/system_ext/etc/build.prop"},
+    {"system_ext/build.prop", "/system_ext/build.prop"},
     {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
 };
 
@@ -145,10 +124,6 @@ static std::string read_file(const char* p) {
     return ss.str();
 }
 
-// v1.0.6: setns(CLONE_NEWNS) requires single-threaded caller (EINVAL otherwise).
-// Zygisk-Next companion runtime is multithreaded, so we fork a child. Post-fork
-// child is guaranteed single-threaded → setns works. Result piped back to parent.
-// Same pattern used by Shamiko / PlayIntegrityFork.
 static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     int pipefd[2];
     if (::pipe(pipefd) != 0) {
@@ -164,7 +139,7 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     }
 
     if (child == 0) {
-        // Child — single-threaded, so setns(CLONE_NEWNS) works.
+
         ::close(pipefd[0]);
         LOGD("child: pid=%d parent_target=%u", getpid(), target_pid);
 
@@ -212,14 +187,11 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
         ::_exit(0);
     }
 
-    // Parent — wait for result
     ::close(pipefd[1]);
     uint32_t ok = 0;
     ssize_t n = ::read(pipefd[0], &ok, sizeof(ok));
     ::close(pipefd[0]);
-    // Arm death watcher in PARENT (companion daemon) — not in child which
-    // _exit()s immediately. Watcher runs regardless of mount outcome so we
-    // capture every target exit (crash, SIGKILL, LMK, normal close).
+
     watch_target_death(target_pid);
     int status = 0;
     ::waitpid(child, &status, 0);
@@ -230,20 +202,14 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     return ok;
 }
 
-// ============================================================
-// Death watcher: after a successful mount request we spawn a
-// detached thread that polls kill(pid,0) until the target dies.
-// This surfaces OOM / LMK / SIGKILL kills that the in-process
-// signal handler CANNOT see (SIGKILL is uncatchable).
-// ============================================================
 static void watch_target_death(uint32_t pid) {
     std::thread([pid]() {
         struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
-        // Poll every 500ms, give up after 30 min (target likely user-closed).
+
         for (int i = 0; i < 3600; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            if (::kill((pid_t)pid, 0) == 0) continue;         // still alive
-            if (errno != ESRCH) continue;                     // EPERM etc — keep polling
+            if (::kill((pid_t)pid, 0) == 0) continue;
+            if (errno != ESRCH) continue;
             struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
             long ms = (t1.tv_sec - t0.tv_sec) * 1000L +
                       (t1.tv_nsec - t0.tv_nsec) / 1000000L;
@@ -265,12 +231,7 @@ extern "C" void ternak_tt_companion(int client) {
         LOGD("recv cmd=%u", cmd);
 
         if (cmd == CMD_GET_IDENTITY) {
-            // v1.0.15 wire format:
-            //   client -> [u8 cmd=2][u16 pkg_len][pkg bytes]
-            //   server -> [u32 blob_len][blob bytes]
-            //     blob_len == 0  =>  "not a target, unload"
-            // This centralizes the target check in the companion so the
-            // whitelist (target.txt) is a single, user-editable file.
+
             uint16_t plen = 0;
             if (::read(client, &plen, sizeof(plen)) != (ssize_t)sizeof(plen)) break;
             std::string pkg;
