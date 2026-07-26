@@ -75,6 +75,8 @@ build_variant() {
   rm -rf "$PKG"
   mkdir -p "$PKG/zygisk" "$PKG/bin"
   cp module.prop action.sh service.sh customize.sh "$PKG/"
+  # v1.0.11: bundle summarizer so action.sh can auto-digest debug logs
+  [ -f summarize.sh ] && cp summarize.sh "$PKG/"
 
   # Stamp variant into module.prop so it's visible in KernelSU Manager
   if [ "$V" = "debug" ]; then

@@ -1,11 +1,12 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.10"
+ui_print "- Ternak TT v1.0.11"
 ui_print "- TikTok + Grab Zygisk fresh persona"
 ui_print "- + mount namespace overlay (build.prop x5 + settings_secure.xml)"
 ui_print "- + crash watchdog + companion death watcher"
 ui_print "- + L7 leak sensors (debug variant)"
+ui_print "- + auto-summarize on Action tap (chat-friendly digest)"
 ui_print ""
 
 # Detect debug variant marker (dropped by build.sh)
@@ -33,6 +34,7 @@ ZOK=0
 set_perm_recursive $MODPATH 0 0 0755 0644
 set_perm $MODPATH/action.sh                 0 0 0755
 set_perm $MODPATH/service.sh                0 0 0755
+[ -f $MODPATH/summarize.sh ] && set_perm $MODPATH/summarize.sh 0 0 0755
 
 # v1.0.10: prepare debug/ dir so background logcat can write on first boot
 if [ -f "$MODPATH/debug_variant" ]; then
