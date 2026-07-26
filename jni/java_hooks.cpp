@@ -1,7 +1,11 @@
-// Ternak TT — Path B Java method hooks via lsplant + Dobby.
+// Ternak TT — Path B Java method hooks via lsplant + ShadowHook.
 //
 // Requires build with -DTT_HAVE_LSPLANT=1 (auto-set by CMakeLists.txt when
-// jni/lsplant/ and jni/dobby/ are present after ./fetch_lsplant.sh).
+// prebuilt/lsplant/ and jni/shadowhook/ are present after ./fetch_lsplant.sh).
+// v1.1.7: switched from jmpews/Dobby to bytedance/android-inline-hook
+// (ShadowHook). Dobby master stopped compiling on NDK r26d; ShadowHook is
+// actively maintained and has the same call surface (`hook_func_addr` +
+// `unhook`).
 // Requires jni/helper_dex.h to be generated (fetch_lsplant.sh runs javac + d8
 // on java_helper/TernakHookHelper.java when both are on PATH).
 //
@@ -32,8 +36,9 @@ bool IsAvailable() {
 #include <dlfcn.h>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include "lsplant.hpp"
-#include "dobby.h"
+#include "shadowhook.h"
 
 #ifdef TT_HAVE_HELPER_DEX
 #include "helper_dex.h"  // provides HELPER_DEX[] + HELPER_DEX_LEN
@@ -43,6 +48,14 @@ static std::mutex g_mu;
 static bool g_inited = false;
 static std::map<std::string, std::string> g_ident;
 static jclass g_helper_cls = nullptr;  // global ref
+
+// v1.1.7: ShadowHook returns a stub handle from `shadowhook_hook_func_addr()`,
+// and `shadowhook_unhook()` takes that stub — but LSPlant's inline_unhooker
+// callback only gives us the target address. Keep a target->stub map so we
+// can round-trip. (Dobby did not need this; its DobbyDestroy took the target
+// directly.)
+static std::mutex g_stub_mu;
+static std::unordered_map<void*, void*> g_stub_map;
 
 // ==== Native bridges called from TernakHookHelper *_h() methods ====
 
@@ -101,17 +114,43 @@ bool Init(JNIEnv* env) {
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_inited) return true;
 
+    // ShadowHook init:
+    //   SHADOWHOOK_MODE_SHARED = allow chaining (safer if the target app also
+    //     uses ShadowHook internally, e.g. TikTok itself).
+    //   debuggable=false       = production mode, minimal overhead.
+    int sh_err = shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
+    if (sh_err != 0) {
+        TT_LOGE("Path B: shadowhook_init failed: %d (%s)",
+                sh_err, shadowhook_to_errmsg(sh_err));
+        return false;
+    }
+
     lsplant::InitInfo info{
         .inline_hooker = [](void* target, void* replace) -> void* {
             void* backup = nullptr;
-            if (DobbyHook(target, (dobby_dummy_func_t)replace,
-                          (dobby_dummy_func_t*)&backup) != 0) {
+            void* stub = shadowhook_hook_func_addr(target, replace, &backup);
+            if (stub == nullptr) {
+                int e = shadowhook_get_errno();
+                TT_LOGE("Path B: shadowhook_hook_func_addr(%p) failed: %d (%s)",
+                        target, e, shadowhook_to_errmsg(e));
                 return nullptr;
+            }
+            {
+                std::lock_guard<std::mutex> lk2(g_stub_mu);
+                g_stub_map[target] = stub;
             }
             return backup;
         },
         .inline_unhooker = [](void* func) -> bool {
-            return DobbyDestroy(func) == 0;
+            void* stub = nullptr;
+            {
+                std::lock_guard<std::mutex> lk2(g_stub_mu);
+                auto it = g_stub_map.find(func);
+                if (it == g_stub_map.end()) return false;
+                stub = it->second;
+                g_stub_map.erase(it);
+            }
+            return shadowhook_unhook(stub) == 0;
         },
         .art_symbol_resolver = [](std::string_view name) -> void* {
             static void* h = dlopen("libart.so", RTLD_LAZY);
@@ -126,7 +165,7 @@ bool Init(JNIEnv* env) {
         return false;
     }
     g_inited = true;
-    TT_LOGI("Path B: lsplant::Init OK (Dobby inline_hooker wired)");
+    TT_LOGI("Path B: lsplant::Init OK (ShadowHook inline_hooker wired)");
     return true;
 }
 

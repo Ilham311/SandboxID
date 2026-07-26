@@ -9,6 +9,73 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.1.7
+
+**Focus**: Unblock v1.1.6 CI failure (exit code 2). Two independent bugs surfaced in the v1.1.6 GitHub Actions run — both are fixed here with no functional regression.
+
+### Fixed — Bug #1: helper dex compile (silent Java-hook loss)
+- v1.1.6 `fetch_lsplant.sh` invoked `javac -source 8 -target 8` **without** `-bootclasspath android.jar`. CI log:
+  ```
+  java_helper/TernakHookHelper.java:22: error: package android.content does not exist
+  import android.content.ContentResolver;
+  ...
+  4 errors
+  !! d8 did not produce classes.dex — Path B helper dex not embedded
+  ```
+  The fetcher exited 0 (fail-soft) so the build continued, but Path B lost all 5 Java-side hooks (`Settings.Secure.getString`, `Settings.Global.getString`, `Settings.Global.getInt`, `SystemClock.uptimeMillis`, `SystemClock.elapsedRealtime`) — the exact hooks that kill Bluetooth-name / android_id / dev_settings leaks.
+- `fetch_lsplant.sh` now scans `$ANDROID_SDK_ROOT/platforms/android-{34,35,33,36,32,31}/android.jar` and passes the first hit as `-bootclasspath` to javac. If no android.jar is found, prints a loud warning pointing at the workflow.
+- `.github/workflows/build.yml` adds `platforms;android-34` to `android-actions/setup-android@v3` packages so android.jar is available on the runner.
+
+### Fixed — Bug #2: Dobby master broke on NDK r26d
+- v1.1.6 CI cascade-failed at `[ 46%] Building CXX ... closure_bridge_arm64.asm.o`:
+  ```
+  /tmp/closure_bridge_arm64-*.s:56:1: error: invalid symbol kind for ADRP relocation
+  adrp x17, common_closure_bridge_handler@PAGE
+  os_arch_features.h:39: error: use of undeclared identifier 'OSMemory'
+  os_arch_features.h:40: error: use of undeclared identifier 'kReadExecute'
+  code-patch-tool-posix.cc:3: fatal error: 'core/arch/Cpu.h' file not found
+  ProcessRuntime.cc:17: reference to non-static member function must be called
+  ProcessRuntime.cc:166,194,198 + dobby_symbol_resolver.cc:173,185,193,205:
+    no member named 'load_address' in 'RuntimeModule'
+  gmake: *** [Makefile:91: all] Error 2
+  ```
+  Root cause: `jmpews/Dobby` HEAD carries an incomplete refactor (Darwin ADRP@PAGE syntax leaking to ELF, `OSMemory` abstraction not merged in for POSIX backend, `RuntimeModule::load_address` field removed but ProcessRuntime.cc and dobby_symbol_resolver.cc still reference it). Pinning a specific pre-refactor Dobby SHA is fragile; the maintenance burden accumulates every NDK bump.
+- **Swapped `jmpews/Dobby` → `bytedance/android-inline-hook` (ShadowHook, tag `v1.0.9`)**:
+  - Maintained by ByteDance (same team behind TikTok), battle-tested against exactly the anti-tamper surfaces we're spoofing.
+  - API maps 1:1 onto LSPlant's `InitInfo`: `shadowhook_hook_func_addr(target, replace, &backup)` → `inline_hooker`; `shadowhook_unhook(stub)` → `inline_unhooker`.
+  - Because ShadowHook returns a stub handle instead of taking the target address on unhook (Dobby's `DobbyDestroy(func)`), `java_hooks.cpp` now keeps a `std::unordered_map<void*, void*>` (target → stub) under `g_stub_mu`.
+  - Init call: `shadowhook_init(SHADOWHOOK_MODE_SHARED, false)` before `lsplant::Init`. SHARED mode = safe if the target app also uses ShadowHook internally (TikTok itself does).
+- **SONAME renamed to `libternak_shadowhook.so`**:
+  - CMake: `set_target_properties(shadowhook PROPERTIES OUTPUT_NAME "ternak_shadowhook" VERSION "" SOVERSION "")`.
+  - Reason: TikTok bundles its own `libshadowhook.so`. Two libraries with the same SONAME in one linker namespace produces undefined symbol-resolution behavior. Renaming ours defuses the collision — apps continue to load their own `libshadowhook.so` from their apk libs dir, and our library loads from `/system/lib{,64}/libternak_shadowhook.so` via the Magisk/KSU magic-mount overlay.
+- `build.sh` copies `libternak_shadowhook.so` per ABI into `$MODPATH/system/lib{,64}/` with `.so.<abi>` suffix.
+- `customize.sh` install-time picker updated: `for LIB in liblsplant libternak_shadowhook`.
+
+### Changed — riscv64 waste elimination
+- v1.1.6 fetched and copied `liblsplant.so` for `riscv64` (88K per build) even though `build.sh` never builds a riscv64 variant with NDK r26d. Now skipped in `fetch_lsplant.sh` — reduces `prebuilt/lsplant/` size ~15%.
+
+### Not Changed
+- Zero changes to `jni/main.cpp`, `jni/companion.cpp`, `jni/ternak-tt.cpp`, `jni/pool_tt.hpp`, `jni/java_hooks.hpp`, `java_helper/TernakHookHelper.java`.
+- Path A behavior byte-for-byte identical to v1.1.6.
+- 5 Java hooks + native-side call plumbing unchanged — only the underlying inline hooker changed.
+- Goal, scope, and target list identical to `Ilham311/Tt` at v1.1.6.
+
+### Verification checklist (for the next CI run)
+- [ ] Step "Setup Android SDK build-tools + platform" installs `build-tools;34.0.0 platforms;android-34`.
+- [ ] Step "Fetch lsplant + Dobby (Path B)" prints `==> Using android.jar from android-34`.
+- [ ] Step prints `==> shadowhook  tag:     v1.0.9`.
+- [ ] `==> Compiling TernakHookHelper.java -> classes.dex -> jni/helper_dex.h` completes WITHOUT `package android.content does not exist`.
+- [ ] `==> Generated jni/helper_dex.h (N bytes)` where N > 500.
+- [ ] `==> Skipping riscv64 (not built by this module)` appears.
+- [ ] CMake configure prints `[ternak_tt] Path B ENABLED` per ABI (all four).
+- [ ] Compile log does NOT contain ANY of: `invalid symbol kind for ADRP`, `undeclared identifier 'OSMemory'`, `no member named 'load_address'`, `'core/arch/Cpu.h' file not found`.
+- [ ] Final `##[error]Process completed with exit code 0` (green build).
+- [ ] `dist/ternak-tt-v1.1.7-release.zip` contains `system/lib64/libternak_shadowhook.so.arm64-v8a` + `.so.x86_64` and `system/lib/libternak_shadowhook.so.armeabi-v7a` + `.so.x86`.
+- [ ] On device, `logcat -s TernakTT:*` shows `Path B: lsplant::Init OK (ShadowHook inline_hooker wired)` on first target launch.
+- [ ] Bluetooth adapter name spoof active on TikTok launch.
+
+---
+
 ## v1.1.6
 
 **Focus**: Path B re-architected end-to-end. v1.1.5 fixed the CI *compile* problem, but two runtime problems remained latent (never actually seen because Path B never compiled successfully before):

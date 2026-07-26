@@ -74,27 +74,41 @@ build_variant() {
   mkdir -p "$PKG/zygisk" "$PKG/bin"
   cp module.prop action.sh service.sh customize.sh "$PKG/"
 
-  # v1.1.6: ship liblsplant.so + libdobby.so via Magisk/KSU $MODPATH/system/lib{,64}
-  # overlay so DT_NEEDED resolves inside app processes at runtime.
+  # v1.1.7: ship liblsplant.so + libternak_shadowhook.so via Magisk/KSU
+  # $MODPATH/system/lib{,64} overlay so DT_NEEDED resolves inside app
+  # processes at runtime. (v1.1.6 shipped libdobby.so; ShadowHook replaced
+  # it after Dobby broke on NDK r26d. The .so is renamed to
+  # libternak_shadowhook.so via SONAME to avoid collision with target apps
+  # that already bundle their own libshadowhook.so — e.g. TikTok itself.)
   if [ "${PATH_B_OK:-0}" = "1" ]; then
     mkdir -p "$PKG/system/lib64" "$PKG/system/lib"
+    copy_shadowhook_so() {
+      local abi="$1"; local dst_dir="$2"
+      local src
+      src=$(find "build/$V/$abi/shadowhook-build" -name 'libternak_shadowhook.so' 2>/dev/null | head -1)
+      # Fallback: some CMake versions emit under a nested subdir.
+      if [ -z "$src" ]; then
+        src=$(find "build/$V/$abi" -name 'libternak_shadowhook.so' 2>/dev/null | head -1)
+      fi
+      if [ -n "$src" ] && [ -f "$src" ]; then
+        cp "$src" "$dst_dir/libternak_shadowhook.so.$abi"
+      else
+        echo "  WARN: [$V] $abi: libternak_shadowhook.so not found under build/$V/$abi/"
+      fi
+    }
     # arm64-v8a + x86_64 -> /system/lib64
     for A64 in arm64-v8a x86_64; do
       if [ -f "prebuilt/lsplant/lib/$A64/liblsplant.so" ]; then
         cp "prebuilt/lsplant/lib/$A64/liblsplant.so" "$PKG/system/lib64/liblsplant.so.$A64"
       fi
-      if [ -f "build/$V/$A64/dobby-build/libdobby.so" ]; then
-        cp "build/$V/$A64/dobby-build/libdobby.so" "$PKG/system/lib64/libdobby.so.$A64"
-      fi
+      copy_shadowhook_so "$A64" "$PKG/system/lib64"
     done
     # armeabi-v7a + x86 -> /system/lib
     for A32 in armeabi-v7a x86; do
       if [ -f "prebuilt/lsplant/lib/$A32/liblsplant.so" ]; then
         cp "prebuilt/lsplant/lib/$A32/liblsplant.so" "$PKG/system/lib/liblsplant.so.$A32"
       fi
-      if [ -f "build/$V/$A32/dobby-build/libdobby.so" ]; then
-        cp "build/$V/$A32/dobby-build/libdobby.so" "$PKG/system/lib/libdobby.so.$A32"
-      fi
+      copy_shadowhook_so "$A32" "$PKG/system/lib"
     done
     # customize.sh will rename the correct .so.$ABI to .so at install time based
     # on device arch (single-arch install semantics for Magisk/KSU modules).

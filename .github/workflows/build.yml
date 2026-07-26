@@ -80,10 +80,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK build-tools (d8 for Path B)
+      - name: Setup Android SDK build-tools + platform (d8 + android.jar for Path B)
+        # v1.1.7: `platforms;android-34` supplies android.jar so
+        # fetch_lsplant.sh can pass -bootclasspath to javac. Without it,
+        # v1.1.6 CI hit `package android.content does not exist` and
+        # dropped all 5 Java-side hooks silently.
         uses: android-actions/setup-android@v3
         with:
-          packages: 'build-tools;34.0.0'
+          packages: 'build-tools;34.0.0 platforms;android-34'
 
       - name: Fetch lsplant + Dobby (Path B)
         continue-on-error: true

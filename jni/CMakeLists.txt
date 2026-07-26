@@ -41,13 +41,15 @@ set(TERNAK_TT_SOURCES main.cpp companion.cpp java_hooks.cpp)
 set(LSPLANT_PREBUILT "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/lsplant")
 set(LSPLANT_SO       "${LSPLANT_PREBUILT}/lib/${ANDROID_ABI}/liblsplant.so")
 set(LSPLANT_HEADER   "${LSPLANT_PREBUILT}/include/lsplant.hpp")
-set(DOBBY_DIR        "${CMAKE_CURRENT_SOURCE_DIR}/dobby")
+# v1.1.7: ShadowHook replaces Dobby (Dobby master broke on NDK r26d).
+set(SHADOWHOOK_ROOT  "${CMAKE_CURRENT_SOURCE_DIR}/shadowhook")
+set(SHADOWHOOK_CMAKE "${SHADOWHOOK_ROOT}/shadowhook/src/main/cpp/CMakeLists.txt")
 
-if(EXISTS "${LSPLANT_SO}" AND EXISTS "${LSPLANT_HEADER}" AND EXISTS "${DOBBY_DIR}/CMakeLists.txt")
+if(EXISTS "${LSPLANT_SO}" AND EXISTS "${LSPLANT_HEADER}" AND EXISTS "${SHADOWHOOK_CMAKE}")
     message(STATUS "[ternak_tt] Path B ENABLED")
-    message(STATUS "[ternak_tt]   lsplant .so:     ${LSPLANT_SO}")
-    message(STATUS "[ternak_tt]   lsplant header:  ${LSPLANT_HEADER}")
-    message(STATUS "[ternak_tt]   dobby dir:       ${DOBBY_DIR}")
+    message(STATUS "[ternak_tt]   lsplant .so:      ${LSPLANT_SO}")
+    message(STATUS "[ternak_tt]   lsplant header:   ${LSPLANT_HEADER}")
+    message(STATUS "[ternak_tt]   shadowhook cmake: ${SHADOWHOOK_CMAKE}")
 
     # Prebuilt lsplant — imported SHARED .so from AAR
     add_library(lsplant SHARED IMPORTED)
@@ -55,18 +57,30 @@ if(EXISTS "${LSPLANT_SO}" AND EXISTS "${LSPLANT_HEADER}" AND EXISTS "${DOBBY_DIR
         IMPORTED_LOCATION "${LSPLANT_SO}"
         INTERFACE_INCLUDE_DIRECTORIES "${LSPLANT_PREBUILT}/include")
 
-    # Dobby — built from source (small, no submodule issues)
-    # Disable Dobby's own logging + shared build noise
-    set(DOBBY_DEBUG OFF   CACHE BOOL "" FORCE)
-    set(DOBBY_GENERATE_SHARED ON CACHE BOOL "" FORCE)
-    add_subdirectory("${DOBBY_DIR}" dobby-build EXCLUDE_FROM_ALL)
+    # ShadowHook — bytedance/android-inline-hook, built from source via its
+    # own CMakeLists.txt. Produces libshadowhook.so (SHARED).
+    # We rename its output to libternak_shadowhook.so at link time to avoid
+    # SONAME collision — target apps like TikTok bundle their own
+    # libshadowhook.so, and two libraries with the same SONAME in a single
+    # linker namespace would produce undefined symbol-resolution behavior.
+    set(SHADOWHOOK_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${SHADOWHOOK_ROOT}/shadowhook/src/main/cpp"
+                     shadowhook-build EXCLUDE_FROM_ALL)
+    if(TARGET shadowhook)
+        set_target_properties(shadowhook PROPERTIES
+            OUTPUT_NAME "ternak_shadowhook"
+            VERSION ""
+            SOVERSION "")
+    endif()
 
     add_library(ternak_tt SHARED ${TERNAK_TT_SOURCES})
     target_compile_definitions(ternak_tt PRIVATE TT_HAVE_LSPLANT=1)
     target_include_directories(ternak_tt PRIVATE
         ${CMAKE_SOURCE_DIR}
-        ${LSPLANT_PREBUILT}/include)
-    target_link_libraries(ternak_tt PRIVATE log dl lsplant dobby)
+        ${LSPLANT_PREBUILT}/include
+        ${SHADOWHOOK_ROOT}/shadowhook/src/main/cpp
+        ${SHADOWHOOK_ROOT}/shadowhook/src/main/cpp/include)
+    target_link_libraries(ternak_tt PRIVATE log dl lsplant shadowhook)
 else()
     message(WARNING "[ternak_tt] Path B DISABLED: missing one of:")
     if(NOT EXISTS "${LSPLANT_SO}")
@@ -75,10 +89,10 @@ else()
     if(NOT EXISTS "${LSPLANT_HEADER}")
         message(WARNING "[ternak_tt]   - ${LSPLANT_HEADER}")
     endif()
-    if(NOT EXISTS "${DOBBY_DIR}/CMakeLists.txt")
-        message(WARNING "[ternak_tt]   - ${DOBBY_DIR}/CMakeLists.txt")
+    if(NOT EXISTS "${SHADOWHOOK_CMAKE}")
+        message(WARNING "[ternak_tt]   - ${SHADOWHOOK_CMAKE}")
     endif()
-    message(WARNING "[ternak_tt] Run ./fetch_lsplant.sh to populate prebuilt/lsplant + jni/dobby.")
+    message(WARNING "[ternak_tt] Run ./fetch_lsplant.sh to populate prebuilt/lsplant + jni/shadowhook.")
 
     add_library(ternak_tt SHARED ${TERNAK_TT_SOURCES})
     target_include_directories(ternak_tt PRIVATE ${CMAKE_SOURCE_DIR})

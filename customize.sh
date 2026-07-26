@@ -1,11 +1,17 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.1.6"
-ui_print "- + FIX v1.1.6: AAR-based lsplant (Maven Central) + system/lib64"
-ui_print "-   overlay ship — Path B liblsplant.so + libdobby.so now"
-ui_print "-   resolvable inside app processes (DT_NEEDED works via magic"
-ui_print "-   mount). v1.1.5's SSH-URL clone workaround retired."
+ui_print "- Ternak TT v1.1.7"
+ui_print "- + FIX v1.1.7: swapped Dobby -> ShadowHook (bytedance/android-inline-hook)"
+ui_print "-   Dobby master broke on NDK r26d (ADRP relocation, load_address"
+ui_print "-   rename, missing Cpu.h). ShadowHook is actively maintained by"
+ui_print "-   ByteDance, has the same call surface, and integrates cleanly."
+ui_print "-   liblsplant.so + libternak_shadowhook.so shipped via system/lib{,64}."
+ui_print "- + FIX v1.1.7: javac -bootclasspath android.jar (v1.1.6 helper dex was"
+ui_print "-   empty because android.content.ContentResolver could not resolve)."
+ui_print "- + FIX v1.1.6: AAR-based lsplant (Maven Central) + system/lib{,64}"
+ui_print "-   overlay ship — Path B .so now resolvable inside app processes"
+ui_print "-   (DT_NEEDED works via magic mount)."
 ui_print "- + FIX v1.1.3: early bail-out for root/system/shell apps"
 ui_print "- + FIX v1.1.4: build fix — <sys/socket.h> + forward decl (CI green)"
 ui_print "-   (skips companion IPC for KSU, Magisk, Shizuku, Termux, ...)"
@@ -83,18 +89,18 @@ case "$ABI" in
     *)           ui_print "! Unknown ABI: $ABI" ;;
 esac
 
-# v1.1.6 Path B: pick correct per-ABI liblsplant.so + libdobby.so,
+# v1.1.7 Path B: pick correct per-ABI liblsplant.so + libternak_shadowhook.so,
 # rename to .so, delete the other ABI variants. If path_b libs were not
 # shipped (Path B disabled build), this block is a no-op.
 if [ -f "$MODPATH/.path_b_stamp" ]; then
-    ui_print "- Path B: installing lsplant + dobby for $ABI"
+    ui_print "- Path B: installing lsplant + shadowhook for $ABI"
     case "$ABI" in
         arm64-v8a|x86_64) LIBDIR="$MODPATH/system/lib64" ;;
         armeabi-v7a|x86) LIBDIR="$MODPATH/system/lib"   ;;
         *)               LIBDIR="" ;;
     esac
     if [ -n "$LIBDIR" ] && [ -d "$LIBDIR" ]; then
-        for LIB in liblsplant libdobby; do
+        for LIB in liblsplant libternak_shadowhook; do
             SRC="$LIBDIR/$LIB.so.$ABI"
             if [ -f "$SRC" ]; then
                 mv -f "$SRC" "$LIBDIR/$LIB.so"
