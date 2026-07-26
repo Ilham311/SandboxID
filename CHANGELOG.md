@@ -9,6 +9,98 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.1.6
+
+**Focus**: Path B re-architected end-to-end. v1.1.5 fixed the CI *compile* problem, but two runtime problems remained latent (never actually seen because Path B never compiled successfully before):
+
+1. `libternak_tt.so` DT_NEEDED `liblsplant.so`, but the module never shipped `liblsplant.so` anywhere the Android linker would find it — the Zygisk .so loads inside each app process's linker namespace (search path = `/system/lib{,64}/`, not `/data/adb/modules/`).
+2. Building LSPlant from source (v1.1.5 approach) still depends on the GitHub availability of LSPlant + its submodules at build time — fragile.
+
+Both are fixed in v1.1.6.
+
+### Changed — fetch strategy
+- `fetch_lsplant.sh` rewritten (again). No more `git clone LSPosed/LSPlant`. Now:
+  - Downloads **`lsplant-standalone` AAR** from Maven Central (`org.lsposed.lsplant:lsplant-standalone`).
+    - Auto-detects latest version via `maven-metadata.xml`, falls back to pinned `6.4`.
+    - Override via `LSPLANT_VERSION=X.Y.Z ./fetch_lsplant.sh`.
+  - Unzips the AAR (it's just a ZIP) and extracts `prefab/modules/lsplant/{include,libs/android.<abi>/liblsplant.so}` — that's the official Prefab distribution, one prebuilt `liblsplant.so` per ABI + `lsplant.hpp`.
+  - `git clone jmpews/Dobby` still needed (LSPlant's `InitInfo::inline_hooker` callback in `java_hooks.cpp` calls `DobbyHook` directly). Dobby's repo is clean — no SSH submodule pain, this clone step is trivial.
+  - `javac + d8` step for `TernakHookHelper.java -> jni/helper_dex.h` unchanged.
+
+### Changed — build layout
+- `jni/CMakeLists.txt`: Path B target now uses `add_library(lsplant SHARED IMPORTED)` pointing at `../prebuilt/lsplant/lib/${ANDROID_ABI}/liblsplant.so` and the AAR-extracted `lsplant.hpp` header. Dobby continues to build from `add_subdirectory(jni/dobby)`. Result on CMake configure:
+  ```
+  [ternak_tt] Path B ENABLED
+  [ternak_tt]   lsplant .so:     ../prebuilt/lsplant/lib/arm64-v8a/liblsplant.so
+  [ternak_tt]   lsplant header:  ../prebuilt/lsplant/include/lsplant.hpp
+  [ternak_tt]   dobby dir:       jni/dobby
+  ```
+
+### Fixed — runtime `.so` shipping (latent v1.1.4 bug)
+- `build.sh` now ships `liblsplant.so` + `libdobby.so` per ABI into `$MODPATH/system/lib64/` (for arm64-v8a + x86_64) and `$MODPATH/system/lib/` (for armeabi-v7a + x86), suffixed as `.so.<abi>`.
+- `customize.sh` ABI-picker at install time:
+  - Reads `ro.product.cpu.abi`
+  - Renames the matching `lib*.so.<abi>` → `lib*.so` in the right `lib{,64}` dir
+  - Deletes the other ABI's dir + any leftover `.so.*` variants
+  - Sets 0755/0644 recursive perms on `$MODPATH/system/`
+- **Why this fixes DT_NEEDED**: Magisk / KernelSU / Zygisk-Next magic-mount everything under `$MODPATH/system/` onto `/system/` at boot. So after install, `/system/lib64/liblsplant.so` exists inside every app's linker view, and libternak_tt.so's DT_NEEDED entries resolve normally. No dlopen gymnastics, no linker-namespace surgery, no android_dlopen_ext.
+
+### Retired
+- v1.1.5's SSH-URL rewrite + skip-`test/`-submodules trick in `fetch_lsplant.sh`. Not needed since we no longer clone LSPlant. The Dobby-only clone still has a defensive `git config --global url."https://github.com/".insteadOf "git@github.com:"` just in case Dobby ever adds SSH submodules — belt-and-suspenders.
+
+### Not Changed
+- Zero changes to `jni/main.cpp`, `jni/java_hooks.cpp`, `jni/java_hooks.hpp`, `jni/companion.cpp`, `jni/ternak-tt.cpp`, `jni/pool_tt.hpp`, `.github/workflows/build.yml`.
+- Path A behavior byte-for-byte identical to v1.1.4/v1.1.5.
+
+### Verification checklist (for the next CI run)
+- [ ] `fetch_lsplant.sh` step prints `==> Path B dependencies fetched successfully.` with an lsplant version number.
+- [ ] CMake configure step prints `[ternak_tt] Path B ENABLED` per ABI.
+- [ ] Compile log shows `[100%] Built target lsplant` is *absent* (it's a prebuilt import, not a build target) but `[100%] Built target dobby` present.
+- [ ] Release zip contains `system/lib64/liblsplant.so.arm64-v8a`, `system/lib64/libdobby.so.arm64-v8a`, `system/lib64/liblsplant.so.x86_64`, `system/lib/liblsplant.so.armeabi-v7a`, `system/lib/liblsplant.so.x86` (etc).
+- [ ] After install on arm64 device: `/data/adb/modules/ternak_tt/system/lib64/liblsplant.so` exists (renamed from `.so.arm64-v8a`), no `.so.x86_64`, no `.so.armeabi-v7a`.
+- [ ] After reboot: `find /system/lib64/liblsplant.so` returns hit (magic-mount overlay active).
+- [ ] On device, `logcat -s TernakTT:*` shows `Path B: lsplant::Init OK` on first target launch.
+- [ ] Bluetooth adapter name spoof active on TikTok launch (was `Vivo 14Ultra-788` leak in v1.1.4 device log).
+
+---
+
+## v1.1.5
+
+**Focus**: Unblock Path B (lsplant Java method hooks) in GitHub Actions CI. v1.1.4 shipped the Path B source code (5 hooks + Dobby + helper dex) but the CI build always fell back to Path A because `fetch_lsplant.sh` died before finishing.
+
+### Fixed
+- **`fetch_lsplant.sh` CI failure** — v1.1.4 GitHub Actions log showed:
+  ```
+  Submodule 'test/src/main/jni/external/lsparself' (git@github.com:LSPosed/lsparself.git) registered ...
+  Submodule 'test/src/main/jni/external/lsprism'   (git@github.com:LSPosed/lsprism.git)   registered ...
+  git@github.com: Permission denied (publickey).
+  fatal: clone of 'git@github.com:LSPosed/lsparself.git' ... failed
+  Failed to clone 'test/src/main/jni/external/lsparself' a second time, aborting
+  fetch_lsplant.sh failed — Path B will be disabled for this build
+  ```
+  Root cause: LSPosed/LSPlant declares two submodules under `test/` with SSH remote URLs (`git@github.com:`). The GitHub Actions runner has no SSH key for those repos, so `--recurse-submodules` aborts on the first SSH submodule. Under `set -euo pipefail`, the whole fetch script then dies before ever cloning Dobby, and CMake correctly reports `Path B disabled: lsplant/ or dobby/ missing`.
+
+### Changed
+- `fetch_lsplant.sh` rewritten:
+  - Adds `git config --global url."https://github.com/".insteadOf "git@github.com:"` (and the `ssh://git@github.com/` variant) **before** any clone. Any SSH submodule URL is silently rewritten to HTTPS on the CI runner.
+  - Clones LSPlant **without** `--recurse-submodules`. Then explicitly `git submodule update --depth 1 --recursive -- lsplant/src/main/jni/external/dex_builder` — that is the only submodule the library actually needs. `docs/doxygen-awesome-css` and both `test/` submodules are skipped.
+  - Manual fallback: if `dex_builder` still fails, direct-clones `https://github.com/LSPosed/DexBuilder.git` into place.
+  - Dobby clone is now a separate step guarded by its own success flag, and `set -e` is replaced with per-step return codes so a partial failure logs a clear message instead of vanishing under a `pipefail` trap.
+  - Idempotent: skips re-cloning if `jni/lsplant/lsplant/` and `jni/dobby/CMakeLists.txt` already exist.
+
+### Not Changed
+- Zero changes to `jni/main.cpp`, `jni/java_hooks.cpp`, `jni/java_hooks.hpp`, `jni/companion.cpp`, or any runtime code.
+- Zero changes to `CMakeLists.txt` or the workflow — the existing `USE_PATH_B` auto-detection just starts seeing `lsplant/` and `dobby/` populated and flips itself on.
+- Path A behavior is byte-for-byte identical to v1.1.4.
+
+### Verification checklist (for the next CI run)
+- [ ] Step "Fetch lsplant + Dobby" prints `==> Path B dependencies fetched successfully.`
+- [ ] CMake configure prints `[ternak_tt] Path B ENABLED` (not the `Path B disabled` warning).
+- [ ] `jni/helper_dex.h` is generated (visible in the compile log as `Generated jni/helper_dex.h (N bytes)`).
+- [ ] On device, `logcat -s ternak-tt:*` shows `Path B: OK` on first target launch instead of `Path B: unavailable`.
+
+---
+
 ## v1.1.4
 
 ### Fixed

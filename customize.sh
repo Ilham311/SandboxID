@@ -1,7 +1,11 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.1.4"
+ui_print "- Ternak TT v1.1.6"
+ui_print "- + FIX v1.1.6: AAR-based lsplant (Maven Central) + system/lib64"
+ui_print "-   overlay ship — Path B liblsplant.so + libdobby.so now"
+ui_print "-   resolvable inside app processes (DT_NEEDED works via magic"
+ui_print "-   mount). v1.1.5's SSH-URL clone workaround retired."
 ui_print "- + FIX v1.1.3: early bail-out for root/system/shell apps"
 ui_print "- + FIX v1.1.4: build fix — <sys/socket.h> + forward decl (CI green)"
 ui_print "-   (skips companion IPC for KSU, Magisk, Shizuku, Termux, ...)"
@@ -78,6 +82,40 @@ case "$ABI" in
     x86)         ln -sf ternak-tt-x86    $MODPATH/bin/ternak-tt ;;
     *)           ui_print "! Unknown ABI: $ABI" ;;
 esac
+
+# v1.1.6 Path B: pick correct per-ABI liblsplant.so + libdobby.so,
+# rename to .so, delete the other ABI variants. If path_b libs were not
+# shipped (Path B disabled build), this block is a no-op.
+if [ -f "$MODPATH/.path_b_stamp" ]; then
+    ui_print "- Path B: installing lsplant + dobby for $ABI"
+    case "$ABI" in
+        arm64-v8a|x86_64) LIBDIR="$MODPATH/system/lib64" ;;
+        armeabi-v7a|x86) LIBDIR="$MODPATH/system/lib"   ;;
+        *)               LIBDIR="" ;;
+    esac
+    if [ -n "$LIBDIR" ] && [ -d "$LIBDIR" ]; then
+        for LIB in liblsplant libdobby; do
+            SRC="$LIBDIR/$LIB.so.$ABI"
+            if [ -f "$SRC" ]; then
+                mv -f "$SRC" "$LIBDIR/$LIB.so"
+                ui_print "-   $LIB.so ($(du -h "$LIBDIR/$LIB.so" | cut -f1))"
+            else
+                ui_print "! Path B: $LIB.so.$ABI not found — Java hooks will fail"
+            fi
+        done
+        # Delete all other ABI variants and stray system/lib{,64} dirs
+        for D in "$MODPATH/system/lib64" "$MODPATH/system/lib"; do
+            [ "$D" = "$LIBDIR" ] && continue
+            rm -rf "$D"
+        done
+        find "$LIBDIR" -name '*.so.*' -type f -delete
+        set_perm_recursive "$MODPATH/system" 0 0 0755 0644
+    else
+        ui_print "! Path B: no lib dir for ABI $ABI — removing system/ overlay"
+        rm -rf "$MODPATH/system"
+    fi
+    rm -f "$MODPATH/.path_b_stamp"
+fi
 
 echo "fresh" > $MODPATH/identity.mode
 set_perm $MODPATH/identity.mode 0 0 0644

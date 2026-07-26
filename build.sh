@@ -22,12 +22,21 @@ if [ ! -f jni/zygisk.hpp ]; then
     https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
 fi
 
-# v1.1.0 Path B: warn if lsplant not fetched (module still builds, Path B disabled)
-if [ ! -d jni/lsplant ] || [ ! -d jni/dobby ]; then
-  echo "==> Path B disabled: jni/lsplant/ or jni/dobby/ missing."
-  echo "    Run './fetch_lsplant.sh' first if you want Java method hooks (Settings.Secure, MediaDrm, ...)."
+# v1.1.6 Path B (AAR-based): warn if lsplant .so or Dobby missing (module still builds, Path B disabled)
+PATH_B_OK=1
+if [ ! -d prebuilt/lsplant/lib ] || [ ! -f prebuilt/lsplant/include/lsplant.hpp ]; then
+  echo "==> Path B disabled: prebuilt/lsplant/ incomplete (need AAR-extracted .so + header)."
+  PATH_B_OK=0
+fi
+if [ ! -d jni/dobby ]; then
+  echo "==> Path B disabled: jni/dobby/ missing."
+  PATH_B_OK=0
+fi
+if [ "$PATH_B_OK" = "1" ]; then
+  LSPLANT_VER="$(cat prebuilt/lsplant/VERSION 2>/dev/null || echo unknown)"
+  echo "==> Path B: prebuilt lsplant $LSPLANT_VER + jni/dobby present -> TT_HAVE_LSPLANT will be enabled"
 else
-  echo "==> Path B: jni/lsplant + jni/dobby present -> TT_HAVE_LSPLANT will be enabled"
+  echo "    Run './fetch_lsplant.sh' first if you want Java method hooks (Settings.Secure, MediaDrm, ...)."
 fi
 
 mkdir -p "$OUT"
@@ -64,6 +73,33 @@ build_variant() {
   rm -rf "$PKG"
   mkdir -p "$PKG/zygisk" "$PKG/bin"
   cp module.prop action.sh service.sh customize.sh "$PKG/"
+
+  # v1.1.6: ship liblsplant.so + libdobby.so via Magisk/KSU $MODPATH/system/lib{,64}
+  # overlay so DT_NEEDED resolves inside app processes at runtime.
+  if [ "${PATH_B_OK:-0}" = "1" ]; then
+    mkdir -p "$PKG/system/lib64" "$PKG/system/lib"
+    # arm64-v8a + x86_64 -> /system/lib64
+    for A64 in arm64-v8a x86_64; do
+      if [ -f "prebuilt/lsplant/lib/$A64/liblsplant.so" ]; then
+        cp "prebuilt/lsplant/lib/$A64/liblsplant.so" "$PKG/system/lib64/liblsplant.so.$A64"
+      fi
+      if [ -f "build/$V/$A64/dobby-build/libdobby.so" ]; then
+        cp "build/$V/$A64/dobby-build/libdobby.so" "$PKG/system/lib64/libdobby.so.$A64"
+      fi
+    done
+    # armeabi-v7a + x86 -> /system/lib
+    for A32 in armeabi-v7a x86; do
+      if [ -f "prebuilt/lsplant/lib/$A32/liblsplant.so" ]; then
+        cp "prebuilt/lsplant/lib/$A32/liblsplant.so" "$PKG/system/lib/liblsplant.so.$A32"
+      fi
+      if [ -f "build/$V/$A32/dobby-build/libdobby.so" ]; then
+        cp "build/$V/$A32/dobby-build/libdobby.so" "$PKG/system/lib/libdobby.so.$A32"
+      fi
+    done
+    # customize.sh will rename the correct .so.$ABI to .so at install time based
+    # on device arch (single-arch install semantics for Magisk/KSU modules).
+    echo "path_b_libs=shipped" > "$PKG/.path_b_stamp"
+  fi
   [ -f summarize.sh ] && cp summarize.sh "$PKG/"
   [ -f post-fs-data.sh ] && cp post-fs-data.sh "$PKG/"
   [ -f target.txt ] && cp target.txt "$PKG/"

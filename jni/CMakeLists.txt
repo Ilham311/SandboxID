@@ -24,20 +24,62 @@ endif()
 
 set(TERNAK_TT_SOURCES main.cpp companion.cpp java_hooks.cpp)
 
-# Path B: optional lsplant + Dobby subdirs (populated by ./fetch_lsplant.sh)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/lsplant/lsplant/src/main/jni/CMakeLists.txt"
-   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dobby/CMakeLists.txt")
-    message(STATUS "[ternak_tt] Path B: lsplant + dobby found -> TT_HAVE_LSPLANT=1")
-    add_subdirectory(dobby   dobby-build   EXCLUDE_FROM_ALL)
-    add_subdirectory(lsplant/lsplant/src/main/jni lsplant-build EXCLUDE_FROM_ALL)
+# ============================================================================
+# Path B: prebuilt lsplant (from AAR) + Dobby (from git clone)
+#
+# Populated by ./fetch_lsplant.sh:
+#   - ../prebuilt/lsplant/lib/<ABI>/liblsplant.so   (from lsplant-standalone AAR)
+#   - ../prebuilt/lsplant/include/lsplant.hpp        (from AAR)
+#   - ./dobby/CMakeLists.txt                         (from jmpews/Dobby git)
+#
+# libternak_tt.so DT_NEEDs liblsplant.so at load time. Android's linker resolves
+# DT_NEEDED via /system/lib{,64}/. build.sh ships liblsplant.so + libdobby.so
+# under $MODPATH/system/lib{,64}/, which Magisk/KSU magic-mount overlays onto
+# /system/lib{,64}/ at boot — so DT_NEEDED resolves inside every app process.
+# ============================================================================
+
+set(LSPLANT_PREBUILT "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/lsplant")
+set(LSPLANT_SO       "${LSPLANT_PREBUILT}/lib/${ANDROID_ABI}/liblsplant.so")
+set(LSPLANT_HEADER   "${LSPLANT_PREBUILT}/include/lsplant.hpp")
+set(DOBBY_DIR        "${CMAKE_CURRENT_SOURCE_DIR}/dobby")
+
+if(EXISTS "${LSPLANT_SO}" AND EXISTS "${LSPLANT_HEADER}" AND EXISTS "${DOBBY_DIR}/CMakeLists.txt")
+    message(STATUS "[ternak_tt] Path B ENABLED")
+    message(STATUS "[ternak_tt]   lsplant .so:     ${LSPLANT_SO}")
+    message(STATUS "[ternak_tt]   lsplant header:  ${LSPLANT_HEADER}")
+    message(STATUS "[ternak_tt]   dobby dir:       ${DOBBY_DIR}")
+
+    # Prebuilt lsplant — imported SHARED .so from AAR
+    add_library(lsplant SHARED IMPORTED)
+    set_target_properties(lsplant PROPERTIES
+        IMPORTED_LOCATION "${LSPLANT_SO}"
+        INTERFACE_INCLUDE_DIRECTORIES "${LSPLANT_PREBUILT}/include")
+
+    # Dobby — built from source (small, no submodule issues)
+    # Disable Dobby's own logging + shared build noise
+    set(DOBBY_DEBUG OFF   CACHE BOOL "" FORCE)
+    set(DOBBY_GENERATE_SHARED ON CACHE BOOL "" FORCE)
+    add_subdirectory("${DOBBY_DIR}" dobby-build EXCLUDE_FROM_ALL)
+
     add_library(ternak_tt SHARED ${TERNAK_TT_SOURCES})
     target_compile_definitions(ternak_tt PRIVATE TT_HAVE_LSPLANT=1)
     target_include_directories(ternak_tt PRIVATE
         ${CMAKE_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/lsplant/lsplant/src/main/jni/include)
-    target_link_libraries(ternak_tt PRIVATE log lsplant dobby dl)
+        ${LSPLANT_PREBUILT}/include)
+    target_link_libraries(ternak_tt PRIVATE log dl lsplant dobby)
 else()
-    message(WARNING "[ternak_tt] Path B disabled: lsplant/ or dobby/ missing. Run ./fetch_lsplant.sh to enable Java method hooks.")
+    message(WARNING "[ternak_tt] Path B DISABLED: missing one of:")
+    if(NOT EXISTS "${LSPLANT_SO}")
+        message(WARNING "[ternak_tt]   - ${LSPLANT_SO}")
+    endif()
+    if(NOT EXISTS "${LSPLANT_HEADER}")
+        message(WARNING "[ternak_tt]   - ${LSPLANT_HEADER}")
+    endif()
+    if(NOT EXISTS "${DOBBY_DIR}/CMakeLists.txt")
+        message(WARNING "[ternak_tt]   - ${DOBBY_DIR}/CMakeLists.txt")
+    endif()
+    message(WARNING "[ternak_tt] Run ./fetch_lsplant.sh to populate prebuilt/lsplant + jni/dobby.")
+
     add_library(ternak_tt SHARED ${TERNAK_TT_SOURCES})
     target_include_directories(ternak_tt PRIVATE ${CMAKE_SOURCE_DIR})
     target_link_libraries(ternak_tt PRIVATE log)
