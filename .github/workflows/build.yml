@@ -1,0 +1,239 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -eu
+          PROP_VERSION=$(grep '^version=' module.prop | cut -d= -f2)
+          PROP_CODE=$(grep '^versionCode=' module.prop | cut -d= -f2)
+
+          if git rev-parse -q --verify "refs/tags/${PROP_VERSION}" >/dev/null; then
+            V=${PROP_VERSION#v}
+            MAJ=$(echo "$V" | cut -d. -f1)
+            MIN=$(echo "$V" | cut -d. -f2)
+            PAT=$(echo "$V" | cut -d. -f3)
+            [ -z "$PAT" ] && PAT=0
+            NP=$((PAT + 1))
+            NEW_VERSION="v${MAJ}.${MIN}.${NP}"
+            NEW_CODE="${MAJ}${MIN}${NP}"
+            echo "tag ${PROP_VERSION} exists -> bumping to ${NEW_VERSION}"
+          else
+            NEW_VERSION="$PROP_VERSION"
+            NEW_CODE="$PROP_CODE"
+            echo "tag ${PROP_VERSION} not present -> using module.prop as-is"
+          fi
+
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${NEW_VERSION}$" | head -1 || true)
+
+          {
+            echo "new_version=${NEW_VERSION}"
+            echo "new_code=${NEW_CODE}"
+            echo "prev_tag=${PREV_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "resolved: ${NEW_VERSION} (code=${NEW_CODE}), prev=${PREV_TAG:-<none>}"
+
+      - name: Sync module.prop
+        run: |
+          set -eu
+          sed -i "s/^version=.*/version=${{ steps.version.outputs.new_version }}/"     module.prop
+          sed -i "s/^versionCode=.*/versionCode=${{ steps.version.outputs.new_code }}/" module.prop
+          cat module.prop
+
+      - name: Setup NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Fetch Zygisk header
+        run: |
+          set -eu
+          mkdir -p jni
+          curl -fsSL -o jni/zygisk.hpp \
+            https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
+
+      - name: Placeholder resetprop-rs
+        run: |
+          mkdir -p prebuilt
+          echo "placeholder" > prebuilt/resetprop-rs.README
+
+      - name: Build (release + debug)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          VARIANT: both
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Generate checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum *.zip > checksums.sha256
+          cat checksums.sha256
+
+      - name: Generate update.json
+        run: |
+          set -eu
+          NV="${{ steps.version.outputs.new_version }}"
+          NC="${{ steps.version.outputs.new_code }}"
+          REPO="${{ github.repository }}"
+
+          cat > update.json <<EOF
+          {
+            "version": "${NV}",
+            "versionCode": ${NC},
+            "zipUrl": "https://github.com/${REPO}/releases/download/${NV}/ternak-tt-${NV}-release.zip",
+            "changelog": "https://raw.githubusercontent.com/${REPO}/main/CHANGELOG.md"
+          }
+          EOF
+
+          echo "----- update.json -----"
+          cat update.json
+
+      - name: Generate release_notes.md
+        run: |
+          set -eu
+          NV="${{ steps.version.outputs.new_version }}"
+          PREV="${{ steps.version.outputs.prev_tag }}"
+          REPO="${{ github.repository }}"
+
+          CL_SECTION=""
+          if [ -f CHANGELOG.md ]; then
+            CL_SECTION=$(awk -v ver="## ${NV}" '
+              $0 == ver { flag = 1; next }
+              /^## v/ && flag { exit }
+              flag { print }
+            ' CHANGELOG.md)
+          fi
+
+          if [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/${PREV}" >/dev/null; then
+            COMMITS=$(git log --pretty=format:'- %s (%h)' "${PREV}..HEAD" 2>/dev/null | head -40 || true)
+          else
+            COMMITS=$(git log --pretty=format:'- %s (%h)' -n 20 HEAD 2>/dev/null || true)
+          fi
+
+          {
+            echo "# Ternak TT ${NV}"
+            echo
+            echo "**Build:** \`$(date -u '+%Y-%m-%d %H:%M:%S UTC')\`  "
+            echo "**Commit:** [\`${GITHUB_SHA:0:7}\`](https://github.com/${REPO}/commit/${GITHUB_SHA})"
+            echo
+            if [ -n "$CL_SECTION" ]; then
+              echo "## What's new"
+              echo
+              printf '%s\n' "$CL_SECTION"
+              echo
+            fi
+            echo "## Downloads"
+            echo
+            echo "| Variant | Purpose |"
+            echo "|---------|---------|"
+            echo "| \`ternak-tt-${NV}-release.zip\` | Production install (stripped, no LOGD) |"
+            echo "| \`ternak-tt-${NV}-debug.zip\` | Verbose LOGD + on-device auto-log capture |"
+            echo
+            echo "## Install"
+            echo
+            echo "1. Download the release zip below"
+            echo "2. KernelSU / Magisk manager → Modules → Install from storage"
+            echo "3. Reboot, then tap **Action** to rotate persona"
+            echo
+            echo "## Debug"
+            echo
+            echo '```bash'
+            echo 'su -c "logcat -c && logcat -v time -s TernakTT:V TernakTTCompanion:V"'
+            echo '```'
+            echo
+            if [ -n "$COMMITS" ]; then
+              if [ -n "$PREV" ]; then
+                echo "## Commits since \`${PREV}\`"
+              else
+                echo "## Recent commits"
+              fi
+              echo
+              printf '%s\n' "$COMMITS"
+              echo
+            fi
+            echo "## SHA-256"
+            echo
+            echo '```'
+            cat dist/checksums.sha256
+            echo '```'
+          } > release_notes.md
+
+          echo "----- release_notes.md -----"
+          cat release_notes.md
+
+      - name: Commit synced module.prop + update.json
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: |
+          set -eu
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add module.prop update.json
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "chore(release): sync ${{ steps.version.outputs.new_version }} [skip ci]"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ternak-tt-release
+          path: dist/*-release.zip
+          if-no-files-found: warn
+
+      - name: Upload debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ternak-tt-debug
+          path: dist/*-debug.zip
+          if-no-files-found: warn
+
+      - name: Upload release notes artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release_notes.md
+          if-no-files-found: warn
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.new_version }}
+          name: Ternak TT ${{ steps.version.outputs.new_version }}
+          body_path: release_notes.md
+          files: |
+            dist/*.zip
+            dist/checksums.sha256
+            update.json
+            release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

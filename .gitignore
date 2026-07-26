@@ -1,0 +1,24 @@
+# Build
+build/
+pkg/
+*.zip
+*.o
+*.so
+*.a
+
+# NDK
+.cxx/
+.gradle/
+local.properties
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Fetched at build time
+jni/zygisk.hpp
