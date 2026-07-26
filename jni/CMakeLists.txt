@@ -1,5 +1,15 @@
-cmake_minimum_required(VERSION 3.18)
-project(ternak_tt LANGUAGES CXX)
+# v1.1.8: bump min to 3.22.1 (Android AGP standard) + add C to LANGUAGES.
+#
+# v1.1.7 CI hit `No known features for C compiler ""` on CMake 3.31.6 + NDK
+# r26d because we only declared LANGUAGES CXX. When ShadowHook's
+# add_subdirectory activates, ShadowHook is a C+CXX project; CMake tries to
+# detect the C compiler for its sources but CMAKE_C_COMPILER is empty (never
+# set up), so try_compile fails and configure aborts before any code is
+# generated. LANGUAGES C CXX registers the C compiler up front so the whole
+# tree (us + ShadowHook) builds cleanly. Bumping min to 3.22.1 also silences
+# the NDK-toolchain deprecation cascade under CMake 3.31+.
+cmake_minimum_required(VERSION 3.22.1)
+project(ternak_tt LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 

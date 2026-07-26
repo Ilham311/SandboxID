@@ -9,6 +9,49 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.1.8
+
+**Focus**: Unblock v1.1.7 CI failure (exit code 1 at CMake configure). Two independent regressions from the v1.1.7 Dobby→ShadowHook migration surfaced. Both fixed, no functional changes.
+
+### Fixed — Bug #3: CMake configure failed with `No known features for C compiler`
+- v1.1.7 CI (CMake 3.31.6 + NDK r26d, arm64-v8a release) aborted at configure:
+  ```
+  CMake Error in CMakeLists.txt:
+    No known features for C compiler
+    ""
+    version .
+  CMake Generate step failed.  Build files cannot be regenerated correctly.
+  Error: Process completed with exit code 1
+  ```
+- Root cause: `jni/CMakeLists.txt` declared `project(ternak_tt LANGUAGES CXX)` — only CXX. But ShadowHook (added via `add_subdirectory` in v1.1.7) is a C+CXX project; when it tries to build C sources, CMake queries `CMAKE_C_COMPILER` — which was never set up because C was not in `LANGUAGES`. Empty string + `try_compile` = `No known features for C compiler ""`.
+- Fix: `project(ternak_tt LANGUAGES C CXX)` — registers the C compiler up front so the whole tree (us + ShadowHook) builds cleanly.
+- Also bumped `cmake_minimum_required(VERSION 3.18)` → `3.22.1` (Android AGP standard). Silences the NDK-toolchain deprecation cascade seen in the log (their toolchain files call `cmake_minimum_required` below 3.10, which CMake 3.31+ warns on loudly).
+- Belt-and-suspenders: `build.sh` cmake invocation adds `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` to suppress residual NDK-toolchain deprecation warnings without touching the toolchain itself.
+
+### Fixed — Bug #4: Path B silently disabled (build.sh checked removed jni/dobby/)
+- v1.1.7 CI log line 1:
+  ```
+  ==> Path B disabled: jni/dobby/ missing.
+      Run './fetch_lsplant.sh' first if you want Java method hooks (Settings.Secure, MediaDrm, ...).
+  ```
+- Root cause: `build.sh` still checked `if [ ! -d jni/dobby ]` — the v1.1.6 Dobby-era guard. v1.1.7 replaced Dobby with ShadowHook (jni/shadowhook/) but left the build-time guard untouched. Even when `fetch_lsplant.sh` succeeded, Path B was disabled because jni/dobby/ never existed.
+- Fix: `build.sh` now checks `if [ ! -f jni/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt ]`. Diagnostic message updated to reference bytedance/android-inline-hook. The stale `LSPLANT_VER ... + jni/dobby present` log line also updated to `jni/shadowhook present`.
+
+### Not Changed
+- `jni/java_hooks.cpp` ShadowHook API integration from v1.1.7 stays as-is.
+- `fetch_lsplant.sh` unchanged.
+- All hook logic, target list, native prop spoofs, companion, autofuzz — unchanged.
+- Path A byte-identical to v1.1.6/v1.1.7.
+
+### Testing done in sandbox
+- `bash -n build.sh`, `bash -n fetch_lsplant.sh`, `bash -n customize.sh`, `bash -n service.sh`, `bash -n action.sh`, `bash -n post-fs-data.sh`, `bash -n summarize.sh` → all OK.
+- `jq . update.json` → valid JSON, v1.1.8 / 1108.
+- `python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/build.yml"))'` → parses.
+- CMake syntax review: LANGUAGES C CXX + cmake_minimum_required 3.22.1 confirmed at head of `jni/CMakeLists.txt`.
+- Cannot run cmake configure in sandbox (no NDK). If ShadowHook's own CMakeLists still trips a policy in the wild, we'll need a target-scoped `cmake_policy(SET CMPxxxx OLD)` in v1.1.9.
+
+---
+
 ## v1.1.7
 
 **Focus**: Unblock v1.1.6 CI failure (exit code 2). Two independent bugs surfaced in the v1.1.6 GitHub Actions run — both are fixed here with no functional regression.

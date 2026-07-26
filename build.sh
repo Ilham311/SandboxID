@@ -22,19 +22,21 @@ if [ ! -f jni/zygisk.hpp ]; then
     https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
 fi
 
-# v1.1.6 Path B (AAR-based): warn if lsplant .so or Dobby missing (module still builds, Path B disabled)
+# v1.1.8 Path B (AAR-based): warn if lsplant .so or ShadowHook missing.
+# v1.1.8 Bug #4 fix: check jni/shadowhook/ not jni/dobby/ (Dobby was replaced
+# by bytedance/android-inline-hook in v1.1.7 after Dobby broke on NDK r26d).
 PATH_B_OK=1
 if [ ! -d prebuilt/lsplant/lib ] || [ ! -f prebuilt/lsplant/include/lsplant.hpp ]; then
   echo "==> Path B disabled: prebuilt/lsplant/ incomplete (need AAR-extracted .so + header)."
   PATH_B_OK=0
 fi
-if [ ! -d jni/dobby ]; then
-  echo "==> Path B disabled: jni/dobby/ missing."
+if [ ! -f jni/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt ]; then
+  echo "==> Path B disabled: jni/shadowhook/ missing (bytedance/android-inline-hook not cloned)."
   PATH_B_OK=0
 fi
 if [ "$PATH_B_OK" = "1" ]; then
   LSPLANT_VER="$(cat prebuilt/lsplant/VERSION 2>/dev/null || echo unknown)"
-  echo "==> Path B: prebuilt lsplant $LSPLANT_VER + jni/dobby present -> TT_HAVE_LSPLANT will be enabled"
+  echo "==> Path B: prebuilt lsplant $LSPLANT_VER + jni/shadowhook present -> TT_HAVE_LSPLANT will be enabled"
 else
   echo "    Run './fetch_lsplant.sh' first if you want Java method hooks (Settings.Secure, MediaDrm, ...)."
 fi
@@ -61,11 +63,15 @@ build_variant() {
     local BUILD="build/$V/$ABI"
     rm -rf "$BUILD"
     mkdir -p "$BUILD"
+    # v1.1.8: -DCMAKE_POLICY_VERSION_MINIMUM=3.5 suppresses the NDK
+    # toolchain's own cmake_minimum_required(VERSION <3.10) deprecation
+    # cascade under CMake 3.31+. Cosmetic; does not change build output.
     cmake -S jni -B "$BUILD" \
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$ABI" \
       -DANDROID_PLATFORM="android-$MIN_SDK" \
       -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
       $DBG_FLAG >/dev/null
     cmake --build "$BUILD" -j
   done
