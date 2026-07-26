@@ -51,12 +51,21 @@ static const char* IDENTITY_FILE = "/data/adb/modules/ternak_tt/identity.prop";
 static const char* MOUNTDIR      = "/data/adb/modules/ternak_tt/mount";
 
 struct BindEntry { const char* src_rel; const char* dst; };
+// v1.0.14: added alternate destination paths for odm/product/system_ext.
+// POCO F3 (MIUI15, tested) uses Android 11+ canonical layout where
+// partition build.prop lives at /<part>/etc/build.prop, not /<part>/build.prop.
+// v1.0.12 telemetry showed 3 skip on those partitions because the legacy
+// dst path didn't exist. Trying both paths per partition; at most one dst
+// exists per partition so the alternate is a silent skip on other ROMs.
 static const BindEntry BIND_ENTRIES[] = {
     {"system/build.prop",     "/system/build.prop"},
     {"vendor/build.prop",     "/vendor/build.prop"},
-    {"odm/build.prop",        "/odm/build.prop"},
-    {"product/build.prop",    "/product/build.prop"},
-    {"system_ext/build.prop", "/system_ext/build.prop"},
+    {"odm/build.prop",        "/odm/etc/build.prop"},           // Android 11+
+    {"odm/build.prop",        "/odm/build.prop"},               // legacy
+    {"product/build.prop",    "/product/etc/build.prop"},       // Android 11+
+    {"product/build.prop",    "/product/build.prop"},           // legacy
+    {"system_ext/build.prop", "/system_ext/etc/build.prop"},    // Android 11+
+    {"system_ext/build.prop", "/system_ext/build.prop"},        // legacy
     {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
 };
 
@@ -105,13 +114,15 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
         } else {
             LOGD("child: setns OK, entering %u bind loop",
                  (unsigned)(sizeof(BIND_ENTRIES)/sizeof(BIND_ENTRIES[0])));
+            uint32_t skip_src = 0, skip_dst = 0;
             for (const auto& e : BIND_ENTRIES) {
                 std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
                 bool src_ok = (::access(src.c_str(), F_OK) == 0);
                 bool dst_ok = (::access(e.dst,        F_OK) == 0);
                 LOGD("  bind check: src=%s(%d) dst=%s(%d)",
                      src.c_str(), src_ok, e.dst, dst_ok);
-                if (!src_ok || !dst_ok) { skip++; continue; }
+                if (!src_ok) { skip_src++; skip++; continue; }
+                if (!dst_ok) { skip_dst++; skip++; continue; }
                 int rc = ::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr);
                 if (rc == 0) {
                     ok++;
@@ -122,8 +133,9 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
                          src.c_str(), e.dst, errno);
                 }
             }
-            LOGI("child mount for pid=%u: %u ok, %u fail, %u skip [%s]",
-                 target_pid, ok, fail, skip, TT_VARIANT_TAG);
+            LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
+                 "(skip_src=%u skip_dst=%u) [%s]",
+                 target_pid, ok, fail, skip, skip_src, skip_dst, TT_VARIANT_TAG);
             ::close(tgt_ns);
         }
 

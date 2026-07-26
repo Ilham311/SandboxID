@@ -556,6 +556,34 @@ static int cmd_apply_boot_impl() {
     return 0;
 }
 
+// v1.0.14: seed = early-boot bootstrap for post-fs-data.sh.
+// Runs BEFORE Android userspace / Zygisk. Only does file writes:
+//   * generate identity.prop if missing (reuse existing otherwise)
+//   * regenerate mount/*/build.prop tree so companion bind-mount has
+//     valid sources on the very first target spawn.
+// Deliberately DOES NOT call apply_native() or wipe_tt_data(): resetprop
+// and pm/am/settings binaries are unusable this early. apply-boot picks
+// those up later from service.sh once boot_completed.
+static int cmd_seed() {
+    if (!ensure_root()) return 1;
+    Identity id;
+    std::string existing = read_file(IDENTITY_FILE);
+    if (!existing.empty()) {
+        id = load_identity();
+        DBG("seed: reusing existing identity (%zu keys)", id.kv.size());
+    } else {
+        DBG("seed: no identity yet, generating fresh");
+        id = gen_identity();
+        if (!atomic_write(IDENTITY_FILE, id.serialize())) {
+            fprintf(stderr, "! seed: failed to write %s\n", IDENTITY_FILE);
+            return 1;
+        }
+    }
+    generate_mount_files(id);
+    printf("OK: seed complete (mount overlay ready at %s)\n", MOUNTDIR);
+    return 0;
+}
+
 static int cmd_lock() {
     if (!ensure_root()) return 1;
     atomic_write(MODE_FILE, "locked\n");
@@ -595,7 +623,9 @@ static void usage(const char* p) {
         "  rollback     Restore previous identity from backup\n"
         "  lock         Prevent freshen (safety)\n"
         "  unlock       Re-enable freshen\n"
-        "  apply-boot   Re-apply native prop (used by service.sh)\n",
+        "  apply-boot   Re-apply native prop (used by service.sh)\n"
+        "  seed         Fast bootstrap: identity + mount overlay only\n"
+        "               (used by post-fs-data.sh, no native/wipe)\n",
         p);
 }
 
@@ -608,6 +638,7 @@ int main(int argc, char** argv) {
     if (!strcmp(c, "lock"))       return cmd_lock();
     if (!strcmp(c, "unlock"))     return cmd_unlock();
     if (!strcmp(c, "apply-boot")) return cmd_apply_boot();
+    if (!strcmp(c, "seed"))       return cmd_seed();  // v1.0.14: early bootstrap
     usage(argv[0]);
     return 1;
 }

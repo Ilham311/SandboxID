@@ -1,7 +1,7 @@
 id=ternak_tt
 name=Ternak TT — Zygisk Fresh Persona
-version=v1.0.12
-versionCode=112
+version=v1.0.14
+versionCode=114
 author=diru768
-description=Zygisk device spoofer targeting TikTok (musically/trill/lite) + Grab Passenger. 6-layer Java hook + 76 native prop (18 new: gsm.operator.*, sys.boot_completed, ro.build.characteristics, cpu.abi*, persist.sys.timezone) + companion fork+setns bind mount overlay. v1.0.12: FIXED crash-storm bug (v1.0.11 caused 42k CRASH events / pid because SIGSEGV+SIGBUS handler chained to SIG_DFL via function pointer = infinite loop). Watchdog now covers only SIGABRT/SIGFPE/SIGILL/SIGSYS, rate-limited to 3 hits/signal, and restores actual SIG_DFL via sigaction so kernel terminates naturally. Auto-summarizer on Action tap. Works on Zygisk-Next / HMA-OSS.
+description=Zygisk device spoofer targeting TikTok (musically/trill/lite) + Grab Passenger. 6-layer Java hook + 78 native prop spoofs + L7 TYPED spoof tables + companion fork+setns bind mount overlay. v1.0.14: post-fs-data early seed (new `ternak-tt seed` subcommand generates identity + mount overlay BEFORE Zygisk loads — fixes v1.0.13 first-boot race where first target pid got 0/6 mounts). Companion BIND_ENTRIES extended with Android 11+ canonical paths (/odm/etc/build.prop, /product/etc/build.prop, /system_ext/etc/build.prop) alongside legacy layouts — fixes 3-skip on POCO F3 / MIUI. Skip counter now split into skip_src (bug) vs skip_dst (device doesn't have that partition, expected). Auto-summarizer on Action tap. Works on Zygisk-Next / HMA-OSS.
 updateJson=https://raw.githubusercontent.com/diru768/ternak-tt/main/update.json

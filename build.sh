@@ -77,6 +77,8 @@ build_variant() {
   cp module.prop action.sh service.sh customize.sh "$PKG/"
   # v1.0.11: bundle summarizer so action.sh can auto-digest debug logs
   [ -f summarize.sh ] && cp summarize.sh "$PKG/"
+  # v1.0.14: bundle post-fs-data.sh for early-boot mount overlay seed
+  [ -f post-fs-data.sh ] && cp post-fs-data.sh "$PKG/"
 
   # Stamp variant into module.prop so it's visible in KernelSU Manager
   if [ "$V" = "debug" ]; then

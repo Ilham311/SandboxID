@@ -99,6 +99,9 @@ static const std::string& val(const std::string& k) {
         {"DALVIK_HEAPGROWTHLIMIT","256m"},
         {"MEDIACODEC_MIN_RATE",   "8000"},
         {"MEDIACODEC_MAX_RATE",   "192000"},
+        // v1.0.13:
+        {"DEBUG_FORCE_RTL",       "false"},
+        {"MULTISIM_CONFIG",       ""},                 // single-SIM Pixel-alike
     };
     auto d = defaults.find(k);
     if (d != defaults.end()) return d->second;
@@ -139,6 +142,9 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         // them to spoof map turns LEAK spam into SPOOF hits and prevents
         // real-device values from being returned to fingerprinting SDKs.
         {"sys.boot_completed",       "SYS_BOOT_COMPLETED"},
+        // v1.0.13: LEAK surfaces still hot in v1.0.12 telemetry:
+        {"debug.force_rtl",          "DEBUG_FORCE_RTL"},          // 456x
+        {"persist.radio.multisim.config", "MULTISIM_CONFIG"},      // 5x
         {"gsm.operator.numeric",     "GSM_OPERATOR_NUMERIC"},
         {"gsm.sim.operator.numeric", "GSM_OPERATOR_NUMERIC"},
         {"gsm.operator.alpha",       "GSM_OPERATOR_ALPHA"},
@@ -269,30 +275,94 @@ static jstring hook_tel_meid    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.g
 // L7 (debug-only): LEAK SENSORS — hook surfaces we don't spoof,
 //                  just to log what target queries beyond our coverage.
 // ============================================================
+// v1.0.13: L7 was only logging. In v1.0.12 telemetry the SPB hook
+// received sys.boot_completed 1388x and returned def=false, which breaks
+// app boot-detection retry loops. Now L7 consults typed spoof tables
+// first, so hot keys get real values and get labeled SPOOF instead of LEAK.
+static const std::map<std::string, jboolean>& tt_bool_spoof() {
+    static const std::map<std::string, jboolean> m = {
+        {"sys.boot_completed",                    JNI_TRUE},  // CRITICAL
+        {"debug.force_rtl",                       JNI_FALSE},
+        {"framework.pause_bg_animations.enabled", JNI_FALSE},
+        {"dalvik.vm.dexopt.secondary",            JNI_TRUE},
+        {"viewroot.profile_rendering",            JNI_FALSE},
+        {"debug.sqlite.no_double_quoted_strs",    JNI_TRUE},
+    };
+    return m;
+}
+static const std::map<std::string, jint>& tt_int_spoof() {
+    static const std::map<std::string, jint> m = {
+        {"ro.mediacodec.min_sample_rate",         8000},
+        {"ro.mediacodec.max_sample_rate",         192000},
+        {"debug.sqlite.wal.autocheckpoint",       100},
+        {"debug.sqlite.pagesize",                 4096},
+        {"debug.sqlite.journalsizelimit",         524288},
+        {"debug.sqlite.wal.truncatesize",         1048576},
+        {"debug.sqlite.wal.poolsize",             0},
+        {"debug.hwui.fps_divisor",                1},
+        {"persist.wm.debug.ext_version_override", 0},
+        {"build.version.extensions.r",            3},
+        {"build.version.extensions.s",            4},
+        {"build.version.extensions.t",            4},
+        {"build.version.extensions.u",            13},
+        {"build.version.extensions.v",            13},
+        {"build.version.extensions.ad_services",  15},
+        {"debug.am.run_gc_trim_level",            2147483647},
+        {"debug.am.run_mallopt_trim_level",       2147483647},
+    };
+    return m;
+}
+static const std::map<std::string, jlong>& tt_long_spoof() {
+    static const std::map<std::string, jlong> m = {
+        {"ro.gfx.driver_build_time",              1704067200LL},  // 2024-01-01 UTC
+    };
+    return m;
+}
+
 #ifdef TT_DEBUG
 static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
+    jint out = def;
+    const char* label = "LEAK";
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
-        LOGD("L7 SPI native_get_int('%s') def=%d [LEAK — returning def]", r ? r : "", def);
+        std::string k(r ? r : "");
         env->ReleaseStringUTFChars(j_key, r);
+        const auto& m = tt_int_spoof();
+        auto it = m.find(k);
+        if (it != m.end()) { out = it->second; label = "SPOOF"; }
+        LOGD("L7 SPI native_get_int('%s') def=%d -> %d [%s]", k.c_str(), def, out, label);
     }
-    return def;
+    return out;
 }
 static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
+    jlong out = def;
+    const char* label = "LEAK";
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
-        LOGD("L7 SPL native_get_long('%s') def=%lld [LEAK]", r ? r : "", (long long)def);
+        std::string k(r ? r : "");
         env->ReleaseStringUTFChars(j_key, r);
+        const auto& m = tt_long_spoof();
+        auto it = m.find(k);
+        if (it != m.end()) { out = it->second; label = "SPOOF"; }
+        LOGD("L7 SPL native_get_long('%s') def=%lld -> %lld [%s]",
+             k.c_str(), (long long)def, (long long)out, label);
     }
-    return def;
+    return out;
 }
 static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean def) {
+    jboolean out = def;
+    const char* label = "LEAK";
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
-        LOGD("L7 SPB native_get_boolean('%s') def=%d [LEAK]", r ? r : "", def);
+        std::string k(r ? r : "");
         env->ReleaseStringUTFChars(j_key, r);
+        const auto& m = tt_bool_spoof();
+        auto it = m.find(k);
+        if (it != m.end()) { out = it->second; label = "SPOOF"; }
+        LOGD("L7 SPB native_get_boolean('%s') def=%d -> %d [%s]",
+             k.c_str(), (int)def, (int)out, label);
     }
-    return def;
+    return out;
 }
 static jstring hook_build_radio(JNIEnv* env, jclass) {
     LOGD("L7 Build.getRadioVersion() called [LEAK — returning empty]");

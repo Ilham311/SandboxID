@@ -1,12 +1,13 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.12"
+ui_print "- Ternak TT v1.0.14"
 ui_print "- TikTok + Grab Zygisk fresh persona"
-ui_print "- + mount namespace overlay (build.prop x5 + settings_secure.xml)"
-ui_print "- + FIXED crash watchdog (no more 42k-CRASH loops on SIGSEGV/SIGBUS)"
-ui_print "- + 18 new native_get spoofs (gsm.operator.*, sys.boot_completed, cpu.abi*)"
-ui_print "- + L7 leak sensors (debug variant)"
+ui_print "- + mount overlay (build.prop x5 + settings_secure.xml)"
+ui_print "- + crash watchdog (SIGABRT/FPE/ILL/SYS, rate-limited)"
+ui_print "- + 20 native_get + L7 TYPED spoof (sys.boot_completed=true)"
+ui_print "- + post-fs-data early seed (fixes first-boot mount race)"
+ui_print "- + companion tries /odm/etc + /odm legacy paths (POCO F3 fix)"
 ui_print "- + auto-summarize on Action tap (chat-friendly digest)"
 ui_print ""
 
@@ -35,6 +36,8 @@ ZOK=0
 set_perm_recursive $MODPATH 0 0 0755 0644
 set_perm $MODPATH/action.sh                 0 0 0755
 set_perm $MODPATH/service.sh                0 0 0755
+# v1.0.14: post-fs-data.sh runs early to seed mount overlay before Zygisk.
+[ -f $MODPATH/post-fs-data.sh ] && set_perm $MODPATH/post-fs-data.sh 0 0 0755
 [ -f $MODPATH/summarize.sh ] && set_perm $MODPATH/summarize.sh 0 0 0755
 
 # v1.0.10: prepare debug/ dir so background logcat can write on first boot
