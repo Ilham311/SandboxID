@@ -79,6 +79,15 @@ build_variant() {
   # Stamp variant into module.prop so it's visible in KernelSU Manager
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"
+    # v1.0.10: marker file consumed by service.sh + customize.sh + action.sh
+    # to enable auto-log-capture without any user setup.
+    echo "variant=debug" >  "$PKG/debug_variant"
+    echo "created=$(date -u +%FT%TZ)" >> "$PKG/debug_variant"
+    echo "version=$VERSION" >> "$PKG/debug_variant"
+    mkdir -p "$PKG/debug"
+    # placeholder so zip preserves the empty directory
+    echo "# Auto-populated by service.sh on boot. Latest session-<ts>.log lives here." \
+      > "$PKG/debug/README.txt"
   fi
 
   for ABI in "${ABIS[@]}"; do

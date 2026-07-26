@@ -1,7 +1,7 @@
 id=ternak_tt
 name=Ternak TT — Zygisk Fresh Persona
-version=v1.0.9
-versionCode=109
+version=v1.0.10
+versionCode=110
 author=diru768
-description=Zygisk device spoofer targeting TikTok (musically/trill/lite) + Grab Passenger. 6-layer Java hook + 59 native prop + companion fork+setns bind mount overlay. v1.0.9: crash watchdog (8 signals) + companion death watcher (SIGKILL/LMK detection) + L7 leak sensors (SystemProperties int/long/bool + Build.getRadioVersion) + per-hook LOGD tracing in debug variant. Works on Zygisk-Next / HMA-OSS.
+description=Zygisk device spoofer targeting TikTok (musically/trill/lite) + Grab Passenger. 6-layer Java hook + 59 native prop + companion fork+setns bind mount overlay. v1.0.10: auto-log capture on debug variant — session-<timestamp>.log lands in module debug/ folder on every boot without any user setup; Action button snapshots to /sdcard/Download/ternak-tt-logs/. Includes v1.0.9 crash watchdog + death watcher + L7 leak sensors. Works on Zygisk-Next / HMA-OSS.
 updateJson=https://raw.githubusercontent.com/diru768/ternak-tt/main/update.json

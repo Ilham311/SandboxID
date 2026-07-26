@@ -1,11 +1,23 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.3"
-ui_print "- TikTok Zygisk fresh persona"
+ui_print "- Ternak TT v1.0.10"
+ui_print "- TikTok + Grab Zygisk fresh persona"
 ui_print "- + mount namespace overlay (build.prop x5 + settings_secure.xml)"
-ui_print "- + /proc/self/{mountinfo,mounts,maps} sanitizer"
+ui_print "- + crash watchdog + companion death watcher"
+ui_print "- + L7 leak sensors (debug variant)"
 ui_print ""
+
+# Detect debug variant marker (dropped by build.sh)
+if [ -f "$MODPATH/debug_variant" ]; then
+    ui_print "- ! DEBUG variant detected"
+    ui_print "-   Auto-log will start on next boot."
+    ui_print "-   Location: /data/adb/modules/ternak_tt/debug/"
+    ui_print "-   File name: session-<timestamp>.log"
+    ui_print "-   Tap Action button to snapshot latest log"
+    ui_print "-   to /sdcard/Download/ternak-tt-logs/"
+    ui_print ""
+fi
 
 ABI=$(getprop ro.product.cpu.abi)
 ui_print "- Device ABI: $ABI"
@@ -21,6 +33,13 @@ ZOK=0
 set_perm_recursive $MODPATH 0 0 0755 0644
 set_perm $MODPATH/action.sh                 0 0 0755
 set_perm $MODPATH/service.sh                0 0 0755
+
+# v1.0.10: prepare debug/ dir so background logcat can write on first boot
+if [ -f "$MODPATH/debug_variant" ]; then
+    mkdir -p "$MODPATH/debug"
+    set_perm_recursive $MODPATH/debug 0 0 0755 0644
+    set_perm $MODPATH/debug_variant 0 0 0644
+fi
 set_perm $MODPATH/bin/ternak-tt-arm64       0 0 0755
 set_perm $MODPATH/bin/ternak-tt-arm         0 0 0755
 set_perm $MODPATH/bin/ternak-tt-x86_64      0 0 0755
