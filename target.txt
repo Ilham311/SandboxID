@@ -1,0 +1,27 @@
+# ============================================================
+# Ternak TT — target package list  (v1.0.15+)
+#
+# Runtime-editable whitelist. Any package NOT listed here is
+# ignored by the Zygisk hook. Edit + reboot (or restart
+# Zygisk) to change targets. The companion re-reads this file
+# automatically when its mtime changes, so most edits take
+# effect on the next app spawn.
+#
+# Format:
+#   • one package per line
+#   • lines starting with '#' are comments
+#   • blank lines are ignored
+#   • trailing whitespace is stripped
+#
+# If this file is missing or empty the companion falls back
+# to the built-in default list (below).
+# ============================================================
+
+# TikTok
+com.zhiliaoapp.musically         # TT Global
+com.ss.android.ugc.trill         # TT Asia (Indonesia / SEA)
+com.zhiliaoapp.musically.go      # TT Lite
+
+# Grab (driver + passenger apps do heavy device fingerprinting)
+com.grabtaxi.passenger
+# com.grabtaxi.driver2           # uncomment if you want Grab Driver too

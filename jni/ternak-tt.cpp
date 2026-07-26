@@ -29,12 +29,39 @@ static const char* IDENTITY_BAK   = "/data/adb/modules/ternak_tt/identity.prop.b
 static const char* MODE_FILE      = "/data/adb/modules/ternak_tt/identity.mode";
 static const char* RESETPROP      = "/data/adb/modules/ternak_tt/bin/resetprop-rs";
 static const char* MOUNTDIR       = "/data/adb/modules/ternak_tt/mount";  // v1.0.3
+static const char* TARGET_FILE    = "/data/adb/modules/ternak_tt/target.txt";  // v1.0.15
 
-static const char* TT_PACKAGES[] = {
-    "com.zhiliaoapp.musically",
-    "com.ss.android.ugc.trill",
-    "com.zhiliaoapp.musically.go",
-};
+// v1.0.15: target list is no longer hardcoded. `wipe_tt_data()` reads
+// target.txt so `ternak-tt freshen` clears the exact same apps the Zygisk
+// companion accepts. If target.txt is missing or empty we fall back to the
+// built-in defaults (matches companion behavior).
+static std::vector<std::string> load_targets() {
+    std::vector<std::string> out;
+    std::ifstream f(TARGET_FILE);
+    std::string line;
+    while (std::getline(f, line)) {
+        size_t hash = line.find('#');
+        if (hash != std::string::npos) line.erase(hash);
+        while (!line.empty() &&
+               (line.back() == '\r' || line.back() == ' ' ||
+                line.back() == '\t' || line.back() == '\n'))
+            line.pop_back();
+        size_t s = line.find_first_not_of(" \t");
+        if (s == std::string::npos) continue;
+        line = line.substr(s);
+        if (line.empty()) continue;
+        out.push_back(line);
+    }
+    if (out.empty()) {
+        out = {
+            "com.zhiliaoapp.musically",
+            "com.ss.android.ugc.trill",
+            "com.zhiliaoapp.musically.go",
+            "com.grabtaxi.passenger",
+        };
+    }
+    return out;
+}
 
 // ---- Helpers ----
 static std::string random_hex(int bytes, bool upper) {
@@ -465,10 +492,24 @@ static void generate_mount_files(const Identity& id) {
 }
 
 static void wipe_tt_data() {
-    for (const char* pkg : TT_PACKAGES) {
-        run_bin("/system/bin/pm", {"pm", "clear", pkg});
-        run_bin("/system/bin/am", {"am", "force-stop", pkg});
+    auto pkgs = load_targets();
+    for (const auto& pkg : pkgs) {
+        run_bin("/system/bin/pm", {"pm", "clear", pkg.c_str()});
+        run_bin("/system/bin/am", {"am", "force-stop", pkg.c_str()});
     }
+}
+
+// v1.0.15: user-facing dump of the runtime target whitelist.
+static int cmd_targets() {
+    auto pkgs = load_targets();
+    struct stat st{};
+    bool have_file = (::stat(TARGET_FILE, &st) == 0);
+    printf("target.txt : %s%s\n",
+           TARGET_FILE,
+           have_file ? "" : "  (missing — using built-in defaults)");
+    printf("count      : %zu\n\n", pkgs.size());
+    for (const auto& p : pkgs) printf("  %s\n", p.c_str());
+    return 0;
 }
 
 static Identity load_identity() {
@@ -527,7 +568,10 @@ static int cmd_freshen() {
     printf("  ANDROID_ID  : %s\n", id.kv["ANDROID_ID"].c_str());
     printf("  GAID        : %s\n", id.kv["GOOGLE_AID"].c_str());
     printf("  SEC PATCH   : %s\n", id.kv["SECURITY_PATCH"].c_str());
-    printf("  Wiped: musically, trill, musically.go\n");
+    // v1.0.15: report the exact wiped list from target.txt
+    auto pkgs = load_targets();
+    printf("  Wiped: %zu pkg(s) from target.txt\n", pkgs.size());
+    for (const auto& p : pkgs) printf("    - %s\n", p.c_str());
     return 0;
 }
 
@@ -625,7 +669,8 @@ static void usage(const char* p) {
         "  unlock       Re-enable freshen\n"
         "  apply-boot   Re-apply native prop (used by service.sh)\n"
         "  seed         Fast bootstrap: identity + mount overlay only\n"
-        "               (used by post-fs-data.sh, no native/wipe)\n",
+        "               (used by post-fs-data.sh, no native/wipe)\n"
+        "  targets      List current target packages from target.txt\n",
         p);
 }
 
@@ -638,7 +683,8 @@ int main(int argc, char** argv) {
     if (!strcmp(c, "lock"))       return cmd_lock();
     if (!strcmp(c, "unlock"))     return cmd_unlock();
     if (!strcmp(c, "apply-boot")) return cmd_apply_boot();
-    if (!strcmp(c, "seed"))       return cmd_seed();  // v1.0.14: early bootstrap
+    if (!strcmp(c, "seed"))       return cmd_seed();     // v1.0.14: early bootstrap
+    if (!strcmp(c, "targets"))    return cmd_targets();  // v1.0.15: runtime whitelist dump
     usage(argv[0]);
     return 1;
 }

@@ -79,6 +79,9 @@ build_variant() {
   [ -f summarize.sh ] && cp summarize.sh "$PKG/"
   # v1.0.14: bundle post-fs-data.sh for early-boot mount overlay seed
   [ -f post-fs-data.sh ] && cp post-fs-data.sh "$PKG/"
+  # v1.0.15: bundle default target.txt (user-editable whitelist).
+  # customize.sh will preserve any existing live target.txt on upgrade.
+  [ -f target.txt ] && cp target.txt "$PKG/"
 
   # Stamp variant into module.prop so it's visible in KernelSU Manager
   if [ "$V" = "debug" ]; then

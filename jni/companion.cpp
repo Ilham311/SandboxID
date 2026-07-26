@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <vector>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -49,6 +50,73 @@ enum : uint8_t {
 
 static const char* IDENTITY_FILE = "/data/adb/modules/ternak_tt/identity.prop";
 static const char* MOUNTDIR      = "/data/adb/modules/ternak_tt/mount";
+static const char* TARGET_FILE   = "/data/adb/modules/ternak_tt/target.txt";  // v1.0.15
+
+// ------------------------------------------------------------
+// v1.0.15: target package whitelist loaded from target.txt.
+// Previously hardcoded in is_target_pkg() (main.cpp) — moved
+// here so the whitelist is a single, user-editable file that
+// doesn't require a rebuild. Cached in-memory with mtime
+// reload so runtime edits take effect on next app spawn.
+// ------------------------------------------------------------
+static std::vector<std::string> g_targets;
+static time_t                   g_targets_mtime = 0;
+
+static void reload_targets_if_changed() {
+    struct stat st{};
+    bool have = (::stat(TARGET_FILE, &st) == 0);
+    if (!have) {
+        if (g_targets.empty()) {
+            g_targets = {
+                "com.zhiliaoapp.musically",
+                "com.ss.android.ugc.trill",
+                "com.zhiliaoapp.musically.go",
+                "com.grabtaxi.passenger",
+            };
+            LOGI("target.txt missing, using built-in defaults (%zu pkgs)",
+                 g_targets.size());
+        }
+        return;
+    }
+    if (!g_targets.empty() && st.st_mtime == g_targets_mtime) return;
+
+    std::ifstream f(TARGET_FILE);
+    std::vector<std::string> next;
+    std::string line;
+    while (std::getline(f, line)) {
+        // strip inline comment (# ...) and trailing whitespace
+        size_t hash = line.find('#');
+        if (hash != std::string::npos) line.erase(hash);
+        while (!line.empty() &&
+               (line.back() == '\r' || line.back() == ' ' ||
+                line.back() == '\t' || line.back() == '\n'))
+            line.pop_back();
+        size_t s = line.find_first_not_of(" \t");
+        if (s == std::string::npos) continue;
+        line = line.substr(s);
+        if (line.empty()) continue;
+        next.push_back(line);
+    }
+    if (next.empty()) {
+        LOGE("target.txt has 0 valid entries; keeping previous list (%zu pkgs)",
+             g_targets.size());
+        g_targets_mtime = st.st_mtime;
+        return;
+    }
+    g_targets       = std::move(next);
+    g_targets_mtime = st.st_mtime;
+    LOGI("target.txt loaded: %zu pkg(s) mtime=%ld",
+         g_targets.size(), (long)st.st_mtime);
+#ifdef TT_DEBUG
+    for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
+#endif
+}
+
+static bool is_target(const std::string& pkg) {
+    reload_targets_if_changed();
+    for (const auto& t : g_targets) if (t == pkg) return true;
+    return false;
+}
 
 struct BindEntry { const char* src_rel; const char* dst; };
 // v1.0.14: added alternate destination paths for odm/product/system_ext.
@@ -197,6 +265,32 @@ extern "C" void ternak_tt_companion(int client) {
         LOGD("recv cmd=%u", cmd);
 
         if (cmd == CMD_GET_IDENTITY) {
+            // v1.0.15 wire format:
+            //   client -> [u8 cmd=2][u16 pkg_len][pkg bytes]
+            //   server -> [u32 blob_len][blob bytes]
+            //     blob_len == 0  =>  "not a target, unload"
+            // This centralizes the target check in the companion so the
+            // whitelist (target.txt) is a single, user-editable file.
+            uint16_t plen = 0;
+            if (::read(client, &plen, sizeof(plen)) != (ssize_t)sizeof(plen)) break;
+            std::string pkg;
+            if (plen) {
+                pkg.resize(plen);
+                size_t got = 0;
+                while (got < plen) {
+                    ssize_t n = ::read(client, &pkg[got], plen - got);
+                    if (n <= 0) break;
+                    got += (size_t)n;
+                }
+                if (got != plen) break;
+            }
+            if (!is_target(pkg)) {
+                LOGD("REJECT pkg='%s' (not in target.txt)", pkg.c_str());
+                uint32_t z = 0;
+                ::write(client, &z, sizeof(z));
+                continue;
+            }
+            LOGD("ACCEPT pkg='%s'", pkg.c_str());
             std::string d = read_file(IDENTITY_FILE);
             uint32_t l = (uint32_t)d.size();
             ::write(client, &l, sizeof(l));

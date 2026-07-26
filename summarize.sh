@@ -43,14 +43,31 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     # High-level event counters
     # -----------------------------------------------------------------
     echo "--- Event counts ---"
-    printf "  SPOOF   : %s\n"  "$(grep -c 'SPOOF' "$IN")"
-    printf "  LEAK    : %s\n"  "$(grep -c 'LEAK'  "$IN")"
-    printf "  MISS    : %s\n"  "$(grep -c 'MISS'  "$IN")"
-    printf "  CRASH   : %s\n"  "$(grep -c 'CRASH \[' "$IN")"
-    printf "  DEATH   : %s\n"  "$(grep -c 'DEATH target' "$IN")"
-    printf "  MOUNT   : %s\n"  "$(grep -Ec 'child mount for pid=|bind-mount via companion|bind OK:' "$IN")"
-    printf "  ANR     : %s\n"  "$(grep -c 'ANR in' "$IN")"
-    printf "  FATAL   : %s\n"  "$(grep -c 'FATAL EXCEPTION' "$IN")"
+    printf "  SPOOF    : %s\n"  "$(grep -c 'SPOOF' "$IN")"
+    printf "  SUPPRESS : %s\n"  "$(grep -c 'SUPPRESS' "$IN")"
+    printf "  LEAK     : %s\n"  "$(grep -c 'LEAK'  "$IN")"
+    printf "  MISS     : %s\n"  "$(grep -c 'MISS'  "$IN")"
+    printf "  REJECT   : %s\n"  "$(grep -c 'REJECT pkg=' "$IN")"
+    printf "  ACCEPT   : %s\n"  "$(grep -c 'ACCEPT pkg=' "$IN")"
+    printf "  CRASH    : %s\n"  "$(grep -c 'CRASH \[' "$IN")"
+    printf "  DEATH    : %s\n"  "$(grep -c 'DEATH target' "$IN")"
+    printf "  MOUNT    : %s\n"  "$(grep -Ec 'child mount for pid=|bind-mount via companion|bind OK:' "$IN")"
+    printf "  ANR      : %s\n"  "$(grep -c 'ANR in' "$IN")"
+    printf "  FATAL    : %s\n"  "$(grep -c 'FATAL EXCEPTION' "$IN")"
+    echo ""
+
+    # -----------------------------------------------------------------
+    # v1.0.15: target.txt whitelist visible in log (companion prints on load)
+    # -----------------------------------------------------------------
+    echo "--- Target whitelist (from companion 'target.txt loaded') ---"
+    TL=$(grep 'target.txt loaded' "$IN" | tail -1)
+    if [ -n "$TL" ]; then
+        echo "  $(echo "$TL" | sed -E 's/^.*I TernakTTCompanion: //')"
+    fi
+    TM=$(grep 'target.txt missing' "$IN" | tail -1)
+    if [ -n "$TM" ]; then
+        echo "  $(echo "$TM" | sed -E 's/^.*I TernakTTCompanion: //')"
+    fi
     echo ""
 
     # -----------------------------------------------------------------
@@ -79,10 +96,23 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     # SPOOF distribution — verify our hooks are firing
     # -----------------------------------------------------------------
     echo "--- SPOOF hits per hook layer ---"
-    for L in L1 L2 L3 L4 L5 L6 L7; do
+    for L in L1 L2 L3 L4 L5 L6; do
         C=$(grep -c "$L SPOOF\|$L install_" "$IN")
-        [ "$C" -gt 0 ] && printf "  %s : %s\n" "$L" "$C"
+        [ "$C" -gt 0 ] && printf "  %-8s : %s\n" "$L" "$C"
     done
+    # v1.0.15: L7 split into three typed hooks (Bool / Int / Long) so break out separately.
+    L7B=$(grep -c 'L7 SPB.*\[SPOOF\]'    "$IN")
+    L7I=$(grep -c 'L7 SPI.*\[SPOOF\]'    "$IN")
+    L7L=$(grep -c 'L7 SPL.*\[SPOOF\]'    "$IN")
+    L7BS=$(grep -c 'L7 SPB.*\[SUPPRESS\]' "$IN")
+    L7IS=$(grep -c 'L7 SPI.*\[SUPPRESS\]' "$IN")
+    L7LS=$(grep -c 'L7 SPL.*\[SUPPRESS\]' "$IN")
+    L7BL=$(grep -c 'L7 SPB.*\[LEAK\]'     "$IN")
+    L7IL=$(grep -c 'L7 SPI.*\[LEAK\]'     "$IN")
+    L7LL=$(grep -c 'L7 SPL.*\[LEAK\]'     "$IN")
+    printf "  %-8s : SPOOF=%s SUPPRESS=%s LEAK=%s\n" "L7-SPB" "$L7B" "$L7BS" "$L7BL"
+    printf "  %-8s : SPOOF=%s SUPPRESS=%s LEAK=%s\n" "L7-SPI" "$L7I" "$L7IS" "$L7IL"
+    printf "  %-8s : SPOOF=%s SUPPRESS=%s LEAK=%s\n" "L7-SPL" "$L7L" "$L7LS" "$L7LL"
     echo ""
 
     # -----------------------------------------------------------------

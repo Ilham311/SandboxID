@@ -1,15 +1,28 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.14"
+ui_print "- Ternak TT v1.0.15"
 ui_print "- TikTok + Grab Zygisk fresh persona"
+ui_print "- + runtime target.txt (edit whitelist, no rebuild)"
+ui_print "- + companion hot-reloads target.txt on mtime change"
+ui_print "- + `ternak-tt targets` CLI to view whitelist"
+ui_print "- + L7 SUPPRESS label for log.looper.*.slow (log noise)"
+ui_print "- + summarize.sh: SPOOF broken out by L1/L2/L7-SPB/SPI/SPL"
 ui_print "- + mount overlay (build.prop x5 + settings_secure.xml)"
-ui_print "- + crash watchdog (SIGABRT/FPE/ILL/SYS, rate-limited)"
-ui_print "- + 20 native_get + L7 TYPED spoof (sys.boot_completed=true)"
-ui_print "- + post-fs-data early seed (fixes first-boot mount race)"
-ui_print "- + companion tries /odm/etc + /odm legacy paths (POCO F3 fix)"
-ui_print "- + auto-summarize on Action tap (chat-friendly digest)"
+ui_print "- + crash watchdog + auto-summarize on Action tap"
 ui_print ""
+
+# v1.0.15: preserve user's custom target.txt across reinstalls.
+# KernelSU / Magisk stage the new module under MODPATH and swap it in
+# on reboot. If the live install already has target.txt, copy it into
+# MODPATH BEFORE ui_print reports so the user's edits survive upgrade.
+LIVE_TARGET="/data/adb/modules/ternak_tt/target.txt"
+if [ -s "$LIVE_TARGET" ]; then
+    ui_print "- Preserving existing target.txt from previous install"
+    cp -f "$LIVE_TARGET" "$MODPATH/target.txt"
+else
+    ui_print "- Installing default target.txt (4 packages)"
+fi
 
 # Detect debug variant marker (dropped by build.sh)
 if [ -f "$MODPATH/debug_variant" ]; then
@@ -39,6 +52,9 @@ set_perm $MODPATH/service.sh                0 0 0755
 # v1.0.14: post-fs-data.sh runs early to seed mount overlay before Zygisk.
 [ -f $MODPATH/post-fs-data.sh ] && set_perm $MODPATH/post-fs-data.sh 0 0 0755
 [ -f $MODPATH/summarize.sh ] && set_perm $MODPATH/summarize.sh 0 0 0755
+# v1.0.15: target.txt must be world-readable (companion runs as root so
+# 0644 is fine; user can `su -c 'nano /data/adb/modules/ternak_tt/target.txt'`).
+[ -f $MODPATH/target.txt ] && set_perm $MODPATH/target.txt 0 0 0644
 
 # v1.0.10: prepare debug/ dir so background logcat can write on first boot
 if [ -f "$MODPATH/debug_variant" ]; then

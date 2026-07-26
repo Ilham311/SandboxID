@@ -66,15 +66,11 @@ enum : uint8_t {
     CMD_DO_MOUNTS    = 3,  // v1.0.4: companion-side mount agent
 };
 
-// TT package hardcoded (fork focused, no whitelist file)
-// v1.0.7: expanded target set. Same spoofed identity applied to Grab
-// (driver/passenger apps do heavy device fingerprinting for fraud).
-static bool is_target_pkg(const std::string& p) {
-    return p == "com.zhiliaoapp.musically"        // TT Global
-        || p == "com.ss.android.ugc.trill"        // TT Asia
-        || p == "com.zhiliaoapp.musically.go"     // TT Lite
-        || p == "com.grabtaxi.passenger";         // Grab Passenger
-}
+// v1.0.15: target whitelist moved out of code into
+// /data/adb/modules/ternak_tt/target.txt (loaded by companion).
+// Zygisk .so no longer knows the list — it just sends the pkg
+// name to the companion, which rejects with blob_len=0 for
+// any pkg not in target.txt. See companion.cpp reload_targets_if_changed().
 
 static std::map<std::string, std::string> g_id;
 
@@ -319,6 +315,22 @@ static const std::map<std::string, jlong>& tt_long_spoof() {
     return m;
 }
 
+// v1.0.15: log-noise suppressor. Android emits log.looper.<pid>.<class>.slow
+// probes hundreds of times per session; def is always -1 and no app actually
+// consumes the value, so labelling these as LEAK just floods the summarizer.
+// We still return def (behavior unchanged) but tag the trace line SUPPRESS.
+static bool tt_should_suppress_key(const std::string& k) {
+    // log.looper.*.slow
+    if (k.size() >= 11 + 5 &&
+        k.compare(0, 11, "log.looper.") == 0 &&
+        k.compare(k.size() - 5, 5, ".slow") == 0)
+        return true;
+    // debug.watson.* (Xiaomi telemetry, always def)
+    if (k.compare(0, 13, "debug.watson.") == 0)
+        return true;
+    return false;
+}
+
 #ifdef TT_DEBUG
 static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
     jint out = def;
@@ -330,6 +342,7 @@ static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
         const auto& m = tt_int_spoof();
         auto it = m.find(k);
         if (it != m.end()) { out = it->second; label = "SPOOF"; }
+        else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
         LOGD("L7 SPI native_get_int('%s') def=%d -> %d [%s]", k.c_str(), def, out, label);
     }
     return out;
@@ -344,6 +357,7 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
         const auto& m = tt_long_spoof();
         auto it = m.find(k);
         if (it != m.end()) { out = it->second; label = "SPOOF"; }
+        else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
         LOGD("L7 SPL native_get_long('%s') def=%lld -> %lld [%s]",
              k.c_str(), (long long)def, (long long)out, label);
     }
@@ -359,6 +373,7 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean 
         const auto& m = tt_bool_spoof();
         auto it = m.find(k);
         if (it != m.end()) { out = it->second; label = "SPOOF"; }
+        else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
         LOGD("L7 SPB native_get_boolean('%s') def=%d -> %d [%s]",
              k.c_str(), (int)def, (int)out, label);
     }
@@ -754,19 +769,29 @@ public:
             env_->ReleaseStringUTFChars(args->nice_name, raw);
         }
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
-        if (!is_target_pkg(pkg)) {
-            LOGD("pkg='%s' not a target, unloading", pkg.c_str());
-            unload(); return;
-        }
+        if (pkg.empty()) { unload(); return; }  // system_server etc.
 
+        // v1.0.15: companion holds the target whitelist (target.txt).
+        // We send our pkg name; companion returns len=0 for non-targets.
+        // This costs 1 UDS round-trip per app spawn but centralizes the
+        // target list in a single user-editable file (no rebuild needed).
         int fd = api_->connectCompanion();
         LOGD("connectCompanion() -> fd=%d", fd);
-        if (fd < 0) { LOGE("companion connect failed for pkg='%s'", pkg.c_str()); unload(); return; }
+        if (fd < 0) { LOGD("companion connect failed for pkg='%s'", pkg.c_str()); unload(); return; }
 
         uint8_t cmd = CMD_GET_IDENTITY;
         write(fd, &cmd, 1);
+        uint16_t plen = (uint16_t)pkg.size();
+        write(fd, &plen, sizeof(plen));
+        if (plen) write(fd, pkg.data(), plen);
+
         uint32_t len = 0;
-        if (read(fd, &len, sizeof(len)) != sizeof(len) || len == 0 || len > 65536) {
+        if (read(fd, &len, sizeof(len)) != sizeof(len) || len > 65536) {
+            close(fd); unload(); return;
+        }
+        if (len == 0) {
+            // Companion rejected: pkg is not in target.txt.
+            LOGD("pkg='%s' not a target (companion), unloading", pkg.c_str());
             close(fd); unload(); return;
         }
         blob_.resize(len);
