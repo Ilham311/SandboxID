@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <ctime>
 #include "zygisk.hpp"
+#include "java_hooks.hpp"
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -781,6 +782,15 @@ public:
 #endif
         install_crash_watchdog(pkg_);
 
+        // v1.1.0 Path B: lsplant-based Java method hooks (scaffold; no-op
+        // unless built with -DTT_HAVE_LSPLANT=1 via fetch_lsplant.sh + CI).
+        {
+            std::map<std::string, std::string> ident;
+            // TODO(v1.1.1): populate ident from parsed /data/adb/modules/ternak_tt/identity.prop
+            if (ternak_tt::java_hooks::Init(env_)) {
+                ternak_tt::java_hooks::InstallAll(env_, ident);
+            }
+        }
     }
 
     void preServerSpecialize(ServerSpecializeArgs*) override { unload(); }

@@ -1,14 +1,15 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.18"
+ui_print "- Ternak TT v1.1.0"
 ui_print "- TikTok + Grab Zygisk fresh persona"
+ui_print "- + kernel identity bind (proc_uptime + kernel_boot_id)"
+ui_print "- + rich BIND-FAIL diagnostic (src/dst stat + errno + strerror)"
+ui_print "- + Path B java_hooks scaffold (lsplant integration, opt-in via fetch_lsplant.sh)"
 ui_print "- + runtime target.txt (edit whitelist, no rebuild)"
 ui_print "- + companion hot-reloads target.txt on mtime change"
 ui_print "- + `ternak-tt targets` CLI to view whitelist"
-ui_print "- + L7 SUPPRESS label for log.looper.*.slow (log noise)"
-ui_print "- + summarize.sh: SPOOF broken out by L1/L2/L7-SPB/SPI/SPL"
-ui_print "- + mount overlay (build.prop x5 + settings_secure.xml)"
+ui_print "- + mount overlay (build.prop x5 + settings_secure.xml + proc_uptime + kernel_boot_id)"
 ui_print "- + crash watchdog + auto-summarize on Action tap"
 ui_print ""
 

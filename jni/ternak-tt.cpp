@@ -453,7 +453,33 @@ static void generate_mount_files(const Identity& id) {
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_data_file:s0",
             xml_path.c_str()});
 
-    printf("  Mount overlay: 5 build.prop + settings_secure.xml -> %s\n", MOUNTDIR);
+    // v1.1.0 Path A: kernel identity overlay files
+    // /proc/uptime  format: "<up>.<xx> <idle>.<xx>\n" where up = 1h..30d
+    // /proc/sys/kernel/random/boot_id  format: fresh UUIDv4 + newline
+    {
+        std::random_device rd;
+        std::mt19937 g(rd());
+        std::uniform_int_distribution<int> sec_dist(3600, 2592000);
+        int up = sec_dist(g);
+        int idle = up - (int)(g() % ((unsigned)up / 3 + 1));
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%d.%02d %d.%02d\n",
+                 up, (int)(g() % 100), idle, (int)(g() % 100));
+        std::string up_path = std::string(MOUNTDIR) + "/proc_uptime";
+        atomic_write(up_path, buf);
+        ::chmod(up_path.c_str(), 0444);
+        run_bin("/system/bin/chcon",
+                {"chcon", "u:object_r:proc_uptime:s0", up_path.c_str()});
+
+        std::string bid = uuid_v4() + "\n";
+        std::string bid_path = std::string(MOUNTDIR) + "/kernel_boot_id";
+        atomic_write(bid_path, bid);
+        ::chmod(bid_path.c_str(), 0444);
+        run_bin("/system/bin/chcon",
+                {"chcon", "u:object_r:proc_sys_kernel:s0", bid_path.c_str()});
+    }
+
+    printf("  Mount overlay: 5 build.prop + settings_secure.xml + proc_uptime + kernel_boot_id -> %s\n", MOUNTDIR);
 }
 
 static void wipe_tt_data() {

@@ -22,6 +22,14 @@ if [ ! -f jni/zygisk.hpp ]; then
     https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
 fi
 
+# v1.1.0 Path B: warn if lsplant not fetched (module still builds, Path B disabled)
+if [ ! -d jni/lsplant ] || [ ! -d jni/dobby ]; then
+  echo "==> Path B disabled: jni/lsplant/ or jni/dobby/ missing."
+  echo "    Run './fetch_lsplant.sh' first if you want Java method hooks (Settings.Secure, MediaDrm, ...)."
+else
+  echo "==> Path B: jni/lsplant + jni/dobby present -> TT_HAVE_LSPLANT will be enabled"
+fi
+
 mkdir -p "$OUT"
 
 build_variant() {

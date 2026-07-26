@@ -9,6 +9,49 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.1.0
+
+### Added
+
+- **Kernel identity bind (Path A)** — companion now bind-mounts two additional overlay files into the target's mount namespace:
+  - `/proc/uptime` → random value between 1 hour and 30 days (fresh persona shouldn't look like a device that was just booted or one that's been up for months)
+  - `/proc/sys/kernel/random/boot_id` → fresh UUIDv4 per identity rotation (SafetyNet + several fingerprinters cross-check this against `ro.boottime.zygote`)
+- **Rich BIND-FAIL diagnostic** — when a bind mount fails post-`setns`, companion now logs source and destination `stat()` (inode / size / mode), the raw `errno` **plus** `strerror(errno)`, and the target pid, so root-cause is obvious without reproducing under strace. Example:
+  ```
+  BIND-FAIL /data/adb/modules/ternak_tt/mount/settings_secure.xml -> /data/system/users/0/settings_secure.xml \
+    errno=2(No such file or directory) src{stat=0 ino=12345 size=421 mode=0100644} \
+    dst{stat=-1 ino=0 mode=00} [post-setns pid=23811]
+  ```
+- **Path B: Java method hook scaffold (lsplant)** — new `jni/java_hooks.{hpp,cpp}` implements a lsplant-based hook framework, guarded by `TT_HAVE_LSPLANT`. When compiled with lsplant available, `postAppSpecialize` now calls `java_hooks::Init(env)` → `InstallAll(env, identity)` after the crash watchdog. **v1.1.0 ships the scaffold only** — `Init()` wires up the lsplant runtime, `InstallAll()` is a logging no-op. v1.1.1 will populate hooks for `Settings.Secure.getString` (android_id / bluetooth_address / advertising_id), `MediaDrm.getPropertyByteArray` (widevine deviceUniqueId), `Locale.getDefault`, `TimeZone.getDefault`, `SystemClock.uptimeMillis`, and `SystemClock.elapsedRealtime`.
+- **`fetch_lsplant.sh`** — one-shot script that clones LSPosed/LSPlant + jmpews/Dobby into `jni/`, then (if `javac` + `d8` are on PATH) compiles `java_helper/TernakHookHelper.java` into `jni/helper_dex.h` for embedding.
+- **CI workflow auto-fetch** — GitHub Actions runs `./fetch_lsplant.sh` after the Zygisk header fetch. Marked `continue-on-error: true`, so if fetch fails the module still builds — just with Path B disabled.
+- **Conditional CMake integration** — `jni/CMakeLists.txt` now detects `jni/lsplant/` + `jni/dobby/` and, when both exist, adds them as subdirectories, sets `-DTT_HAVE_LSPLANT=1`, and links against `lsplant` + `dobby` + `dl`. Falls back to the original single-target build when either is missing.
+- **`build.sh` Path B status message** — prints whether Path B is active or disabled before invoking cmake, so build output is self-documenting.
+- **`java_helper/TernakHookHelper.java`** — scaffold Java class with `native` method declarations that the v1.1.1 hooks will point to for calling the original ART method via lsplant's backup handle.
+
+### Fixed
+
+- **BIND-FAIL log ambiguity from v1.0.18** — previously the log line was just `child: bind fail <src> -> <dst> errno=<n>`, which didn't distinguish "source file gone" from "target NS already has this path overlaid" from "selinux denied". The rich diagnostic above resolves this.
+
+### Known limitations
+
+- **Path B is scaffold-only in v1.1.0.** `InstallAll()` returns without hooking any Java methods. `Settings.Secure.getString("android_id")` and `MediaDrm.getPropertyByteArray("deviceUniqueId")` will still return the real device values on v1.1.0. Full hook bodies land in v1.1.1.
+- **Path B build requires internet on CI** — `fetch_lsplant.sh` clones from GitHub. Offline / air-gapped builds must vendor `jni/lsplant/` + `jni/dobby/` manually.
+- **`/proc/uptime` bind** may fail on some kernels that mark `/proc/uptime` as a synthetic pseudo-file rejecting bind sources; this is why bind failures now log `errno=EINVAL(Invalid argument)` explicitly.
+
+### Unchanged
+
+- L1 `Build.*` ×17 hooks, L2 native_get 42 identity keys + 13 static defaults, L6 Telephony ×4 hooks, L7 SPB ×9 / SPI ×18 / SPL ×1, watchdog ×4 signals — all identical to v1.0.18.
+- Companion wire protocol, target.txt hot-reload, `ternak-tt targets` CLI, `summarize.sh` two-section output — unchanged.
+
+### Impact
+
+- **/proc/uptime + /proc/sys/kernel/random/boot_id** now spoofed. Fingerprinters that cross-check these against `ro.boottime.zygote` or `ro.build.date.utc` should no longer flag inconsistency.
+- **SSAID, GAID, App Set ID, MediaDRM ID still leak on v1.1.0.** These identifiers are read via binder IPC to `system_server` / Play Services, so no mount-namespace overlay can intercept them. Path B in v1.1.1 will close this gap by hooking the ART methods directly in the target process.
+- No regression on TT / Grab / Shopee flows expected — all v1.0.18 behavior preserved; new code is additive.
+
+---
+
 ## v1.0.18
 
 ### Added
