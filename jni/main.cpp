@@ -139,6 +139,26 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         {"dalvik.vm.heapgrowthlimit","DALVIK_HEAPGROWTHLIMIT"},
         {"ro.mediacodec.min_sample_rate", "MEDIACODEC_MIN_RATE"},
         {"ro.mediacodec.max_sample_rate", "MEDIACODEC_MAX_RATE"},
+        {"ro.build.user",            "USER"},
+        {"ro.build.host",            "HOST"},
+        {"ro.build.tags",            "TAGS"},
+        {"ro.build.type",            "TYPE"},
+    };
+
+    static const std::map<std::string, std::string> static_defaults = {
+        {"gsm.operator.isroaming",         "false"},
+        {"ro.zygote",                      "zygote64_32"},
+        {"ro.hardware",                    "qcom"},
+        {"ro.board.platform",              "sm8250"},
+        {"ro.dalvik.vm.native.bridge",     "0"},
+        {"ro.allow.mock.location",         "0"},
+        {"dalvik.vm.isa.arm64.variant",    "generic"},
+        {"dalvik.vm.isa.arm64.features",   "default"},
+        {"dalvik.vm.isa.arm.variant",      "generic"},
+        {"dalvik.vm.isa.arm.features",     "default"},
+        {"dalvik.vm.heapsize",             "512m"},
+        {"ro.build.version.preview_sdk",   "0"},
+        {"persist.radio.multisim.config",  "ss"},
     };
 
     auto it = map.find(k);
@@ -148,6 +168,11 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
             LOGD("L2 SPOOF '%s' -> '%s'", k.c_str(), v.c_str());
             return env->NewStringUTF(v.c_str());
         }
+    }
+    auto sit = static_defaults.find(k);
+    if (sit != static_defaults.end()) {
+        LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), sit->second.c_str());
+        return env->NewStringUTF(sit->second.c_str());
     }
     char buf[PROP_VALUE_MAX] = {0};
     if (__system_property_get(k.c_str(), buf) > 0) {
@@ -237,12 +262,15 @@ static jstring hook_tel_meid    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.g
 
 static const std::map<std::string, jboolean>& tt_bool_spoof() {
     static const std::map<std::string, jboolean> m = {
-        {"sys.boot_completed",                    JNI_TRUE},
-        {"debug.force_rtl",                       JNI_FALSE},
-        {"framework.pause_bg_animations.enabled", JNI_FALSE},
-        {"dalvik.vm.dexopt.secondary",            JNI_TRUE},
-        {"viewroot.profile_rendering",            JNI_FALSE},
-        {"debug.sqlite.no_double_quoted_strs",    JNI_TRUE},
+        {"sys.boot_completed",                       JNI_TRUE},
+        {"debug.force_rtl",                          JNI_FALSE},
+        {"framework.pause_bg_animations.enabled",    JNI_FALSE},
+        {"dalvik.vm.dexopt.secondary",               JNI_TRUE},
+        {"viewroot.profile_rendering",               JNI_FALSE},
+        {"debug.sqlite.no_double_quoted_strs",       JNI_TRUE},
+        {"persist.sys.activity_anim_perf_override",  JNI_FALSE},
+        {"persist.sys.lmk.reportkills",              JNI_FALSE},
+        {"debug.layout",                             JNI_FALSE},
     };
     return m;
 }
@@ -265,6 +293,7 @@ static const std::map<std::string, jint>& tt_int_spoof() {
         {"build.version.extensions.ad_services",  15},
         {"debug.am.run_gc_trim_level",            2147483647},
         {"debug.am.run_mallopt_trim_level",       2147483647},
+        {"debug.adservices.binder_timeout",       10000},
     };
     return m;
 }

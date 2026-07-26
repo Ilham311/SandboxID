@@ -49,11 +49,17 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     fi
     echo ""
 
-    echo "--- Target packages seen ---"
-    grep -oE 'pkg=[a-zA-Z0-9._]+' "$IN" \
+    echo "--- Target packages seen (ACCEPTED by companion) ---"
+    grep -oE "ACCEPT pkg='[^']+'" "$IN" \
+        | sed -E "s/ACCEPT pkg='([^']+)'/\1/" \
         | sort | uniq -c | sort -rn \
-        | awk '{printf "  %-6s %s\n", $1"x", $2}' \
-        | sed 's/pkg=//'
+        | awk '{printf "  %-6s %s\n", $1"x", $2}'
+    echo ""
+    echo "--- All packages spawned (top 20, incl. rejected) ---"
+    grep -oE "pkg='[^']+'" "$IN" \
+        | sed -E "s/pkg='([^']+)'/\1/" \
+        | sort | uniq -c | sort -rn | head -20 \
+        | awk '{printf "  %-6s %s\n", $1"x", $2}'
     echo ""
 
     echo "--- Unique LEAK surfaces (top 40, sorted by frequency) ---"

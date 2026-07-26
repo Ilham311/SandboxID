@@ -1,7 +1,11 @@
 id=ternak_tt
 name=Ternak TT — Zygisk Fresh Persona
 version=v1.0.18
+<<<<<<< HEAD
 versionCode=1018
+=======
+versionCode=118
+>>>>>>> 33e1fbd (Initial commit)
 author=Ilham311
 description=Zygisk device spoofer targeting TikTok (musically/trill/lite) + Grab Passenger. 6-layer Java hook + 78 native prop spoofs + L7 TYPED spoof tables + companion fork+setns bind mount overlay. v1.0.15: target list moved out of the binary into /data/adb/modules/ternak_tt/target.txt — the companion loads + hot-reloads it (mtime watch), so you can add/remove TikTok clones, Grab Driver, or any custom package without rebuilding. Wire protocol updated: Zygisk .so sends pkg name to companion, companion rejects non-targets with len=0 (single source of truth). CLI gains `ternak-tt targets` subcommand. L7 SPI/SPL/SPB gain SUPPRESS label for known-noise keys (log.looper.*.slow, debug.watson.*) to keep summaries readable. Auto-summarizer on Action tap now breaks SPOOF hits out by hook layer (L1/L2/L7-SPB/SPI/SPL) and counts SUPPRESS separately. Works on Zygisk-Next / HMA-OSS.
 updateJson=https://raw.githubusercontent.com/Ilham311/Tt/main/update.json

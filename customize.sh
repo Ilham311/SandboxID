@@ -1,7 +1,7 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.17"
+ui_print "- Ternak TT v1.0.18"
 ui_print "- TikTok + Grab Zygisk fresh persona"
 ui_print "- + runtime target.txt (edit whitelist, no rebuild)"
 ui_print "- + companion hot-reloads target.txt on mtime change"
