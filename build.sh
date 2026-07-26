@@ -63,15 +63,16 @@ build_variant() {
     local BUILD="build/$V/$ABI"
     rm -rf "$BUILD"
     mkdir -p "$BUILD"
-    # v1.1.8: -DCMAKE_POLICY_VERSION_MINIMUM=3.5 suppresses the NDK
-    # toolchain's own cmake_minimum_required(VERSION <3.10) deprecation
-    # cascade under CMake 3.31+. Cosmetic; does not change build output.
+    # v1.1.9: dropped -DCMAKE_POLICY_VERSION_MINIMUM=3.5 from v1.1.8 because
+    # CMake 3.31.6 flagged it as "unused" (it takes effect only when the
+    # project itself calls cmake_minimum_required below its floor, which we
+    # no longer do since bumping to 3.22.1). The NDK-toolchain deprecation
+    # warnings are noisy but harmless.
     cmake -S jni -B "$BUILD" \
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$ABI" \
       -DANDROID_PLATFORM="android-$MIN_SDK" \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
       $DBG_FLAG >/dev/null
     cmake --build "$BUILD" -j
   done

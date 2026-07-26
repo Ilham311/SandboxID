@@ -81,6 +81,22 @@ if(EXISTS "${LSPLANT_SO}" AND EXISTS "${LSPLANT_HEADER}" AND EXISTS "${SHADOWHOO
             OUTPUT_NAME "ternak_shadowhook"
             VERSION ""
             SOVERSION "")
+        # v1.1.9: ShadowHook v1.0.9 was written before NDK r26d's Clang
+        # started promoting -Wunsafe-buffer-usage, -Wdeclaration-after-statement,
+        # and -Wreserved-identifier to -Werror. The code itself is fine (it uses
+        # __xxx identifiers required by the Linux syscall support layer, and
+        # normal C99 mixed declarations), so we just silence -Werror on the
+        # shadowhook target. This does NOT touch project-wide flags or our own
+        # ternak_tt target — only ShadowHook's compilation is affected.
+        target_compile_options(shadowhook PRIVATE
+            -Wno-error
+            -Wno-error=unsafe-buffer-usage
+            -Wno-error=declaration-after-statement
+            -Wno-error=reserved-identifier
+            -Wno-error=deprecated-declarations
+            -Wno-unsafe-buffer-usage
+            -Wno-declaration-after-statement
+            -Wno-reserved-identifier)
     endif()
 
     add_library(ternak_tt SHARED ${TERNAK_TT_SOURCES})

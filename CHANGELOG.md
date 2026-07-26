@@ -9,6 +9,73 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.1.9
+
+**Focus**: Unblock v1.1.8 CI failure. Configure passed cleanly this time (v1.1.8 fixes to LANGUAGES C CXX + `jni/shadowhook` guard confirmed working in the CI log), but ShadowHook's own C sources failed to compile under NDK r26d Clang.
+
+### v1.1.8 fixes confirmed working (from CI log)
+- `==> Using android.jar from android-34` → helper dex compile OK (`Generated jni/helper_dex.h (2528 bytes)`).
+- `==> Path B: prebuilt lsplant 6.4 + jni/shadowhook present -> TT_HAVE_LSPLANT will be enabled` → Bug #4 resolved.
+- CMake configure lolos ke build phase; no more `No known features for C compiler`.
+
+### Fixed — Bug #5: ShadowHook v1.0.9 warnings-as-errors under NDK r26d
+- v1.1.8 CI at 46% of arm64-v8a release compile:
+  ```
+  shadowhook/src/main/cpp/arch/arm64/sh_a64.c:93:18: error: 'map' is an unsafe buffer
+    that does not perform bounds checks [-Werror,-Wunsafe-buffer-usage]
+  shadowhook/src/main/cpp/common/sh_errno.c:67:22: error: 'msg' is an unsafe buffer ...
+  shadowhook/src/main/cpp/arch/arm64/sh_a64.c:129:15: error: mixing declarations and code
+    is incompatible with standards before C99 [-Werror,-Wdeclaration-after-statement]
+  shadowhook/src/main/cpp/third_party/lss/linux_syscall_support.h:430:22: error:
+    identifier '__pad0' is reserved because it starts with '__' [-Werror,-Wreserved-identifier]
+  ...
+  fatal error: too many errors emitted, stopping now [-ferror-limit=]
+  gmake[2]: *** [shadowhook-build/CMakeFiles/shadowhook.dir/build.make:...] Error 1
+  ```
+- Root cause: NDK r26d ships a newer Clang that promotes three warning classes to `-Werror` by default:
+  1. `-Wunsafe-buffer-usage`: any array indexing without a bounds check on the array symbol.
+  2. `-Wdeclaration-after-statement`: C89 rule; ShadowHook uses normal C99 mixed declarations.
+  3. `-Wreserved-identifier`: identifiers starting with `__`; ShadowHook's `third_party/lss/linux_syscall_support.h` MUST use `__pad0`, `__st_ino`, `__res_x0`, etc. because those names are dictated by the Linux kernel syscall ABI (see `arch/arm64/include/uapi/asm/*.h`).
+- The code itself is correct — the warnings are new Clang policy changes that ShadowHook v1.0.9 (released before r26d) can't have anticipated. No upstream fix exists yet.
+- Fix: silence `-Werror` **only** on the ShadowHook target (not project-wide, not on our `ternak_tt` target). Added to `jni/CMakeLists.txt` inside the `if(TARGET shadowhook)` block:
+  ```cmake
+  target_compile_options(shadowhook PRIVATE
+      -Wno-error
+      -Wno-error=unsafe-buffer-usage
+      -Wno-error=declaration-after-statement
+      -Wno-error=reserved-identifier
+      -Wno-error=deprecated-declarations
+      -Wno-unsafe-buffer-usage
+      -Wno-declaration-after-statement
+      -Wno-reserved-identifier)
+  ```
+  `target_compile_options(... PRIVATE)` appends AFTER ShadowHook's own compile flags, so `-Wno-error*` reliably overrides any `-Werror` the ShadowHook CMakeLists set.
+
+### Fixed — CMake `CMAKE_POLICY_VERSION_MINIMUM` unused warning
+- v1.1.8 CI showed:
+  ```
+  CMake Warning:
+    Manually-specified variables were not used by the project:
+      CMAKE_POLICY_VERSION_MINIMUM
+  ```
+- `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` in `build.sh` only takes effect if the project itself calls `cmake_minimum_required` below its floor — which we no longer do since v1.1.8 bumped ours to 3.22.1. The NDK-toolchain deprecation warnings (from the toolchain files themselves) are noisy but harmless; we don't control them.
+- Fix: dropped `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` from `build.sh` cmake invocation.
+
+### Not Changed
+- Zero source-level changes to ShadowHook — we don't fork or patch upstream code.
+- `jni/java_hooks.cpp` ShadowHook API integration unchanged.
+- `fetch_lsplant.sh` unchanged.
+- All hook logic, target list, native prop spoofs, companion — unchanged.
+
+### Testing done in sandbox
+- `bash -n` on all 7 shell scripts → all OK.
+- `jq . update.json` → valid, v1.1.9 / 1109.
+- `python3 -c 'import yaml; yaml.safe_load(...)'` on `.github/workflows/build.yml` → parses.
+- CMake syntax review: `target_compile_options(shadowhook PRIVATE ...)` guarded by `if(TARGET shadowhook)`.
+- Cannot run cmake configure or compile in sandbox (no NDK); rely on next CI run to confirm ShadowHook compiles cleanly.
+
+---
+
 ## v1.1.8
 
 **Focus**: Unblock v1.1.7 CI failure (exit code 1 at CMake configure). Two independent regressions from the v1.1.7 Dobby→ShadowHook migration surfaced. Both fixed, no functional changes.
