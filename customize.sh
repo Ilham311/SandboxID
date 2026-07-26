@@ -1,10 +1,11 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.11"
+ui_print "- Ternak TT v1.0.12"
 ui_print "- TikTok + Grab Zygisk fresh persona"
 ui_print "- + mount namespace overlay (build.prop x5 + settings_secure.xml)"
-ui_print "- + crash watchdog + companion death watcher"
+ui_print "- + FIXED crash watchdog (no more 42k-CRASH loops on SIGSEGV/SIGBUS)"
+ui_print "- + 18 new native_get spoofs (gsm.operator.*, sys.boot_completed, cpu.abi*)"
 ui_print "- + L7 leak sensors (debug variant)"
 ui_print "- + auto-summarize on Action tap (chat-friendly digest)"
 ui_print ""

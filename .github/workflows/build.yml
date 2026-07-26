@@ -21,25 +21,40 @@ jobs:
 
       - name: Get version
         id: version
+        # v1.0.12: module.prop is the SINGLE source of truth for version.
+        # Previous logic seeded from git-describe (defaulted v0.0.0 when no
+        # tag existed) and auto-incremented the patch. On this repo without
+        # tags it produced v0.0.6 after 6 pushes — overwriting the real
+        # v1.0.11 in module.prop and corrupting the log-header version.
+        # New behavior: read module.prop; if a matching git tag already
+        # exists, bump the patch by 1 so re-runs still produce a new tag;
+        # otherwise use module.prop as-is.
         run: |
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          PROP_VERSION=$(grep '^version=' module.prop | cut -d= -f2)
+          PROP_CODE=$(grep '^versionCode=' module.prop | cut -d= -f2)
+          echo "prop_version=$PROP_VERSION (code=$PROP_CODE)"
 
-          VERSION=${LATEST_TAG#v}
-          MAJOR=$(echo $VERSION | cut -d. -f1)
-          MINOR=$(echo $VERSION | cut -d. -f2)
-          PATCH=$(echo $VERSION | cut -d. -f3)
-          if [ -z "$PATCH" ]; then PATCH=0; fi
-
-          NEW_PATCH=$((PATCH + 1))
-          NEW_VERSION="v${MAJOR}.${MINOR}.${NEW_PATCH}"
-          NEW_CODE="${MAJOR}${MINOR}${NEW_PATCH}"
+          if git rev-parse -q --verify "refs/tags/${PROP_VERSION}" >/dev/null; then
+              VERSION=${PROP_VERSION#v}
+              MAJOR=$(echo $VERSION | cut -d. -f1)
+              MINOR=$(echo $VERSION | cut -d. -f2)
+              PATCH=$(echo $VERSION | cut -d. -f3)
+              [ -z "$PATCH" ] && PATCH=0
+              NEW_PATCH=$((PATCH + 1))
+              NEW_VERSION="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+              NEW_CODE="${MAJOR}${MINOR}${NEW_PATCH}"
+              echo "tag exists → bumping to $NEW_VERSION"
+          else
+              NEW_VERSION="$PROP_VERSION"
+              NEW_CODE="$PROP_CODE"
+              echo "tag not present → using module.prop as-is"
+          fi
 
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "new_code=$NEW_CODE"       >> $GITHUB_OUTPUT
-          echo "📦 Version: $LATEST_TAG → $NEW_VERSION (code=$NEW_CODE)"
+          echo "📦 Version: $NEW_VERSION (code=$NEW_CODE)"
 
-      - name: Sync module.prop with tag
+      - name: Sync module.prop with resolved version
         run: |
           NEW_VERSION="${{ steps.version.outputs.new_version }}"
           NEW_CODE="${{ steps.version.outputs.new_code }}"

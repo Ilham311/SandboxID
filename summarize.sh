@@ -48,7 +48,7 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     printf "  MISS    : %s\n"  "$(grep -c 'MISS'  "$IN")"
     printf "  CRASH   : %s\n"  "$(grep -c 'CRASH \[' "$IN")"
     printf "  DEATH   : %s\n"  "$(grep -c 'DEATH target' "$IN")"
-    printf "  MOUNT   : %s\n"  "$(grep -Ec 'do_mounts_via_fork|mount_target|bind ok' "$IN")"
+    printf "  MOUNT   : %s\n"  "$(grep -Ec 'child mount for pid=|bind-mount via companion|bind OK:' "$IN")"
     printf "  ANR     : %s\n"  "$(grep -c 'ANR in' "$IN")"
     printf "  FATAL   : %s\n"  "$(grep -c 'FATAL EXCEPTION' "$IN")"
     echo ""
@@ -135,8 +135,8 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     # Companion mount timeline
     # -----------------------------------------------------------------
     echo "--- Companion mount events ---"
-    grep -E 'CMD_DO_MOUNTS|do_mounts|bind (ok|fail)|setns|mount_target' "$IN" \
-        | head -25 | awk '{sub(/^.*TernakTTCompanion: /, ""); print "  " $0}'
+    grep -E 'child mount for pid=|bind-mount via companion|bind OK:|bind fail|setns->target|child: setns OK|child: open /proc/' "$IN" \
+        | head -25 | awk '{sub(/^.*(TernakTTCompanion|TernakTT): /, ""); print "  " $0}'
     echo ""
 
     # -----------------------------------------------------------------

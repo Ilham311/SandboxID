@@ -81,7 +81,28 @@ static std::map<std::string, std::string> g_id;
 static const std::string& val(const std::string& k) {
     static const std::string empty;
     auto it = g_id.find(k);
-    return it != g_id.end() ? it->second : empty;
+    if (it != g_id.end() && !it->second.empty()) return it->second;
+    // v1.0.12: fallback defaults for keys typically absent from identity.prop
+    // but heavily queried by TT/Grab (sourced from real leak telemetry).
+    static const std::map<std::string, std::string> defaults = {
+        {"SYS_BOOT_COMPLETED",    "1"},
+        {"GSM_OPERATOR_NUMERIC",  "51010"},           // Telkomsel ID
+        {"GSM_OPERATOR_ALPHA",    "Telkomsel"},
+        {"GSM_OPERATOR_ISO",      "id"},
+        {"BUILD_CHARACTERISTICS", "default"},
+        {"PERSIST_TIMEZONE",      "Asia/Jakarta"},
+        {"CPU_ABI",               "arm64-v8a"},
+        {"CPU_ABI2",              ""},                // empty is legit on arm64
+        {"CPU_ABILIST",           "arm64-v8a,armeabi-v7a,armeabi"},
+        {"CPU_ABILIST64",         "arm64-v8a"},
+        {"CPU_ABILIST32",         "armeabi-v7a,armeabi"},
+        {"DALVIK_HEAPGROWTHLIMIT","256m"},
+        {"MEDIACODEC_MIN_RATE",   "8000"},
+        {"MEDIACODEC_MAX_RATE",   "192000"},
+    };
+    auto d = defaults.find(k);
+    if (d != defaults.end()) return d->second;
+    return empty;
 }
 
 // ============================================================
@@ -113,6 +134,27 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         {"ro.build.version.security_patch", "SECURITY_PATCH"},
         {"ro.build.version.incremental",    "INCREMENTAL"},
         {"gsm.version.baseband",     "RADIO"},
+        // v1.0.12: top LEAK surfaces from v1.0.11 telemetry (session-20260726).
+        // These were querying 800+, 30+, and 5-10x per session in-app. Adding
+        // them to spoof map turns LEAK spam into SPOOF hits and prevents
+        // real-device values from being returned to fingerprinting SDKs.
+        {"sys.boot_completed",       "SYS_BOOT_COMPLETED"},
+        {"gsm.operator.numeric",     "GSM_OPERATOR_NUMERIC"},
+        {"gsm.sim.operator.numeric", "GSM_OPERATOR_NUMERIC"},
+        {"gsm.operator.alpha",       "GSM_OPERATOR_ALPHA"},
+        {"gsm.sim.operator.alpha",   "GSM_OPERATOR_ALPHA"},
+        {"gsm.operator.iso-country", "GSM_OPERATOR_ISO"},
+        {"gsm.sim.operator.iso-country", "GSM_OPERATOR_ISO"},
+        {"ro.build.characteristics", "BUILD_CHARACTERISTICS"},
+        {"persist.sys.timezone",     "PERSIST_TIMEZONE"},
+        {"ro.product.cpu.abi",       "CPU_ABI"},
+        {"ro.product.cpu.abi2",      "CPU_ABI2"},
+        {"ro.product.cpu.abilist",   "CPU_ABILIST"},
+        {"ro.product.cpu.abilist64", "CPU_ABILIST64"},
+        {"ro.product.cpu.abilist32", "CPU_ABILIST32"},
+        {"dalvik.vm.heapgrowthlimit","DALVIK_HEAPGROWTHLIMIT"},
+        {"ro.mediacodec.min_sample_rate", "MEDIACODEC_MIN_RATE"},
+        {"ro.mediacodec.max_sample_rate", "MEDIACODEC_MAX_RATE"},
     };
 
     auto it = map.find(k);
@@ -329,6 +371,16 @@ static void install_telephony_hook(JNIEnv* env) {
 static struct sigaction g_prev_sig[NSIG];
 static std::string g_watchdog_pkg;
 static long        g_load_time_ms = 0;
+// v1.0.12: per-signal counter to bound crash-log spam.
+// v1.0.9-v1.0.11 caused 42,944 CRASH events on a single pid because we
+// installed handlers for SIGSEGV/SIGBUS and chained to SIG_DFL via function
+// pointer (a no-op on Bionic). Kernel re-executed the faulting instruction
+// forever until LMK reaped. v1.0.12 fix: (a) remove SEGV/BUS/TERM/PIPE from
+// the watched set — ART needs them for JIT/page-fault/mmap; (b) after
+// logging, install SIG_DFL via sigaction so kernel actually terminates on
+// the next hit; (c) cap logs per signal to CRASH_LIMIT.
+static volatile sig_atomic_t g_crash_count[NSIG] = {0};
+static const int CRASH_LIMIT = 3;
 
 static long tt_now_ms() {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -348,32 +400,49 @@ static const char* tt_sig_name(int sig) {
     }
 }
 static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
-    long alive = tt_now_ms() - g_load_time_ms;
-    // async-signal-safe-ish; __android_log_print is technically not, but
-    // ART already uses it in its own signal handler, so best-effort here.
-    LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%ldms",
-         TT_VARIANT_TAG,
-         g_watchdog_pkg.c_str(), getpid(),
-         sig, tt_sig_name(sig),
-         info ? info->si_code : 0,
-         info ? info->si_addr : nullptr,
-         info ? info->si_pid  : 0,
-         alive);
-#ifdef TT_DEBUG
-    // Extra: which signal-firing FDs are open? First 3 mount lines?
-    // (Kept simple; more forensics is easy to add later.)
-#endif
-    // Chain to previous handler so tombstone / ART crash reporter still runs.
+    int n = 0;
+    if (sig >= 0 && sig < NSIG) n = ++g_crash_count[sig];
+
+    if (n <= CRASH_LIMIT) {
+        long alive = tt_now_ms() - g_load_time_ms;
+        // async-signal-safe-ish; __android_log_print is technically not, but
+        // ART already uses it in its own signal handler, so best-effort here.
+        LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%ldms hit=%d/%d",
+             TT_VARIANT_TAG,
+             g_watchdog_pkg.c_str(), getpid(),
+             sig, tt_sig_name(sig),
+             info ? info->si_code : 0,
+             info ? info->si_addr : nullptr,
+             info ? info->si_pid  : 0,
+             alive, n, CRASH_LIMIT);
+    }
+
+    // v1.0.12: chain-to-SIG_DFL via function pointer is a no-op on Bionic,
+    // so we install the actual default handler via sigaction and let the
+    // kernel resume the faulting instruction. The next fault (or the same
+    // one, if the PC hasn't moved) hits SIG_DFL and the kernel terminates
+    // + generates the tombstone via debuggerd. This breaks the crash loop
+    // that produced 42k events per pid in v1.0.11.
     if (sig >= 0 && sig < NSIG) {
+        // If the previous handler was a real function (ART tombstone hook,
+        // libsigchain, etc.) restore it so ART crash reporter still runs.
         struct sigaction* p = &g_prev_sig[sig];
-        if (p->sa_flags & SA_SIGINFO) {
-            if (p->sa_sigaction) p->sa_sigaction(sig, info, ctx);
-            else                 signal(sig, SIG_DFL), raise(sig);
+        bool prev_is_real =
+            ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction != nullptr) ||
+            (!(p->sa_flags & SA_SIGINFO) &&
+             p->sa_handler != SIG_DFL && p->sa_handler != SIG_IGN &&
+             p->sa_handler != nullptr);
+        if (prev_is_real) {
+            sigaction(sig, p, nullptr);
         } else {
-            if (p->sa_handler == SIG_DFL) { signal(sig, SIG_DFL); raise(sig); }
-            else if (p->sa_handler != SIG_IGN && p->sa_handler) p->sa_handler(sig);
+            struct sigaction dfl;
+            memset(&dfl, 0, sizeof(dfl));
+            dfl.sa_handler = SIG_DFL;
+            sigaction(sig, &dfl, nullptr);
         }
     }
+    // Do NOT invoke the previous handler here — returning lets the kernel
+    // re-run the faulting instruction under the newly-restored handler.
 }
 static void install_crash_watchdog(const std::string& pkg) {
     g_watchdog_pkg  = pkg;
@@ -383,9 +452,18 @@ static void install_crash_watchdog(const std::string& pkg) {
     sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
     sa.sa_sigaction = tt_signal_handler;
     sigemptyset(&sa.sa_mask);
-    static const int sigs[] = { SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE, SIGTERM, SIGPIPE, SIGSYS };
-    for (int s : sigs) sigaction(s, &sa, &g_prev_sig[s]);
-    LOGD("crash watchdog armed for %s (8 signals)", pkg.c_str());
+    // v1.0.12: reduced from 8 to 4 signals. Removed:
+    //   SIGSEGV, SIGBUS  — ART/JIT + mmap page faults trigger these normally.
+    //                       Catching without reliably terminating = crash loop.
+    //   SIGTERM, SIGPIPE — not fatal; broken pipe & normal shutdown are noise.
+    // Kept: real programmer errors that ART won't recover from.
+    static const int sigs[] = { SIGABRT, SIGFPE, SIGILL, SIGSYS };
+    for (int s : sigs) {
+        g_crash_count[s] = 0;
+        sigaction(s, &sa, &g_prev_sig[s]);
+    }
+    LOGD("crash watchdog armed for %s (4 signals: ABRT/FPE/ILL/SYS, limit=%d)",
+         pkg.c_str(), CRASH_LIMIT);
 }
 
 // ============================================================

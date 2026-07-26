@@ -1,7 +1,7 @@
 id=ternak_tt
 name=Ternak TT — Zygisk Fresh Persona
-version=v1.0.11
-versionCode=111
+version=v1.0.12
+versionCode=112
 author=diru768
-description=Zygisk device spoofer targeting TikTok (musically/trill/lite) + Grab Passenger. 6-layer Java hook + 59 native prop + companion fork+setns bind mount overlay. v1.0.11: auto-summarizer on Action tap — raw session log (10+ MB) is condensed into a chat-friendly digest (~5-15 KB) + gzipped raw + persistent crash journal, all in /sdcard/Download/ternak-tt-logs/. Zero-cmd debug loop: flash debug zip → use app → tap Action → share summary-*.txt. Works on Zygisk-Next / HMA-OSS.
+description=Zygisk device spoofer targeting TikTok (musically/trill/lite) + Grab Passenger. 6-layer Java hook + 76 native prop (18 new: gsm.operator.*, sys.boot_completed, ro.build.characteristics, cpu.abi*, persist.sys.timezone) + companion fork+setns bind mount overlay. v1.0.12: FIXED crash-storm bug (v1.0.11 caused 42k CRASH events / pid because SIGSEGV+SIGBUS handler chained to SIG_DFL via function pointer = infinite loop). Watchdog now covers only SIGABRT/SIGFPE/SIGILL/SIGSYS, rate-limited to 3 hits/signal, and restores actual SIG_DFL via sigaction so kernel terminates naturally. Auto-summarizer on Action tap. Works on Zygisk-Next / HMA-OSS.
 updateJson=https://raw.githubusercontent.com/diru768/ternak-tt/main/update.json
