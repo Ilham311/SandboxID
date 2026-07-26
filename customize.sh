@@ -1,8 +1,9 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.1.3"
+ui_print "- Ternak TT v1.1.4"
 ui_print "- + FIX v1.1.3: early bail-out for root/system/shell apps"
+ui_print "- + FIX v1.1.4: build fix — <sys/socket.h> + forward decl (CI green)"
 ui_print "-   (skips companion IPC for KSU, Magisk, Shizuku, Termux, ...)"
 ui_print "-   fixes Android 15 Instrumentation-null NPE race on BOOT_COMPLETED"
 ui_print "- + 500ms socket timeout on companion IPC (belt-and-suspenders)"

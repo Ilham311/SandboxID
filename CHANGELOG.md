@@ -9,6 +9,20 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.1.4
+
+### Fixed
+- Build error in v1.1.3 on GitHub Actions (arm64-v8a release):
+  - `use of undeclared identifier 'should_skip_early_v113'` at `jni/main.cpp:724` — helper defined after use site. Added forward declaration near top of file.
+  - `use of undeclared identifier 'SOL_SOCKET' / 'SO_RCVTIMEO' / 'SO_SNDTIMEO'` at `jni/main.cpp:741-742` — missing `#include <sys/socket.h>`. Added.
+- `-Wdeprecated-volatile` warning at `jni/main.cpp:460` (`++g_crash_count[sig]` on `volatile sig_atomic_t`). Rewritten as two-statement assignment to silence deprecation on Clang 17+ (NDK r26d).
+
+### Notes
+- No runtime behavior changes vs v1.1.3. This release only makes v1.1.3 actually compile.
+- Path B (Java hooks via lsplant) still requires `./fetch_lsplant.sh` to succeed in CI. If the fetch step fails, the module builds with Path A only and logs `Path B: unavailable` at startup — this is graceful degradation, not a crash.
+
+---
+
 ## v1.1.3
 
 **Focus**: Fix Android 15 race condition where root/superuser-managed apps (KernelSU manager, Shizuku, Magisk manager, Termux, ...) crash with `Instrumentation.onException` NPE when the module is active. Root cause was synchronous companion IPC delay racing with `ActivityThread.handleBindApplication`.

@@ -9,6 +9,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/system_properties.h>
 #include <android/log.h>
 #include <string>
@@ -20,6 +21,9 @@
 #include <ctime>
 #include "zygisk.hpp"
 #include "java_hooks.hpp"
+
+// v1.1.4: forward decl for early-skip helper defined near end of file.
+static bool should_skip_early_v113(const std::string& pkg);
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -457,7 +461,7 @@ static const char* tt_sig_name(int sig) {
 }
 static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
-    if (sig >= 0 && sig < NSIG) n = ++g_crash_count[sig];
+    if (sig >= 0 && sig < NSIG) { g_crash_count[sig] = g_crash_count[sig] + 1; n = g_crash_count[sig]; }
 
     if (n <= CRASH_LIMIT) {
         long alive = tt_now_ms() - g_load_time_ms;
