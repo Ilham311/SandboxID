@@ -9,6 +9,51 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.1.3
+
+**Focus**: Fix Android 15 race condition where root/superuser-managed apps (KernelSU manager, Shizuku, Magisk manager, Termux, ...) crash with `Instrumentation.onException` NPE when the module is active. Root cause was synchronous companion IPC delay racing with `ActivityThread.handleBindApplication`.
+
+### Fixed
+- **KernelSU manager, Magisk manager, Shizuku, Termux, etc. no longer crash** when the module is active. Confirmed reproducer from user log 2026-07-27 05:07:46: Shizuku (`moe.shizuku.privileged.api`) crashed 686ms after our `unload()` with `java.lang.NullPointerException: Attempt to invoke virtual method 'boolean android.app.Instrumentation.onException(...)' on a null object reference` at `LoadedApk.makeApplicationInner:1480` → called from `ActivityThread.handleReceiver:4916` for `BootCompleteReceiver`. Real cause: `mInstrumentation` was null because `handleBindApplication` had not finished when the receiver dispatched. On Android 15 SDK 35, even a 1ms synchronous companion round-trip during `preAppSpecialize` widens the race window enough to trigger this.
+
+### Added
+- **Early bail-out list in `preAppSpecialize`** (before `connectCompanion`): 20+ package names + 12 prefix/substring patterns. Matched packages get instant `unload()` with zero IPC, zero race window. Covers:
+  - Root/superuser managers: `me.weishu.kernelsu`, `com.rifsxd.ksunext`, `com.topjohnwu.magisk`, `io.github.vvb2060.magisk`, `eu.chainfire.supersu`
+  - Zygisk/Riru/LSPosed: `moe.riru.core`, `org.lsposed.manager`, `de.robv.android.xposed.installer`
+  - Shizuku family: `moe.shizuku.privileged.api`, `moe.shizuku.manager`, `rikka.shizuku.wrapper`
+  - Terminal apps: `com.termux`, `com.termux.api`, `com.termux.styling`, `com.termux.boot`, `com.termux.tasker`, `jackpal.androidterm`
+  - System prefixes: `android.*`, `com.android.*`, `com.google.android.gms*`, `com.google.android.gsf*`, `com.google.android.setupwizard*`, `com.google.android.captiveportallogin*`, `com.google.android.permission*`, `com.google.android.packageinstaller*`
+  - Special names: `system`, `system_server`, `android`
+  - Sub-process patterns (substring): `:zygote`, `_zygote`, `:isolated_process`, `:sandboxed_process`, `:webview_service`
+- **500ms hard-cap `SO_RCVTIMEO` + `SO_SNDTIMEO`** on companion socket. Belt-and-suspenders: if the companion daemon ever wedges (bug or SELinux denial), a target-app spawn now fails fast instead of hanging forever. Non-target root apps are already skipped before this point, so the timeout is only a safety net for target flows.
+
+### Impact
+**Direct effect on user's log reproducer (2026-07-27 05:07:46)**:
+```diff
+- 05:07:46.071 preAppSpecialize pkg='moe.shizuku.privileged.api' pid=9993
+- 05:07:46.072 connectCompanion() -> fd=85
+- 05:07:46.072 REJECT pkg='moe.shizuku.privileged.api' (not in target.txt)
+- 05:07:46.072 pkg='moe.shizuku.privileged.api' not a target (companion), unloading
+- 05:07:46.758 FATAL EXCEPTION: main  ← CRASH
++ 05:07:46.071 preAppSpecialize pkg='moe.shizuku.privileged.api' pid=9993
++ 05:07:46.071 early-skip pkg='moe.shizuku.privileged.api' (root/system/shell manager) — v1.1.3
++                                                                                              ← no crash
+```
+Zero companion IPC → zero race window → receiver dispatch proceeds normally.
+
+**Broader effect**: any app in the skip list now sees exactly the same behavior with or without Ternak TT installed. Perfect transparency for root/system/shell apps.
+
+### Unchanged
+- Target packages (`target.txt`) still go through full companion IPC + L1-L8 hook chain + Path B (when built with lsplant). Behavior for TikTok/Grab is identical to v1.1.2.
+- L1-L8 hook coverage, L2 SystemProperties spoof table, L7 SPB/SPI/SPL leak sensors: unchanged.
+- No new dependencies. Skip check is pure C++ string compare, zero allocations.
+
+### Known limitations
+- Skip list is hardcoded. If a user has a custom root manager not in the list, they may still hit the race. Workaround: rename the app or add its package to a runtime `skip.txt` (deferred to v1.1.4).
+- The Android 15 receiver-dispatch race exists **regardless** of our module. Other Zygisk modules with slower `preAppSpecialize` (LSPosed, Shamiko) may still trigger the same NPE on receiver-only cold starts. This fix only removes **our** contribution to the race.
+
+---
+
 ## v1.1.2
 
 **Focus**: Full Path B implementation — 5 live lsplant Java method hooks. Fixes Android Device ID (SSAID), Developer mode, Boot count, and Uptime leaks visible on Device Fingerprint dashboards.

@@ -711,9 +711,36 @@ public:
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
         if (pkg.empty()) { unload(); return; }
 
+        // v1.1.3: Early bail-out BEFORE companion IPC for known non-target
+        // root/system/shell processes. Motivation: on Android 15 SDK 35, even
+        // a 1ms synchronous companion round-trip during preAppSpecialize can
+        // race with ActivityThread.handleBindApplication when a
+        // receiver-only process (e.g. BOOT_COMPLETED to Shizuku) is spawned,
+        // causing NPE inside LoadedApk.makeApplicationInner because
+        // mInstrumentation is not yet set. Skipping the IPC entirely for
+        // these packages removes the race window. Root apps in this list
+        // never need spoofing anyway (they see the real device, not the
+        // TikTok/Grab persona).
+        if (should_skip_early_v113(pkg)) {
+            LOGD("early-skip pkg='%s' (root/system/shell manager) — v1.1.3",
+                 pkg.c_str());
+            unload();
+            return;
+        }
+
         int fd = api_->connectCompanion();
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { LOGD("companion connect failed for pkg='%s'", pkg.c_str()); unload(); return; }
+
+        // v1.1.3: 500ms hard cap on companion socket read/write so a wedged
+        // companion daemon can never block preAppSpecialize indefinitely.
+        {
+            struct timeval tv;
+            tv.tv_sec  = 0;
+            tv.tv_usec = 500000;  // 500ms
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        }
 
         uint8_t cmd = CMD_GET_IDENTITY;
         write(fd, &cmd, 1);
@@ -874,6 +901,64 @@ private:
         }
     }
 };
+
+// v1.1.3 skip list — packages that must NEVER go through companion IPC.
+// These are root/superuser managers, terminal apps, system apps, and Zygote
+// sub-processes. Called only during preAppSpecialize, so cost is one
+// std::string compare per app spawn.
+static bool should_skip_early_v113(const std::string& pkg) {
+    // Root / superuser / Zygisk managers
+    static const char* const roots[] = {
+        "me.weishu.kernelsu",
+        "me.weishu.kernelsu.manager",
+        "io.github.a13e300.ksuwebui",
+        "com.rifsxd.ksunext",
+        "com.topjohnwu.magisk",
+        "io.github.vvb2060.magisk",
+        "com.kernelsu.manager",
+        "eu.chainfire.supersu",
+        // Shizuku family (BOOT_COMPLETED race target on Android 15)
+        "moe.shizuku.privileged.api",
+        "moe.shizuku.manager",
+        "rikka.shizuku.wrapper",
+        // Riru / LSPosed / Xposed variants
+        "moe.riru.core",
+        "org.lsposed.manager",
+        "de.robv.android.xposed.installer",
+        // Termux family
+        "com.termux",
+        "com.termux.api",
+        "com.termux.styling",
+        "com.termux.boot",
+        "com.termux.tasker",
+        // Terminal / dev tools that often run as root
+        "jackpal.androidterm",
+        "com.spartacusrex.spartacuside",
+        // Ourselves (defensive)
+        "com.ternak.tt",
+    };
+    for (const char* r : roots) if (pkg == r) return true;
+
+    // System packages — never spoofing targets
+    if (pkg.rfind("android.", 0)          == 0) return true;
+    if (pkg.rfind("com.android.", 0)      == 0) return true;
+    if (pkg.rfind("com.google.android.gms", 0)      == 0) return true;
+    if (pkg.rfind("com.google.android.gsf", 0)      == 0) return true;
+    if (pkg.rfind("com.google.android.setupwizard", 0) == 0) return true;
+    if (pkg.rfind("com.google.android.captiveportallogin", 0) == 0) return true;
+    if (pkg.rfind("com.google.android.permission", 0) == 0) return true;
+    if (pkg.rfind("com.google.android.packageinstaller", 0) == 0) return true;
+    if (pkg == "system" || pkg == "system_server" || pkg == "android") return true;
+
+    // Zygote / isolated sub-processes
+    if (pkg.find(":zygote")            != std::string::npos) return true;
+    if (pkg.find("_zygote")            != std::string::npos) return true;
+    if (pkg.find(":isolated_process")  != std::string::npos) return true;
+    if (pkg.find(":sandboxed_process") != std::string::npos) return true;
+    if (pkg.find(":webview_service")   != std::string::npos) return true;
+
+    return false;
+}
 
 REGISTER_ZYGISK_MODULE(TernakTT)
 
