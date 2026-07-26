@@ -74,10 +74,25 @@ jobs:
           curl -fsSL -o jni/zygisk.hpp \
             https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
 
+      - name: Setup JDK (Path B helper compile)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK build-tools (d8 for Path B)
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;34.0.0'
+
       - name: Fetch lsplant + Dobby (Path B)
         continue-on-error: true
         run: |
           set -eu
+          # Put d8 on PATH
+          if [ -n "${ANDROID_HOME:-}" ] && [ -x "$ANDROID_HOME/build-tools/34.0.0/d8" ]; then
+            export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          fi
           chmod +x fetch_lsplant.sh || true
           ./fetch_lsplant.sh || echo "fetch_lsplant.sh failed — Path B will be disabled for this build"
 

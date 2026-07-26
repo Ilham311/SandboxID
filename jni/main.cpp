@@ -782,13 +782,70 @@ public:
 #endif
         install_crash_watchdog(pkg_);
 
+        // v1.1.1 L8: TimeZone + Locale default spoof (pure JNI, Path A).
+        // Fixes the "Time zone" and "Locale (Region)" rows on device
+        // fingerprint dashboards without needing lsplant. Clears the JVM's
+        // cached TimeZone/Locale defaults for this target process by calling
+        // setDefault() with spoofed values from the identity blob.
+        {
+            auto get_id = [](const char* k, const char* def) -> std::string {
+                auto it = g_id.find(k);
+                return (it != g_id.end() && !it->second.empty()) ? it->second : std::string(def);
+            };
+            const std::string tz_id    = get_id("TIMEZONE_ID",    "America/Los_Angeles");
+            const std::string loc_lang = get_id("LOCALE_LANG",    "en");
+            const std::string loc_ctry = get_id("LOCALE_COUNTRY", "US");
+
+            // TimeZone.setDefault(TimeZone.getTimeZone(id))
+            if (jclass TZ = env_->FindClass("java/util/TimeZone")) {
+                jmethodID getTZ = env_->GetStaticMethodID(TZ, "getTimeZone",
+                    "(Ljava/lang/String;)Ljava/util/TimeZone;");
+                jmethodID setTZ = env_->GetStaticMethodID(TZ, "setDefault",
+                    "(Ljava/util/TimeZone;)V");
+                if (getTZ && setTZ) {
+                    jstring id_s = env_->NewStringUTF(tz_id.c_str());
+                    jobject tz_obj = env_->CallStaticObjectMethod(TZ, getTZ, id_s);
+                    if (tz_obj && !env_->ExceptionCheck()) {
+                        env_->CallStaticVoidMethod(TZ, setTZ, tz_obj);
+                        LOGI("L8 TZ spoof: setDefault(%s)", tz_id.c_str());
+                        env_->DeleteLocalRef(tz_obj);
+                    }
+                    env_->DeleteLocalRef(id_s);
+                }
+                env_->DeleteLocalRef(TZ);
+            }
+            if (env_->ExceptionCheck()) env_->ExceptionClear();
+
+            // Locale.setDefault(new Locale(lang, country))
+            if (jclass LC = env_->FindClass("java/util/Locale")) {
+                jmethodID ctor = env_->GetMethodID(LC, "<init>",
+                    "(Ljava/lang/String;Ljava/lang/String;)V");
+                jmethodID setLC = env_->GetStaticMethodID(LC, "setDefault",
+                    "(Ljava/util/Locale;)V");
+                if (ctor && setLC) {
+                    jstring lang_s = env_->NewStringUTF(loc_lang.c_str());
+                    jstring ctry_s = env_->NewStringUTF(loc_ctry.c_str());
+                    jobject loc_obj = env_->NewObject(LC, ctor, lang_s, ctry_s);
+                    if (loc_obj && !env_->ExceptionCheck()) {
+                        env_->CallStaticVoidMethod(LC, setLC, loc_obj);
+                        LOGI("L8 Locale spoof: setDefault(%s_%s)",
+                             loc_lang.c_str(), loc_ctry.c_str());
+                        env_->DeleteLocalRef(loc_obj);
+                    }
+                    env_->DeleteLocalRef(lang_s);
+                    env_->DeleteLocalRef(ctry_s);
+                }
+                env_->DeleteLocalRef(LC);
+            }
+            if (env_->ExceptionCheck()) env_->ExceptionClear();
+        }
+
         // v1.1.0 Path B: lsplant-based Java method hooks (scaffold; no-op
         // unless built with -DTT_HAVE_LSPLANT=1 via fetch_lsplant.sh + CI).
+        // v1.1.1: ident now populated from parsed identity blob (g_id).
         {
-            std::map<std::string, std::string> ident;
-            // TODO(v1.1.1): populate ident from parsed /data/adb/modules/ternak_tt/identity.prop
             if (ternak_tt::java_hooks::Init(env_)) {
-                ternak_tt::java_hooks::InstallAll(env_, ident);
+                ternak_tt::java_hooks::InstallAll(env_, g_id);
             }
         }
     }

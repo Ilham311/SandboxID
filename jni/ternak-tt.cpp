@@ -113,6 +113,8 @@ struct Identity {
             "BOOTLOADER","HOST","USER","TYPE","TAGS",
             "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
             "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
+            "TIMEZONE_ID","LOCALE_LANG","LOCALE_COUNTRY",
+            "UPTIME_OFFSET_MS",
         };
         std::string out;
         for (const auto& k : order) {
@@ -185,6 +187,23 @@ static Identity gen_identity() {
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
+
+    // v1.1.1: TZ + Locale for JNI-side setDefault() spoof (L8)
+    // Fixed to US persona to match Pixel build fingerprint; randomization
+    // would require pool-aware locale mapping (deferred).
+    id.kv["TIMEZONE_ID"]    = "America/Los_Angeles";
+    id.kv["LOCALE_LANG"]    = "en";
+    id.kv["LOCALE_COUNTRY"] = "US";
+
+    // v1.1.2 Path B: uptime offset (added to SystemClock.uptimeMillis /
+    // elapsedRealtime via lsplant hook). Random 1h-30d in ms so persona
+    // looks like a device that has been up for a plausible time.
+    {
+        std::uniform_int_distribution<long long> upt(3600LL * 1000,
+                                                     30LL * 86400 * 1000);
+        id.kv["UPTIME_OFFSET_MS"] = std::to_string(upt(g));
+    }
+
     return id;
 }
 

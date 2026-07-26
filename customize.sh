@@ -1,11 +1,17 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.1.0"
+ui_print "- Ternak TT v1.1.2"
 ui_print "- TikTok + Grab Zygisk fresh persona"
+ui_print "- + Path B FULL: lsplant Java method hooks (5 hooks live)"
+ui_print "-   * Settings.Secure.getString  -> android_id spoof"
+ui_print "-   * Settings.Global.getString  -> dev_settings/adb spoof"
+ui_print "-   * Settings.Global.getInt     -> boot_count/dev_mode spoof"
+ui_print "-   * SystemClock.uptimeMillis   -> +offset"
+ui_print "-   * SystemClock.elapsedRealtime -> +offset"
+ui_print "- + L8: TimeZone.setDefault() + Locale.setDefault() JNI spoof"
 ui_print "- + kernel identity bind (proc_uptime + kernel_boot_id)"
 ui_print "- + rich BIND-FAIL diagnostic (src/dst stat + errno + strerror)"
-ui_print "- + Path B java_hooks scaffold (lsplant integration, opt-in via fetch_lsplant.sh)"
 ui_print "- + runtime target.txt (edit whitelist, no rebuild)"
 ui_print "- + companion hot-reloads target.txt on mtime change"
 ui_print "- + `ternak-tt targets` CLI to view whitelist"
