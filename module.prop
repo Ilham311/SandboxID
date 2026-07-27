@@ -1,7 +1,7 @@
 id=ternak_tt
 name=Ternak TT — Zygisk Fresh Persona
-version=v1.0.19
-versionCode=119
+version=v1.0.20
+versionCode=1020
 author=Ilham311
 description=Zygisk device spoofer targeting TikTok (musically/trill/lite) + Grab Passenger. 6-layer Java hook + 78 native prop spoofs + L7 TYPED spoof tables + companion fork+setns bind mount overlay. v1.0.19: Action button is now 1-tap ready — freshen writes new identity.prop, then rotate_ids.sh all applies SSAID wipe + GAID + wlan MAC + Bluetooth MAC + device/BT name to the shell layer using the SAME persona (MODEL/GOOGLE_AID/etc read back from identity.prop, no random Brand/Model list clash with hooks). WIFI_MAC, BLUETOOTH_ADDR, BLUETOOTH_NAME now persisted to identity.prop for reboot-idempotent state. New helpers.sh shared library (log_*, se_permissive refcounted, get_users, identity_get/persist, backup_rotate). Backups auto-rotate (keep 10). Works on Zygisk-Next / HMA-OSS.
 updateJson=https://raw.githubusercontent.com/Ilham311/Tt/main/update.json
