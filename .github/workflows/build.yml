@@ -45,13 +45,11 @@ jobs:
           PROP_CODE=$(grep '^versionCode=' module.prop | cut -d= -f2)
           FORCE="${{ github.event.inputs.force_version }}"
 
-          # Highest existing semver tag (fallback: v0.0.0)
           HIGHEST=$(git tag --sort=-v:refname \
                     | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
                     | head -1 || true)
           [ -z "$HIGHEST" ] && HIGHEST="v0.0.0"
 
-          # semver max helper: picks the higher of two vA.B.C strings
           higher() {
             printf '%s\n%s\n' "$1" "$2" \
               | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -61,12 +59,10 @@ jobs:
 
           if [ -n "$FORCE" ]; then
             BASE="$FORCE"
-            echo "force_version=$FORCE"
           else
             BASE=$(higher "$PROP_VERSION" "$HIGHEST")
           fi
 
-          # Loop-safe: keep bumping patch until we hit an unused tag.
           NEW_VERSION="$BASE"
           BUMPS=0
           while git rev-parse -q --verify "refs/tags/${NEW_VERSION}" >/dev/null; do
@@ -78,15 +74,12 @@ jobs:
             NP=$((PAT + 1))
             NEW_VERSION="v${MAJ}.${MIN}.${NP}"
             BUMPS=$((BUMPS + 1))
-            # Safety fuse: refuse to bump more than 500 patches in one run.
             if [ "$BUMPS" -gt 500 ]; then
               echo "::error::Bumped >500 times without finding a free tag. Aborting."
               exit 1
             fi
           done
 
-          # Monotonic versionCode: increment from module.prop's current code by
-          # the number of bumps we needed. If BUMPS==0, keep prop code.
           if [ "$BUMPS" -gt 0 ]; then
             NEW_CODE=$((PROP_CODE + BUMPS))
           else
@@ -149,41 +142,6 @@ jobs:
 
       - name: List artifacts
         run: ls -lh dist/
-
-      - name: Setup Node.js (for public-build obfuscators)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install obfuscator toolchain
-        run: |
-          set -eu
-          npm install -g \
-            javascript-obfuscator \
-            clean-css-cli \
-            html-minifier-terser
-          echo 'installed:'
-          javascript-obfuscator --version || true
-          cleancss --version || true
-          html-minifier-terser --version || true
-
-      - name: Build public variant (obfuscated, no update, no source)
-        run: |
-          set -eu
-          chmod +x build-public.sh
-          mkdir -p dist-public
-          NV="${{ steps.version.outputs.new_version }}"
-          ./build-public.sh . "dist-public/ternak-tt-${NV}-public.zip"
-          ls -lh dist-public/
-
-      - name: Upload public artifact (workflow-only, NOT released)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ternak-tt-public-DO-NOT-SHARE
-          path: dist-public/*.zip
-          if-no-files-found: error
-          retention-days: 30
-
 
       - name: Generate checksums
         run: |
@@ -289,7 +247,6 @@ jobs:
             exit 0
           fi
           git commit -m "chore(release): sync ${{ steps.version.outputs.new_version }} [skip ci]"
-          # Retry loop: rebase-and-push in case of concurrent commits.
           for i in 1 2 3 4 5; do
             if git push origin HEAD:${GITHUB_REF_NAME}; then
               echo "push ok (attempt $i)"

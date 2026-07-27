@@ -61,15 +61,15 @@ build_variant() {
   [ -f target.txt ] && cp target.txt "$PKG/"
   [ -f helpers.sh ] && cp helpers.sh "$PKG/"
   [ -f rotate_ids.sh ] && cp rotate_ids.sh "$PKG/"
-[ -d webroot ] && cp -R webroot "$PKG/"
+  [ -d webroot ] && cp -R webroot "$PKG/"
 
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"
-    echo "variant=debug" >  "$PKG/debug_variant"
+    echo "variant=debug"              >  "$PKG/debug_variant"
     echo "created=$(date -u +%FT%TZ)" >> "$PKG/debug_variant"
-    echo "version=$VERSION" >> "$PKG/debug_variant"
+    echo "version=$VERSION"           >> "$PKG/debug_variant"
     mkdir -p "$PKG/debug"
-    echo "# Auto-populated by service.sh on boot. Latest session-YYYYMMDD-HHMMSS.log lives here." \
+    echo "Auto-populated by service.sh on boot. Latest session log lives here." \
       > "$PKG/debug/README.txt"
   fi
 
