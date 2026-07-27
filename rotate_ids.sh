@@ -1,17 +1,4 @@
 #!/system/bin/sh
-# Ternak TT v1.0.19 - identifier rotation CLI.
-#
-# Called by action.sh AFTER `bin/ternak-tt freshen` so we read the freshly-
-# written identity.prop (MODEL, DEVICE, ANDROID_ID, GOOGLE_AID, ...) and
-# apply the SAME values to the shell layer. Result: L1/L2 Java hooks +
-# native prop + shell files all report the same persona.
-#
-# Usage:
-#   sh rotate_ids.sh all               (default: full rotate)
-#   sh rotate_ids.sh safe              (GAID + BT-MAC + device-name, no reboot)
-#   sh rotate_ids.sh ssaid|gaid|wlan-mac|bt-mac|device-name
-#   sh rotate_ids.sh status            (read-only snapshot)
-#   sh rotate_ids.sh help
 
 set -u
 MODDIR="${MODDIR:-/data/adb/modules/ternak_tt}"
@@ -27,9 +14,6 @@ fi
 REBOOT_NEEDED=0
 FAILURES=0
 
-# =====================================================================
-# wipe_ssaid - clear settings_ssaid.xml per user, backup first
-# =====================================================================
 wipe_ssaid() {
     log_step "Wipe SSAID (backup + surgical)"
     se_permissive
@@ -53,10 +37,6 @@ wipe_ssaid() {
     return 0
 }
 
-# =====================================================================
-# set_gaid_value - reads identity.prop GOOGLE_AID (fresh from freshen);
-# writes to Settings.Global + adid_settings.xml in GMS
-# =====================================================================
 set_gaid_value() {
     newgaid="${1:-}"
     [ -z "$newgaid" ] && newgaid="$(identity_get GOOGLE_AID 2>/dev/null || true)"
@@ -111,10 +91,6 @@ XMLEOF
     return 0
 }
 
-# =====================================================================
-# randomize_wlan_mac - wlan0 MAC + wipe WifiConfigStore (backup first)
-# Persists WIFI_MAC to identity.prop for next-tap consistency.
-# =====================================================================
 randomize_wlan_mac() {
     newmac="${1:-}"
     [ -z "$newmac" ] && newmac="$(identity_get WIFI_MAC 2>/dev/null || true)"
@@ -150,9 +126,6 @@ randomize_wlan_mac() {
     return 0
 }
 
-# =====================================================================
-# rotate_bluetooth_mac - BT adapter MAC + bt_config.conf Address
-# =====================================================================
 rotate_bluetooth_mac() {
     newbt="${1:-}"
     [ -z "$newbt" ] && newbt="$(identity_get BLUETOOTH_ADDR 2>/dev/null || true)"
@@ -204,12 +177,6 @@ rotate_bluetooth_mac() {
     return 0
 }
 
-# =====================================================================
-# sync_device_name - derives name from identity.prop MODEL so it MATCHES
-# the L1/L2 hook persona (freshen already sets Build.MODEL to this value).
-# Random Brand/Model lists were removed in v1.0.19 because they clashed
-# with the hook's chosen persona ("Galaxy S24" name over Pixel 8 hook).
-# =====================================================================
 sync_device_name() {
     NEW_NAME="${1:-}"
     [ -z "$NEW_NAME" ] && NEW_NAME="$(identity_get BLUETOOTH_NAME 2>/dev/null || true)"
@@ -257,9 +224,6 @@ sync_device_name() {
     return 0
 }
 
-# =====================================================================
-# cmd_status - read-only current state snapshot
-# =====================================================================
 cmd_status() {
     log_step "Current identifier state"
     if [ -f "$IDENTITY_FILE" ]; then
@@ -290,9 +254,6 @@ cmd_status() {
     done
 }
 
-# =====================================================================
-# dispatch
-# =====================================================================
 cmd="${1:-all}"
 shift 2>/dev/null || true
 MODVER=$(awk -F= '$1=="version"{print $2}' "$MODDIR/module.prop" 2>/dev/null)

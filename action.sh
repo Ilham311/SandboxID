@@ -1,19 +1,4 @@
 #!/system/bin/sh
-# Ternak TT v1.0.19 - 1-tap Action.
-#
-# Flow:
-#   1. bin/ternak-tt freshen  -> writes new identity.prop
-#      (MODEL, DEVICE, BRAND, SERIAL, ANDROID_ID, GOOGLE_AID, ...)
-#      -> also runs `settings put global device_name MODEL`
-#   2. rotate_ids.sh all      -> applies the SAME persona to the shell layer:
-#        - wipe_ssaid            (needs reboot to regenerate)
-#        - set_gaid_value        (reads GOOGLE_AID from step 1)
-#        - randomize_wlan_mac    (persists WIFI_MAC to identity.prop)
-#        - rotate_bluetooth_mac  (persists BLUETOOTH_ADDR to identity.prop)
-#        - sync_device_name      (reads MODEL from step 1 - matches hook)
-#   3. (debug variant only) snapshot latest session log to /sdcard/Download/
-#
-# Result: single tap = fresh persona applied end-to-end. No manual sh calls.
 
 MODDIR="${0%/*}"
 BIN="$MODDIR/bin/ternak-tt"
@@ -48,7 +33,6 @@ if [ "$RC_ROTATE" != "0" ] && [ "$RC_ROTATE" != "1" ]; then
     echo "[Ternak TT] see $LOGFILE for details"
 fi
 
-# --- debug variant: snapshot session log to /sdcard/Download ---
 if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then
     LATEST=$(ls -1t "$MODDIR/debug"/session-*.log 2>/dev/null | head -1)
     if [ -n "$LATEST" ]; then

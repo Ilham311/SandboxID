@@ -1,6 +1,4 @@
 #!/system/bin/sh
-# Ternak TT v1.0.19 - shared shell library.
-# Sourced by rotate_ids.sh. Do not execute directly.
 
 MODDIR="${MODDIR:-/data/adb/modules/ternak_tt}"
 LOGFILE="${LOGFILE:-/cache/ternak-tt-boot.log}"
@@ -12,7 +10,6 @@ chmod 0700 "$BACKUP_DIR_ROOT" 2>/dev/null
 [ -w "$(dirname "$LOGFILE")" ] || LOGFILE=/data/local/tmp/ternak-tt-boot.log
 touch "$LOGFILE" 2>/dev/null
 
-# --- logging ---
 _now() { date '+%Y-%m-%d %H:%M:%S'; }
 _log() { printf '[%s] %s\n' "$(_now)" "$*" | tee -a "$LOGFILE" >/dev/null; }
 log_step() { _log "==> $*"; }
@@ -21,7 +18,6 @@ log_ok()   { _log "[OK] $*"; }
 log_warn() { _log "[WARN] $*"; }
 log_err()  { _log "[ERR] $*"; }
 
-# --- refcounted SELinux permissive scope ---
 _SE_REF=0
 _SE_PRIOR=""
 se_permissive() {
@@ -38,7 +34,6 @@ se_restore() {
     fi
 }
 
-# --- user enumeration (multi-user aware) ---
 get_users() {
     if [ -d /data/system/users ]; then
         for d in /data/system/users/[0-9]*; do
@@ -50,7 +45,6 @@ get_users() {
     fi
 }
 
-# --- id generators ---
 generate_uuid() {
     if [ -r /proc/sys/kernel/random/uuid ]; then
         cat /proc/sys/kernel/random/uuid
@@ -66,7 +60,6 @@ generate_uuid() {
 }
 
 generate_mac() {
-    # locally-administered unicast MAC (first byte = 02)
     b=$(od -An -N5 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
     printf '02:%s:%s:%s:%s:%s\n' \
         "$(echo "$b" | cut -c1-2)" \
@@ -76,7 +69,6 @@ generate_mac() {
         "$(echo "$b" | cut -c9-10)"
 }
 
-# --- system wrappers ---
 settings_put() {
     scope="$1"; key="$2"; val="$3"
     command -v settings >/dev/null 2>&1 || return 1
@@ -103,7 +95,6 @@ force_stop() {
     am force-stop "$pkg" 2>/dev/null
 }
 
-# --- identity.prop read/write ---
 identity_get() {
     key="$1"
     [ -f "$IDENTITY_FILE" ] || return 1
