@@ -61,6 +61,7 @@ build_variant() {
   [ -f target.txt ] && cp target.txt "$PKG/"
   [ -f helpers.sh ] && cp helpers.sh "$PKG/"
   [ -f rotate_ids.sh ] && cp rotate_ids.sh "$PKG/"
+[ -d webroot ] && cp -R webroot "$PKG/"
 
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"

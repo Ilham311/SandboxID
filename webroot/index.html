@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0a">
+<title>Ternak TT</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">tt</div>
+    <div>
+      <div class="title">Ternak TT</div>
+      <div class="sub" id="version">v1.0.19</div>
+    </div>
+  </div>
+  <button id="lockBtn" class="pill" data-state="unlocked">unlocked</button>
+</header>
+
+<nav>
+  <button class="tab active" data-tab="persona">Persona</button>
+  <button class="tab" data-tab="rotate">Rotate</button>
+  <button class="tab" data-tab="targets">Targets</button>
+  <button class="tab" data-tab="log">Log</button>
+</nav>
+
+<main>
+  <section id="persona" class="page active">
+    <div class="row">
+      <button id="freshenBtn" class="primary">Freshen persona</button>
+      <button id="refreshBtn" class="ghost">Refresh</button>
+    </div>
+    <div id="identity" class="kv"></div>
+  </section>
+
+  <section id="rotate" class="page">
+    <div class="row">
+      <button id="rotAll" class="primary">Rotate all</button>
+      <button id="rotSafe" class="ghost">Safe (no reboot)</button>
+    </div>
+    <div class="cards" id="rotCards"></div>
+  </section>
+
+  <section id="targets" class="page">
+    <div class="row spread">
+      <div class="hint">One package per line. Blank + # ignored. Companion hot-reloads.</div>
+      <button id="tgtSave" class="primary sm">Save</button>
+    </div>
+    <textarea id="tgtArea" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    <div class="row">
+      <button id="tgtReload" class="ghost sm">Reload from disk</button>
+      <div id="tgtStatus" class="hint"></div>
+    </div>
+  </section>
+
+  <section id="log" class="page">
+    <div class="row spread">
+      <select id="logSrc">
+        <option value="rotate">Rotate log</option>
+        <option value="session">Latest session</option>
+        <option value="crashes">Crashes</option>
+        <option value="logcat">Live logcat (200 lines)</option>
+      </select>
+      <button id="logRefresh" class="ghost sm">Reload</button>
+    </div>
+    <pre id="logBody"></pre>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -2,18 +2,15 @@
 SKIPUNZIP=0
 
 ui_print "- Ternak TT v1.0.19"
-ui_print "- TikTok + Grab Zygisk fresh persona"
-ui_print "- + 1-tap Action: freshen -> rotate_ids all (SSAID/GAID/wlan-MAC/BT-MAC/BT-name)"
-ui_print "- + device_name derived from identity.prop MODEL (persona-consistent w/ L1/L2 hooks)"
-ui_print "- + Bluetooth MAC rotation (persist.bluetooth.bdaddr + bt_config.conf Address)"
-ui_print "- + WIFI_MAC + BLUETOOTH_ADDR + BLUETOOTH_NAME persisted to identity.prop"
-ui_print "- + runtime target.txt (edit whitelist, no rebuild)"
-ui_print "- + companion hot-reloads target.txt on mtime change"
-ui_print "- + 'ternak-tt targets' CLI to view whitelist"
-ui_print "- + L7 SUPPRESS label for log.looper.*.slow (log noise)"
-ui_print "- + summarize.sh: SPOOF broken out by L1/L2/L7-SPB/SPI/SPL"
-ui_print "- + mount overlay (build.prop x5 + settings_secure.xml)"
-ui_print "- + crash watchdog + auto-summarize on Action tap"
+ui_print "- Spoofs device identity apps see:"
+ui_print "-   model, brand, manufacturer, fingerprint, serial"
+ui_print "-   per-app Android ID / SSAID"
+ui_print "- Property spoof runs pre-zygote (before apps launch)"
+ui_print "- Only safe identity strings - no risky HW/framework changes"
+ui_print "- 1-tap Action: freshen -> rotate_ids all"
+ui_print "-   SSAID wipe, GAID, wlan MAC, BT MAC, device/BT name"
+ui_print "- Targets: TikTok + Grab Passenger (target.txt editable)"
+ui_print "- WebUI: open module in KernelSU/APatch manager"
 ui_print ""
 
 LIVE_TARGET="/data/adb/modules/ternak_tt/target.txt"
@@ -62,6 +59,7 @@ if [ -f "$MODPATH/debug_variant" ]; then
     set_perm_recursive $MODPATH/debug 0 0 0755 0644
     set_perm $MODPATH/debug_variant 0 0 0644
 fi
+[ -d $MODPATH/webroot ] && set_perm_recursive $MODPATH/webroot 0 0 0755 0644
 set_perm $MODPATH/bin/ternak-tt-arm64       0 0 0755
 set_perm $MODPATH/bin/ternak-tt-arm         0 0 0755
 set_perm $MODPATH/bin/ternak-tt-x86_64      0 0 0755
