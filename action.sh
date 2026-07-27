@@ -7,13 +7,26 @@ LOGFILE="/cache/ternak-tt-boot.log"
 [ -w "$(dirname "$LOGFILE")" ] || LOGFILE="/data/local/tmp/ternak-tt-boot.log"
 touch "$LOGFILE" 2>/dev/null
 
+# Mirror all output to $MODDIR/debug/action.log so the WebUI Log tab
+# can display it. Header helps distinguish runs.
+ACTION_LOG="$MODDIR/debug/action.log"
+mkdir -p "$MODDIR/debug" 2>/dev/null
+{
+  echo ""
+  echo "=== $(date '+%F %T') action.sh (moddir=$MODDIR) ==="
+} >> "$ACTION_LOG" 2>/dev/null
+
 RC_FRESHEN=0
 RC_ROTATE=0
 
 if [ -x "$BIN" ]; then
     echo "[Ternak TT] freshen (step 1/2)..."
-    "$BIN" freshen 2>&1 | tee -a "$LOGFILE"
+    # Auto unlock -> freshen -> lock so the module always ends locked.
+    "$BIN" unlock >/dev/null 2>&1 || true
+    "$BIN" freshen 2>&1 | tee -a "$LOGFILE" "$ACTION_LOG"
     RC_FRESHEN=${PIPESTATUS:-$?}
+    "$BIN" lock >/dev/null 2>&1 || true
+    echo "[Ternak TT] auto-locked after freshen" | tee -a "$LOGFILE" "$ACTION_LOG"
 else
     echo "[Ternak TT] ERROR: $BIN not executable" | tee -a "$LOGFILE"
     RC_FRESHEN=127
@@ -21,7 +34,7 @@ fi
 
 if [ -r "$ROTATE" ]; then
     echo "[Ternak TT] rotate_ids all (step 2/2)..."
-    MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all 2>&1 | tee -a "$LOGFILE"
+    MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all 2>&1 | tee -a "$LOGFILE" "$ACTION_LOG"
     RC_ROTATE=${PIPESTATUS:-$?}
 else
     echo "[Ternak TT] WARN: rotate_ids.sh missing - skipping shell-layer rotation" | tee -a "$LOGFILE"

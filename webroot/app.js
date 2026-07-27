@@ -5,11 +5,15 @@ const BIN = `${MODDIR}/bin/ternak-tt`;
 const ROTATE_SH = `${MODDIR}/rotate_ids.sh`;
 const IDENTITY = `${MODDIR}/identity.prop`;
 const TARGETS = `${MODDIR}/target.txt`;
-const LOCK_FILE = `${MODDIR}/.locked`;
 
 const ROTATE_LOG = `${MODDIR}/debug/rotate.log`;
+const ACTION_LOG = `${MODDIR}/debug/action.log`;
 
 function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+
+// Env prefix: cd into MODDIR and put bin/ on PATH so the native binary
+// can find its siblings (resetprop-rs, ternak-tt-arm64, etc.)
+const ENV = `cd ${shq(MODDIR)} && export MODDIR=${shq(MODDIR)} && export PATH=${shq(MODDIR + '/bin')}:\"$PATH\"`;
 
 function exec(cmd) {
   return new Promise((resolve, reject) => {
@@ -21,8 +25,16 @@ function exec(cmd) {
     window[cbName] = function (errno, stdout, stderr) {
       try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
       const code = Number(errno);
-      if (code === 0) resolve(String(stdout || ''));
-      else reject(Object.assign(new Error(String(stderr || `exit ${code}`).trim()), { code, stdout, stderr }));
+      const out = String(stdout || '');
+      const err = String(stderr || '');
+      if (code === 0) {
+        resolve(out);
+      } else {
+        // On error: prefer whichever stream has content. When callers
+        // redirect with 2>&1, stderr is empty and error text is in stdout.
+        const msg = (err.trim() || out.trim() || `exit ${code}`);
+        reject(Object.assign(new Error(msg), { code, stdout: out, stderr: err }));
+      }
     };
     try {
       ksu.exec(cmd, '{}', cbName);
@@ -33,17 +45,24 @@ function exec(cmd) {
   });
 }
 
-async function shell(cmd) {
-  return exec(cmd);
-}
+async function shell(cmd) { return exec(cmd); }
 
-function toast(msg, kind) {
+function toast(msg, kind, sticky) {
   const el = document.getElementById('toast');
-  el.textContent = msg;
+  const text = String(msg || '').trim() || '(empty)';
+  // Truncate very long errors in the pill but keep the newlines
+  const lines = text.split('\n').filter(Boolean);
+  const head = lines.slice(0, 3).join('\n');
+  const more = lines.length > 3 ? `\n(+${lines.length - 3} more lines)` : '';
+  el.textContent = head + more;
   el.className = 'toast show' + (kind ? ` ${kind}` : '');
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { el.className = 'toast'; }, 2400);
+  const ttl = sticky ? 8000 : (kind === 'error' ? 6000 : 2400);
+  toast._t = setTimeout(() => { el.className = 'toast'; }, ttl);
 }
+document.getElementById('toast').addEventListener('click', () => {
+  document.getElementById('toast').className = 'toast';
+});
 
 async function safeExec(cmd, okMsg) {
   try {
@@ -51,7 +70,8 @@ async function safeExec(cmd, okMsg) {
     if (okMsg) toast(okMsg, 'ok');
     return { ok: true, out };
   } catch (e) {
-    toast(e.message || String(e), 'error');
+    // Show full error content so user can see what went wrong
+    toast(e.message || String(e), 'error', true);
     return { ok: false, err: e };
   }
 }
@@ -108,36 +128,32 @@ async function loadPersona() {
     return `<div class="k">${k}</div><div class="v">${escapeHtml(v)}</div>`;
   }).join('');
   el.innerHTML = html || '<div class="empty">identity.prop is empty.</div>';
-  await loadLockState();
 }
 
 document.getElementById('refreshBtn').addEventListener('click', loadPersona);
 document.getElementById('freshenBtn').addEventListener('click', async () => {
   const btn = document.getElementById('freshenBtn');
-  btn.disabled = true; const old = btn.textContent; btn.textContent = 'Freshening&hellip;';
-  await safeExec(`${shq(BIN)} freshen 2>&1`, 'New persona written');
+  btn.disabled = true; const old = btn.textContent; btn.textContent = 'Freshening\u2026';
+  // Auto-unlock -> freshen -> auto-lock so the module always ends in a
+  // locked state. Each subsequent tap unlocks itself, no manual toggle.
+  const cmd = `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
+    `{ echo "--- $(date '+%F %T') freshen (webui) ---"; ` +
+    `./bin/ternak-tt unlock >/dev/null 2>&1 || true; ` +
+    `./bin/ternak-tt freshen 2>&1; RC=$?; ` +
+    `./bin/ternak-tt lock >/dev/null 2>&1 || true; ` +
+    `echo "[freshen exit $RC | auto-locked]"; exit $RC; } | ` +
+    `tee -a ${shq(ACTION_LOG)}`;
+  await safeExec(cmd, 'Persona freshened + locked');
   btn.textContent = old; btn.disabled = false;
   loadPersona();
 });
 
-/* ---------- Lock ---------- */
-async function loadLockState() {
-  const r = await safeExec(`[ -f ${shq(LOCK_FILE)} ] && echo locked || echo unlocked`);
-  const b = document.getElementById('lockBtn');
-  const state = (r.out || '').trim();
-  b.dataset.state = state === 'locked' ? 'locked' : 'unlocked';
-  b.textContent = b.dataset.state;
-}
-document.getElementById('lockBtn').addEventListener('click', async () => {
-  const b = document.getElementById('lockBtn');
-  const next = b.dataset.state === 'locked' ? 'unlock' : 'lock';
-  await safeExec(`${shq(BIN)} ${next} 2>&1`, next === 'lock' ? 'Locked' : 'Unlocked');
-  loadLockState();
-});
-
 /* ---------- Rotate ---------- */
 const ROT_CARDS = [
-  { key: 'ssaid',       name: 'SSAID',           desc: 'Per-user Settings.Secure.ANDROID_ID wipe (reboot required)', get: null },
+  // SSAID surfaces as Settings.Secure.ANDROID_ID once system_server regens
+  // after wipe. identity.prop ANDROID_ID is the persona value returned by
+  // the L1/L2 Java hook, so show that as the current value.
+  { key: 'ssaid',       name: 'SSAID',           desc: 'Per-app Settings.Secure.ANDROID_ID (wipe requires reboot to regen)', get: 'ANDROID_ID' },
   { key: 'gaid',        name: 'Google AID',      desc: 'Advertising ID (Settings.Global + GMS xml)',                get: 'GOOGLE_AID' },
   { key: 'wlan-mac',    name: 'wlan MAC',        desc: 'wlan0 MAC + WifiConfigStore reset',                          get: 'WIFI_MAC' },
   { key: 'bt-mac',      name: 'Bluetooth MAC',   desc: 'BT adapter MAC + bt_config.conf Address',                    get: 'BLUETOOTH_ADDR' },
@@ -169,22 +185,34 @@ async function loadRotate() {
 async function rotateOne(key, btn) {
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = '\u2026';
-  await safeExec(`sh ${shq(ROTATE_SH)} ${shq(key)} 2>&1 | tee -a ${shq(ROTATE_LOG)}`, `${key} rotated`);
+  const cmd = `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
+    `{ echo "--- $(date '+%F %T') rotate ${key} (webui) ---"; ` +
+    `sh ${shq(ROTATE_SH)} ${shq(key)} 2>&1; echo "[exit $?]"; } | ` +
+    `tee -a ${shq(ROTATE_LOG)}`;
+  await safeExec(cmd, `${key} rotated`);
   btn.textContent = old; btn.disabled = false;
   loadRotate();
 }
 
 document.getElementById('rotAll').addEventListener('click', async (ev) => {
   const b = ev.currentTarget; const old = b.textContent;
-  b.disabled = true; b.textContent = 'Running&hellip;';
-  await safeExec(`sh ${shq(ROTATE_SH)} all 2>&1 | tee -a ${shq(ROTATE_LOG)}`, 'Rotated all');
+  b.disabled = true; b.textContent = 'Running\u2026';
+  const cmd = `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
+    `{ echo "--- $(date '+%F %T') rotate all (webui) ---"; ` +
+    `sh ${shq(ROTATE_SH)} all 2>&1; echo "[exit $?]"; } | ` +
+    `tee -a ${shq(ROTATE_LOG)}`;
+  await safeExec(cmd, 'Rotated all');
   b.textContent = old; b.disabled = false;
   loadRotate();
 });
 document.getElementById('rotSafe').addEventListener('click', async (ev) => {
   const b = ev.currentTarget; const old = b.textContent;
-  b.disabled = true; b.textContent = 'Running&hellip;';
-  await safeExec(`sh ${shq(ROTATE_SH)} safe 2>&1 | tee -a ${shq(ROTATE_LOG)}`, 'Safe rotate done');
+  b.disabled = true; b.textContent = 'Running\u2026';
+  const cmd = `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
+    `{ echo "--- $(date '+%F %T') rotate safe (webui) ---"; ` +
+    `sh ${shq(ROTATE_SH)} safe 2>&1; echo "[exit $?]"; } | ` +
+    `tee -a ${shq(ROTATE_LOG)}`;
+  await safeExec(cmd, 'Safe rotate done');
   b.textContent = old; b.disabled = false;
   loadRotate();
 });
@@ -215,7 +243,8 @@ async function loadLog() {
   const body = document.getElementById('logBody');
   body.textContent = 'Loading\u2026';
   let cmd;
-  if (src === 'rotate') cmd = `tail -n 400 ${shq(ROTATE_LOG)} 2>/dev/null || echo '(no rotate log yet)'`;
+  if (src === 'action')  cmd = `tail -n 400 ${shq(ACTION_LOG)} 2>/dev/null || echo '(no action.log yet \u2014 tap Freshen or the KSU/APatch Action button)'`;
+  else if (src === 'rotate') cmd = `tail -n 400 ${shq(ROTATE_LOG)} 2>/dev/null || echo '(no rotate.log yet \u2014 tap a Rotate button)'`;
   else if (src === 'session') cmd = `ls -t ${shq(MODDIR)}/debug/session-*.log 2>/dev/null | head -n 1 | xargs -r tail -n 400 || echo '(no session log \u2014 flash the debug variant)'`;
   else if (src === 'crashes') cmd = `tail -n 400 ${shq(MODDIR)}/debug/crashes.log 2>/dev/null || echo '(no crashes.log yet)'`;
   else if (src === 'logcat') cmd = `logcat -d -t 200 -v time -s TernakTT:V TernakTTCompanion:V 2>&1 | tail -n 200`;
@@ -239,6 +268,6 @@ function escapeHtml(s) {
     const r = await safeExec(`sed -n 's/^version=//p' ${shq(MODDIR)}/module.prop 2>/dev/null | head -n 1`);
     if (r.ok && r.out.trim()) document.getElementById('version').textContent = r.out.trim();
   } catch (_) {}
-  await safeExec(`mkdir -p ${shq(MODDIR)}/debug && touch ${shq(ROTATE_LOG)}`);
+  await safeExec(`mkdir -p ${shq(MODDIR)}/debug && touch ${shq(ROTATE_LOG)} ${shq(ACTION_LOG)}`);
   loadPersona();
 })();

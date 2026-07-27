@@ -16,7 +16,6 @@
       <div class="sub" id="version">v1.0.19</div>
     </div>
   </div>
-  <button id="lockBtn" class="pill" data-state="unlocked">unlocked</button>
 </header>
 
 <nav>
@@ -58,10 +57,11 @@
   <section id="log" class="page">
     <div class="row spread">
       <select id="logSrc">
-        <option value="rotate">Rotate log</option>
-        <option value="session">Latest session</option>
-        <option value="crashes">Crashes</option>
         <option value="logcat">Live logcat (200 lines)</option>
+        <option value="action">Action log (freshen)</option>
+        <option value="rotate">Rotate log</option>
+        <option value="session">Latest session (debug variant)</option>
+        <option value="crashes">Crashes</option>
       </select>
       <button id="logRefresh" class="ghost sm">Reload</button>
     </div>
