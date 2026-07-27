@@ -262,7 +262,6 @@ function escapeHtml(s) {
   }[c]));
 }
 
-/* ---------- Boot ---------- */
 (async function boot() {
   try {
     const r = await safeExec(`sed -n 's/^version=//p' ${shq(MODDIR)}/module.prop 2>/dev/null | head -n 1`);

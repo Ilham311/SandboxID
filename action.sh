@@ -7,8 +7,6 @@ LOGFILE="/cache/ternak-tt-boot.log"
 [ -w "$(dirname "$LOGFILE")" ] || LOGFILE="/data/local/tmp/ternak-tt-boot.log"
 touch "$LOGFILE" 2>/dev/null
 
-# Mirror all output to $MODDIR/debug/action.log so the WebUI Log tab
-# can display it. Header helps distinguish runs.
 ACTION_LOG="$MODDIR/debug/action.log"
 mkdir -p "$MODDIR/debug" 2>/dev/null
 {
@@ -21,7 +19,6 @@ RC_ROTATE=0
 
 if [ -x "$BIN" ]; then
     echo "[Ternak TT] freshen (step 1/2)..."
-    # Auto unlock -> freshen -> lock so the module always ends locked.
     "$BIN" unlock >/dev/null 2>&1 || true
     "$BIN" freshen 2>&1 | tee -a "$LOGFILE" "$ACTION_LOG"
     RC_FRESHEN=${PIPESTATUS:-$?}

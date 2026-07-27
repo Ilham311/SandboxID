@@ -150,6 +150,41 @@ jobs:
       - name: List artifacts
         run: ls -lh dist/
 
+      - name: Setup Node.js (for public-build obfuscators)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install obfuscator toolchain
+        run: |
+          set -eu
+          npm install -g \
+            javascript-obfuscator \
+            clean-css-cli \
+            html-minifier-terser
+          echo 'installed:'
+          javascript-obfuscator --version || true
+          cleancss --version || true
+          html-minifier-terser --version || true
+
+      - name: Build public variant (obfuscated, no update, no source)
+        run: |
+          set -eu
+          chmod +x build-public.sh
+          mkdir -p dist-public
+          NV="${{ steps.version.outputs.new_version }}"
+          ./build-public.sh . "dist-public/ternak-tt-${NV}-public.zip"
+          ls -lh dist-public/
+
+      - name: Upload public artifact (workflow-only, NOT released)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ternak-tt-public-DO-NOT-SHARE
+          path: dist-public/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+
       - name: Generate checksums
         run: |
           set -eu
