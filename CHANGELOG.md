@@ -1,3 +1,22 @@
+## v1.2.2 — Fix build.sh post-compile crash (2026-07-27)
+
+**Root cause**: v1.2.1 CI compiled all 4 ABIs successfully (arm64-v8a, armeabi-v7a, x86_64, x86) — `java_hooks.cpp` no longer failed on `try { std::stoll } catch (...)`. But then `build.sh` exited with code 1 immediately after the last `[100%] Built target ternak-tt`, with no error message.
+
+**Trigger**: `build.sh`'s `copy_shadowhook_so()` still contained v1.1.9 code:
+```bash
+src=$(find "build/$V/$abi/shadowhook-build" -name 'libternak_shadowhook.so' 2>/dev/null | head -1)
+```
+That search path stopped existing in v1.2.0 when we migrated ShadowHook from `add_subdirectory(jni/shadowhook)` (source clone) to prebuilt AAR at `prebuilt/shadowhook/`. With the target directory missing, `find` returns exit 1; combined with `set -euo pipefail` (line 2) that terminated build.sh before it could package the .zip.
+
+**Also**: ByteDance's ShadowHook Maven AAR only publishes `arm64-v8a` + `armeabi-v7a` prebuilts — no `x86` or `x86_64`. CMake correctly disables Path B for those ABIs (`libternak_tt.so` has no `DT_NEEDED` on `libternak_shadowhook.so` there), but `copy_shadowhook_so` still expected them to exist.
+
+**Fix**:
+- Rewrote `copy_shadowhook_so()` to read directly from `prebuilt/shadowhook/lib/$abi/libternak_shadowhook.so` (v1.2.0+ layout).
+- Soft-skip when the ABI has no prebuilt `.so`: print a friendly message and `return 0`. Since Path B is CMake-disabled for that ABI, the runtime never needs the .so.
+- Bumped `versionCode` to 1202.
+
+**No changes to CMakeLists.txt, fetch_lsplant.sh, workflow, or source code** — those were correct in v1.2.1.
+
 # Changelog
 
 All notable changes to Ternak TT are recorded here. The GitHub Actions workflow

@@ -90,18 +90,24 @@ build_variant() {
   if [ "${PATH_B_OK:-0}" = "1" ]; then
     mkdir -p "$PKG/system/lib64" "$PKG/system/lib"
     copy_shadowhook_so() {
+      # v1.2.2 Bug #1 fix: v1.2.0 migrated ShadowHook from add_subdirectory
+      # (source clone) to prebuilt AAR — the .so now lives under
+      # prebuilt/shadowhook/lib/$abi/, not build/$V/$abi/shadowhook-build/.
+      # v1.1.9's find on the missing shadowhook-build/ dir returned exit 1
+      # and, combined with `set -euo pipefail`, crashed build.sh AFTER all 4
+      # ABIs compiled cleanly. ByteDance's Maven AAR only ships arm64-v8a +
+      # armeabi-v7a, so this function must soft-skip x86/x86_64 (Path B is
+      # CMake-disabled for those ABIs anyway; libternak_tt.so has no
+      # DT_NEEDED on libternak_shadowhook.so there).
       local abi="$1"; local dst_dir="$2"
-      local src
-      src=$(find "build/$V/$abi/shadowhook-build" -name 'libternak_shadowhook.so' 2>/dev/null | head -1)
-      # Fallback: some CMake versions emit under a nested subdir.
-      if [ -z "$src" ]; then
-        src=$(find "build/$V/$abi" -name 'libternak_shadowhook.so' 2>/dev/null | head -1)
-      fi
-      if [ -n "$src" ] && [ -f "$src" ]; then
+      local src="prebuilt/shadowhook/lib/$abi/libternak_shadowhook.so"
+      if [ -f "$src" ]; then
         cp "$src" "$dst_dir/libternak_shadowhook.so.$abi"
+        echo "  ==> [$V] $abi: shipped libternak_shadowhook.so"
       else
-        echo "  WARN: [$V] $abi: libternak_shadowhook.so not found under build/$V/$abi/"
+        echo "  ==> [$V] $abi: no prebuilt libternak_shadowhook.so (Path B not available for this ABI)"
       fi
+      return 0
     }
     # arm64-v8a + x86_64 -> /system/lib64
     for A64 in arm64-v8a x86_64; do

@@ -1,7 +1,7 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.2.1"
+ui_print "- Ternak TT v1.2.2"
 ui_print "- + FIX v1.1.7: swapped Dobby -> ShadowHook (bytedance/android-inline-hook)"
 ui_print "-   Dobby master broke on NDK r26d (ADRP relocation, load_address"
 ui_print "-   rename, missing Cpu.h). ShadowHook is actively maintained by"

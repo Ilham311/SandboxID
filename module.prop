@@ -1,7 +1,7 @@
 id=ternak_tt
 name=Ternak TT — Zygisk Fresh Persona
-version=v1.2.1
-versionCode=1201
+version=v1.2.2
+versionCode=1202
 author=Ilham311
-description=Zygisk device spoofer targeting TikTok + Grab Passenger. 6-layer Java hook + 78 native prop spoofs + L7 TYPED spoof tables + companion fork+setns bind mount overlay. v1.2.0: ShadowHook + lsplant now consumed as prebuilt AAR from Maven Central (kills -Werror cascade on NDK r26d Clang). v1.2.1: Removed -fno-exceptions -fno-rtti so java_hooks.cpp's try/catch around std::stoll compiles. Works on Zygisk-Next / HMA-OSS, KernelSU + LSPosed, Android 12-16.
+description=Zygisk device spoofer targeting TikTok + Grab Passenger. 6-layer Java hook + 78 native prop spoofs + L7 TYPED spoof tables + companion fork+setns bind mount overlay. v1.2.0: ShadowHook + lsplant now consumed as prebuilt AAR from Maven Central (kills -Werror cascade on NDK r26d Clang). v1.2.1: Removed -fno-exceptions -fno-rtti so java_hooks.cpp's try/catch around std::stoll compiles. v1.2.2: Fixed build.sh crashing after all-ABI compile succeeded — copy_shadowhook_so still pointed at v1.1.9's add_subdirectory build tree; now reads from prebuilt/shadowhook/ and soft-skips x86/x86_64 (ByteDance ShadowHook AAR only ships arm64-v8a + armeabi-v7a; Path B is CMake-disabled for x86/x86_64 anyway). Works on Zygisk-Next / HMA-OSS, KernelSU + LSPosed, Android 12-16.
 updateJson=https://raw.githubusercontent.com/Ilham311/Tt/main/update.json
