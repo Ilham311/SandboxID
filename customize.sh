@@ -1,11 +1,15 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.18"
+ui_print "- Ternak TT v1.0.19"
 ui_print "- TikTok + Grab Zygisk fresh persona"
+ui_print "- + 1-tap Action: freshen -> rotate_ids all (SSAID/GAID/wlan-MAC/BT-MAC/BT-name)"
+ui_print "- + device_name derived from identity.prop MODEL (persona-consistent w/ L1/L2 hooks)"
+ui_print "- + Bluetooth MAC rotation (persist.bluetooth.bdaddr + bt_config.conf Address)"
+ui_print "- + WIFI_MAC + BLUETOOTH_ADDR + BLUETOOTH_NAME persisted to identity.prop"
 ui_print "- + runtime target.txt (edit whitelist, no rebuild)"
 ui_print "- + companion hot-reloads target.txt on mtime change"
-ui_print "- + `ternak-tt targets` CLI to view whitelist"
+ui_print "- + 'ternak-tt targets' CLI to view whitelist"
 ui_print "- + L7 SUPPRESS label for log.looper.*.slow (log noise)"
 ui_print "- + summarize.sh: SPOOF broken out by L1/L2/L7-SPB/SPI/SPL"
 ui_print "- + mount overlay (build.prop x5 + settings_secure.xml)"
@@ -39,14 +43,19 @@ ZOK=0
 [ -d /data/adb/modules/zygisksu ] && ZOK=1
 [ -d /data/adb/modules/ReZygisk ] && ZOK=1
 [ "${MAGISK_VER_CODE:-0}" -ge 26100 ] && ZOK=1
-[ "$ZOK" = "0" ] && ui_print "! WARNING: Zygisk not detected — install ZygiskNext / ReZygisk first"
+[ "$ZOK" = "0" ] && ui_print "! WARNING: Zygisk not detected - install ZygiskNext / ReZygisk first"
 
 set_perm_recursive $MODPATH 0 0 0755 0644
 set_perm $MODPATH/action.sh                 0 0 0755
 set_perm $MODPATH/service.sh                0 0 0755
 [ -f $MODPATH/post-fs-data.sh ] && set_perm $MODPATH/post-fs-data.sh 0 0 0755
 [ -f $MODPATH/summarize.sh ] && set_perm $MODPATH/summarize.sh 0 0 0755
+[ -f $MODPATH/helpers.sh ] && set_perm $MODPATH/helpers.sh 0 0 0644
+[ -f $MODPATH/rotate_ids.sh ] && set_perm $MODPATH/rotate_ids.sh 0 0 0755
 [ -f $MODPATH/target.txt ] && set_perm $MODPATH/target.txt 0 0 0644
+
+mkdir -p "$MODPATH/backups"
+set_perm $MODPATH/backups 0 0 0700
 
 if [ -f "$MODPATH/debug_variant" ]; then
     mkdir -p "$MODPATH/debug"
@@ -78,4 +87,4 @@ mkdir -p $MODPATH/mount/system_ext
 set_perm_recursive $MODPATH/mount 0 0 0755 0644
 
 ui_print ""
-ui_print "- Install complete. Reboot then tap Action to freshen."
+ui_print "- Install complete. Reboot then tap Action for 1-shot rotation."

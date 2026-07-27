@@ -1,5 +1,49 @@
 # Changelog
 
+## v1.0.19 (2026-07-27)
+
+### Action button is now 1-tap ready
+- `action.sh` now runs **`bin/ternak-tt freshen` → `rotate_ids.sh all`** in sequence.
+- Before v1.0.19 you had to `sh rotate_ids.sh all` manually after tapping Action. That step is gone — one tap in KernelSU/Magisk = fresh persona applied end-to-end.
+
+### New: `rotate_ids.sh` + `helpers.sh`
+- **helpers.sh** — shared shell library: `log_*`, refcounted `se_permissive`/`se_restore`, `get_users`, `generate_uuid`, `generate_mac`, `settings_put`, `rp_set`, `force_stop`, `identity_get`, `identity_persist`, `backup_rotate`.
+- **rotate_ids.sh** — CLI dispatcher with `all` / `safe` / `ssaid` / `gaid` / `wlan-mac` / `bt-mac` / `device-name` / `status` / `help`.
+
+### Design fix: `device_name` now consistent with hook persona
+- Old `randomize_device_name` picked a random Brand+Model from a hardcoded list (`"Galaxy S24-427"`). That name clashed with the persona chosen by the L1/L2 hooks (which reads `MODEL` from `identity.prop` — e.g. `Pixel 8`).
+- New `sync_device_name` reads `MODEL` from `identity.prop` and applies **that same value** to `settings put global device_name`, `settings put global bluetooth_name`, `persist.bluetooth.adaptername`, and rewrites `Name = ` in `bt_config.conf`. Hook layer and shell layer now report identical values.
+- Optional override: `BLUETOOTH_NAME` key in `identity.prop` (if set, wins over `MODEL`).
+
+### New: Bluetooth MAC rotation
+- `rotate_bluetooth_mac()` writes `persist.service.bdroid.bdaddr`, `persist.sys.bt.bdaddr`, `persist.bluetooth.bdaddr`, `bluetooth.device.mac.address`, `ro.boot.btmacaddr`.
+- Rewrites `Address = ` line in `/data/misc/{bluedroid,bluetooth}/bt_config.conf` and `/data/vendor/bluetooth/bt_config.conf`. If missing, injects under `[Adapter]` section.
+- MAC persisted to `identity.prop` as `BLUETOOTH_ADDR` for reboot-idempotent state.
+
+### Identity persistence
+- `rotate_ids.sh` now writes `WIFI_MAC`, `BLUETOOTH_ADDR`, `BLUETOOTH_NAME` back into `identity.prop` via `identity_persist()` (atomic awk upsert). Next `freshen` preserves them; next `rotate all` reads them back — same value across reboots until an explicit re-rotate.
+
+### Backup rotation
+- All destructive ops (`wipe_ssaid`, `set_gaid_value`, `randomize_wlan_mac`, `rotate_bluetooth_mac`, `sync_device_name`) copy the target file into `$MODDIR/backups/` first.
+- `backup_rotate PREFIX KEEP` prunes older files, keeping the newest N (defaults: SSAID/BT-config = 10, WifiConfigStore = 5).
+
+### GAID hardening
+- Now reads `GOOGLE_AID` from `identity.prop` (populated by `freshen`) instead of always regenerating. If missing, generates + persists.
+- Guards against GMS not installed — writes to `Settings.Global` and returns without touching the shared_prefs dir.
+- Optional `chcon` re-labels `adid_settings.xml` from parent directory context if `chcon` is available.
+
+### Full flow (1-tap)
+1. `bin/ternak-tt freshen` — rolls `MODEL`, `DEVICE`, `BRAND`, `SERIAL`, `ANDROID_ID`, `GOOGLE_AID`, etc.
+2. `wipe_ssaid` — deletes `settings_ssaid.xml` per user (needs reboot to regenerate).
+3. `set_gaid_value` — syncs `GOOGLE_AID` to `Settings.Global.advertising_id` + GMS `adid_settings.xml`.
+4. `randomize_wlan_mac` — wlan0 MAC + wipes `WifiConfigStore.xml`.
+5. `rotate_bluetooth_mac` — BT adapter MAC + `bt_config.conf` Address.
+6. `sync_device_name` — device_name/bluetooth_name/`bt_config.conf` Name = `identity.prop` MODEL.
+
+---
+
+# Changelog
+
 All notable changes to Ternak TT are recorded here. The GitHub Actions workflow
 reads the matching `## vX.Y.Z` section to build `release_notes.md` automatically
 on every release.
