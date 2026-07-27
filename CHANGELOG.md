@@ -1,3 +1,41 @@
+## v1.2.4 — CRITICAL: system.prop for pre-zygote Build.* spoof (2026-07-27)
+
+**Symptom reported (v1.2.3 on-device)**: Fingerprint apps + TikTok/Grab still read the real device — `Build.MANUFACTURER=Xiaomi`, `Build.BRAND=POCO`, `Build.MODEL=M2012K11AG`, `Build.PRODUCT=alioth_global`, `Build.DEVICE=alioth`, `Build.BOARD=kona`, `Build.HARDWARE=qcom`, `Build.FINGERPRINT=POCO/alioth_global/alioth:13/TKQ1.221114.001/V816.0.3.0.TKHMIXM:user/release-keys`. Only `Build.MODEL` sometimes flipped to `Pixel 10` in apps that call `SystemProperties.get("ro.product.model")` fresh.
+
+**Boot log analysis (v1.2.3, provided 2026-07-27 09:37)**:
+```
+Native prop: 60 set via resetprop-rs
+Mount overlay: 5 build.prop + settings_secure.xml + proc_uptime + kernel_boot_id -> /data/adb/modules/ternak_tt/mount
+OK: native prop re-applied + mount overlay refreshed
+[D] seed: reusing existing identity (28 keys)
+chcon: '/data/adb/modules/ternak_tt/mount/proc_uptime' to u:object_r:proc_uptime:s0: Permission denied
+```
+The module is **running normally** across every boot cycle. The `chcon` line is a non-fatal SELinux warning (Vivo/MIUI kernel does not permit relabeling to `proc_uptime` from init domain — proc_uptime bind mount will fail, but no crash).
+
+**Root cause**:
+1. `resetprop-rs` applies 60 props to the live property_service AFTER post-fs-data, i.e. AFTER zygote has already started and cached `android.os.Build.*` static fields from the ORIGINAL `/system/build.prop`. Any process forked from zygote inherits the cached (real) values — resetprop cannot patch a Java static field that was already read.
+2. The module generates `$MODDIR/mount/system/build.prop`, `$MODDIR/mount/vendor/build.prop`, etc., but **never bind-mounts them over** `/system/build.prop`. Those files were dead code — they existed on disk and nothing consumed them.
+3. Magisk has a first-class mechanism for pre-zygote prop application: any `$MODPATH/system.prop` file is read at early-init and applied via internal `resetprop` **before** zygote start. The module was not using this mechanism.
+
+**Fix**:
+1. `post-fs-data.sh` now concatenates `$MODDIR/mount/{system,vendor,odm,product,system_ext}/build.prop` into `$MODDIR/system.prop` on every boot. `awk '!seen[$0]++'` dedupes across partition variants. Effect lands on the NEXT boot (Magisk applies system.prop at early-init, before post-fs-data.sh runs).
+2. `customize.sh` runs the same concatenation at install time using leftover `mount/*/build.prop` from any previous install of the module. If found, the FIRST reboot after install already spoofs Build.*. If no leftover (truly fresh install with no prior identity), post-fs-data.sh will still generate it, and Build.* spoof activates on the SECOND reboot.
+3. Only `key=value` lines (not comments) are copied. Non-matching lines are dropped by the `grep -E '^[a-zA-Z][a-zA-Z0-9._]*='` filter.
+
+**Impact on device fingerprint apps**:
+- Before v1.2.4: `Build.MANUFACTURER=Xiaomi` (cached at zygote fork from real /system/build.prop) — spoof invisible.
+- After v1.2.4 (post-reboot): Magisk resetprop applies `ro.product.manufacturer=Google` etc. BEFORE zygote fork → zygote caches spoofed value → every subsequent Java process reads `Build.MANUFACTURER=Google`.
+
+**Non-fatal warning kept as-is**: `chcon ... proc_uptime ... Permission denied` remains because it is diagnostic (tells user their kernel does not allow proc_uptime relabel — expected on Vivo/MIUI). proc_uptime + kernel_boot_id spoof will still fail on this kernel; the module continues normally. Silencing it would hide the fact that these two identifiers are NOT spoofed on this device.
+
+**Not addressed in v1.2.4** (design gaps — see chat thread):
+- `Build.MANUFACTURER`, `Build.MODEL`, `Build.BRAND`, `Build.DEVICE` static Java fields in already-running processes: `system.prop` fixes new forks, but existing processes are only fixed after their own reboot.
+- `TimeZone.getDefault()`, `Locale.getDefault()`, `MediaDrm.getPropertyByteArray()`, `TelephonyManager.getNetworkOperator/getSimCountryIso` — no Java hook yet.
+- `Settings.Global.boot_count` — no hook.
+- Play Services binder proxy (for GAID / Ad ID / App Set ID spoofing).
+
+**No native code changes**. Only shell scripts (`post-fs-data.sh`, `customize.sh`), `module.prop`, `update.json` bumped to v1.2.4/1204.
+
 ## v1.2.3 — CRITICAL: fix lsplant.hpp included inside namespace (2026-07-27)
 
 **Error observed in v1.2.2 CI (arm64-v8a link stage)**:

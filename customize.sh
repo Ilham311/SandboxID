@@ -1,7 +1,12 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.2.3"
+ui_print "- Ternak TT v1.2.4"
+ui_print "- + FIX v1.2.4: generate \$MODPATH/system.prop so Magisk applies"
+ui_print "-   spoofed Build.* props BEFORE zygote caches them. This is the"
+ui_print "-   root cause of Build.MANUFACTURER / MODEL / FINGERPRINT still"
+ui_print "-   showing the real device (Xiaomi / POCO / alioth). system.prop"
+ui_print "-   is regenerated in post-fs-data.sh; effect lands on NEXT boot."
 ui_print "- + FIX v1.1.7: swapped Dobby -> ShadowHook (bytedance/android-inline-hook)"
 ui_print "-   Dobby master broke on NDK r26d (ADRP relocation, load_address"
 ui_print "-   rename, missing Cpu.h). ShadowHook is actively maintained by"
@@ -132,6 +137,33 @@ mkdir -p $MODPATH/mount/odm
 mkdir -p $MODPATH/mount/product
 mkdir -p $MODPATH/mount/system_ext
 set_perm_recursive $MODPATH/mount 0 0 0755 0644
+
+# --- v1.2.4: best-effort system.prop generation at install time ---------------
+# If /data/adb/modules/ternak_tt/mount/*/build.prop already exists (leftover
+# from a previous install), synthesize system.prop now so the FIRST reboot
+# after this install already spoofs Build.* fields to zygote. If mount files
+# do not exist yet, post-fs-data.sh will handle it on the second reboot.
+OLDMOUNT="/data/adb/modules/ternak_tt/mount"
+SYSPROP="$MODPATH/system.prop"
+if [ -d "$OLDMOUNT" ] && [ -f "$OLDMOUNT/system/build.prop" ]; then
+    {
+        echo "# Ternak TT v1.2.4 system.prop (install-time snapshot)"
+        for F in "$OLDMOUNT/system/build.prop" \
+                 "$OLDMOUNT/vendor/build.prop" \
+                 "$OLDMOUNT/odm/build.prop" \
+                 "$OLDMOUNT/product/build.prop" \
+                 "$OLDMOUNT/system_ext/build.prop"; do
+            [ -f "$F" ] && grep -E '^[a-zA-Z][a-zA-Z0-9._]*=' "$F"
+        done
+    } | awk '!seen[$0]++' > "$SYSPROP"
+    set_perm "$SYSPROP" 0 0 0644
+    LINES=$(wc -l < "$SYSPROP" 2>/dev/null || echo 0)
+    ui_print "- system.prop generated at install time ($LINES lines)"
+    ui_print "-   Build.MODEL / MANUFACTURER / FINGERPRINT will spoof on next boot."
+else
+    ui_print "- system.prop will be generated on first boot"
+    ui_print "-   Build.* spoof will activate on the SECOND reboot after install."
+fi
 
 ui_print ""
 ui_print "- Install complete. Reboot then tap Action to freshen."

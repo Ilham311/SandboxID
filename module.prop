@@ -1,7 +1,7 @@
 id=ternak_tt
 name=Ternak TT — Zygisk Fresh Persona
-version=v1.2.3
-versionCode=1203
+version=v1.2.4
+versionCode=1204
 author=Ilham311
-description=Zygisk device spoofer targeting TikTok + Grab Passenger. 6-layer Java hook + 78 native prop spoofs + L7 TYPED spoof tables + companion fork+setns bind mount overlay. v1.2.0: ShadowHook + lsplant now consumed as prebuilt AAR from Maven Central. v1.2.1: Removed -fno-exceptions -fno-rtti for try/catch. v1.2.2: Fixed build.sh copy_shadowhook_so still pointed at v1.1.9 build tree. v1.2.3: CRITICAL LINKER FIX — lsplant.hpp/shadowhook.h were being included INSIDE `namespace ternak_tt::java_hooks`, which nested lsplant's own namespace as `ternak_tt::java_hooks::lsplant::v2::*`, mangling calls to a symbol liblsplant.so never exports. v1.1.7-v1.2.2 linked only because LSPlant 6.4 emitted Init as inline; newer LSPlant AAR broke that. Includes moved to global scope. Works on Zygisk-Next / HMA-OSS, KernelSU + LSPosed, Android 12-16.
+description=Zygisk device spoofer targeting TikTok + Grab Passenger. v1.2.4: CRITICAL FIX — generate $MODPATH/system.prop so Magisk applies spoofed Build.* props BEFORE zygote caches them (root cause of Build.MANUFACTURER/MODEL/FINGERPRINT still showing the real device in fingerprint apps). system.prop is refreshed every boot in post-fs-data.sh and best-effort at install time in customize.sh. v1.2.3: fix lsplant.hpp/shadowhook.h included inside ternak_tt::java_hooks namespace (undefined symbol on newer LSPlant AAR). v1.2.2: fix build.sh copy_shadowhook_so pointing at v1.1.9 build tree. v1.2.1: removed -fno-exceptions for try/catch. v1.2.0: ShadowHook + lsplant via prebuilt AAR from Maven Central. Works on Zygisk-Next / HMA-OSS, KernelSU + LSPosed, Android 12-16.
 updateJson=https://raw.githubusercontent.com/Ilham311/Tt/main/update.json
