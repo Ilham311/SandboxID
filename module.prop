@@ -1,7 +1,7 @@
 id=ternak_tt
-name=Ternak TT — Zygisk Fresh Persona
-version=v1.1.9
-versionCode=1109
-author=Ilham311
-description=Zygisk device spoofer targeting TikTok (musically/trill/lite) + Grab Passenger. 6-layer Java hook + 78 native prop spoofs + L7 TYPED spoof tables + companion fork+setns bind mount overlay. v1.1.6: Path B AAR-based (lsplant .so from Maven Central shipped via /system/lib{,64}/ overlay). v1.1.7: swapped Dobby -> ShadowHook (bytedance/android-inline-hook v1.0.9); SONAME renamed to libternak_shadowhook.so to avoid TikTok collision. v1.1.8: fixed CMake C-compiler features error (LANGUAGES C CXX, min 3.22.1) and Path B guard (jni/shadowhook not jni/dobby). v1.1.9: fixed ShadowHook compile under NDK r26d — target now built with -Wno-error / -Wno-error=unsafe-buffer-usage / -Wno-error=declaration-after-statement / -Wno-error=reserved-identifier because r26d Clang promoted these warnings to errors, but ShadowHook v1.0.9's source (esp. third_party/lss/linux_syscall_support.h with its required __xxx syscall identifiers) predates those defaults. No source patches to ShadowHook; project-wide flags unaffected. Works on Zygisk-Next / HMA-OSS, KernelSU + LSPosed, Android 12-16.
+name=Ternak TT
+version=v1.2.0
+versionCode=1200
+author=diru768
+description=Zygisk TikTok fresh persona (ternak) — LSPlant + ShadowHook Path B via Maven Central AARs. Reboot then tap Action to rotate persona.
 updateJson=https://raw.githubusercontent.com/Ilham311/Tt/main/update.json

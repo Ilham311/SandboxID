@@ -1,13 +1,21 @@
-# v1.1.8: bump min to 3.22.1 (Android AGP standard) + add C to LANGUAGES.
+# v1.2.0: ShadowHook now consumed as prebuilt AAR (matching lsplant approach).
 #
-# v1.1.7 CI hit `No known features for C compiler ""` on CMake 3.31.6 + NDK
-# r26d because we only declared LANGUAGES CXX. When ShadowHook's
-# add_subdirectory activates, ShadowHook is a C+CXX project; CMake tries to
-# detect the C compiler for its sources but CMAKE_C_COMPILER is empty (never
-# set up), so try_compile fails and configure aborts before any code is
-# generated. LANGUAGES C CXX registers the C compiler up front so the whole
-# tree (us + ShadowHook) builds cleanly. Bumping min to 3.22.1 also silences
-# the NDK-toolchain deprecation cascade under CMake 3.31+.
+# Archaeology: v1.1.7-v1.1.9 tried to compile ShadowHook v1.0.9 from source
+# via add_subdirectory. That worked on older NDK but broke under r26d Clang
+# with hundreds of -Werror errors on -Wunsafe-buffer-usage,
+# -Wdeclaration-after-statement, and -Wreserved-identifier — three warning
+# classes promoted to -Werror by newer Clang policy. Silencing them via
+# target_compile_options(shadowhook PRIVATE -Wno-error=...) still failed
+# because ShadowHook's own CMakeLists appends -Werror AFTER our PRIVATE
+# options, and the LSS syscall headers use __xxx identifiers that Clang's
+# -Wreserved-identifier flags regardless of our flag order.
+#
+# Official ByteDance integration (doc/manual.md) uses AAR + prefab:
+#   dependencies { implementation 'com.bytedance.android:shadowhook:x.y.z' }
+#   find_package(shadowhook REQUIRED CONFIG)
+#   target_link_libraries(mylib shadowhook::shadowhook)
+# We use plain IMPORTED SHARED targets (same recipe as lsplant), skipping
+# Gradle/prefab plumbing because our build is raw NDK+CMake (no AGP).
 cmake_minimum_required(VERSION 3.22.1)
 project(ternak_tt LANGUAGES C CXX)
 
@@ -35,77 +43,52 @@ endif()
 set(TERNAK_TT_SOURCES main.cpp companion.cpp java_hooks.cpp)
 
 # ============================================================================
-# Path B: prebuilt lsplant (from AAR) + Dobby (from git clone)
+# Path B: prebuilt lsplant + shadowhook (both from Maven Central AARs)
 #
 # Populated by ./fetch_lsplant.sh:
-#   - ../prebuilt/lsplant/lib/<ABI>/liblsplant.so   (from lsplant-standalone AAR)
-#   - ../prebuilt/lsplant/include/lsplant.hpp        (from AAR)
-#   - ./dobby/CMakeLists.txt                         (from jmpews/Dobby git)
+#   ../prebuilt/lsplant/lib/<ABI>/liblsplant.so
+#   ../prebuilt/lsplant/include/lsplant.hpp
+#   ../prebuilt/shadowhook/lib/<ABI>/libternak_shadowhook.so  (SONAME rewritten)
+#   ../prebuilt/shadowhook/include/shadowhook.h
 #
-# libternak_tt.so DT_NEEDs liblsplant.so at load time. Android's linker resolves
-# DT_NEEDED via /system/lib{,64}/. build.sh ships liblsplant.so + libdobby.so
-# under $MODPATH/system/lib{,64}/, which Magisk/KSU magic-mount overlays onto
+# libternak_tt.so DT_NEEDs both at load time. Android's linker resolves
+# DT_NEEDED via /system/lib{,64}/. build.sh ships both .so files under
+# $MODPATH/system/lib{,64}/, which Magisk/KSU magic-mount overlays onto
 # /system/lib{,64}/ at boot — so DT_NEEDED resolves inside every app process.
 # ============================================================================
 
-set(LSPLANT_PREBUILT "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/lsplant")
-set(LSPLANT_SO       "${LSPLANT_PREBUILT}/lib/${ANDROID_ABI}/liblsplant.so")
-set(LSPLANT_HEADER   "${LSPLANT_PREBUILT}/include/lsplant.hpp")
-# v1.1.7: ShadowHook replaces Dobby (Dobby master broke on NDK r26d).
-set(SHADOWHOOK_ROOT  "${CMAKE_CURRENT_SOURCE_DIR}/shadowhook")
-set(SHADOWHOOK_CMAKE "${SHADOWHOOK_ROOT}/shadowhook/src/main/cpp/CMakeLists.txt")
+set(LSPLANT_PREBUILT    "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/lsplant")
+set(LSPLANT_SO          "${LSPLANT_PREBUILT}/lib/${ANDROID_ABI}/liblsplant.so")
+set(LSPLANT_HEADER      "${LSPLANT_PREBUILT}/include/lsplant.hpp")
 
-if(EXISTS "${LSPLANT_SO}" AND EXISTS "${LSPLANT_HEADER}" AND EXISTS "${SHADOWHOOK_CMAKE}")
+set(SHADOWHOOK_PREBUILT "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/shadowhook")
+set(SHADOWHOOK_SO       "${SHADOWHOOK_PREBUILT}/lib/${ANDROID_ABI}/libternak_shadowhook.so")
+set(SHADOWHOOK_HEADER   "${SHADOWHOOK_PREBUILT}/include/shadowhook.h")
+
+if(EXISTS "${LSPLANT_SO}" AND EXISTS "${LSPLANT_HEADER}"
+   AND EXISTS "${SHADOWHOOK_SO}" AND EXISTS "${SHADOWHOOK_HEADER}")
     message(STATUS "[ternak_tt] Path B ENABLED")
-    message(STATUS "[ternak_tt]   lsplant .so:      ${LSPLANT_SO}")
-    message(STATUS "[ternak_tt]   lsplant header:   ${LSPLANT_HEADER}")
-    message(STATUS "[ternak_tt]   shadowhook cmake: ${SHADOWHOOK_CMAKE}")
+    message(STATUS "[ternak_tt]   lsplant .so:       ${LSPLANT_SO}")
+    message(STATUS "[ternak_tt]   lsplant header:    ${LSPLANT_HEADER}")
+    message(STATUS "[ternak_tt]   shadowhook .so:    ${SHADOWHOOK_SO}")
+    message(STATUS "[ternak_tt]   shadowhook header: ${SHADOWHOOK_HEADER}")
 
-    # Prebuilt lsplant — imported SHARED .so from AAR
     add_library(lsplant SHARED IMPORTED)
     set_target_properties(lsplant PROPERTIES
         IMPORTED_LOCATION "${LSPLANT_SO}"
         INTERFACE_INCLUDE_DIRECTORIES "${LSPLANT_PREBUILT}/include")
 
-    # ShadowHook — bytedance/android-inline-hook, built from source via its
-    # own CMakeLists.txt. Produces libshadowhook.so (SHARED).
-    # We rename its output to libternak_shadowhook.so at link time to avoid
-    # SONAME collision — target apps like TikTok bundle their own
-    # libshadowhook.so, and two libraries with the same SONAME in a single
-    # linker namespace would produce undefined symbol-resolution behavior.
-    set(SHADOWHOOK_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-    add_subdirectory("${SHADOWHOOK_ROOT}/shadowhook/src/main/cpp"
-                     shadowhook-build EXCLUDE_FROM_ALL)
-    if(TARGET shadowhook)
-        set_target_properties(shadowhook PROPERTIES
-            OUTPUT_NAME "ternak_shadowhook"
-            VERSION ""
-            SOVERSION "")
-        # v1.1.9: ShadowHook v1.0.9 was written before NDK r26d's Clang
-        # started promoting -Wunsafe-buffer-usage, -Wdeclaration-after-statement,
-        # and -Wreserved-identifier to -Werror. The code itself is fine (it uses
-        # __xxx identifiers required by the Linux syscall support layer, and
-        # normal C99 mixed declarations), so we just silence -Werror on the
-        # shadowhook target. This does NOT touch project-wide flags or our own
-        # ternak_tt target — only ShadowHook's compilation is affected.
-        target_compile_options(shadowhook PRIVATE
-            -Wno-error
-            -Wno-error=unsafe-buffer-usage
-            -Wno-error=declaration-after-statement
-            -Wno-error=reserved-identifier
-            -Wno-error=deprecated-declarations
-            -Wno-unsafe-buffer-usage
-            -Wno-declaration-after-statement
-            -Wno-reserved-identifier)
-    endif()
+    add_library(shadowhook SHARED IMPORTED)
+    set_target_properties(shadowhook PROPERTIES
+        IMPORTED_LOCATION "${SHADOWHOOK_SO}"
+        INTERFACE_INCLUDE_DIRECTORIES "${SHADOWHOOK_PREBUILT}/include")
 
     add_library(ternak_tt SHARED ${TERNAK_TT_SOURCES})
     target_compile_definitions(ternak_tt PRIVATE TT_HAVE_LSPLANT=1)
     target_include_directories(ternak_tt PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${LSPLANT_PREBUILT}/include
-        ${SHADOWHOOK_ROOT}/shadowhook/src/main/cpp
-        ${SHADOWHOOK_ROOT}/shadowhook/src/main/cpp/include)
+        ${SHADOWHOOK_PREBUILT}/include)
     target_link_libraries(ternak_tt PRIVATE log dl lsplant shadowhook)
 else()
     message(WARNING "[ternak_tt] Path B DISABLED: missing one of:")
@@ -115,10 +98,13 @@ else()
     if(NOT EXISTS "${LSPLANT_HEADER}")
         message(WARNING "[ternak_tt]   - ${LSPLANT_HEADER}")
     endif()
-    if(NOT EXISTS "${SHADOWHOOK_CMAKE}")
-        message(WARNING "[ternak_tt]   - ${SHADOWHOOK_CMAKE}")
+    if(NOT EXISTS "${SHADOWHOOK_SO}")
+        message(WARNING "[ternak_tt]   - ${SHADOWHOOK_SO}")
     endif()
-    message(WARNING "[ternak_tt] Run ./fetch_lsplant.sh to populate prebuilt/lsplant + jni/shadowhook.")
+    if(NOT EXISTS "${SHADOWHOOK_HEADER}")
+        message(WARNING "[ternak_tt]   - ${SHADOWHOOK_HEADER}")
+    endif()
+    message(WARNING "[ternak_tt] Run ./fetch_lsplant.sh to populate prebuilt/.")
 
     add_library(ternak_tt SHARED ${TERNAK_TT_SOURCES})
     target_include_directories(ternak_tt PRIVATE ${CMAKE_SOURCE_DIR})
