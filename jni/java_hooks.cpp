@@ -21,6 +21,26 @@
 #define TT_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TT_LOG_TAG, __VA_ARGS__)
 #define TT_LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TT_LOG_TAG, __VA_ARGS__)
 
+// v1.2.3: These includes MUST be at global scope. If included inside
+// `namespace ternak_tt::java_hooks`, lsplant.hpp's `namespace lsplant` becomes
+// nested as `ternak_tt::java_hooks::lsplant::v2::...`, so `lsplant::Init` calls
+// mangle to a symbol liblsplant.so never exports -> undefined symbol at link.
+// v1.1.7-v1.2.2 accidentally linked because LSPlant 6.4 emitted Init inline
+// (each TU got a local weak copy); newer LSPlant AAR moves Init out-of-line,
+// exposing the design bug that had lived here since v1.1.7.
+#ifdef TT_HAVE_LSPLANT
+#include <dlfcn.h>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include "lsplant.hpp"
+#include "shadowhook.h"
+
+#ifdef TT_HAVE_HELPER_DEX
+#include "helper_dex.h"  // provides HELPER_DEX[] + HELPER_DEX_LEN
+#endif
+#endif
+
 namespace ternak_tt { namespace java_hooks {
 
 bool IsAvailable() {
@@ -32,17 +52,6 @@ bool IsAvailable() {
 }
 
 #ifdef TT_HAVE_LSPLANT
-
-#include <dlfcn.h>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include "lsplant.hpp"
-#include "shadowhook.h"
-
-#ifdef TT_HAVE_HELPER_DEX
-#include "helper_dex.h"  // provides HELPER_DEX[] + HELPER_DEX_LEN
-#endif
 
 static std::mutex g_mu;
 static bool g_inited = false;

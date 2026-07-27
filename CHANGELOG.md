@@ -1,3 +1,21 @@
+## v1.2.3 — CRITICAL: fix lsplant.hpp included inside namespace (2026-07-27)
+
+**Error observed in v1.2.2 CI (arm64-v8a link stage)**:
+```
+ld.lld: error: undefined symbol: ternak_tt::java_hooks::lsplant::v2::Init(_JNIEnv*, ternak_tt::java_hooks::lsplant::v2::InitInfo const&)
+>>> referenced by java_hooks.cpp:163
+```
+
+**Root cause**: In `jni/java_hooks.cpp`, `#include "lsplant.hpp"` and `#include "shadowhook.h"` were placed at line 40-41, which was **inside** the `namespace ternak_tt { namespace java_hooks {` block opened at line 24. That meant `lsplant.hpp`'s own `namespace lsplant { inline namespace v2 { ... } }` declarations got nested as `ternak_tt::java_hooks::lsplant::v2::...`. When `Init()` at line 163 wrote `lsplant::Init(env, info)`, the compiler resolved it via the nearest scope to `ternak_tt::java_hooks::lsplant::v2::Init` and mangled a symbol name that `liblsplant.so` never exports (the real .so exports `::lsplant::v2::Init`).
+
+**Why v1.1.7-v1.2.2 accidentally worked**: LSPlant 6.4's public `lsplant.hpp` declared `Init` as `inline`, so every translation unit that included the header got its own local weak-symbol definition. The linker resolved the reference from the TU-local copy, no external symbol required. When Maven Central's `<release>` tag advanced past 6.4 (auto-resolved by `fetch_lsplant.sh`), the newer header dropped `inline` on `Init`, exposing the design bug that had lived here for six versions.
+
+**Fix**: Moved the entire `#ifdef TT_HAVE_LSPLANT #include ... #endif` block (dlfcn.h, string, string_view, unordered_map, lsplant.hpp, shadowhook.h, helper_dex.h) from **inside** `namespace ternak_tt::java_hooks` to **before** the namespace opens. Now `lsplant.hpp` declares its own namespace at global scope, `lsplant::Init` resolves to `::lsplant::v2::Init`, mangled symbol matches liblsplant.so's export, linker succeeds.
+
+**Also**: LSPlant version pin considered but not applied — header-only-inline was an implementation detail we should never have depended on. The proper fix is the include placement, not pinning an old version.
+
+**No other changes** from v1.2.2.
+
 ## v1.2.2 — Fix build.sh post-compile crash (2026-07-27)
 
 **Root cause**: v1.2.1 CI compiled all 4 ABIs successfully (arm64-v8a, armeabi-v7a, x86_64, x86) — `java_hooks.cpp` no longer failed on `try { std::stoll } catch (...)`. But then `build.sh` exited with code 1 immediately after the last `[100%] Built target ternak-tt`, with no error message.
