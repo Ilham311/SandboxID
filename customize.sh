@@ -1,41 +1,14 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.2.4"
-ui_print "- + FIX v1.2.4: generate \$MODPATH/system.prop so Magisk applies"
-ui_print "-   spoofed Build.* props BEFORE zygote caches them. This is the"
-ui_print "-   root cause of Build.MANUFACTURER / MODEL / FINGERPRINT still"
-ui_print "-   showing the real device (Xiaomi / POCO / alioth). system.prop"
-ui_print "-   is regenerated in post-fs-data.sh; effect lands on NEXT boot."
-ui_print "- + FIX v1.1.7: swapped Dobby -> ShadowHook (bytedance/android-inline-hook)"
-ui_print "-   Dobby master broke on NDK r26d (ADRP relocation, load_address"
-ui_print "-   rename, missing Cpu.h). ShadowHook is actively maintained by"
-ui_print "-   ByteDance, has the same call surface, and integrates cleanly."
-ui_print "-   liblsplant.so + libternak_shadowhook.so shipped via system/lib{,64}."
-ui_print "- + FIX v1.1.7: javac -bootclasspath android.jar (v1.1.6 helper dex was"
-ui_print "-   empty because android.content.ContentResolver could not resolve)."
-ui_print "- + FIX v1.1.6: AAR-based lsplant (Maven Central) + system/lib{,64}"
-ui_print "-   overlay ship — Path B .so now resolvable inside app processes"
-ui_print "-   (DT_NEEDED works via magic mount)."
-ui_print "- + FIX v1.1.3: early bail-out for root/system/shell apps"
-ui_print "- + FIX v1.1.4: build fix — <sys/socket.h> + forward decl (CI green)"
-ui_print "-   (skips companion IPC for KSU, Magisk, Shizuku, Termux, ...)"
-ui_print "-   fixes Android 15 Instrumentation-null NPE race on BOOT_COMPLETED"
-ui_print "- + 500ms socket timeout on companion IPC (belt-and-suspenders)"
+ui_print "- Ternak TT v1.0.18"
 ui_print "- TikTok + Grab Zygisk fresh persona"
-ui_print "- + Path B FULL: lsplant Java method hooks (5 hooks live)"
-ui_print "-   * Settings.Secure.getString  -> android_id spoof"
-ui_print "-   * Settings.Global.getString  -> dev_settings/adb spoof"
-ui_print "-   * Settings.Global.getInt     -> boot_count/dev_mode spoof"
-ui_print "-   * SystemClock.uptimeMillis   -> +offset"
-ui_print "-   * SystemClock.elapsedRealtime -> +offset"
-ui_print "- + L8: TimeZone.setDefault() + Locale.setDefault() JNI spoof"
-ui_print "- + kernel identity bind (proc_uptime + kernel_boot_id)"
-ui_print "- + rich BIND-FAIL diagnostic (src/dst stat + errno + strerror)"
 ui_print "- + runtime target.txt (edit whitelist, no rebuild)"
 ui_print "- + companion hot-reloads target.txt on mtime change"
 ui_print "- + `ternak-tt targets` CLI to view whitelist"
-ui_print "- + mount overlay (build.prop x5 + settings_secure.xml + proc_uptime + kernel_boot_id)"
+ui_print "- + L7 SUPPRESS label for log.looper.*.slow (log noise)"
+ui_print "- + summarize.sh: SPOOF broken out by L1/L2/L7-SPB/SPI/SPL"
+ui_print "- + mount overlay (build.prop x5 + settings_secure.xml)"
 ui_print "- + crash watchdog + auto-summarize on Action tap"
 ui_print ""
 
@@ -94,40 +67,6 @@ case "$ABI" in
     *)           ui_print "! Unknown ABI: $ABI" ;;
 esac
 
-# v1.1.7 Path B: pick correct per-ABI liblsplant.so + libternak_shadowhook.so,
-# rename to .so, delete the other ABI variants. If path_b libs were not
-# shipped (Path B disabled build), this block is a no-op.
-if [ -f "$MODPATH/.path_b_stamp" ]; then
-    ui_print "- Path B: installing lsplant + shadowhook for $ABI"
-    case "$ABI" in
-        arm64-v8a|x86_64) LIBDIR="$MODPATH/system/lib64" ;;
-        armeabi-v7a|x86) LIBDIR="$MODPATH/system/lib"   ;;
-        *)               LIBDIR="" ;;
-    esac
-    if [ -n "$LIBDIR" ] && [ -d "$LIBDIR" ]; then
-        for LIB in liblsplant libternak_shadowhook; do
-            SRC="$LIBDIR/$LIB.so.$ABI"
-            if [ -f "$SRC" ]; then
-                mv -f "$SRC" "$LIBDIR/$LIB.so"
-                ui_print "-   $LIB.so ($(du -h "$LIBDIR/$LIB.so" | cut -f1))"
-            else
-                ui_print "! Path B: $LIB.so.$ABI not found — Java hooks will fail"
-            fi
-        done
-        # Delete all other ABI variants and stray system/lib{,64} dirs
-        for D in "$MODPATH/system/lib64" "$MODPATH/system/lib"; do
-            [ "$D" = "$LIBDIR" ] && continue
-            rm -rf "$D"
-        done
-        find "$LIBDIR" -name '*.so.*' -type f -delete
-        set_perm_recursive "$MODPATH/system" 0 0 0755 0644
-    else
-        ui_print "! Path B: no lib dir for ABI $ABI — removing system/ overlay"
-        rm -rf "$MODPATH/system"
-    fi
-    rm -f "$MODPATH/.path_b_stamp"
-fi
-
 echo "fresh" > $MODPATH/identity.mode
 set_perm $MODPATH/identity.mode 0 0 0644
 
@@ -137,33 +76,6 @@ mkdir -p $MODPATH/mount/odm
 mkdir -p $MODPATH/mount/product
 mkdir -p $MODPATH/mount/system_ext
 set_perm_recursive $MODPATH/mount 0 0 0755 0644
-
-# --- v1.2.4: best-effort system.prop generation at install time ---------------
-# If /data/adb/modules/ternak_tt/mount/*/build.prop already exists (leftover
-# from a previous install), synthesize system.prop now so the FIRST reboot
-# after this install already spoofs Build.* fields to zygote. If mount files
-# do not exist yet, post-fs-data.sh will handle it on the second reboot.
-OLDMOUNT="/data/adb/modules/ternak_tt/mount"
-SYSPROP="$MODPATH/system.prop"
-if [ -d "$OLDMOUNT" ] && [ -f "$OLDMOUNT/system/build.prop" ]; then
-    {
-        echo "# Ternak TT v1.2.4 system.prop (install-time snapshot)"
-        for F in "$OLDMOUNT/system/build.prop" \
-                 "$OLDMOUNT/vendor/build.prop" \
-                 "$OLDMOUNT/odm/build.prop" \
-                 "$OLDMOUNT/product/build.prop" \
-                 "$OLDMOUNT/system_ext/build.prop"; do
-            [ -f "$F" ] && grep -E '^[a-zA-Z][a-zA-Z0-9._]*=' "$F"
-        done
-    } | awk '!seen[$0]++' > "$SYSPROP"
-    set_perm "$SYSPROP" 0 0 0644
-    LINES=$(wc -l < "$SYSPROP" 2>/dev/null || echo 0)
-    ui_print "- system.prop generated at install time ($LINES lines)"
-    ui_print "-   Build.MODEL / MANUFACTURER / FINGERPRINT will spoof on next boot."
-else
-    ui_print "- system.prop will be generated on first boot"
-    ui_print "-   Build.* spoof will activate on the SECOND reboot after install."
-fi
 
 ui_print ""
 ui_print "- Install complete. Reboot then tap Action to freshen."

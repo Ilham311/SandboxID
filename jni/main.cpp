@@ -9,7 +9,6 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include <sys/socket.h>
 #include <sys/system_properties.h>
 #include <android/log.h>
 #include <string>
@@ -20,10 +19,6 @@
 #include <signal.h>
 #include <ctime>
 #include "zygisk.hpp"
-#include "java_hooks.hpp"
-
-// v1.1.4: forward decl for early-skip helper defined near end of file.
-static bool should_skip_early_v113(const std::string& pkg);
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -461,7 +456,7 @@ static const char* tt_sig_name(int sig) {
 }
 static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
-    if (sig >= 0 && sig < NSIG) { g_crash_count[sig] = g_crash_count[sig] + 1; n = g_crash_count[sig]; }
+    if (sig >= 0 && sig < NSIG) n = ++g_crash_count[sig];
 
     if (n <= CRASH_LIMIT) {
         long alive = tt_now_ms() - g_load_time_ms;
@@ -715,36 +710,9 @@ public:
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
         if (pkg.empty()) { unload(); return; }
 
-        // v1.1.3: Early bail-out BEFORE companion IPC for known non-target
-        // root/system/shell processes. Motivation: on Android 15 SDK 35, even
-        // a 1ms synchronous companion round-trip during preAppSpecialize can
-        // race with ActivityThread.handleBindApplication when a
-        // receiver-only process (e.g. BOOT_COMPLETED to Shizuku) is spawned,
-        // causing NPE inside LoadedApk.makeApplicationInner because
-        // mInstrumentation is not yet set. Skipping the IPC entirely for
-        // these packages removes the race window. Root apps in this list
-        // never need spoofing anyway (they see the real device, not the
-        // TikTok/Grab persona).
-        if (should_skip_early_v113(pkg)) {
-            LOGD("early-skip pkg='%s' (root/system/shell manager) — v1.1.3",
-                 pkg.c_str());
-            unload();
-            return;
-        }
-
         int fd = api_->connectCompanion();
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { LOGD("companion connect failed for pkg='%s'", pkg.c_str()); unload(); return; }
-
-        // v1.1.3: 500ms hard cap on companion socket read/write so a wedged
-        // companion daemon can never block preAppSpecialize indefinitely.
-        {
-            struct timeval tv;
-            tv.tv_sec  = 0;
-            tv.tv_usec = 500000;  // 500ms
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        }
 
         uint8_t cmd = CMD_GET_IDENTITY;
         write(fd, &cmd, 1);
@@ -813,72 +781,6 @@ public:
 #endif
         install_crash_watchdog(pkg_);
 
-        // v1.1.1 L8: TimeZone + Locale default spoof (pure JNI, Path A).
-        // Fixes the "Time zone" and "Locale (Region)" rows on device
-        // fingerprint dashboards without needing lsplant. Clears the JVM's
-        // cached TimeZone/Locale defaults for this target process by calling
-        // setDefault() with spoofed values from the identity blob.
-        {
-            auto get_id = [](const char* k, const char* def) -> std::string {
-                auto it = g_id.find(k);
-                return (it != g_id.end() && !it->second.empty()) ? it->second : std::string(def);
-            };
-            const std::string tz_id    = get_id("TIMEZONE_ID",    "America/Los_Angeles");
-            const std::string loc_lang = get_id("LOCALE_LANG",    "en");
-            const std::string loc_ctry = get_id("LOCALE_COUNTRY", "US");
-
-            // TimeZone.setDefault(TimeZone.getTimeZone(id))
-            if (jclass TZ = env_->FindClass("java/util/TimeZone")) {
-                jmethodID getTZ = env_->GetStaticMethodID(TZ, "getTimeZone",
-                    "(Ljava/lang/String;)Ljava/util/TimeZone;");
-                jmethodID setTZ = env_->GetStaticMethodID(TZ, "setDefault",
-                    "(Ljava/util/TimeZone;)V");
-                if (getTZ && setTZ) {
-                    jstring id_s = env_->NewStringUTF(tz_id.c_str());
-                    jobject tz_obj = env_->CallStaticObjectMethod(TZ, getTZ, id_s);
-                    if (tz_obj && !env_->ExceptionCheck()) {
-                        env_->CallStaticVoidMethod(TZ, setTZ, tz_obj);
-                        LOGI("L8 TZ spoof: setDefault(%s)", tz_id.c_str());
-                        env_->DeleteLocalRef(tz_obj);
-                    }
-                    env_->DeleteLocalRef(id_s);
-                }
-                env_->DeleteLocalRef(TZ);
-            }
-            if (env_->ExceptionCheck()) env_->ExceptionClear();
-
-            // Locale.setDefault(new Locale(lang, country))
-            if (jclass LC = env_->FindClass("java/util/Locale")) {
-                jmethodID ctor = env_->GetMethodID(LC, "<init>",
-                    "(Ljava/lang/String;Ljava/lang/String;)V");
-                jmethodID setLC = env_->GetStaticMethodID(LC, "setDefault",
-                    "(Ljava/util/Locale;)V");
-                if (ctor && setLC) {
-                    jstring lang_s = env_->NewStringUTF(loc_lang.c_str());
-                    jstring ctry_s = env_->NewStringUTF(loc_ctry.c_str());
-                    jobject loc_obj = env_->NewObject(LC, ctor, lang_s, ctry_s);
-                    if (loc_obj && !env_->ExceptionCheck()) {
-                        env_->CallStaticVoidMethod(LC, setLC, loc_obj);
-                        LOGI("L8 Locale spoof: setDefault(%s_%s)",
-                             loc_lang.c_str(), loc_ctry.c_str());
-                        env_->DeleteLocalRef(loc_obj);
-                    }
-                    env_->DeleteLocalRef(lang_s);
-                    env_->DeleteLocalRef(ctry_s);
-                }
-                env_->DeleteLocalRef(LC);
-            }
-            if (env_->ExceptionCheck()) env_->ExceptionClear();
-        }
-
-        // v1.1.0 Path B: lsplant-based Java method hooks (scaffold; no-op
-        // unless built with -DTT_HAVE_LSPLANT=1 via fetch_lsplant.sh + CI).
-        // v1.1.1: ident now populated from parsed identity blob (g_id).
-        {
-            if (ternak_tt::java_hooks::Init(env_)) {
-                ternak_tt::java_hooks::InstallAll(env_, g_id);
-            }
-        }
     }
 
     void preServerSpecialize(ServerSpecializeArgs*) override { unload(); }
@@ -905,64 +807,6 @@ private:
         }
     }
 };
-
-// v1.1.3 skip list — packages that must NEVER go through companion IPC.
-// These are root/superuser managers, terminal apps, system apps, and Zygote
-// sub-processes. Called only during preAppSpecialize, so cost is one
-// std::string compare per app spawn.
-static bool should_skip_early_v113(const std::string& pkg) {
-    // Root / superuser / Zygisk managers
-    static const char* const roots[] = {
-        "me.weishu.kernelsu",
-        "me.weishu.kernelsu.manager",
-        "io.github.a13e300.ksuwebui",
-        "com.rifsxd.ksunext",
-        "com.topjohnwu.magisk",
-        "io.github.vvb2060.magisk",
-        "com.kernelsu.manager",
-        "eu.chainfire.supersu",
-        // Shizuku family (BOOT_COMPLETED race target on Android 15)
-        "moe.shizuku.privileged.api",
-        "moe.shizuku.manager",
-        "rikka.shizuku.wrapper",
-        // Riru / LSPosed / Xposed variants
-        "moe.riru.core",
-        "org.lsposed.manager",
-        "de.robv.android.xposed.installer",
-        // Termux family
-        "com.termux",
-        "com.termux.api",
-        "com.termux.styling",
-        "com.termux.boot",
-        "com.termux.tasker",
-        // Terminal / dev tools that often run as root
-        "jackpal.androidterm",
-        "com.spartacusrex.spartacuside",
-        // Ourselves (defensive)
-        "com.ternak.tt",
-    };
-    for (const char* r : roots) if (pkg == r) return true;
-
-    // System packages — never spoofing targets
-    if (pkg.rfind("android.", 0)          == 0) return true;
-    if (pkg.rfind("com.android.", 0)      == 0) return true;
-    if (pkg.rfind("com.google.android.gms", 0)      == 0) return true;
-    if (pkg.rfind("com.google.android.gsf", 0)      == 0) return true;
-    if (pkg.rfind("com.google.android.setupwizard", 0) == 0) return true;
-    if (pkg.rfind("com.google.android.captiveportallogin", 0) == 0) return true;
-    if (pkg.rfind("com.google.android.permission", 0) == 0) return true;
-    if (pkg.rfind("com.google.android.packageinstaller", 0) == 0) return true;
-    if (pkg == "system" || pkg == "system_server" || pkg == "android") return true;
-
-    // Zygote / isolated sub-processes
-    if (pkg.find(":zygote")            != std::string::npos) return true;
-    if (pkg.find("_zygote")            != std::string::npos) return true;
-    if (pkg.find(":isolated_process")  != std::string::npos) return true;
-    if (pkg.find(":sandboxed_process") != std::string::npos) return true;
-    if (pkg.find(":webview_service")   != std::string::npos) return true;
-
-    return false;
-}
 
 REGISTER_ZYGISK_MODULE(TernakTT)
 

@@ -113,8 +113,6 @@ struct Identity {
             "BOOTLOADER","HOST","USER","TYPE","TAGS",
             "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
             "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
-            "TIMEZONE_ID","LOCALE_LANG","LOCALE_COUNTRY",
-            "UPTIME_OFFSET_MS",
         };
         std::string out;
         for (const auto& k : order) {
@@ -187,23 +185,6 @@ static Identity gen_identity() {
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
-
-    // v1.1.1: TZ + Locale for JNI-side setDefault() spoof (L8)
-    // Fixed to US persona to match Pixel build fingerprint; randomization
-    // would require pool-aware locale mapping (deferred).
-    id.kv["TIMEZONE_ID"]    = "America/Los_Angeles";
-    id.kv["LOCALE_LANG"]    = "en";
-    id.kv["LOCALE_COUNTRY"] = "US";
-
-    // v1.1.2 Path B: uptime offset (added to SystemClock.uptimeMillis /
-    // elapsedRealtime via lsplant hook). Random 1h-30d in ms so persona
-    // looks like a device that has been up for a plausible time.
-    {
-        std::uniform_int_distribution<long long> upt(3600LL * 1000,
-                                                     30LL * 86400 * 1000);
-        id.kv["UPTIME_OFFSET_MS"] = std::to_string(upt(g));
-    }
-
     return id;
 }
 
@@ -472,33 +453,7 @@ static void generate_mount_files(const Identity& id) {
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_data_file:s0",
             xml_path.c_str()});
 
-    // v1.1.0 Path A: kernel identity overlay files
-    // /proc/uptime  format: "<up>.<xx> <idle>.<xx>\n" where up = 1h..30d
-    // /proc/sys/kernel/random/boot_id  format: fresh UUIDv4 + newline
-    {
-        std::random_device rd;
-        std::mt19937 g(rd());
-        std::uniform_int_distribution<int> sec_dist(3600, 2592000);
-        int up = sec_dist(g);
-        int idle = up - (int)(g() % ((unsigned)up / 3 + 1));
-        char buf[128];
-        snprintf(buf, sizeof(buf), "%d.%02d %d.%02d\n",
-                 up, (int)(g() % 100), idle, (int)(g() % 100));
-        std::string up_path = std::string(MOUNTDIR) + "/proc_uptime";
-        atomic_write(up_path, buf);
-        ::chmod(up_path.c_str(), 0444);
-        run_bin("/system/bin/chcon",
-                {"chcon", "u:object_r:proc_uptime:s0", up_path.c_str()});
-
-        std::string bid = uuid_v4() + "\n";
-        std::string bid_path = std::string(MOUNTDIR) + "/kernel_boot_id";
-        atomic_write(bid_path, bid);
-        ::chmod(bid_path.c_str(), 0444);
-        run_bin("/system/bin/chcon",
-                {"chcon", "u:object_r:proc_sys_kernel:s0", bid_path.c_str()});
-    }
-
-    printf("  Mount overlay: 5 build.prop + settings_secure.xml + proc_uptime + kernel_boot_id -> %s\n", MOUNTDIR);
+    printf("  Mount overlay: 5 build.prop + settings_secure.xml -> %s\n", MOUNTDIR);
 }
 
 static void wipe_tt_data() {

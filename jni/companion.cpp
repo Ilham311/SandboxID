@@ -114,8 +114,6 @@ static const BindEntry BIND_ENTRIES[] = {
     {"system_ext/build.prop", "/system_ext/etc/build.prop"},
     {"system_ext/build.prop", "/system_ext/build.prop"},
     {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
-    {"proc_uptime",           "/proc/uptime"},
-    {"kernel_boot_id",        "/proc/sys/kernel/random/boot_id"},
 };
 
 static std::string read_file(const char* p) {
@@ -174,18 +172,8 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
                     LOGD("  bind OK: %s -> %s", src.c_str(), e.dst);
                 } else {
                     fail++;
-                    int me = errno;
-                    struct stat s_src{}, s_dst{};
-                    int rs = ::stat(src.c_str(), &s_src);
-                    int rd = ::stat(e.dst,        &s_dst);
-                    LOGE("BIND-FAIL %s -> %s errno=%d(%s) "
-                         "src{stat=%d ino=%llu size=%lld mode=0%o} "
-                         "dst{stat=%d ino=%llu mode=0%o} [post-setns pid=%u]",
-                         src.c_str(), e.dst, me, strerror(me),
-                         rs, (unsigned long long)s_src.st_ino,
-                             (long long)s_src.st_size, s_src.st_mode,
-                         rd, (unsigned long long)s_dst.st_ino, s_dst.st_mode,
-                         target_pid);
+                    LOGE("child: bind fail %s -> %s errno=%d",
+                         src.c_str(), e.dst, errno);
                 }
             }
             LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
