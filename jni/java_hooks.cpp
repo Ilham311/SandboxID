@@ -16,6 +16,19 @@
 #include <android/log.h>
 #include <mutex>
 
+#ifdef TT_HAVE_LSPLANT
+#include <dlfcn.h>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include "lsplant.hpp"
+#include "shadowhook.h"
+
+#ifdef TT_HAVE_HELPER_DEX
+#include "helper_dex.h"  // provides HELPER_DEX[] + HELPER_DEX_LEN
+#endif
+#endif
+
 #define TT_LOG_TAG "TernakTT"
 #define TT_LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TT_LOG_TAG, __VA_ARGS__)
 #define TT_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TT_LOG_TAG, __VA_ARGS__)
@@ -32,17 +45,6 @@ bool IsAvailable() {
 }
 
 #ifdef TT_HAVE_LSPLANT
-
-#include <dlfcn.h>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include "lsplant.hpp"
-#include "shadowhook.h"
-
-#ifdef TT_HAVE_HELPER_DEX
-#include "helper_dex.h"  // provides HELPER_DEX[] + HELPER_DEX_LEN
-#endif
 
 static std::mutex g_mu;
 static bool g_inited = false;

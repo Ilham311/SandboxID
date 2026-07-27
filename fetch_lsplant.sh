@@ -261,6 +261,7 @@ fetch_shadowhook() {
 }
 
 SHADOWHOOK_OK=1
+LSPLANT_OK=1
 fetch_lsplant_aar "$LSPLANT_VER" || LSPLANT_OK=0
 fetch_shadowhook                 || SHADOWHOOK_OK=0
 
@@ -274,8 +275,8 @@ else
     echo "==> Path B dependencies fetched successfully."
     echo "    lsplant     version: $(cat "$PREBUILT/VERSION")"
     echo "    lsplant     ABIs:    $(ls "$PREBUILT/lib" | tr '\n' ' ')"
-    echo "    shadowhook  tag:     ${SHADOWHOOK_TAG}"
-    echo "    shadowhook  at:      $JNI/shadowhook"
+    echo "    shadowhook  tag:     ${SHADOWHOOK_VERSION}"
+    echo "    shadowhook  at:      $ROOT/prebuilt/shadowhook"
 fi
 
 cd "$ROOT"
