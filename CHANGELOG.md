@@ -9,6 +9,57 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.2.1
+
+**Focus**: Hotfix build error unmasked by v1.2.0's successful ShadowHook migration.
+
+### The bug that finally surfaced
+
+v1.2.0 CI log showed:
+```
+jni/java_hooks.cpp:98:13: error: cannot use 'try' with exceptions disabled
+    try { return std::stoll(it->second); } catch (...) {}
+```
+
+This bug has been latent in `java_hooks.cpp` since it was first written. `jni/CMakeLists.txt` set `-fno-exceptions -fno-rtti` in the COMMON flag set (to shrink `libternak_tt.so`), but the source uses a `try {} catch {}` around `std::stoll` to guard against parse errors on user-controlled property strings.
+
+Why didn't we hit it before v1.2.0?
+- v1.1.7–v1.1.9 all failed *earlier* in the build — ShadowHook subproject compilation hit `-Werror` on unsafe-buffer / declaration-after-statement / reserved-identifier warnings and killed the build before CMake even started compiling our own targets.
+- v1.2.0 removed the ShadowHook source-compile entirely (AAR migration), so the build finally reached `CMakeFiles/ternak_tt.dir/java_hooks.cpp.o` — and immediately exposed the flag mismatch.
+
+### Fix
+
+**`jni/CMakeLists.txt`**: removed `-fno-exceptions -fno-rtti` from both debug and release COMMON flag strings. `try/catch` and `dynamic_cast` now work again across our targets (`libternak_tt.so` + `ternak-tt` CLI).
+
+**Trade-off**: +5–10 KB per ABI for exception-unwinding tables and RTTI. `libternak_tt.so` will go from ~90 KB to ~100 KB per ABI. Acceptable for a Zygisk module.
+
+---
+
+## v1.2.0
+
+**Focus**: Kill the ShadowHook `-Werror` cascade for good by consuming ShadowHook the way ByteDance ships it — as a prebuilt AAR from Maven Central.
+
+### Changed — ShadowHook: source-clone → prebuilt AAR
+
+- **Before (v1.1.7–v1.1.9)**: `git clone bytedance/android-inline-hook@v1.0.9` into `jni/shadowhook/`, then `add_subdirectory(shadowhook/src/main/cpp)` in our CMake.
+- **After (v1.2.0)**: `curl` the AAR from `https://repo1.maven.org/maven2/com/bytedance/android/shadowhook/<version>/shadowhook-<version>.aar`, extract `prefab/modules/shadowhook/{include/shadowhook.h,libs/android.*/libshadowhook.so}` into `prebuilt/shadowhook/`, rewrite SONAME with `patchelf --set-soname libternak_shadowhook.so`, link as IMPORTED SHARED library.
+- Latest AAR is `2.0.1` (auto-resolved via `<release>` in `maven-metadata.xml`, override with `SHADOWHOOK_VERSION=x.y.z ./fetch_lsplant.sh`).
+
+### Why AAR instead of silencing `-Werror`
+
+v1.1.9 added `target_compile_options(shadowhook PRIVATE -Wno-error=...)` but flags cascade unpredictably across NDK versions and ShadowHook's own CMake appended `-Werror` after our PRIVATE options. Also the LSS syscall headers use `__xxx` identifiers required by the kernel ABI that trip `-Wreserved-identifier` regardless of flag ordering. Consuming the prebuilt AAR sidesteps all of it — we never compile ShadowHook's code, only link its `.so`.
+
+### Added
+- `.github/workflows/build.yml`: `Install patchelf` step (needed to rewrite SONAME).
+- `fetch_lsplant.sh`: `fetch_shadowhook()` function (AAR download + extract + SONAME rewrite).
+- `jni/CMakeLists.txt`: `shadowhook` as IMPORTED SHARED library (same recipe as lsplant).
+- `build.sh`: check `prebuilt/shadowhook/` instead of `jni/shadowhook/`, copy `.so` from `prebuilt/shadowhook/lib/$abi/` instead of `build/$V/$abi/shadowhook-build/`.
+
+### Impact
+First 3 CI files compile successfully (main.cpp, companion.cpp, ternak-tt.cpp). Fourth (`java_hooks.cpp`) reveals a *different* latent bug (see v1.2.1).
+
+---
+
 ## v1.1.9
 
 **Focus**: Unblock v1.1.8 CI failure. Configure passed cleanly this time (v1.1.8 fixes to LANGUAGES C CXX + `jni/shadowhook` guard confirmed working in the CI log), but ShadowHook's own C sources failed to compile under NDK r26d Clang.

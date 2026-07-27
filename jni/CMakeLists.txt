@@ -1,21 +1,18 @@
+# v1.2.1: Removed -fno-exceptions -fno-rtti so java_hooks.cpp's try/catch
+# around std::stoll(it->second) compiles. This bug ("cannot use 'try' with
+# exceptions disabled") existed since v1.1.x but was masked by ShadowHook
+# source-compile failures. Once v1.2.0 killed those (via AAR migration), the
+# next compile stage revealed jni/java_hooks.cpp:98 hitting the flag mismatch.
+# Trade-off: +5-10 KB per ABI for exception unwinding tables. Acceptable.
+#
 # v1.2.0: ShadowHook now consumed as prebuilt AAR (matching lsplant approach).
+# v1.1.7-v1.1.9 tried to compile ShadowHook v1.0.9 from source via
+# add_subdirectory. That broke under NDK r26d Clang with -Werror on
+# -Wunsafe-buffer-usage, -Wdeclaration-after-statement, -Wreserved-identifier.
+# Official ByteDance integration ships AAR + prefab on Maven Central. We use
+# plain IMPORTED SHARED targets (same recipe as lsplant), skipping Gradle.
 #
-# Archaeology: v1.1.7-v1.1.9 tried to compile ShadowHook v1.0.9 from source
-# via add_subdirectory. That worked on older NDK but broke under r26d Clang
-# with hundreds of -Werror errors on -Wunsafe-buffer-usage,
-# -Wdeclaration-after-statement, and -Wreserved-identifier — three warning
-# classes promoted to -Werror by newer Clang policy. Silencing them via
-# target_compile_options(shadowhook PRIVATE -Wno-error=...) still failed
-# because ShadowHook's own CMakeLists appends -Werror AFTER our PRIVATE
-# options, and the LSS syscall headers use __xxx identifiers that Clang's
-# -Wreserved-identifier flags regardless of our flag order.
-#
-# Official ByteDance integration (doc/manual.md) uses AAR + prefab:
-#   dependencies { implementation 'com.bytedance.android:shadowhook:x.y.z' }
-#   find_package(shadowhook REQUIRED CONFIG)
-#   target_link_libraries(mylib shadowhook::shadowhook)
-# We use plain IMPORTED SHARED targets (same recipe as lsplant), skipping
-# Gradle/prefab plumbing because our build is raw NDK+CMake (no AGP).
+# v1.1.8: bump min to 3.22.1 (Android AGP standard) + add C to LANGUAGES.
 cmake_minimum_required(VERSION 3.22.1)
 project(ternak_tt LANGUAGES C CXX)
 
@@ -26,13 +23,15 @@ option(TERNAK_TT_DEBUG "Enable verbose debug logging (LOGD)" OFF)
 if(TERNAK_TT_DEBUG)
     message(STATUS "[ternak_tt] BUILD VARIANT: DEBUG (verbose LOGD, no strip)")
     add_compile_definitions(TT_DEBUG=1)
-    set(COMMON "-Os -g -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
+    # v1.2.1: -fno-exceptions -fno-rtti removed (java_hooks.cpp uses try/catch)
+    set(COMMON "-Os -g -fvisibility=hidden -ffunction-sections -fdata-sections")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-Wl,--gc-sections -Wl,--exclude-libs,ALL")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "-Wl,--gc-sections")
 else()
     message(STATUS "[ternak_tt] BUILD VARIANT: RELEASE (LOGD compiled out, stripped)")
-    set(COMMON "-Os -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
+    # v1.2.1: -fno-exceptions -fno-rtti removed (java_hooks.cpp uses try/catch)
+    set(COMMON "-Os -fvisibility=hidden -ffunction-sections -fdata-sections")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE
         "-Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL")

@@ -80,22 +80,23 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install patchelf (SONAME rewrite for shadowhook AAR)
-        # v1.2.0: patchelf rewrites libshadowhook.so's SONAME to
-        # libternak_shadowhook.so before build, so libternak_tt.so bakes
-        # DT_NEEDED=libternak_shadowhook.so and doesn't collide with
-        # TikTok's own bundled libshadowhook.so.
-        run: sudo apt-get update -qq && sudo apt-get install -y patchelf
-
       - name: Setup Android SDK build-tools + platform (d8 + android.jar for Path B)
+        # v1.1.7: `platforms;android-34` supplies android.jar so
+        # fetch_lsplant.sh can pass -bootclasspath to javac. Without it,
+        # v1.1.6 CI hit `package android.content does not exist` and
+        # dropped all 5 Java-side hooks silently.
         uses: android-actions/setup-android@v3
         with:
           packages: 'build-tools;34.0.0 platforms;android-34'
 
-      - name: Fetch lsplant + ShadowHook (Path B, both AAR)
+      - name: Install patchelf (for ShadowHook SONAME rewrite)
+        run: sudo apt-get update && sudo apt-get install -y patchelf
+
+      - name: Fetch lsplant + ShadowHook AARs (Path B, v1.2.0)
         continue-on-error: true
         run: |
           set -eu
+          # Put d8 on PATH
           if [ -n "${ANDROID_HOME:-}" ] && [ -x "$ANDROID_HOME/build-tools/34.0.0/d8" ]; then
             export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
           fi
@@ -140,6 +141,7 @@ jobs:
             "changelog": "https://raw.githubusercontent.com/${REPO}/main/CHANGELOG.md"
           }
           EOF
+
           echo "----- update.json -----"
           cat update.json
 
@@ -212,6 +214,7 @@ jobs:
             cat dist/checksums.sha256
             echo '```'
           } > release_notes.md
+
           echo "----- release_notes.md -----"
           cat release_notes.md
 
@@ -243,19 +246,12 @@ jobs:
           path: dist/*-debug.zip
           if-no-files-found: warn
 
-      - name: Create/refresh tag on main
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-        run: |
-          set -eu
-          NV="${{ steps.version.outputs.new_version }}"
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git rev-parse -q --verify "refs/tags/${NV}" >/dev/null; then
-            echo "tag ${NV} already exists"
-          else
-            git tag -a "${NV}" -m "Ternak TT ${NV}"
-            git push origin "${NV}"
-          fi
+      - name: Upload release notes artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release_notes.md
+          if-no-files-found: warn
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -266,5 +262,7 @@ jobs:
           files: |
             dist/*.zip
             dist/checksums.sha256
-          draft: false
-          prerelease: false
+            update.json
+            release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

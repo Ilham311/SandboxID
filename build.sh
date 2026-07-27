@@ -22,24 +22,21 @@ if [ ! -f jni/zygisk.hpp ]; then
     https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
 fi
 
-# v1.2.0 Path B: both lsplant AND shadowhook are now prebuilt AARs from
-# Maven Central. Source-based shadowhook (v1.1.7-v1.1.9) is retired — it
-# broke under NDK r26d Clang with -Werror cascade on -Wunsafe-buffer-usage,
-# -Wdeclaration-after-statement, -Wreserved-identifier. AAR is pre-compiled
-# by ByteDance and sidesteps the compile entirely.
+# v1.1.8 Path B (AAR-based): warn if lsplant .so or ShadowHook missing.
+# v1.1.8 Bug #4 fix: check jni/shadowhook/ not jni/dobby/ (Dobby was replaced
+# by bytedance/android-inline-hook in v1.1.7 after Dobby broke on NDK r26d).
 PATH_B_OK=1
 if [ ! -d prebuilt/lsplant/lib ] || [ ! -f prebuilt/lsplant/include/lsplant.hpp ]; then
   echo "==> Path B disabled: prebuilt/lsplant/ incomplete (need AAR-extracted .so + header)."
   PATH_B_OK=0
 fi
-if [ ! -d prebuilt/shadowhook/lib ] || [ ! -f prebuilt/shadowhook/include/shadowhook.h ]; then
-  echo "==> Path B disabled: prebuilt/shadowhook/ incomplete (need AAR-extracted .so + header)."
+if [ ! -f prebuilt/shadowhook/include/shadowhook.h ] || [ ! -d prebuilt/shadowhook/lib ]; then
+  echo "==> Path B disabled: prebuilt/shadowhook/ incomplete (AAR not extracted)."
   PATH_B_OK=0
 fi
 if [ "$PATH_B_OK" = "1" ]; then
   LSPLANT_VER="$(cat prebuilt/lsplant/VERSION 2>/dev/null || echo unknown)"
-  SHADOWHOOK_VER="$(cat prebuilt/shadowhook/VERSION 2>/dev/null || echo unknown)"
-  echo "==> Path B: lsplant $LSPLANT_VER + shadowhook $SHADOWHOOK_VER (AAR) -> TT_HAVE_LSPLANT will be enabled"
+  echo "==> Path B: prebuilt lsplant $LSPLANT_VER + prebuilt shadowhook present -> TT_HAVE_LSPLANT will be enabled (v1.2.0 AAR-based)"
 else
   echo "    Run './fetch_lsplant.sh' first if you want Java method hooks (Settings.Secure, MediaDrm, ...)."
 fi
@@ -66,6 +63,11 @@ build_variant() {
     local BUILD="build/$V/$ABI"
     rm -rf "$BUILD"
     mkdir -p "$BUILD"
+    # v1.1.9: dropped -DCMAKE_POLICY_VERSION_MINIMUM=3.5 from v1.1.8 because
+    # CMake 3.31.6 flagged it as "unused" (it takes effect only when the
+    # project itself calls cmake_minimum_required below its floor, which we
+    # no longer do since bumping to 3.22.1). The NDK-toolchain deprecation
+    # warnings are noisy but harmless.
     cmake -S jni -B "$BUILD" \
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$ABI" \
@@ -79,37 +81,41 @@ build_variant() {
   mkdir -p "$PKG/zygisk" "$PKG/bin"
   cp module.prop action.sh service.sh customize.sh "$PKG/"
 
-  # v1.2.0: ship liblsplant.so + libternak_shadowhook.so via Magisk/KSU
+  # v1.1.7: ship liblsplant.so + libternak_shadowhook.so via Magisk/KSU
   # $MODPATH/system/lib{,64} overlay so DT_NEEDED resolves inside app
-  # processes at runtime. Both .so files come directly from prebuilt AARs
-  # (see fetch_lsplant.sh). libshadowhook.so's SONAME was rewritten to
-  # libternak_shadowhook.so by patchelf during fetch, to avoid collision
-  # with target apps that bundle their own libshadowhook.so (e.g. TikTok).
+  # processes at runtime. (v1.1.6 shipped libdobby.so; ShadowHook replaced
+  # it after Dobby broke on NDK r26d. The .so is renamed to
+  # libternak_shadowhook.so via SONAME to avoid collision with target apps
+  # that already bundle their own libshadowhook.so — e.g. TikTok itself.)
   if [ "${PATH_B_OK:-0}" = "1" ]; then
     mkdir -p "$PKG/system/lib64" "$PKG/system/lib"
+    copy_shadowhook_so() {
+      local abi="$1"; local dst_dir="$2"
+      local src
+      src=$(find "build/$V/$abi/shadowhook-build" -name 'libternak_shadowhook.so' 2>/dev/null | head -1)
+      # Fallback: some CMake versions emit under a nested subdir.
+      if [ -z "$src" ]; then
+        src=$(find "build/$V/$abi" -name 'libternak_shadowhook.so' 2>/dev/null | head -1)
+      fi
+      if [ -n "$src" ] && [ -f "$src" ]; then
+        cp "$src" "$dst_dir/libternak_shadowhook.so.$abi"
+      else
+        echo "  WARN: [$V] $abi: libternak_shadowhook.so not found under build/$V/$abi/"
+      fi
+    }
     # arm64-v8a + x86_64 -> /system/lib64
     for A64 in arm64-v8a x86_64; do
       if [ -f "prebuilt/lsplant/lib/$A64/liblsplant.so" ]; then
         cp "prebuilt/lsplant/lib/$A64/liblsplant.so" "$PKG/system/lib64/liblsplant.so.$A64"
       fi
-      if [ -f "prebuilt/shadowhook/lib/$A64/libternak_shadowhook.so" ]; then
-        cp "prebuilt/shadowhook/lib/$A64/libternak_shadowhook.so" \
-           "$PKG/system/lib64/libternak_shadowhook.so.$A64"
-      else
-        echo "  WARN: [$V] $A64: libternak_shadowhook.so missing in prebuilt/shadowhook/"
-      fi
+      copy_shadowhook_so "$A64" "$PKG/system/lib64"
     done
     # armeabi-v7a + x86 -> /system/lib
     for A32 in armeabi-v7a x86; do
       if [ -f "prebuilt/lsplant/lib/$A32/liblsplant.so" ]; then
         cp "prebuilt/lsplant/lib/$A32/liblsplant.so" "$PKG/system/lib/liblsplant.so.$A32"
       fi
-      if [ -f "prebuilt/shadowhook/lib/$A32/libternak_shadowhook.so" ]; then
-        cp "prebuilt/shadowhook/lib/$A32/libternak_shadowhook.so" \
-           "$PKG/system/lib/libternak_shadowhook.so.$A32"
-      else
-        echo "  WARN: [$V] $A32: libternak_shadowhook.so missing in prebuilt/shadowhook/"
-      fi
+      copy_shadowhook_so "$A32" "$PKG/system/lib"
     done
     # customize.sh will rename the correct .so.$ABI to .so at install time based
     # on device arch (single-arch install semantics for Magisk/KSU modules).
