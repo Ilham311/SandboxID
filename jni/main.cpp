@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <ctime>
 #include "zygisk.hpp"
+#include "proc_utils.hpp"
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -588,15 +589,6 @@ static void request_companion_mounts(zygisk::Api* api) {
 
 using openat_t = int (*)(int, const char*, int, ...);
 static openat_t orig_openat = nullptr;
-
-static bool is_sensitive_proc_path(const char* p) {
-    if (!p) return false;
-    if (!strstr(p, "/proc/")) return false;
-    if (strstr(p, "/mountinfo")) return true;
-    if (strstr(p, "/mounts"))    return true;
-    if (strstr(p, "/maps"))      return true;
-    return false;
-}
 
 static int hook_openat(int dirfd, const char* path, int flags, ...) {
     mode_t mode = 0;
