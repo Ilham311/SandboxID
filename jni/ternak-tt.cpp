@@ -26,6 +26,16 @@ static const char* RESETPROP      = "/data/adb/modules/ternak_tt/bin/resetprop-r
 static const char* MOUNTDIR       = "/data/adb/modules/ternak_tt/mount";
 static const char* TARGET_FILE    = "/data/adb/modules/ternak_tt/target.txt";
 
+static bool is_valid_package_name(const std::string& pkg) {
+    if (pkg.empty()) return false;
+    for (char c : pkg) {
+        if (!std::isalnum(c) && c != '.' && c != '_') {
+            return false;
+        }
+    }
+    return true;
+}
+
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
     std::ifstream f(TARGET_FILE);
@@ -41,6 +51,7 @@ static std::vector<std::string> load_targets() {
         if (s == std::string::npos) continue;
         line = line.substr(s);
         if (line.empty()) continue;
+        if (!is_valid_package_name(line)) continue;
         out.push_back(line);
     }
     if (out.empty()) {
