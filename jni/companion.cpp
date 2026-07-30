@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -43,8 +44,8 @@ static const char* IDENTITY_FILE = "/data/adb/modules/ternak_tt/identity.prop";
 static const char* MOUNTDIR      = "/data/adb/modules/ternak_tt/mount";
 static const char* TARGET_FILE   = "/data/adb/modules/ternak_tt/target.txt";
 
-static std::vector<std::string> g_targets;
-static time_t                   g_targets_mtime = 0;
+static std::unordered_set<std::string> g_targets;
+static time_t                          g_targets_mtime = 0;
 
 static void reload_targets_if_changed() {
     struct stat st{};
@@ -65,7 +66,7 @@ static void reload_targets_if_changed() {
     if (!g_targets.empty() && st.st_mtime == g_targets_mtime) return;
 
     std::ifstream f(TARGET_FILE);
-    std::vector<std::string> next;
+    std::unordered_set<std::string> next;
     std::string line;
     while (std::getline(f, line)) {
 
@@ -79,7 +80,7 @@ static void reload_targets_if_changed() {
         if (s == std::string::npos) continue;
         line = line.substr(s);
         if (line.empty()) continue;
-        next.push_back(line);
+        next.insert(line);
     }
     if (next.empty()) {
         LOGE("target.txt has 0 valid entries; keeping previous list (%zu pkgs)",
@@ -98,8 +99,7 @@ static void reload_targets_if_changed() {
 
 static bool is_target(const std::string& pkg) {
     reload_targets_if_changed();
-    for (const auto& t : g_targets) if (t == pkg) return true;
-    return false;
+    return g_targets.find(pkg) != g_targets.end();
 }
 
 struct BindEntry { const char* src_rel; const char* dst; };
