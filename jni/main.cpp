@@ -5,23 +5,6 @@
 // (install all JNI hooks: Build fields, SystemProperties.native_get,
 // Settings.Secure, WifiInfo, TelephonyManager, GAID, proc sanitizer).
 //
-// v1.1.2 (low-priority hardening L1-L8):
-//   L1: local `map` shadow -- already handled in v1.1.0 (tables in prop_map.hpp).
-//   L2: dropped 6 unused headers (sys/mount.h, sys/wait.h, memory, thread,
-//       chrono, fstream). Nothing else changes.
-//   L3: tt_bool/int/long_spoof moved from function-static to namespace-scope
-//       inline maps in `tt_leak_tables` -- removes guard-variable cost.
-//   L4: added TT_STRICT_PROPS compile-time flag to opt into whitelist-only
-//       prop_get (default OFF, permissive behavior unchanged).
-//   L5: identity_fallback_defaults -- already namespace-scope in prop_map.hpp.
-//   L6: TelephonyManager keeps null-return (canonical per AOSP source), only
-//       added rationale comment.
-//   L7: removed dead CMD_CHECK_TT enum entry (never handled). CMD_GET_IDENTITY
-//       and CMD_DO_MOUNTS renumbered 1/2. companion.cpp updated in lockstep.
-//   L8: LOGI compile-out in release, LOG_TAG shortened to "TT" in release.
-//       LOGE (hard errors only) still emits. Ref: VPN Hide, Zygisk-Assistant
-//       release-quiet pattern.
-//
 // v1.1.0 refactor:
 //   - Removed the duplicate MOUNTDIR / BindEntry / BIND_ENTRIES definitions
 //     that used to live near the bottom of this file (they were out of sync
@@ -39,18 +22,24 @@
 #include <time.h>
 
 #include <sys/system_properties.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <fstream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -80,35 +69,25 @@ static inline int tt_memfd_create(const char* name, unsigned flags) {
     return (int)syscall(__NR_memfd_create, name, flags);
 }
 
-// v1.1.2 (L8): In release builds, only LOGE (hard errors) reaches logcat.
-// LOGI is downgraded to compile-out so we don't leak "TernakTT" or per-app
-// target names into logcat where a spying app could grep for module presence.
-// Reference pattern: VPN Hide v0.7.0, Zygisk-Assistant -- both keep logcat
-// near-silent by default and gate verbose logging behind a runtime toggle.
-#ifdef TT_DEBUG
 #define LOG_TAG "TernakTT"
-#define TT_VARIANT_TAG "debug"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
-#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
-#else
-// Short generic tag in release makes logcat pattern matching less obvious.
-#define LOG_TAG "TT"
-#define TT_VARIANT_TAG "release"
-#define LOGI(...) ((void)0)
-#define LOGD(...) ((void)0)
-#endif
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#ifdef TT_DEBUG
+#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
+#define TT_VARIANT_TAG "debug"
+#else
+#define LOGD(...) ((void)0)
+#define TT_VARIANT_TAG "release"
+#endif
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
 using zygisk::ServerSpecializeArgs;
 
-// v1.1.2 (L7): CMD_CHECK_TT removed -- was declared in both main.cpp and
-// companion.cpp but never referenced in any switch/handler. Renumbering the
-// two survivors is safe because companion.cpp is rebuilt from the same source.
 enum : uint8_t {
-    CMD_GET_IDENTITY = 1,
-    CMD_DO_MOUNTS    = 2,
+    CMD_CHECK_TT     = 1,
+    CMD_GET_IDENTITY = 2,
+    CMD_DO_MOUNTS    = 3,
 };
 
 static std::map<std::string, std::string> g_id;
@@ -151,15 +130,6 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), sit->second.c_str());
         return env->NewStringUTF(sit->second.c_str());
     }
-    // v1.1.2 (L4): compile-time whitelist mode. When TT_STRICT_PROPS is
-    // defined, any prop key we did not explicitly map returns j_def instead
-    // of leaking the real system value. This is strictly safer for identity
-    // hiding but may break apps that read vendor-specific keys we forgot to
-    // map. Left OFF by default so existing behavior is unchanged.
-#ifdef TT_STRICT_PROPS
-    LOGD("L2 STRICT '%s' -> j_def (whitelist mode)", k.c_str());
-    return j_def;
-#else
     char buf[PROP_VALUE_MAX] = {0};
     if (__system_property_get(k.c_str(), buf) > 0) {
         LOGD("L2 LEAK '%s' -> '%s' (unhooked, real value returned)", k.c_str(), buf);
@@ -167,7 +137,6 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
     }
     LOGD("L2 MISS '%s' -> default", k.c_str());
     return j_def;
-#endif
 }
 
 // ---- L3: Settings.Secure.getString hook ------------------------------------
@@ -284,16 +253,6 @@ static void install_wifi_hook(JNIEnv* env) {
 }
 
 // ---- L6: TelephonyManager null-return --------------------------------------
-// v1.1.2 (L6): keep null-return (NOT empty string). Rationale from research:
-//   * AOSP TelephonyManager.getDeviceId() itself returns null when the
-//     telephony subsystem is unavailable (see frameworks/base git). Apps that
-//     do the canonical `if (imei != null && !imei.isEmpty())` check treat
-//     null as "unknown" -- which is exactly what we want to signal.
-//   * Returning empty string "" would be interpreted as "IMEI is present and
-//     happens to be empty", which is nonsense and can trigger fingerprint
-//     mismatches (a real IMEI is always 14-15 digits).
-// Apps that NPE on null are buggy on real devices too (no-SIM, tablet) -- not
-// our problem to work around.
 
 static jstring hook_null_str(JNIEnv*, jobject) { return nullptr; }
 #ifdef TT_DEBUG
@@ -327,51 +286,50 @@ static void install_telephony_hook(JNIEnv* env) {
 }
 
 // ---- L7: debug-only leak sensors (spoof int/long/bool prop reads) ----------
-// v1.1.2 (L3): tables moved from function-static to namespace scope. Rationale:
-//   * C++11+ guarantees thread-safe init of function-static, but each call must
-//     check the guard variable (cheap but nonzero on hot paths).
-//   * Namespace-scope const maps init once during dynamic initialization phase
-//     of the SO. No init-order fiasco risk here: nothing else in this TU reads
-//     these tables during its own static init.
-// Ref: cppstories.com/2025/thread_safety_function_statics/
-namespace tt_leak_tables {
-#ifdef TT_DEBUG
-inline const std::map<std::string, jboolean> bool_spoof = {
-    {"sys.boot_completed",                    JNI_TRUE},
-    {"debug.force_rtl",                       JNI_FALSE},
-    {"framework.pause_bg_animations.enabled", JNI_FALSE},
-    {"dalvik.vm.dexopt.secondary",            JNI_TRUE},
-    {"viewroot.profile_rendering",            JNI_FALSE},
-    {"debug.sqlite.no_double_quoted_strs",    JNI_TRUE},
-    {"persist.sys.activity_anim_perf_override", JNI_FALSE},
-    {"persist.sys.lmk.reportkills",           JNI_FALSE},
-    {"debug.layout",                          JNI_FALSE},
-};
-inline const std::map<std::string, jint> int_spoof = {
-    {"ro.mediacodec.min_sample_rate",         8000},
-    {"ro.mediacodec.max_sample_rate",         192000},
-    {"debug.sqlite.wal.autocheckpoint",       100},
-    {"debug.sqlite.pagesize",                 4096},
-    {"debug.sqlite.journalsizelimit",         524288},
-    {"debug.sqlite.wal.truncatesize",         1048576},
-    {"debug.sqlite.wal.poolsize",             0},
-    {"debug.hwui.fps_divisor",                1},
-    {"persist.wm.debug.ext_version_override", 0},
-    {"build.version.extensions.r",            3},
-    {"build.version.extensions.s",            4},
-    {"build.version.extensions.t",            4},
-    {"build.version.extensions.u",            13},
-    {"build.version.extensions.v",            13},
-    {"build.version.extensions.ad_services",  15},
-    {"debug.am.run_gc_trim_level",            2147483647},
-    {"debug.am.run_mallopt_trim_level",       2147483647},
-    {"debug.adservices.binder_timeout",       10000},
-};
-inline const std::map<std::string, jlong> long_spoof = {
-    {"ro.gfx.driver_build_time",              1704067200LL},
-};
-#endif // TT_DEBUG
-} // namespace tt_leak_tables
+
+static const std::map<std::string, jboolean>& tt_bool_spoof() {
+    static const std::map<std::string, jboolean> m = {
+        {"sys.boot_completed",                    JNI_TRUE},
+        {"debug.force_rtl",                       JNI_FALSE},
+        {"framework.pause_bg_animations.enabled", JNI_FALSE},
+        {"dalvik.vm.dexopt.secondary",            JNI_TRUE},
+        {"viewroot.profile_rendering",            JNI_FALSE},
+        {"debug.sqlite.no_double_quoted_strs",    JNI_TRUE},
+        {"persist.sys.activity_anim_perf_override", JNI_FALSE},
+        {"persist.sys.lmk.reportkills",           JNI_FALSE},
+        {"debug.layout",                          JNI_FALSE},
+    };
+    return m;
+}
+static const std::map<std::string, jint>& tt_int_spoof() {
+    static const std::map<std::string, jint> m = {
+        {"ro.mediacodec.min_sample_rate", 8000},
+        {"ro.mediacodec.max_sample_rate", 192000},
+        {"debug.sqlite.wal.autocheckpoint", 100},
+        {"debug.sqlite.pagesize", 4096},
+        {"debug.sqlite.journalsizelimit", 524288},
+        {"debug.sqlite.wal.truncatesize", 1048576},
+        {"debug.sqlite.wal.poolsize", 0},
+        {"debug.hwui.fps_divisor", 1},
+        {"persist.wm.debug.ext_version_override", 0},
+        {"build.version.extensions.r", 3},
+        {"build.version.extensions.s", 4},
+        {"build.version.extensions.t", 4},
+        {"build.version.extensions.u", 13},
+        {"build.version.extensions.v", 13},
+        {"build.version.extensions.ad_services", 15},
+        {"debug.am.run_gc_trim_level", 2147483647},
+        {"debug.am.run_mallopt_trim_level", 2147483647},
+        {"debug.adservices.binder_timeout", 10000},
+    };
+    return m;
+}
+static const std::map<std::string, jlong>& tt_long_spoof() {
+    static const std::map<std::string, jlong> m = {
+        {"ro.gfx.driver_build_time", 1704067200LL},
+    };
+    return m;
+}
 static bool tt_should_suppress_key(const std::string& k) {
     if (k.size() >= 11 + 5 &&
         k.compare(0, 11, "log.looper.") == 0 &&
@@ -387,7 +345,7 @@ static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
         std::string k(r ? r : ""); env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_leak_tables::int_spoof; auto it = m.find(k);
+        const auto& m = tt_int_spoof(); auto it = m.find(k);
         if (it != m.end())              { out = it->second; label = "SPOOF"; }
         else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
         LOGD("L7 SPI native_get_int('%s') def=%d -> %d [%s]", k.c_str(), def, out, label);
@@ -399,7 +357,7 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
         std::string k(r ? r : ""); env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_leak_tables::long_spoof; auto it = m.find(k);
+        const auto& m = tt_long_spoof(); auto it = m.find(k);
         if (it != m.end())              { out = it->second; label = "SPOOF"; }
         else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
         LOGD("L7 SPL native_get_long('%s') def=%lld -> %lld [%s]",
@@ -412,7 +370,7 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean 
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
         std::string k(r ? r : ""); env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_leak_tables::bool_spoof; auto it = m.find(k);
+        const auto& m = tt_bool_spoof(); auto it = m.find(k);
         if (it != m.end())              { out = it->second; label = "SPOOF"; }
         else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
         LOGD("L7 SPB native_get_boolean('%s') def=%d -> %d [%s]",

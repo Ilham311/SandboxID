@@ -1,7 +1,7 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.1.2"
+ui_print "- Ternak TT v1.1.0"
 ui_print "- Spoofs device identity apps see:"
 ui_print "-  model, brand, manufacturer, fingerprint, serial"
 ui_print "-  per-app Android ID / SSAID"
@@ -11,7 +11,7 @@ ui_print "- 1-tap Action: freshen -> rotate_ids all"
 ui_print "-  SSAID wipe, GAID, wlan MAC, BT MAC, device/BT name"
 ui_print "- Targets: TikTok + Grab Passenger (target.txt editable)"
 ui_print "- WebUI: open module in KernelSU/APatch manager"
-ui_print "- v1.1.2: refactored internals + real GAID JNI hook"
+ui_print "- v1.1.0: refactored internals + real GAID JNI hook"
 ui_print ""
 
 LIVE_TARGET="/data/adb/modules/ternak_tt/target.txt"

@@ -54,11 +54,10 @@ using namespace ternak_tt;
 
 static void watch_target_death(uint32_t pid);
 
-// v1.1.2 (L7): CMD_CHECK_TT removed -- was never handled in any switch below.
-// Renumbered in lockstep with main.cpp.
 enum : uint8_t {
-    CMD_GET_IDENTITY = 1,
-    CMD_DO_MOUNTS    = 2,
+    CMD_CHECK_TT     = 1,
+    CMD_GET_IDENTITY = 2,
+    CMD_DO_MOUNTS    = 3,
 };
 
 // ---- target.txt cache ------------------------------------------------------
