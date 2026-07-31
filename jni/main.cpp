@@ -18,8 +18,6 @@
 #include <cstdlib>
 #include <signal.h>
 #include <ctime>
-#include <sys/sysmacros.h>
-#include <set>
 #include "zygisk.hpp"
 
 #ifndef MFD_CLOEXEC
@@ -160,7 +158,6 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         {"dalvik.vm.isa.arm.features",     "default"},
         {"dalvik.vm.heapsize",             "512m"},
         {"ro.build.version.preview_sdk",   "0"},
-        {"persist.radio.multisim.config",  "ss"},
     };
 
     auto it = map.find(k);
@@ -212,16 +209,6 @@ static jstring hook_secure_get(JNIEnv* env, jclass c, jobject cr, jstring name) 
 static void install_secure_hook(JNIEnv* env) {
     jclass c = env->FindClass("android/provider/Settings$Secure");
     if (!c) { env->ExceptionClear(); return; }
-    // [FIX-P0-2] Settings.Secure.getString is a pure Java method.
-    // RegisterNatives will not work and may crash. Rely on rotate_ids.sh instead.
-    /*
-    JNINativeMethod m = {
-        const_cast<char*>("getString"),
-        const_cast<char*>("(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;"),
-        reinterpret_cast<void*>(hook_secure_get)
-    };
-    env->RegisterNatives(c, &m, 1);
-    */
     env->ExceptionClear();
     env->DeleteLocalRef(c);
 }
@@ -245,17 +232,6 @@ static jstring hook_wifi_bssid(JNIEnv* env, jobject) {
 static void install_wifi_hook(JNIEnv* env) {
     jclass c = env->FindClass("android/net/wifi/WifiInfo");
     if (!c) { env->ExceptionClear(); return; }
-    // [FIX-P0-2] WifiInfo.getMacAddress and getBSSID are pure Java methods.
-    // RegisterNatives will not work. Rely on rotate_ids.sh instead.
-    /*
-    JNINativeMethod m[] = {
-        {const_cast<char*>("getMacAddress"), const_cast<char*>("()Ljava/lang/String;"),
-         reinterpret_cast<void*>(hook_wifi_mac)},
-        {const_cast<char*>("getBSSID"), const_cast<char*>("()Ljava/lang/String;"),
-         reinterpret_cast<void*>(hook_wifi_bssid)},
-    };
-    env->RegisterNatives(c, m, 2);
-    */
     env->ExceptionClear();
     env->DeleteLocalRef(c);
 }
@@ -420,29 +396,6 @@ static void install_leak_sensors(JNIEnv* env) {
 static void install_telephony_hook(JNIEnv* env) {
     jclass c = env->FindClass("android/telephony/TelephonyManager");
     if (!c) { env->ExceptionClear(); return; }
-    // [FIX-P0-2] TelephonyManager getDeviceId/getImei/etc are pure Java methods.
-    // RegisterNatives will not work.
-#ifdef TT_DEBUG
-    /*
-    JNINativeMethod m[] = {
-        {const_cast<char*>("getDeviceId"),     const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_deviceId)},
-        {const_cast<char*>("getImei"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_imei)},
-        {const_cast<char*>("getSubscriberId"), const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_subId)},
-        {const_cast<char*>("getMeid"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_meid)},
-    };
-    env->RegisterNatives(c, m, 4);
-    */
-#else
-    /*
-    JNINativeMethod m[] = {
-        {const_cast<char*>("getDeviceId"),     const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
-        {const_cast<char*>("getImei"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
-        {const_cast<char*>("getSubscriberId"), const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
-        {const_cast<char*>("getMeid"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
-    };
-    env->RegisterNatives(c, m, 4);
-    */
-#endif
     env->ExceptionClear();
     env->DeleteLocalRef(c);
 }
@@ -606,126 +559,6 @@ static void request_companion_mounts(zygisk::Api* api) {
 using openat_t = int (*)(int, const char*, int, ...);
 static openat_t orig_openat = nullptr;
 
-// Forward declare struct stat64 if not available natively to avoid compile errors on 64-bit systems
-struct stat64;
-
-using stat_t = int (*)(const char*, struct stat*);
-static stat_t orig_stat = nullptr;
-
-using fstat_t = int (*)(int, struct stat*);
-static fstat_t orig_fstat = nullptr;
-
-using fstatat_t = int (*)(int, const char*, struct stat*, int);
-static fstatat_t orig_fstatat = nullptr;
-
-static void spoof_stat_inode(struct stat* st) {
-    if (!st) return;
-    // Just mock a system-like partition ID (typically major 253 or similar for block devices, or 104)
-    // and a plausible inode to hide the tmpfs/overlay characteristics of MOUNTDIR.
-    // 253 major is common for dm-verity system partitions on Android.
-    st->st_dev = makedev(253, 1);
-    // Arbitrary realistic inode number offset
-    st->st_ino = (st->st_ino % 10000) + 50000;
-}
-
-static bool is_target_mount_file(const char* p) {
-    if (!p) return false;
-    if (strstr(p, "/build.prop")) return true;
-    if (strstr(p, "settings_secure.xml")) return true;
-    return false;
-}
-
-static int hook_stat(const char* pathname, struct stat* statbuf) {
-    int res = orig_stat ? orig_stat(pathname, statbuf) : ::stat(pathname, statbuf);
-    if (res == 0 && is_target_mount_file(pathname)) {
-        spoof_stat_inode(statbuf);
-    }
-    return res;
-}
-
-static int hook_fstat(int fd, struct stat* statbuf) {
-    int res = orig_fstat ? orig_fstat(fd, statbuf) : ::fstat(fd, statbuf);
-    if (res == 0) {
-        char proc_path[64];
-        char fd_path[256];
-        ::snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
-        ssize_t n = ::readlink(proc_path, fd_path, sizeof(fd_path) - 1);
-        if (n > 0) {
-            fd_path[n] = '\0';
-            if (is_target_mount_file(fd_path)) {
-                spoof_stat_inode(statbuf);
-            }
-        }
-    }
-    return res;
-}
-
-static int hook_fstatat(int dirfd, const char* pathname, struct stat* statbuf, int flags) {
-    int res = orig_fstatat ? orig_fstatat(dirfd, pathname, statbuf, flags) : ::fstatat(dirfd, pathname, statbuf, flags);
-    if (res == 0 && is_target_mount_file(pathname)) {
-        spoof_stat_inode(statbuf);
-    }
-    return res;
-}
-
-// Stat 64 variants
-// Since we don't know the exact layout of stat64 across 32-bit and 64-bit uniformly,
-// we spoof only the first two fields which are guaranteed to be st_dev and padding/st_ino
-// in all POSIX stat/stat64 structs on Linux/Android.
-using stat64_t = int (*)(const char*, void*);
-static stat64_t orig_stat64 = nullptr;
-
-using fstat64_t = int (*)(int, void*);
-static fstat64_t orig_fstat64 = nullptr;
-
-using fstatat64_t = int (*)(int, const char*, void*, int);
-static fstatat64_t orig_fstatat64 = nullptr;
-
-static void spoof_stat64_inode(void* st) {
-    if (!st) return;
-    // For both stat and stat64 on ARM/x86/64, the first fields are st_dev and st_ino.
-    // We treat the pointer as struct stat to modify st_dev and st_ino.
-    // This is safe because both structs start with st_dev (8 bytes) followed by st_ino (8 bytes)
-    // or similar padding, ensuring we don't overwrite unrelated fields.
-    struct stat* s = reinterpret_cast<struct stat*>(st);
-    s->st_dev = makedev(253, 1);
-    s->st_ino = (s->st_ino % 10000) + 50000;
-}
-
-static int hook_stat64(const char* pathname, void* statbuf) {
-    int res = orig_stat64 ? orig_stat64(pathname, statbuf) : -1;
-    if (res == 0 && is_target_mount_file(pathname)) {
-        spoof_stat64_inode(statbuf);
-    }
-    return res;
-}
-
-static int hook_fstat64(int fd, void* statbuf) {
-    int res = orig_fstat64 ? orig_fstat64(fd, statbuf) : -1;
-    if (res == 0) {
-        char proc_path[64];
-        char fd_path[256];
-        ::snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
-        ssize_t n = ::readlink(proc_path, fd_path, sizeof(fd_path) - 1);
-        if (n > 0) {
-            fd_path[n] = '\0';
-            if (is_target_mount_file(fd_path)) {
-                spoof_stat64_inode(statbuf);
-            }
-        }
-    }
-    return res;
-}
-
-static int hook_fstatat64(int dirfd, const char* pathname, void* statbuf, int flags) {
-    int res = orig_fstatat64 ? orig_fstatat64(dirfd, pathname, statbuf, flags) : -1;
-    if (res == 0 && is_target_mount_file(pathname)) {
-        spoof_stat64_inode(statbuf);
-    }
-    return res;
-}
-
-
 static bool is_sensitive_proc_path(const char* p) {
     if (!p) return false;
     if (!strstr(p, "/proc/")) return false;
@@ -824,85 +657,28 @@ static int hook_api_level() {
 
 static void install_proc_sanitizer(Api* api) {
     if (!api) return;
-
-    FILE* f = ::fopen("/proc/self/maps", "r");
-    if (!f) return;
-    char line[512];
-    int libs_hooked = 0;
-    std::set<std::pair<dev_t, ino_t>> seen_libs;
-
-    while (::fgets(line, sizeof(line), f)) {
-        char* nl = ::strchr(line, '\n');
-        if (nl) *nl = 0;
-        char* sp = ::strrchr(line, ' ');
-        if (!sp) continue;
-        char* path = sp + 1;
-
-        bool is_libc = false;
-        bool is_app_lib = false;
-
-        size_t plen = ::strlen(path);
-        if (plen >= 8 && ::strcmp(path + plen - 8, "/libc.so") == 0) {
-            is_libc = true;
-        } else if (::strncmp(path, "/data/app/", 10) == 0 && plen >= 3 && ::strcmp(path + plen - 3, ".so") == 0) {
-            is_app_lib = true;
-        }
-
-        if (!is_libc && !is_app_lib) continue;
-
-        unsigned long a1, a2, off;
-        char perms[8] = {0};
-        unsigned int dmaj = 0, dmin = 0;
-        unsigned long ino = 0;
-        if (::sscanf(line, "%lx-%lx %7s %lx %x:%x %lu", &a1, &a2, perms, &off, &dmaj, &dmin, &ino) == 7) {
-            dev_t dev = (dev_t)((dmaj << 8) | dmin);
-            ino_t i = (ino_t)ino;
-
-            if (seen_libs.count({dev, i})) continue;
-            seen_libs.insert({dev, i});
-
-            api->pltHookRegister(dev, i, "openat",
-                                 reinterpret_cast<void*>(hook_openat),
-                                 reinterpret_cast<void**>(&orig_openat));
-            api->pltHookRegister(dev, i, "__openat",
-                                 reinterpret_cast<void*>(hook_openat),
-                                 reinterpret_cast<void**>(&orig_openat));
-
-            // [UPDATE] Stat/Fstat Spoofing for Bind-Mount Anomalies
-            api->pltHookRegister(dev, i, "stat",
-                                 reinterpret_cast<void*>(hook_stat),
-                                 reinterpret_cast<void**>(&orig_stat));
-            api->pltHookRegister(dev, i, "fstat",
-                                 reinterpret_cast<void*>(hook_fstat),
-                                 reinterpret_cast<void**>(&orig_fstat));
-            api->pltHookRegister(dev, i, "fstatat",
-                                 reinterpret_cast<void*>(hook_fstatat),
-                                 reinterpret_cast<void**>(&orig_fstatat));
-            api->pltHookRegister(dev, i, "fstatat64",
-                                 reinterpret_cast<void*>(hook_fstatat64),
-                                 reinterpret_cast<void**>(&orig_fstatat64));
-            api->pltHookRegister(dev, i, "stat64",
-                                 reinterpret_cast<void*>(hook_stat64),
-                                 reinterpret_cast<void**>(&orig_stat64));
-            api->pltHookRegister(dev, i, "fstat64",
-                                 reinterpret_cast<void*>(hook_fstat64),
-                                 reinterpret_cast<void**>(&orig_fstat64));
-
-            if (is_libc) {
-                // [UPDATE] Hook android_get_device_api_level only in libc
-                api->pltHookRegister(dev, i, "android_get_device_api_level",
-                                     reinterpret_cast<void*>(hook_api_level),
-                                     reinterpret_cast<void**>(&orig_api_level));
-            }
-            libs_hooked++;
-        }
+    dev_t dev = 0;
+    ino_t ino = 0;
+    if (!find_libc_dev_inode(&dev, &ino)) {
+        LOGI("proc sanitizer: libc.so not found in maps (skip)");
+        return;
     }
-    ::fclose(f);
+    api->pltHookRegister(dev, ino, "openat",
+                         reinterpret_cast<void*>(hook_openat),
+                         reinterpret_cast<void**>(&orig_openat));
+    api->pltHookRegister(dev, ino, "__openat",
+                         reinterpret_cast<void*>(hook_openat),
+                         reinterpret_cast<void**>(&orig_openat));
+
+    api->pltHookRegister(dev, ino, "android_get_device_api_level",
+                         reinterpret_cast<void*>(hook_api_level),
+                         reinterpret_cast<void**>(&orig_api_level));
 
     if (!api->pltHookCommit()) {
         LOGI("proc sanitizer: PLT commit false (best-effort skipped)");
     } else {
-        LOGI("proc sanitizer installed across %d libraries", libs_hooked);
+        LOGI("proc sanitizer installed (dev=%lu ino=%lu)",
+             (unsigned long)dev, (unsigned long)ino);
     }
 }
 
