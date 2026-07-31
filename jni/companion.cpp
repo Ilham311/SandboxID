@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <time.h>
 #include <android/log.h>
+#include <mutex>
 
 #define LOG_TAG "TernakTTCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -45,8 +46,13 @@ static const char* TARGET_FILE   = "/data/adb/modules/ternak_tt/target.txt";
 
 static std::vector<std::string> g_targets;
 static time_t                   g_targets_mtime = 0;
+// [FIX-P0-1] Protect concurrent access to target list.
+// Using recursive_mutex because is_target calls reload_targets_if_changed.
+// The user asked for std::mutex, but that would deadlock.
+static std::recursive_mutex g_targets_mtx;
 
 static void reload_targets_if_changed() {
+    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     struct stat st{};
     bool have = (::stat(TARGET_FILE, &st) == 0);
     if (!have) {
@@ -97,6 +103,7 @@ static void reload_targets_if_changed() {
 }
 
 static bool is_target(const std::string& pkg) {
+    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     reload_targets_if_changed();
     for (const auto& t : g_targets) if (t == pkg) return true;
     return false;
