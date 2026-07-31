@@ -1,17 +1,16 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.1.0"
+ui_print "- Ternak TT v1.0.19"
 ui_print "- Spoofs device identity apps see:"
-ui_print "-  model, brand, manufacturer, fingerprint, serial"
-ui_print "-  per-app Android ID / SSAID"
+ui_print "-   model, brand, manufacturer, fingerprint, serial"
+ui_print "-   per-app Android ID / SSAID"
 ui_print "- Property spoof runs pre-zygote (before apps launch)"
 ui_print "- Only safe identity strings - no risky HW/framework changes"
 ui_print "- 1-tap Action: freshen -> rotate_ids all"
-ui_print "-  SSAID wipe, GAID, wlan MAC, BT MAC, device/BT name"
+ui_print "-   SSAID wipe, GAID, wlan MAC, BT MAC, device/BT name"
 ui_print "- Targets: TikTok + Grab Passenger (target.txt editable)"
 ui_print "- WebUI: open module in KernelSU/APatch manager"
-ui_print "- v1.1.0: refactored internals + real GAID JNI hook"
 ui_print ""
 
 LIVE_TARGET="/data/adb/modules/ternak_tt/target.txt"
@@ -44,13 +43,13 @@ ZOK=0
 [ "$ZOK" = "0" ] && ui_print "! WARNING: Zygisk not detected - install ZygiskNext / ReZygisk first"
 
 set_perm_recursive $MODPATH 0 0 0755 0644
-set_perm $MODPATH/action.sh 0 0 0755
-set_perm $MODPATH/service.sh 0 0 0755
+set_perm $MODPATH/action.sh                 0 0 0755
+set_perm $MODPATH/service.sh                0 0 0755
 [ -f $MODPATH/post-fs-data.sh ] && set_perm $MODPATH/post-fs-data.sh 0 0 0755
-[ -f $MODPATH/summarize.sh ]    && set_perm $MODPATH/summarize.sh 0 0 0755
-[ -f $MODPATH/helpers.sh ]      && set_perm $MODPATH/helpers.sh 0 0 0644
-[ -f $MODPATH/rotate_ids.sh ]   && set_perm $MODPATH/rotate_ids.sh 0 0 0755
-[ -f $MODPATH/target.txt ]      && set_perm $MODPATH/target.txt 0 0 0644
+[ -f $MODPATH/summarize.sh ] && set_perm $MODPATH/summarize.sh 0 0 0755
+[ -f $MODPATH/helpers.sh ] && set_perm $MODPATH/helpers.sh 0 0 0644
+[ -f $MODPATH/rotate_ids.sh ] && set_perm $MODPATH/rotate_ids.sh 0 0 0755
+[ -f $MODPATH/target.txt ] && set_perm $MODPATH/target.txt 0 0 0644
 
 mkdir -p "$MODPATH/backups"
 set_perm $MODPATH/backups 0 0 0700
@@ -61,10 +60,10 @@ if [ -f "$MODPATH/debug_variant" ]; then
     set_perm $MODPATH/debug_variant 0 0 0644
 fi
 [ -d $MODPATH/webroot ] && set_perm_recursive $MODPATH/webroot 0 0 0755 0644
-set_perm $MODPATH/bin/ternak-tt-arm64   0 0 0755
-set_perm $MODPATH/bin/ternak-tt-arm     0 0 0755
-set_perm $MODPATH/bin/ternak-tt-x86_64  0 0 0755
-set_perm $MODPATH/bin/ternak-tt-x86     0 0 0755
+set_perm $MODPATH/bin/ternak-tt-arm64       0 0 0755
+set_perm $MODPATH/bin/ternak-tt-arm         0 0 0755
+set_perm $MODPATH/bin/ternak-tt-x86_64      0 0 0755
+set_perm $MODPATH/bin/ternak-tt-x86         0 0 0755
 [ -f $MODPATH/bin/resetprop-rs ] && set_perm $MODPATH/bin/resetprop-rs 0 0 0755
 
 case "$ABI" in
@@ -72,7 +71,7 @@ case "$ABI" in
     armeabi-v7a) ln -sf ternak-tt-arm    $MODPATH/bin/ternak-tt ;;
     x86_64)      ln -sf ternak-tt-x86_64 $MODPATH/bin/ternak-tt ;;
     x86)         ln -sf ternak-tt-x86    $MODPATH/bin/ternak-tt ;;
-    *) ui_print "! Unknown ABI: $ABI" ;;
+    *)           ui_print "! Unknown ABI: $ABI" ;;
 esac
 
 echo "fresh" > $MODPATH/identity.mode

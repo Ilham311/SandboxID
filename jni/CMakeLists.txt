@@ -22,7 +22,6 @@ else()
         "-Wl,--gc-sections -Wl,--strip-all")
 endif()
 
-# v1.1.0: mount_targets.hpp + prop_map.hpp are header-only and included by main.cpp/companion.cpp/ternak-tt.cpp.
 add_library(ternak_tt SHARED main.cpp companion.cpp)
 target_include_directories(ternak_tt PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(ternak_tt PRIVATE log)

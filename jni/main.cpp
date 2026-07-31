@@ -1,59 +1,29 @@
-// jni/main.cpp - Ternak TT Zygisk module.
-//
-// Runs INSIDE each target app process. Handles preAppSpecialize (RPC to
-// companion for identity blob + bind-mount pass) and postAppSpecialize
-// (install all JNI hooks: Build fields, SystemProperties.native_get,
-// Settings.Secure, WifiInfo, TelephonyManager, GAID, proc sanitizer).
-//
-// v1.1.0 refactor:
-//   - Removed the duplicate MOUNTDIR / BindEntry / BIND_ENTRIES definitions
-//     that used to live near the bottom of this file (they were out of sync
-//     with companion.cpp - 6 vs 9 entries). Now sourced from mount_targets.hpp.
-//   - Moved the two large inline maps in hook_prop_get into prop_map.hpp so
-//     the hook body is compact and the tables are unit-testable in isolation.
-//   - install_gaid_hook now actually registers a native hook (was dead code
-//     that FindClass'd + DeleteLocalRef'd with no RegisterNatives).
 
 #include <jni.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <signal.h>
-#include <time.h>
-
-#include <sys/system_properties.h>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
 #include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-
-#include <cstdarg>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <chrono>
-#include <fstream>
-#include <map>
-#include <memory>
-#include <sstream>
-#include <string>
-#include <thread>
-#include <utility>
-#include <vector>
-
+#include <sys/mman.h>
+#include <sys/system_properties.h>
 #include <android/log.h>
-
+#include <string>
+#include <map>
+#include <vector>
+#include <sstream>
+#include <cstdlib>
+#include <signal.h>
+#include <ctime>
 #include "zygisk.hpp"
-#include "mount_targets.hpp"
-#include "prop_map.hpp"
-
-using namespace ternak_tt;
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif
+#include <sys/syscall.h>
 #ifndef __NR_memfd_create
   #if defined(__aarch64__)
     #define __NR_memfd_create 279
@@ -72,6 +42,7 @@ static inline int tt_memfd_create(const char* name, unsigned flags) {
 #define LOG_TAG "TernakTT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
 #ifdef TT_DEBUG
 #define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
 #define TT_VARIANT_TAG "debug"
@@ -92,20 +63,34 @@ enum : uint8_t {
 
 static std::map<std::string, std::string> g_id;
 
-// ---- identity lookup (compact; defaults live in prop_map.hpp) --------------
-
 static const std::string& val(const std::string& k) {
     static const std::string empty;
     auto it = g_id.find(k);
     if (it != g_id.end() && !it->second.empty()) return it->second;
-    const auto& defaults = identity_fallback_defaults();
+
+    static const std::map<std::string, std::string> defaults = {
+        {"SYS_BOOT_COMPLETED",    "1"},
+        {"GSM_OPERATOR_NUMERIC",  "51010"},
+        {"GSM_OPERATOR_ALPHA",    "Telkomsel"},
+        {"GSM_OPERATOR_ISO",      "id"},
+        {"BUILD_CHARACTERISTICS", "default"},
+        {"PERSIST_TIMEZONE",      "Asia/Jakarta"},
+        {"CPU_ABI",               "arm64-v8a"},
+        {"CPU_ABI2",              ""},
+        {"CPU_ABILIST",           "arm64-v8a,armeabi-v7a,armeabi"},
+        {"CPU_ABILIST64",         "arm64-v8a"},
+        {"CPU_ABILIST32",         "armeabi-v7a,armeabi"},
+        {"DALVIK_HEAPGROWTHLIMIT","256m"},
+        {"MEDIACODEC_MIN_RATE",   "8000"},
+        {"MEDIACODEC_MAX_RATE",   "192000"},
+
+        {"DEBUG_FORCE_RTL",       "false"},
+        {"MULTISIM_CONFIG",       ""},
+    };
     auto d = defaults.find(k);
     if (d != defaults.end()) return d->second;
     return empty;
 }
-
-// ---- L2: SystemProperties.native_get hook ----------------------------------
-// v1.1.0: 89 -> ~25 lines. Maps moved to prop_map.hpp.
 
 static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
@@ -114,32 +99,89 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
     env->ReleaseStringUTFChars(j_key, raw);
     LOGD("L2 native_get('%s') requested", k.c_str());
 
-    const auto& id_map    = prop_to_identity_map();
-    const auto& stat_map  = prop_static_defaults();
+    static const std::map<std::string, std::string> map = {
+        {"ro.serialno",              "SERIAL"},
+        {"ro.boot.serialno",         "SERIAL"},
+        {"ro.build.fingerprint",     "FINGERPRINT"},
+        {"ro.bootimage.build.fingerprint", "FINGERPRINT"},
+        {"ro.product.model",         "MODEL"},
+        {"ro.product.brand",         "BRAND"},
+        {"ro.product.manufacturer",  "MANUFACTURER"},
+        {"ro.product.device",        "DEVICE"},
+        {"ro.product.name",          "PRODUCT"},
+        {"ro.product.board",         "BOARD"},
+        {"ro.build.id",              "ID"},
+        {"ro.build.display.id",      "DISPLAY"},
+        {"ro.build.description",     "DESCRIPTION"},
+        {"ro.build.version.release", "RELEASE"},
+        {"ro.build.version.sdk",     "SDK_INT"},
+        {"ro.build.version.security_patch", "SECURITY_PATCH"},
+        {"ro.build.version.incremental",    "INCREMENTAL"},
+        {"gsm.version.baseband",     "RADIO"},
 
-    auto it = id_map.find(k);
-    if (it != id_map.end()) {
+        {"sys.boot_completed",       "SYS_BOOT_COMPLETED"},
+
+        {"debug.force_rtl",          "DEBUG_FORCE_RTL"},
+        {"persist.radio.multisim.config", "MULTISIM_CONFIG"},
+        {"gsm.operator.numeric",     "GSM_OPERATOR_NUMERIC"},
+        {"gsm.sim.operator.numeric", "GSM_OPERATOR_NUMERIC"},
+        {"gsm.operator.alpha",       "GSM_OPERATOR_ALPHA"},
+        {"gsm.sim.operator.alpha",   "GSM_OPERATOR_ALPHA"},
+        {"gsm.operator.iso-country", "GSM_OPERATOR_ISO"},
+        {"gsm.sim.operator.iso-country", "GSM_OPERATOR_ISO"},
+        {"ro.build.characteristics", "BUILD_CHARACTERISTICS"},
+        {"persist.sys.timezone",     "PERSIST_TIMEZONE"},
+        {"ro.product.cpu.abi",       "CPU_ABI"},
+        {"ro.product.cpu.abi2",      "CPU_ABI2"},
+        {"ro.product.cpu.abilist",   "CPU_ABILIST"},
+        {"ro.product.cpu.abilist64", "CPU_ABILIST64"},
+        {"ro.product.cpu.abilist32", "CPU_ABILIST32"},
+        {"dalvik.vm.heapgrowthlimit","DALVIK_HEAPGROWTHLIMIT"},
+        {"ro.mediacodec.min_sample_rate", "MEDIACODEC_MIN_RATE"},
+        {"ro.mediacodec.max_sample_rate", "MEDIACODEC_MAX_RATE"},
+        {"ro.build.user",            "USER"},
+        {"ro.build.host",            "HOST"},
+        {"ro.build.tags",            "TAGS"},
+        {"ro.build.type",            "TYPE"},
+    };
+
+    static const std::map<std::string, std::string> static_defaults = {
+        {"gsm.operator.isroaming",         "false"},
+        {"ro.zygote",                      "zygote64_32"},
+        {"ro.hardware",                    "qcom"},
+        {"ro.board.platform",              "sm8250"},
+        {"ro.dalvik.vm.native.bridge",     "0"},
+        {"ro.allow.mock.location",         "0"},
+        {"dalvik.vm.isa.arm64.variant",    "generic"},
+        {"dalvik.vm.isa.arm64.features",   "default"},
+        {"dalvik.vm.isa.arm.variant",      "generic"},
+        {"dalvik.vm.isa.arm.features",     "default"},
+        {"dalvik.vm.heapsize",             "512m"},
+        {"ro.build.version.preview_sdk",   "0"},
+        {"persist.radio.multisim.config",  "ss"},
+    };
+
+    auto it = map.find(k);
+    if (it != map.end()) {
         const std::string& v = val(it->second);
         if (!v.empty()) {
             LOGD("L2 SPOOF '%s' -> '%s'", k.c_str(), v.c_str());
             return env->NewStringUTF(v.c_str());
         }
     }
-    auto sit = stat_map.find(k);
-    if (sit != stat_map.end()) {
+    auto sit = static_defaults.find(k);
+    if (sit != static_defaults.end()) {
         LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), sit->second.c_str());
         return env->NewStringUTF(sit->second.c_str());
     }
     char buf[PROP_VALUE_MAX] = {0};
     if (__system_property_get(k.c_str(), buf) > 0) {
-        LOGD("L2 LEAK '%s' -> '%s' (unhooked, real value returned)", k.c_str(), buf);
+        LOGD("L2 LEAK  '%s' -> '%s' (unhooked, real value returned)", k.c_str(), buf);
         return env->NewStringUTF(buf);
     }
-    LOGD("L2 MISS '%s' -> default", k.c_str());
+    LOGD("L2 MISS  '%s' -> default", k.c_str());
     return j_def;
 }
-
-// ---- L3: Settings.Secure.getString hook ------------------------------------
 
 static jstring (*orig_secure_get)(JNIEnv*, jclass, jobject, jstring) = nullptr;
 
@@ -156,9 +198,10 @@ static jstring hook_secure_get(JNIEnv* env, jclass c, jobject cr, jstring name) 
                 return env->NewStringUTF(aid.c_str());
             }
         }
+
         if (n == "bluetooth_address" || n == "bluetooth_name" ||
-            n == "advertising_id" || n == "install_non_market_apps") {
-            LOGD("L3 LEAK Settings.Secure '%s' queried (unhooked)", n.c_str());
+            n == "advertising_id"   || n == "install_non_market_apps") {
+            LOGD("L3 LEAK  Settings.Secure '%s' queried (unhooked)", n.c_str());
         }
     }
     return orig_secure_get ? orig_secure_get(env, c, cr, name) : nullptr;
@@ -177,57 +220,12 @@ static void install_secure_hook(JNIEnv* env) {
     env->DeleteLocalRef(c);
 }
 
-// ---- L4: GAID hook (v1.1.0: was dead in v1.0.23, now REAL) -----------------
-// The identity blob carries GOOGLE_AID (uuid_v4). We register a native impl
-// for AdvertisingIdClient$Info.getId() so any Play-Services call inside the
-// target app sees our value instead of the real GAID.
-
-static jstring hook_gaid_getId(JNIEnv* env, jobject /*self*/) {
-    const std::string& g = val("GOOGLE_AID");
-    if (g.empty()) {
-        LOGD("L4 GAID.getId() -> null (no GOOGLE_AID in identity)");
-        return nullptr;
-    }
-    LOGD("L4 SPOOF GAID.getId() -> '%s'", g.c_str());
-    return env->NewStringUTF(g.c_str());
-}
-
-static jboolean hook_gaid_isLimitAdTrackingEnabled(JNIEnv*, jobject /*self*/) {
-    LOGD("L4 SPOOF GAID.isLimitAdTrackingEnabled() -> false");
-    return JNI_FALSE;
-}
-
 static void install_gaid_hook(JNIEnv* env) {
-    // The Play-Services class only exists if GMS is present. Absence is fine.
     jclass c = env->FindClass("com/google/android/gms/ads/identifier/AdvertisingIdClient$Info");
-    if (!c) {
-        env->ExceptionClear();
-        LOGD("L4 AdvertisingIdClient$Info not found (GMS not present); skip GAID hook");
-        return;
-    }
-    JNINativeMethod m[] = {
-        { const_cast<char*>("getId"),
-          const_cast<char*>("()Ljava/lang/String;"),
-          reinterpret_cast<void*>(hook_gaid_getId) },
-        { const_cast<char*>("isLimitAdTrackingEnabled"),
-          const_cast<char*>("()Z"),
-          reinterpret_cast<void*>(hook_gaid_isLimitAdTrackingEnabled) },
-    };
-    // RegisterNatives returns JNI_OK (0) on success. If GMS uses a Java impl
-    // instead of a native declaration, this call raises NoSuchMethodError which
-    // we swallow via ExceptionClear -- the hook then becomes a no-op, matching
-    // the pre-v1.1.0 behaviour (safe fallback).
-    jint rc = env->RegisterNatives(c, m, 2);
-    if (rc != JNI_OK) {
-        env->ExceptionClear();
-        LOGD("L4 GAID RegisterNatives rc=%d (methods likely non-native; safe skip)", rc);
-    } else {
-        LOGI("L4 GAID hook installed on AdvertisingIdClient$Info");
-    }
+    if (!c) { env->ExceptionClear(); return; }
+
     env->DeleteLocalRef(c);
 }
-
-// ---- L5: WifiInfo.getMacAddress / getBSSID ---------------------------------
 
 static jstring hook_wifi_mac(JNIEnv* env, jobject) {
     LOGD("L5 WifiInfo.getMacAddress -> 02:00:00:00:00:00 (spoofed)");
@@ -243,122 +241,107 @@ static void install_wifi_hook(JNIEnv* env) {
     if (!c) { env->ExceptionClear(); return; }
     JNINativeMethod m[] = {
         {const_cast<char*>("getMacAddress"), const_cast<char*>("()Ljava/lang/String;"),
-            reinterpret_cast<void*>(hook_wifi_mac)},
+         reinterpret_cast<void*>(hook_wifi_mac)},
         {const_cast<char*>("getBSSID"), const_cast<char*>("()Ljava/lang/String;"),
-            reinterpret_cast<void*>(hook_wifi_bssid)},
+         reinterpret_cast<void*>(hook_wifi_bssid)},
     };
     env->RegisterNatives(c, m, 2);
     env->ExceptionClear();
     env->DeleteLocalRef(c);
 }
 
-// ---- L6: TelephonyManager null-return --------------------------------------
-
 static jstring hook_null_str(JNIEnv*, jobject) { return nullptr; }
+
 #ifdef TT_DEBUG
-static jstring hook_tel_deviceId(JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getDeviceId() -> null");     return nullptr; }
-static jstring hook_tel_imei    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getImei() -> null");         return nullptr; }
+
+static jstring hook_tel_deviceId(JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getDeviceId() -> null"); return nullptr; }
+static jstring hook_tel_imei    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getImei() -> null");     return nullptr; }
 static jstring hook_tel_subId   (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getSubscriberId() -> null"); return nullptr; }
-static jstring hook_tel_meid    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getMeid() -> null");         return nullptr; }
+static jstring hook_tel_meid    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getMeid() -> null");     return nullptr; }
 #endif
-
-static void install_telephony_hook(JNIEnv* env) {
-    jclass c = env->FindClass("android/telephony/TelephonyManager");
-    if (!c) { env->ExceptionClear(); return; }
-#ifdef TT_DEBUG
-    JNINativeMethod m[] = {
-        {const_cast<char*>("getDeviceId"),      const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_deviceId)},
-        {const_cast<char*>("getImei"),          const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_imei)},
-        {const_cast<char*>("getSubscriberId"),  const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_subId)},
-        {const_cast<char*>("getMeid"),          const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_meid)},
-    };
-#else
-    JNINativeMethod m[] = {
-        {const_cast<char*>("getDeviceId"),      const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
-        {const_cast<char*>("getImei"),          const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
-        {const_cast<char*>("getSubscriberId"),  const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
-        {const_cast<char*>("getMeid"),          const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
-    };
-#endif
-    env->RegisterNatives(c, m, 4);
-    env->ExceptionClear();
-    env->DeleteLocalRef(c);
-}
-
-// ---- L7: debug-only leak sensors (spoof int/long/bool prop reads) ----------
 
 static const std::map<std::string, jboolean>& tt_bool_spoof() {
     static const std::map<std::string, jboolean> m = {
-        {"sys.boot_completed",                    JNI_TRUE},
-        {"debug.force_rtl",                       JNI_FALSE},
-        {"framework.pause_bg_animations.enabled", JNI_FALSE},
-        {"dalvik.vm.dexopt.secondary",            JNI_TRUE},
-        {"viewroot.profile_rendering",            JNI_FALSE},
-        {"debug.sqlite.no_double_quoted_strs",    JNI_TRUE},
-        {"persist.sys.activity_anim_perf_override", JNI_FALSE},
-        {"persist.sys.lmk.reportkills",           JNI_FALSE},
-        {"debug.layout",                          JNI_FALSE},
+        {"sys.boot_completed",                       JNI_TRUE},
+        {"debug.force_rtl",                          JNI_FALSE},
+        {"framework.pause_bg_animations.enabled",    JNI_FALSE},
+        {"dalvik.vm.dexopt.secondary",               JNI_TRUE},
+        {"viewroot.profile_rendering",               JNI_FALSE},
+        {"debug.sqlite.no_double_quoted_strs",       JNI_TRUE},
+        {"persist.sys.activity_anim_perf_override",  JNI_FALSE},
+        {"persist.sys.lmk.reportkills",              JNI_FALSE},
+        {"debug.layout",                             JNI_FALSE},
     };
     return m;
 }
 static const std::map<std::string, jint>& tt_int_spoof() {
     static const std::map<std::string, jint> m = {
-        {"ro.mediacodec.min_sample_rate", 8000},
-        {"ro.mediacodec.max_sample_rate", 192000},
-        {"debug.sqlite.wal.autocheckpoint", 100},
-        {"debug.sqlite.pagesize", 4096},
-        {"debug.sqlite.journalsizelimit", 524288},
-        {"debug.sqlite.wal.truncatesize", 1048576},
-        {"debug.sqlite.wal.poolsize", 0},
-        {"debug.hwui.fps_divisor", 1},
+        {"ro.mediacodec.min_sample_rate",         8000},
+        {"ro.mediacodec.max_sample_rate",         192000},
+        {"debug.sqlite.wal.autocheckpoint",       100},
+        {"debug.sqlite.pagesize",                 4096},
+        {"debug.sqlite.journalsizelimit",         524288},
+        {"debug.sqlite.wal.truncatesize",         1048576},
+        {"debug.sqlite.wal.poolsize",             0},
+        {"debug.hwui.fps_divisor",                1},
         {"persist.wm.debug.ext_version_override", 0},
-        {"build.version.extensions.r", 3},
-        {"build.version.extensions.s", 4},
-        {"build.version.extensions.t", 4},
-        {"build.version.extensions.u", 13},
-        {"build.version.extensions.v", 13},
-        {"build.version.extensions.ad_services", 15},
-        {"debug.am.run_gc_trim_level", 2147483647},
-        {"debug.am.run_mallopt_trim_level", 2147483647},
-        {"debug.adservices.binder_timeout", 10000},
+        {"build.version.extensions.r",            3},
+        {"build.version.extensions.s",            4},
+        {"build.version.extensions.t",            4},
+        {"build.version.extensions.u",            13},
+        {"build.version.extensions.v",            13},
+        {"build.version.extensions.ad_services",  15},
+        {"debug.am.run_gc_trim_level",            2147483647},
+        {"debug.am.run_mallopt_trim_level",       2147483647},
+        {"debug.adservices.binder_timeout",       10000},
     };
     return m;
 }
 static const std::map<std::string, jlong>& tt_long_spoof() {
     static const std::map<std::string, jlong> m = {
-        {"ro.gfx.driver_build_time", 1704067200LL},
+        {"ro.gfx.driver_build_time",              1704067200LL},
     };
     return m;
 }
+
 static bool tt_should_suppress_key(const std::string& k) {
+
     if (k.size() >= 11 + 5 &&
         k.compare(0, 11, "log.looper.") == 0 &&
         k.compare(k.size() - 5, 5, ".slow") == 0)
         return true;
-    if (k.compare(0, 13, "debug.watson.") == 0) return true;
+
+    if (k.compare(0, 13, "debug.watson.") == 0)
+        return true;
     return false;
 }
 
 #ifdef TT_DEBUG
 static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
-    jint out = def; const char* label = "LEAK";
+    jint out = def;
+    const char* label = "LEAK";
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
-        std::string k(r ? r : ""); env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_int_spoof(); auto it = m.find(k);
-        if (it != m.end())              { out = it->second; label = "SPOOF"; }
+        std::string k(r ? r : "");
+        env->ReleaseStringUTFChars(j_key, r);
+        const auto& m = tt_int_spoof();
+        auto it = m.find(k);
+        if (it != m.end()) { out = it->second; label = "SPOOF"; }
         else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
         LOGD("L7 SPI native_get_int('%s') def=%d -> %d [%s]", k.c_str(), def, out, label);
     }
     return out;
 }
 static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
-    jlong out = def; const char* label = "LEAK";
+    jlong out = def;
+    const char* label = "LEAK";
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
-        std::string k(r ? r : ""); env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_long_spoof(); auto it = m.find(k);
-        if (it != m.end())              { out = it->second; label = "SPOOF"; }
+        std::string k(r ? r : "");
+        env->ReleaseStringUTFChars(j_key, r);
+        const auto& m = tt_long_spoof();
+        auto it = m.find(k);
+        if (it != m.end()) { out = it->second; label = "SPOOF"; }
         else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
         LOGD("L7 SPL native_get_long('%s') def=%lld -> %lld [%s]",
              k.c_str(), (long long)def, (long long)out, label);
@@ -366,12 +349,15 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
     return out;
 }
 static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean def) {
-    jboolean out = def; const char* label = "LEAK";
+    jboolean out = def;
+    const char* label = "LEAK";
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
-        std::string k(r ? r : ""); env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_bool_spoof(); auto it = m.find(k);
-        if (it != m.end())              { out = it->second; label = "SPOOF"; }
+        std::string k(r ? r : "");
+        env->ReleaseStringUTFChars(j_key, r);
+        const auto& m = tt_bool_spoof();
+        auto it = m.find(k);
+        if (it != m.end()) { out = it->second; label = "SPOOF"; }
         else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
         LOGD("L7 SPB native_get_boolean('%s') def=%d -> %d [%s]",
              k.c_str(), (int)def, (int)out, label);
@@ -379,17 +365,24 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean 
     return out;
 }
 static jstring hook_build_radio(JNIEnv* env, jclass) {
-    LOGD("L7 Build.getRadioVersion() called [LEAK - returning empty]");
+    LOGD("L7 Build.getRadioVersion() called [LEAK — returning empty]");
     return env->NewStringUTF("");
 }
 static void install_leak_sensors(JNIEnv* env) {
+
     {
         jclass sp = env->FindClass("android/os/SystemProperties");
         if (sp) {
             JNINativeMethod m[] = {
-                {const_cast<char*>("native_get_int"),     const_cast<char*>("(Ljava/lang/String;I)I"),  reinterpret_cast<void*>(hook_prop_get_int)},
-                {const_cast<char*>("native_get_long"),    const_cast<char*>("(Ljava/lang/String;J)J"),  reinterpret_cast<void*>(hook_prop_get_long)},
-                {const_cast<char*>("native_get_boolean"), const_cast<char*>("(Ljava/lang/String;Z)Z"),  reinterpret_cast<void*>(hook_prop_get_bool)},
+                {const_cast<char*>("native_get_int"),
+                 const_cast<char*>("(Ljava/lang/String;I)I"),
+                 reinterpret_cast<void*>(hook_prop_get_int)},
+                {const_cast<char*>("native_get_long"),
+                 const_cast<char*>("(Ljava/lang/String;J)J"),
+                 reinterpret_cast<void*>(hook_prop_get_long)},
+                {const_cast<char*>("native_get_boolean"),
+                 const_cast<char*>("(Ljava/lang/String;Z)Z"),
+                 reinterpret_cast<void*>(hook_prop_get_bool)},
             };
             env->RegisterNatives(sp, m, 3);
             env->ExceptionClear();
@@ -397,12 +390,14 @@ static void install_leak_sensors(JNIEnv* env) {
             LOGD("L7 leak sensors installed on SystemProperties (int/long/bool)");
         } else env->ExceptionClear();
     }
+
     {
         jclass b = env->FindClass("android/os/Build");
         if (b) {
-            JNINativeMethod m = { const_cast<char*>("getRadioVersion"),
-                                  const_cast<char*>("()Ljava/lang/String;"),
-                                  reinterpret_cast<void*>(hook_build_radio) };
+            JNINativeMethod m = {
+                const_cast<char*>("getRadioVersion"),
+                const_cast<char*>("()Ljava/lang/String;"),
+                reinterpret_cast<void*>(hook_build_radio)};
             env->RegisterNatives(b, &m, 1);
             env->ExceptionClear();
             env->DeleteLocalRef(b);
@@ -410,13 +405,35 @@ static void install_leak_sensors(JNIEnv* env) {
         } else env->ExceptionClear();
     }
 }
-#endif // TT_DEBUG
+#endif
 
-// ---- crash watchdog --------------------------------------------------------
+static void install_telephony_hook(JNIEnv* env) {
+    jclass c = env->FindClass("android/telephony/TelephonyManager");
+    if (!c) { env->ExceptionClear(); return; }
+#ifdef TT_DEBUG
+    JNINativeMethod m[] = {
+        {const_cast<char*>("getDeviceId"),     const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_deviceId)},
+        {const_cast<char*>("getImei"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_imei)},
+        {const_cast<char*>("getSubscriberId"), const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_subId)},
+        {const_cast<char*>("getMeid"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_tel_meid)},
+    };
+#else
+    JNINativeMethod m[] = {
+        {const_cast<char*>("getDeviceId"),     const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
+        {const_cast<char*>("getImei"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
+        {const_cast<char*>("getSubscriberId"), const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
+        {const_cast<char*>("getMeid"),         const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(hook_null_str)},
+    };
+#endif
+    env->RegisterNatives(c, m, 4);
+    env->ExceptionClear();
+    env->DeleteLocalRef(c);
+}
 
 static struct sigaction g_prev_sig[NSIG];
 static std::string g_watchdog_pkg;
-static long g_load_time_ms = 0;
+static long        g_load_time_ms = 0;
+
 static volatile sig_atomic_t g_crash_count[NSIG] = {0};
 static const int CRASH_LIMIT = 3;
 
@@ -434,24 +451,28 @@ static const char* tt_sig_name(int sig) {
         case SIGTERM: return "SIGTERM";
         case SIGPIPE: return "SIGPIPE";
         case SIGSYS:  return "SIGSYS";
-        default: return "?";
+        default:      return "?";
     }
 }
-static void tt_signal_handler(int sig, siginfo_t* info, void* /*ctx*/) {
+static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
     if (sig >= 0 && sig < NSIG) n = ++g_crash_count[sig];
+
     if (n <= CRASH_LIMIT) {
         long alive = tt_now_ms() - g_load_time_ms;
+
         LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%ldms hit=%d/%d",
              TT_VARIANT_TAG,
              g_watchdog_pkg.c_str(), getpid(),
              sig, tt_sig_name(sig),
              info ? info->si_code : 0,
              info ? info->si_addr : nullptr,
-             info ? info->si_pid : 0,
+             info ? info->si_pid  : 0,
              alive, n, CRASH_LIMIT);
     }
+
     if (sig >= 0 && sig < NSIG) {
+
         struct sigaction* p = &g_prev_sig[sig];
         bool prev_is_real =
             ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction != nullptr) ||
@@ -467,24 +488,25 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* /*ctx*/) {
             sigaction(sig, &dfl, nullptr);
         }
     }
+
 }
 static void install_crash_watchdog(const std::string& pkg) {
-    g_watchdog_pkg = pkg;
-    g_load_time_ms = tt_now_ms();
+    g_watchdog_pkg  = pkg;
+    g_load_time_ms  = tt_now_ms();
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
     sa.sa_sigaction = tt_signal_handler;
     sigemptyset(&sa.sa_mask);
+
     static const int sigs[] = { SIGABRT, SIGFPE, SIGILL, SIGSYS };
     for (int s : sigs) {
         g_crash_count[s] = 0;
         sigaction(s, &sa, &g_prev_sig[s]);
     }
-    LOGD("crash watchdog armed for %s (4 signals: ABRT/FPE/ILL/SYS, limit=%d)", pkg.c_str(), CRASH_LIMIT);
+    LOGD("crash watchdog armed for %s (4 signals: ABRT/FPE/ILL/SYS, limit=%d)",
+         pkg.c_str(), CRASH_LIMIT);
 }
-
-// ---- L1: Build / VERSION static-field spoof --------------------------------
 
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
@@ -530,8 +552,17 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 }
 
-// ---- bind-mount request via companion --------------------------------------
-// NOTE: MOUNTDIR + BIND_ENTRIES no longer defined here (moved to mount_targets.hpp).
+static const char* MOUNTDIR = "/data/adb/modules/ternak_tt/mount";
+
+struct BindEntry { const char* src_rel; const char* dst; };
+static const BindEntry BIND_ENTRIES[] = {
+    {"system/build.prop",     "/system/build.prop"},
+    {"vendor/build.prop",     "/vendor/build.prop"},
+    {"odm/build.prop",        "/odm/build.prop"},
+    {"product/build.prop",    "/product/build.prop"},
+    {"system_ext/build.prop", "/system_ext/build.prop"},
+    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
+};
 
 static void request_companion_mounts(zygisk::Api* api) {
     if (!api) return;
@@ -555,8 +586,6 @@ static void request_companion_mounts(zygisk::Api* api) {
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
-// ---- /proc sanitizer (openat hook) -----------------------------------------
-
 using openat_t = int (*)(int, const char*, int, ...);
 static openat_t orig_openat = nullptr;
 
@@ -568,6 +597,7 @@ static bool is_sensitive_proc_path(const char* p) {
     if (strstr(p, "/maps"))      return true;
     return false;
 }
+
 static int hook_openat(int dirfd, const char* path, int flags, ...) {
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -597,28 +627,37 @@ static int hook_openat(int dirfd, const char* path, int flags, ...) {
         filtered.append(line);
         filtered.push_back('\n');
     }
+
     int mfd = tt_memfd_create("clean", MFD_CLOEXEC);
     if (mfd < 0) return orig_openat(dirfd, path, flags, mode);
-    if (!filtered.empty()) ::write(mfd, filtered.data(), filtered.size());
+    if (!filtered.empty()) {
+        ::write(mfd, filtered.data(), filtered.size());
+    }
     ::lseek(mfd, 0, SEEK_SET);
     return mfd;
 }
+
 static bool find_libc_dev_inode(dev_t* dev_out, ino_t* ino_out) {
     FILE* f = ::fopen("/proc/self/maps", "r");
     if (!f) return false;
     char line[512];
     bool found = false;
     while (::fgets(line, sizeof(line), f)) {
+
         char* nl = ::strchr(line, '\n');
         if (nl) *nl = 0;
+
         char* sp = ::strrchr(line, ' ');
         if (!sp) continue;
         char* path = sp + 1;
         size_t plen = ::strlen(path);
         if (plen < 8) continue;
         if (::strcmp(path + plen - 8, "/libc.so") != 0) continue;
-        unsigned long a1, a2, off; char perms[8] = {0};
-        unsigned int dmaj = 0, dmin = 0; unsigned long ino = 0;
+
+        unsigned long a1, a2, off;
+        char perms[8] = {0};
+        unsigned int dmaj = 0, dmin = 0;
+        unsigned long ino = 0;
         if (::sscanf(line, "%lx-%lx %7s %lx %x:%x %lu",
                      &a1, &a2, perms, &off, &dmaj, &dmin, &ino) == 7) {
             *dev_out = (dev_t)((dmaj << 8) | dmin);
@@ -630,19 +669,21 @@ static bool find_libc_dev_inode(dev_t* dev_out, ino_t* ino_out) {
     ::fclose(f);
     return found;
 }
+
 static void install_proc_sanitizer(Api* api) {
     if (!api) return;
-    dev_t dev = 0; ino_t ino = 0;
+    dev_t dev = 0;
+    ino_t ino = 0;
     if (!find_libc_dev_inode(&dev, &ino)) {
         LOGI("proc sanitizer: libc.so not found in maps (skip)");
         return;
     }
     api->pltHookRegister(dev, ino, "openat",
-        reinterpret_cast<void*>(hook_openat),
-        reinterpret_cast<void**>(&orig_openat));
+                         reinterpret_cast<void*>(hook_openat),
+                         reinterpret_cast<void**>(&orig_openat));
     api->pltHookRegister(dev, ino, "__openat",
-        reinterpret_cast<void*>(hook_openat),
-        reinterpret_cast<void**>(&orig_openat));
+                         reinterpret_cast<void*>(hook_openat),
+                         reinterpret_cast<void**>(&orig_openat));
     if (!api->pltHookCommit()) {
         LOGI("proc sanitizer: PLT commit false (best-effort skipped)");
     } else {
@@ -650,8 +691,6 @@ static void install_proc_sanitizer(Api* api) {
              (unsigned long)dev, (unsigned long)ino);
     }
 }
-
-// ---- Zygisk module ---------------------------------------------------------
 
 class TernakTT : public zygisk::ModuleBase {
 public:
@@ -675,7 +714,7 @@ public:
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { LOGD("companion connect failed for pkg='%s'", pkg.c_str()); unload(); return; }
 
-        uint8_t  cmd  = CMD_GET_IDENTITY;
+        uint8_t cmd = CMD_GET_IDENTITY;
         write(fd, &cmd, 1);
         uint16_t plen = (uint16_t)pkg.size();
         write(fd, &plen, sizeof(plen));
@@ -686,6 +725,7 @@ public:
             close(fd); unload(); return;
         }
         if (len == 0) {
+
             LOGD("pkg='%s' not a target (companion), unloading", pkg.c_str());
             close(fd); unload(); return;
         }
@@ -700,7 +740,7 @@ public:
         if (got != len) { unload(); return; }
 
         active_ = true;
-        pkg_    = pkg;
+        pkg_ = pkg;
         LOGI("target: %s (%u B) [%s]", pkg.c_str(), len, TT_VARIANT_TAG);
         LOGD("identity blob head='%.120s'",
              std::string(blob_.begin(), blob_.begin() + (len < 120 ? len : 120)).c_str());
@@ -713,7 +753,9 @@ public:
         parse_blob();
         LOGD("parse_blob: %zu identity keys loaded", g_id.size());
 #ifdef TT_DEBUG
-        for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
+        for (auto& kv : g_id) {
+            LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
+        }
 #endif
         install_build_hook(env_);
         LOGD("L1 install_build_hook done");
@@ -737,17 +779,17 @@ public:
 #ifdef TT_DEBUG
         install_leak_sensors(env_);
 #endif
-        install_proc_sanitizer(api_);
         install_crash_watchdog(pkg_);
+
     }
 
     void preServerSpecialize(ServerSpecializeArgs*) override { unload(); }
 
 private:
-    Api*        api_ = nullptr;
+    Api* api_ = nullptr;
     std::string pkg_;
-    JNIEnv*     env_ = nullptr;
-    bool        active_ = false;
+    JNIEnv* env_ = nullptr;
+    bool active_ = false;
     std::vector<uint8_t> blob_;
 
     void unload() {
