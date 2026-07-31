@@ -10,13 +10,13 @@ chmod 0700 "$BACKUP_DIR_ROOT" 2>/dev/null
 [ -w "$(dirname "$LOGFILE")" ] || LOGFILE=/data/local/tmp/ternak-tt-boot.log
 touch "$LOGFILE" 2>/dev/null
 
-_now() { date '+%Y-%m-%d %H:%M:%S'; }
-_log() { printf '[%s] %s\n' "$(_now)" "$*" | tee -a "$LOGFILE" >/dev/null; }
-log_step() { _log "==> $*"; }
-log_info() { _log "    $*"; }
-log_ok()   { _log "[OK] $*"; }
-log_warn() { _log "[WARN] $*"; }
-log_err()  { _log "[ERR] $*"; }
+_now()      { date '+%Y-%m-%d %H:%M:%S'; }
+_log()      { printf '[%s] %s\n' "$(_now)" "$*" | tee -a "$LOGFILE" >/dev/null; }
+log_step()  { _log "==> $*"; }
+log_info()  { _log "    $*"; }
+log_ok()    { _log "[OK]   $*"; }
+log_warn()  { _log "[WARN] $*"; }
+log_err()   { _log "[ERR]  $*"; }
 
 _SE_REF=0
 _SE_PRIOR=""
@@ -121,4 +121,48 @@ backup_rotate() {
     ls -1t "$BACKUP_DIR_ROOT"/${prefix}* 2>/dev/null | tail -n +"$((keep + 1))" | while read -r f; do
         rm -f "$f" 2>/dev/null
     done
+}
+
+# v1.1.0 helper: rewrite one bt_config.conf field (Address or Name) with SELinux/perms preserved.
+# Args: $1=field-label (Address|Name)  $2=new-value  $3=backup-prefix (e.g. bt_config_addr. or bt_config_name.)
+# Optional: $4=inject-under-adapter-if-missing (only makes sense for Address)
+# Returns 0 if at least one file was rewritten, 1 otherwise. Rotates backups afterward.
+bt_config_rewrite_field() {
+    label="$1"; newval="$2"; bkprefix="$3"; inject="${4:-0}"
+    updated=0
+    for btcfg in /data/misc/bluedroid/bt_config.conf \
+                 /data/misc/bluetooth/bt_config.conf \
+                 /data/vendor/bluetooth/bt_config.conf; do
+        [ -f "$btcfg" ] || continue
+        # For Name we require the field already exists; for Address we can inject.
+        if [ "$inject" = "0" ]; then
+            grep -q "^$label = " "$btcfg" 2>/dev/null || continue
+        fi
+        owner=$(stat -c '%U:%G' "$btcfg" 2>/dev/null)
+        mode=$(stat -c '%a' "$btcfg" 2>/dev/null)
+        cp -f "$btcfg" "$BACKUP_DIR_ROOT/${bkprefix}$(date +%s).conf" 2>/dev/null
+        if grep -q "^$label = " "$btcfg" 2>/dev/null; then
+            awk -v l="$label" -v m="$newval" '$0 ~ ("^" l " = ") { print l " = " m; next } { print }' \
+                "$btcfg" > "${btcfg}.tmp" 2>/dev/null
+        else
+            awk -v l="$label" -v m="$newval" 'BEGIN{d=0} /^\[Adapter\]/ && !d { print; print l " = " m; d=1; next } { print }' \
+                "$btcfg" > "${btcfg}.tmp" 2>/dev/null
+        fi
+        if [ -s "${btcfg}.tmp" ] && mv "${btcfg}.tmp" "$btcfg" 2>/dev/null; then
+            [ -n "$owner" ] && chown "$owner" "$btcfg" 2>/dev/null
+            [ -n "$mode" ]  && chmod "$mode"  "$btcfg" 2>/dev/null
+            log_ok "Rewrote $label in $btcfg"
+            updated=1
+        fi
+        rm -f "${btcfg}.tmp" 2>/dev/null
+    done
+    backup_rotate "$bkprefix" 10
+    [ "$updated" -eq 1 ] && return 0 || return 1
+}
+
+# v1.1.0 helper: kick BT stack so new Address / Name apply.
+bt_stack_kick() {
+    force_stop com.android.bluetooth
+    pkill -f 'com\.(android|google\.android)\.bluetooth' 2>/dev/null
+    sleep 1
 }

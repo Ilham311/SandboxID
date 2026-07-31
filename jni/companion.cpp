@@ -1,24 +1,45 @@
+// jni/companion.cpp - Ternak TT companion process.
+//
+// Runs OUTSIDE the target app's namespace. Handles two RPCs from the Zygisk
+// module (over the companion socket registered with REGISTER_ZYGISK_COMPANION):
+//   CMD_GET_IDENTITY - hand back /data/adb/modules/ternak_tt/identity.prop
+//                      if the requesting pkg is in target.txt.
+//   CMD_DO_MOUNTS    - fork a child, enter the target's mount namespace,
+//                      bind-mount ternak_tt/mount/* over the real build.prop
+//                      files (and settings_secure.xml).
+//
+// v1.1.0 refactor:
+//   - Removed the duplicate MOUNTDIR / BindEntry / BIND_ENTRIES definitions
+//     that used to live at the top of this file. Shared header now.
+//   - do_mounts_via_fork() extracted child_do_binds() helper for clarity.
 
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sched.h>
+#include <signal.h>
+#include <time.h>
+
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/types.h>
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cstdlib>
-#include <string>
-#include <vector>
+#include <chrono>
 #include <fstream>
 #include <sstream>
+#include <string>
 #include <thread>
-#include <chrono>
-#include <signal.h>
-#include <time.h>
+#include <vector>
+
 #include <android/log.h>
+
+#include "mount_targets.hpp"
+
+using namespace ternak_tt;
 
 #define LOG_TAG "TernakTTCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -33,32 +54,26 @@
 
 static void watch_target_death(uint32_t pid);
 
+// v1.1.2 (L7): CMD_CHECK_TT removed -- was never handled in any switch below.
+// Renumbered in lockstep with main.cpp.
 enum : uint8_t {
-    CMD_CHECK_TT     = 1,
-    CMD_GET_IDENTITY = 2,
-    CMD_DO_MOUNTS    = 3,
+    CMD_GET_IDENTITY = 1,
+    CMD_DO_MOUNTS    = 2,
 };
 
-static const char* IDENTITY_FILE = "/data/adb/modules/ternak_tt/identity.prop";
-static const char* MOUNTDIR      = "/data/adb/modules/ternak_tt/mount";
-static const char* TARGET_FILE   = "/data/adb/modules/ternak_tt/target.txt";
+// ---- target.txt cache ------------------------------------------------------
 
 static std::vector<std::string> g_targets;
-static time_t                   g_targets_mtime = 0;
+static time_t g_targets_mtime = 0;
 
 static void reload_targets_if_changed() {
     struct stat st{};
     bool have = (::stat(TARGET_FILE, &st) == 0);
     if (!have) {
         if (g_targets.empty()) {
-            g_targets = {
-                "com.zhiliaoapp.musically",
-                "com.ss.android.ugc.trill",
-                "com.zhiliaoapp.musically.go",
-                "com.grabtaxi.passenger",
-            };
-            LOGI("target.txt missing, using built-in defaults (%zu pkgs)",
-                 g_targets.size());
+            for (size_t i = 0; i < DEFAULT_TARGETS_COUNT; ++i)
+                g_targets.emplace_back(DEFAULT_TARGETS[i]);
+            LOGI("target.txt missing, using built-in defaults (%zu pkgs)", g_targets.size());
         }
         return;
     }
@@ -68,7 +83,6 @@ static void reload_targets_if_changed() {
     std::vector<std::string> next;
     std::string line;
     while (std::getline(f, line)) {
-
         size_t hash = line.find('#');
         if (hash != std::string::npos) line.erase(hash);
         while (!line.empty() &&
@@ -82,15 +96,13 @@ static void reload_targets_if_changed() {
         next.push_back(line);
     }
     if (next.empty()) {
-        LOGE("target.txt has 0 valid entries; keeping previous list (%zu pkgs)",
-             g_targets.size());
+        LOGE("target.txt has 0 valid entries; keeping previous list (%zu pkgs)", g_targets.size());
         g_targets_mtime = st.st_mtime;
         return;
     }
-    g_targets       = std::move(next);
+    g_targets = std::move(next);
     g_targets_mtime = st.st_mtime;
-    LOGI("target.txt loaded: %zu pkg(s) mtime=%ld",
-         g_targets.size(), (long)st.st_mtime);
+    LOGI("target.txt loaded: %zu pkg(s) mtime=%ld", g_targets.size(), (long)st.st_mtime);
 #ifdef TT_DEBUG
     for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
 #endif
@@ -102,20 +114,6 @@ static bool is_target(const std::string& pkg) {
     return false;
 }
 
-struct BindEntry { const char* src_rel; const char* dst; };
-
-static const BindEntry BIND_ENTRIES[] = {
-    {"system/build.prop",     "/system/build.prop"},
-    {"vendor/build.prop",     "/vendor/build.prop"},
-    {"odm/build.prop",        "/odm/etc/build.prop"},
-    {"odm/build.prop",        "/odm/build.prop"},
-    {"product/build.prop",    "/product/etc/build.prop"},
-    {"product/build.prop",    "/product/build.prop"},
-    {"system_ext/build.prop", "/system_ext/etc/build.prop"},
-    {"system_ext/build.prop", "/system_ext/build.prop"},
-    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
-};
-
 static std::string read_file(const char* p) {
     std::ifstream f(p);
     if (!f) return "";
@@ -124,13 +122,45 @@ static std::string read_file(const char* p) {
     return ss.str();
 }
 
+// ---- mount pass (fork -> setns -> bind) -----------------------------------
+
+// v1.1.0: extracted from do_mounts_via_fork. Runs INSIDE the forked child
+// after it enters the target's mount namespace. Returns (ok, fail, skip)
+// via out-parameters. Never longjumps; caller is responsible for _exit().
+static void child_do_binds(uint32_t target_pid, uint32_t* ok_out,
+                           uint32_t* fail_out, uint32_t* skip_out,
+                           uint32_t* skip_src_out, uint32_t* skip_dst_out) {
+    uint32_t ok = 0, fail = 0, skip = 0, skip_src = 0, skip_dst = 0;
+    LOGD("child: entering %zu-entry bind loop", BIND_ENTRIES_COUNT);
+    for (size_t i = 0; i < BIND_ENTRIES_COUNT; ++i) {
+        const auto& e = BIND_ENTRIES[i];
+        std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
+        bool src_ok = (::access(src.c_str(), F_OK) == 0);
+        bool dst_ok = (::access(e.dst,       F_OK) == 0);
+        LOGD("  bind check: src=%s(%d) dst=%s(%d)", src.c_str(), src_ok, e.dst, dst_ok);
+        if (!src_ok) { ++skip_src; ++skip; continue; }
+        if (!dst_ok) { ++skip_dst; ++skip; continue; }
+        int rc = ::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr);
+        if (rc == 0) {
+            ++ok;
+            LOGD("  bind OK: %s -> %s", src.c_str(), e.dst);
+        } else {
+            ++fail;
+            LOGE("child: bind fail %s -> %s errno=%d", src.c_str(), e.dst, errno);
+        }
+    }
+    LOGI("child mount for pid=%u: %u ok, %u fail, %u skip (skip_src=%u skip_dst=%u) [%s]",
+         target_pid, ok, fail, skip, skip_src, skip_dst, TT_VARIANT_TAG);
+    *ok_out = ok; *fail_out = fail; *skip_out = skip;
+    *skip_src_out = skip_src; *skip_dst_out = skip_dst;
+}
+
 static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     int pipefd[2];
     if (::pipe(pipefd) != 0) {
         LOGE("pipe failed: errno=%d", errno);
         return 0;
     }
-
     pid_t child = ::fork();
     if (child < 0) {
         LOGE("fork failed: errno=%d", errno);
@@ -139,15 +169,16 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     }
 
     if (child == 0) {
-
+        // ---- child ----
         ::close(pipefd[0]);
         LOGD("child: pid=%d parent_target=%u", getpid(), target_pid);
+
+        uint32_t ok = 0, fail = 0, skip = 0, skip_src = 0, skip_dst = 0;
 
         char path[64];
         ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
         int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
         LOGD("child: open %s -> fd=%d errno=%d", path, tgt_ns, errno);
-        uint32_t ok = 0, fail = 0, skip = 0;
 
         if (tgt_ns < 0) {
             LOGE("child: open %s failed errno=%d", path, errno);
@@ -155,30 +186,7 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
             LOGE("child: setns->target failed errno=%d", errno);
             ::close(tgt_ns);
         } else {
-            LOGD("child: setns OK, entering %u bind loop",
-                 (unsigned)(sizeof(BIND_ENTRIES)/sizeof(BIND_ENTRIES[0])));
-            uint32_t skip_src = 0, skip_dst = 0;
-            for (const auto& e : BIND_ENTRIES) {
-                std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
-                bool src_ok = (::access(src.c_str(), F_OK) == 0);
-                bool dst_ok = (::access(e.dst,        F_OK) == 0);
-                LOGD("  bind check: src=%s(%d) dst=%s(%d)",
-                     src.c_str(), src_ok, e.dst, dst_ok);
-                if (!src_ok) { skip_src++; skip++; continue; }
-                if (!dst_ok) { skip_dst++; skip++; continue; }
-                int rc = ::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr);
-                if (rc == 0) {
-                    ok++;
-                    LOGD("  bind OK: %s -> %s", src.c_str(), e.dst);
-                } else {
-                    fail++;
-                    LOGE("child: bind fail %s -> %s errno=%d",
-                         src.c_str(), e.dst, errno);
-                }
-            }
-            LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
-                 "(skip_src=%u skip_dst=%u) [%s]",
-                 target_pid, ok, fail, skip, skip_src, skip_dst, TT_VARIANT_TAG);
+            child_do_binds(target_pid, &ok, &fail, &skip, &skip_src, &skip_dst);
             ::close(tgt_ns);
         }
 
@@ -187,6 +195,7 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
         ::_exit(0);
     }
 
+    // ---- parent ----
     ::close(pipefd[1]);
     uint32_t ok = 0;
     ssize_t n = ::read(pipefd[0], &ok, sizeof(ok));
@@ -205,7 +214,6 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
 static void watch_target_death(uint32_t pid) {
     std::thread([pid]() {
         struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
-
         for (int i = 0; i < 3600; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             if (::kill((pid_t)pid, 0) == 0) continue;
@@ -222,16 +230,16 @@ static void watch_target_death(uint32_t pid) {
     }).detach();
 }
 
+// ---- companion entry point -------------------------------------------------
+
 extern "C" void ternak_tt_companion(int client) {
-    LOGD("companion invoked: client=%d pid=%d [%s]",
-         client, getpid(), TT_VARIANT_TAG);
+    LOGD("companion invoked: client=%d pid=%d [%s]", client, getpid(), TT_VARIANT_TAG);
     while (true) {
         uint8_t cmd = 0;
         if (::read(client, &cmd, 1) != 1) break;
         LOGD("recv cmd=%u", cmd);
 
         if (cmd == CMD_GET_IDENTITY) {
-
             uint16_t plen = 0;
             if (::read(client, &plen, sizeof(plen)) != (ssize_t)sizeof(plen)) break;
             std::string pkg;
