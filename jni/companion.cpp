@@ -28,6 +28,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
+#include <poll.h>
 
 #include <android/log.h>
 
@@ -39,7 +40,7 @@
 
 #include "tt_paths.hpp"
 #include "companion_hardening.hpp"   // tt::write_all / read_all / child_init
-#include "multiuser_paths.hpp"       // tt::enumerate_user_secure_targets
+#include "multiuser_paths.hpp"       // tt::build_secure_xml_bind_entries
 
 #define LOG_TAG "TernakTT-Companion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -199,8 +200,9 @@ static uint32_t do_bind_mounts_in_child(pid_t target_pid) {
     // ---- settings_secure.xml overlays (per user) ----
     ::snprintf(src, sizeof(src), "%s/settings_secure.xml", MOUNTDIR);
     if (::access(src, R_OK) == 0) {
-        auto user_targets = tt::enumerate_user_secure_targets();
-        for (const auto& dst : user_targets) {
+        auto user_targets = tt::build_secure_xml_bind_entries();
+        for (const auto& e : user_targets) {
+            const std::string& dst = e.dst;
             if (::access(dst.c_str(), F_OK) != 0) continue;
             if (::mount(src, dst.c_str(), nullptr, MS_BIND, nullptr) == 0) {
                 ++ok;
@@ -230,7 +232,7 @@ static void handle_do_mounts(int client) {
     }
     if (child == 0) {
         // Child: harden and do the work.
-        tt::child_init();  // close stray fds, NO_NEW_PRIVS, umask, prctl death
+        tt::child_init("tt-mount-child");  // close stray fds, NO_NEW_PRIVS, umask, prctl death
         uint32_t ok = do_bind_mounts_in_child(target_pid);
         // Signal parent via exit code (capped at 254)
         ::_exit(ok > 254 ? 254 : (int)ok);
@@ -248,7 +250,7 @@ static void handle_do_mounts(int client) {
 #ifdef TT_DEBUG
     pid_t watcher = ::fork();
     if (watcher == 0) {
-        tt::child_init();
+        tt::child_init("tt-death-watch");
         int pfd = tt_pidfd_open(target_pid, 0);
         if (pfd >= 0) {
             // Block until process exits

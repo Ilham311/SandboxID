@@ -43,7 +43,6 @@
 #include <map>
 #include <sstream>
 #include <string>
-#include <sys/utsname.h>
 #include <vector>
 
 #include "tt_paths.hpp"
@@ -125,9 +124,7 @@ static uint32_t rand_u32() {
 }
 
 static std::string rand_hex_upper(int bytes) {
-    std::string s = tt::random_hex(bytes);
-    for (auto& c : s) if (c >= 'a' && c <= 'f') c = (char)(c - 32);
-    return s;
+    return tt::random_hex(bytes, true);
 }
 
 // Randomised per-identity HOST / USER (part of Build.HOST and ro.build.host).
@@ -214,11 +211,11 @@ static Identity gen_identity() {
     id.kv["SERIAL"] = rand_hex_upper(7);
 
     // ---- RADIO (FIXED: brand/device-aware, not hardcoded Pixel format) ----
-    id.kv["RADIO"] = tt::format_radio(p.brand, p.device, p.incremental,
-                                      yymmdd_from_incremental(p.incremental));
+    id.kv["RADIO"] = tt::format_radio(p.device, p.incremental,
+                                      yymmdd_from_incremental(p.incremental).c_str());
 
     // ---- Android ID (16 hex lower) + GAID (UUID) ----
-    id.kv["ANDROID_ID"] = tt::random_hex(8);   // 16 chars
+    id.kv["ANDROID_ID"] = tt::random_hex(8, false);   // 16 chars
     id.kv["GAID"]       = tt::uuid_v4();
 
     return id;

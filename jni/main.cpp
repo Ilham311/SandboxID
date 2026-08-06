@@ -45,7 +45,6 @@
 #include <ctime>
 #include <chrono>
 #include <map>
-#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -595,7 +594,10 @@ static const char* tt_sig_name(int sig) {
 
 static void tt_signal_handler(int sig, siginfo_t* info, void* /*ctx*/) {
     int n = 0;
-    if (sig >= 0 && sig < NSIG) n = ++g_crash_count[sig];
+    if (sig >= 0 && sig < NSIG) {
+        g_crash_count[sig] = (sig_atomic_t)(g_crash_count[sig] + 1);
+        n = g_crash_count[sig];
+    }
 
     if (n <= CRASH_LIMIT) {
         long alive = tt_now_ms() - g_load_time_ms;
