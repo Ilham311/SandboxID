@@ -6,12 +6,12 @@
 #include <sstream>
 #include "random_util.hpp"
 
-namespace ttfix {
+namespace tt {
 
 inline std::string gen_gaid_uuid() {
 
     unsigned char b[16];
-    ttfix::urandom_bytes(b, 16);
+    tt::urandom_fill(b, 16);
     b[6] = (unsigned char)((b[6] & 0x0F) | 0x40);
     b[8] = (unsigned char)((b[8] & 0x3F) | 0x80);
     static const char* hx = "0123456789abcdef";

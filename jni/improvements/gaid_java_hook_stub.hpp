@@ -5,7 +5,7 @@
 #include <jni.h>
 #include <string>
 
-namespace ttfix {
+namespace tt {
 
 inline bool hook_gaid_info(JNIEnv*  , const std::string&  ) {
 

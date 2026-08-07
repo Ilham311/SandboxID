@@ -1,3 +1,4 @@
+#include <limits>
 
 
 #pragma once
@@ -54,8 +55,10 @@ inline void close_all_fds_except(std::initializer_list<int> keep) {
     int dirfd_self = ::dirfd(d);
     while ((e = ::readdir(d)) != nullptr) {
         if (e->d_name[0] == '.') continue;
-        int fd = ::atoi(e->d_name);
-        if (fd <= 2) continue;
+        char* end;
+        long fd_long = std::strtol(e->d_name, &end, 10);
+        if (*end != '\0' || fd_long <= 2 || fd_long > std::numeric_limits<int>::max()) continue;
+        int fd = static_cast<int>(fd_long);
         if (fd == dirfd_self) continue;
         bool skip = false;
         for (int k : keep) if (fd == k) { skip = true; break; }

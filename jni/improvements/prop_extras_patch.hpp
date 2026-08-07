@@ -5,7 +5,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace ttfix {
+namespace tt {
 
 template <typename IdMap, typename DefMap>
 inline void install_prop_extras(IdMap& g_id, DefMap& static_defaults) {

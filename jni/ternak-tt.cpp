@@ -14,7 +14,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
-#include <map>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -107,7 +107,7 @@ static const char* pick_user() {
 }
 
 struct Identity {
-    std::map<std::string, std::string> kv;
+    std::unordered_map<std::string, std::string> kv;
     std::string dump() const {
         std::ostringstream o;
         o << "# ternak_tt identity file (auto-generated)\n";
@@ -226,7 +226,7 @@ static void generate_mount_files(const Identity& id) {
 }
 
 static void apply_native(const Identity& id) {
-    static const std::map<std::string, const char*> propmap = {
+    static const std::unordered_map<std::string, const char*> propmap = {
         {"BRAND",        "ro.product.brand"},
         {"MANUFACTURER", "ro.product.manufacturer"},
         {"MODEL",        "ro.product.model"},

@@ -52,10 +52,13 @@ add_compile_options(
 
 
 set(TT_COMMON_FLAGS
-    -Os -fvisibility=hidden -ffunction-sections -fdata-sections
-    -fno-exceptions -fno-rtti)
+    -O3 -flto=full -fvisibility=hidden -fvisibility-inlines-hidden
+    -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
+    -fno-unwind-tables -fno-asynchronous-unwind-tables -fomit-frame-pointer
+    -fPIC)
 set(TT_COMMON_LINK
-    -Wl,--gc-sections -Wl,--exclude-libs,ALL)
+    -flto=full -Wl,-O1 -Wl,--gc-sections -Wl,--exclude-libs,ALL -Wl,--as-needed
+    -Wl,--build-id=sha1 -Wl,--icf=all)
 
 if(TERNAK_TT_DEBUG)
     message(STATUS "[ternak_tt] BUILD VARIANT: DEBUG (verbose LOGD, no strip)")
@@ -86,7 +89,8 @@ include_directories(
 add_library(ternak_tt SHARED main.cpp companion.cpp)
 target_include_directories(ternak_tt PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(ternak_tt PRIVATE log)
-
+target_link_options(ternak_tt PRIVATE ${TT_COMMON_LINK})
 
 add_executable(ternak-tt ternak-tt.cpp)
 target_include_directories(ternak-tt PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_options(ternak-tt PRIVATE ${TT_COMMON_LINK})

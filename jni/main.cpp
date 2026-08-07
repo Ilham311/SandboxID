@@ -1,3 +1,4 @@
+#include <unordered_map>
 
 
 #include <jni.h>
@@ -25,6 +26,7 @@
 
 #include "zygisk.hpp"
 #include "tt_paths.hpp"
+#include "JniStringHelper.hpp"
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -61,14 +63,14 @@ using zygisk::ServerSpecializeArgs;
 using tt::paths::CMD_GET_IDENTITY;
 using tt::paths::CMD_DO_MOUNTS;
 
-static std::map<std::string, std::string> g_id;
+static std::unordered_map<std::string, std::string> g_id;
 
 static const std::string& val(const std::string& k) {
     static const std::string empty;
     auto it = g_id.find(k);
     if (it != g_id.end() && !it->second.empty()) return it->second;
 
-    static const std::map<std::string, std::string> defaults = {
+    static const std::unordered_map<std::string, std::string> defaults = {
         {"SYS_BOOT_COMPLETED",    "1"},
         {"GSM_OPERATOR_NUMERIC",  "51010"},
         {"GSM_OPERATOR_ALPHA",    "Telkomsel"},
@@ -93,12 +95,11 @@ static const std::string& val(const std::string& k) {
 
 static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
-    const char* raw = env->GetStringUTFChars(j_key, nullptr);
-    std::string k(raw ? raw : "");
-    env->ReleaseStringUTFChars(j_key, raw);
+    tt::JniStringGuard k_guard(env, j_key);
+    std::string k = k_guard.str();
     LOGD("L2 native_get('%s') requested", k.c_str());
 
-    static const std::map<std::string, std::string> map = {
+    static const std::unordered_map<std::string, std::string> map = {
         {"ro.serialno",                    "SERIAL"},
         {"ro.boot.serialno",               "SERIAL"},
         {"ro.build.fingerprint",           "FINGERPRINT"},
@@ -143,7 +144,7 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         {"ro.build.type",                  "TYPE"},
     };
 
-    static const std::map<std::string, std::string> static_defaults = {
+    static const std::unordered_map<std::string, std::string> static_defaults = {
         {"gsm.operator.isroaming",          "false"},
         {"ro.zygote",                       "zygote64_32"},
         {"ro.hardware",                     "qcom"},
@@ -177,8 +178,8 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
     return j_def;
 }
 
-static const std::map<std::string, jboolean>& tt_bool_spoof() {
-    static const std::map<std::string, jboolean> m = {
+static const std::unordered_map<std::string, jboolean>& tt_bool_spoof() {
+    static const std::unordered_map<std::string, jboolean> m = {
         {"sys.boot_completed",                     JNI_TRUE},
         {"debug.force_rtl",                        JNI_FALSE},
         {"framework.pause_bg_animations.enabled",  JNI_FALSE},
@@ -191,8 +192,8 @@ static const std::map<std::string, jboolean>& tt_bool_spoof() {
     };
     return m;
 }
-static const std::map<std::string, jint>& tt_int_spoof() {
-    static const std::map<std::string, jint> m = {
+static const std::unordered_map<std::string, jint>& tt_int_spoof() {
+    static const std::unordered_map<std::string, jint> m = {
         {"ro.mediacodec.min_sample_rate",        8000},
         {"ro.mediacodec.max_sample_rate",        192000},
         {"debug.sqlite.wal.autocheckpoint",      100},
@@ -214,8 +215,8 @@ static const std::map<std::string, jint>& tt_int_spoof() {
     };
     return m;
 }
-static const std::map<std::string, jlong>& tt_long_spoof() {
-    static const std::map<std::string, jlong> m = {
+static const std::unordered_map<std::string, jlong>& tt_long_spoof() {
+    static const std::unordered_map<std::string, jlong> m = {
         {"ro.gfx.driver_build_time", 1704067200LL},
     };
     return m;
@@ -248,9 +249,8 @@ static bool tt_lookup_int(const std::string& k, jint* out) {
 
 static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
     if (!j_key) return def;
-    const char* r = env->GetStringUTFChars(j_key, nullptr);
-    std::string k(r ? r : "");
-    env->ReleaseStringUTFChars(j_key, r);
+    tt::JniStringGuard k_guard(env, j_key);
+    std::string k = k_guard.str();
     jint out = def;
     if (tt_lookup_int(k, &out)) {
         LOGD("L7 SPI '%s' def=%d -> %d [SPOOF]", k.c_str(), def, out);
@@ -265,9 +265,8 @@ static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
 }
 static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
     if (!j_key) return def;
-    const char* r = env->GetStringUTFChars(j_key, nullptr);
-    std::string k(r ? r : "");
-    env->ReleaseStringUTFChars(j_key, r);
+    tt::JniStringGuard k_guard(env, j_key);
+    std::string k = k_guard.str();
     const auto& m = tt_long_spoof();
     auto it = m.find(k);
     if (it != m.end()) {
@@ -279,9 +278,8 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
 }
 static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean def) {
     if (!j_key) return def;
-    const char* r = env->GetStringUTFChars(j_key, nullptr);
-    std::string k(r ? r : "");
-    env->ReleaseStringUTFChars(j_key, r);
+    tt::JniStringGuard k_guard(env, j_key);
+    std::string k = k_guard.str();
     const auto& m = tt_bool_spoof();
     auto it = m.find(k);
     if (it != m.end()) {
@@ -597,9 +595,8 @@ public:
     void preAppSpecialize(AppSpecializeArgs* args) override {
         std::string pkg;
         if (args && args->nice_name) {
-            const char* raw = env_->GetStringUTFChars(args->nice_name, nullptr);
-            pkg = raw ? raw : "";
-            env_->ReleaseStringUTFChars(args->nice_name, raw);
+            tt::JniStringGuard pkg_guard(env_, args->nice_name);
+            pkg = pkg_guard.str();
         }
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
         if (pkg.empty()) { unload(); return; }

@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include "secure_xml_gaid.hpp"
 
-namespace ttfix {
+namespace tt {
 
 inline std::unordered_map<std::string, std::string>
 read_identity(const std::string& path) {
