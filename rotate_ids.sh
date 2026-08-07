@@ -1,5 +1,4 @@
 #!/system/bin/sh
-
 set -u
 MODDIR="${MODDIR:-/data/adb/modules/ternak_tt}"
 LOGFILE="${LOGFILE:-/cache/ternak-tt-boot.log}"

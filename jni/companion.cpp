@@ -1,21 +1,4 @@
-// ternak_tt v2.1 - companion.cpp (patched)
-//
-// Changes vs v2.0:
-//   P1-1: CMD_CHECK_TT (unused, no handler) removed. Only CMD_GET_IDENTITY
-//         and CMD_DO_MOUNTS remain.
-//   P2-1: uses tt::write_all / tt::read_all from companion_hardening.hpp so
-//         short reads / writes on the client socket never truncate the
-//         identity blob or ack.
-//   P2-2: fork() child immediately calls tt::child_init() (close inherited
-//         fds, prctl NO_NEW_PRIVS, umask 022) - closes fd-leak vector.
-//   P2-3: XML overlay bind-mount now enumerates per-user directories via
-//         multiuser_paths.hpp instead of hard-coding /data/system/users/0.
-//   P2-4: pidfd_open used for target death watch when kernel >= 5.3;
-//         falls back to /proc polling on older kernels. Removes the 100ms
-//         busy-loop from v2.0.
-//   P3-1: BIND_ENTRIES table removed - now imported from tt_paths.hpp.
-//         (Fixes v2.0 drift where main.cpp/companion.cpp/ternak-tt.cpp had
-//         three slightly different tables.)
+
 
 #include <fcntl.h>
 #include <sched.h>
@@ -39,8 +22,8 @@
 #include <vector>
 
 #include "tt_paths.hpp"
-#include "companion_hardening.hpp"   // tt::write_all / read_all / child_init
-#include "multiuser_paths.hpp"       // tt::build_secure_xml_bind_entries
+#include "companion_hardening.hpp"
+#include "multiuser_paths.hpp"
 
 #define LOG_TAG "TernakTT-Companion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -59,9 +42,6 @@ using tt::paths::IDENTITY_FILE;
 using tt::paths::BUILD_PROP_ENTRIES;
 using tt::paths::BUILD_PROP_ENTRIES_N;
 
-// -------------------------------------------------------------------------
-// pidfd_open syscall wrapper (added in Linux 5.3 / API 31 in bionic).
-// -------------------------------------------------------------------------
 #ifndef __NR_pidfd_open
   #if defined(__aarch64__) || defined(__x86_64__)
     #define __NR_pidfd_open 434
@@ -73,16 +53,13 @@ static inline int tt_pidfd_open(pid_t pid, unsigned int flags) {
     return (int)::syscall(__NR_pidfd_open, pid, flags);
 }
 
-// -------------------------------------------------------------------------
-// Target package list (loaded from /data/adb/modules/ternak_tt/target.txt).
-// -------------------------------------------------------------------------
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
     FILE* f = ::fopen(TARGET_FILE, "r");
     if (!f) return out;
     char line[256];
     while (::fgets(line, sizeof(line), f)) {
-        // trim leading/trailing whitespace + comments
+
         std::string s(line);
         auto hash = s.find('#');
         if (hash != std::string::npos) s.erase(hash);
@@ -122,10 +99,6 @@ static std::vector<uint8_t> read_identity_blob() {
     return out;
 }
 
-// -------------------------------------------------------------------------
-// Command handlers
-// -------------------------------------------------------------------------
-
 static void handle_get_identity(int client) {
     uint16_t plen = 0;
     if (!tt::read_all(client, &plen, sizeof(plen))) return;
@@ -158,14 +131,8 @@ static void handle_get_identity(int client) {
     LOGI("GET_IDENTITY: sent %u bytes to pkg=%s", len, pkg.c_str());
 }
 
-// -------------------------------------------------------------------------
-// Bind-mount: enter target's mount namespace and overlay the build.prop /
-// settings_secure.xml files. Runs in a forked child so that failures don't
-// take the companion process down.
-// -------------------------------------------------------------------------
-
 static uint32_t do_bind_mounts_in_child(pid_t target_pid) {
-    // Enter target mount namespace
+
     char ns_path[64];
     ::snprintf(ns_path, sizeof(ns_path), "/proc/%d/ns/mnt", (int)target_pid);
     int ns_fd = ::open(ns_path, O_RDONLY | O_CLOEXEC);
@@ -183,12 +150,11 @@ static uint32_t do_bind_mounts_in_child(pid_t target_pid) {
     uint32_t ok = 0;
     char src[512];
 
-    // ---- build.prop overlays ----
     for (size_t i = 0; i < BUILD_PROP_ENTRIES_N; ++i) {
         const auto& e = BUILD_PROP_ENTRIES[i];
         ::snprintf(src, sizeof(src), "%s/%s", MOUNTDIR, e.src_rel);
-        if (::access(src, R_OK) != 0) continue;      // source not generated
-        if (::access(e.dst, F_OK) != 0)  continue;   // dest doesn't exist
+        if (::access(src, R_OK) != 0) continue;
+        if (::access(e.dst, F_OK) != 0)  continue;
         if (::mount(src, e.dst, nullptr, MS_BIND, nullptr) == 0) {
             ++ok;
             LOGD("bind %s -> %s", src, e.dst);
@@ -197,7 +163,6 @@ static uint32_t do_bind_mounts_in_child(pid_t target_pid) {
         }
     }
 
-    // ---- settings_secure.xml overlays (per user) ----
     ::snprintf(src, sizeof(src), "%s/settings_secure.xml", MOUNTDIR);
     if (::access(src, R_OK) == 0) {
         auto user_targets = tt::build_secure_xml_bind_entries();
@@ -222,7 +187,6 @@ static void handle_do_mounts(int client) {
     if (!tt::read_all(client, &pid32, sizeof(pid32))) return;
     pid_t target_pid = (pid_t)pid32;
 
-    // Fork a helper child. If setns/mount fails, only the child dies.
     pid_t child = ::fork();
     if (child < 0) {
         LOGE("fork failed: %s", strerror(errno));
@@ -231,10 +195,10 @@ static void handle_do_mounts(int client) {
         return;
     }
     if (child == 0) {
-        // Child: harden and do the work.
-        tt::child_init("tt-mount-child");  // close stray fds, NO_NEW_PRIVS, umask, prctl death
+
+        tt::child_init("tt-mount-child");
         uint32_t ok = do_bind_mounts_in_child(target_pid);
-        // Signal parent via exit code (capped at 254)
+
         ::_exit(ok > 254 ? 254 : (int)ok);
     }
 
@@ -245,21 +209,18 @@ static void handle_do_mounts(int client) {
     tt::write_all(client, &ok, sizeof(ok));
     LOGI("DO_MOUNTS: target_pid=%d ok=%u", (int)target_pid, ok);
 
-    // ---- Death-watch daemon (fire-and-forget) ----
-    // Not strictly necessary but useful for debug: log when target dies.
 #ifdef TT_DEBUG
     pid_t watcher = ::fork();
     if (watcher == 0) {
         tt::child_init("tt-death-watch");
         int pfd = tt_pidfd_open(target_pid, 0);
         if (pfd >= 0) {
-            // Block until process exits
+
             struct pollfd pf { pfd, POLLIN, 0 };
             (void)::poll(&pf, 1, -1);
             ::close(pfd);
         } else {
-            // Fallback: poll /proc/<pid> every 500ms (NOT every 100ms
-            // like v2.0 did)
+
             char proc[64];
             ::snprintf(proc, sizeof(proc), "/proc/%d", (int)target_pid);
             while (::access(proc, F_OK) == 0) {
@@ -272,10 +233,6 @@ static void handle_do_mounts(int client) {
     }
 #endif
 }
-
-// -------------------------------------------------------------------------
-// Companion entry point (registered from main.cpp).
-// -------------------------------------------------------------------------
 
 extern "C" void ternak_tt_companion(int client) {
     uint8_t cmd = 0;

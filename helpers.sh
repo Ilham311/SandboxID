@@ -1,5 +1,4 @@
 #!/system/bin/sh
-
 MODDIR="${MODDIR:-/data/adb/modules/ternak_tt}"
 LOGFILE="${LOGFILE:-/cache/ternak-tt-boot.log}"
 IDENTITY_FILE="${IDENTITY_FILE:-$MODDIR/identity.prop}"

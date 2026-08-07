@@ -1,31 +1,4 @@
-// ternak_tt v2.1 - main.cpp (patched)
-//
-// Changes vs v2.0 (see CHANGELOG.md for full rationale):
-//
-//   P0-1: SystemProperties L2 now uses api_->hookJniNativeMethods (proper
-//         Zygisk API that captures the original fnPtr), not RegisterNatives.
-//   P0-2: install_leak_sensors() (int/long/bool spoof + suppress) is now
-//         ALWAYS installed, not only in TT_DEBUG. Only the LOGD lines are
-//         gated. This closes SDK/int/long/bool leaks in release builds.
-//   P0-3: install_secure_hook / install_gaid_hook / install_wifi_hook /
-//         install_telephony_hook were dead code in v2.0 (FindClass then
-//         DeleteLocalRef with no RegisterNatives). They are DELETED because:
-//           * Settings.Secure.getString is a Java method that dispatches to
-//             IContentProvider via binder - it cannot be hooked with
-//             RegisterNatives (would throw NoSuchMethodError). The real
-//             spoof happens through the settings_secure.xml bind-mount.
-//           * WifiInfo.getMacAddress() and BluetoothAdapter.getAddress()
-//             have returned the constant 02:00:00:00:00:00 for normal apps
-//             since Android 6.0 (API 23). No hook needed.
-//           * TelephonyManager.getDeviceId()/getImei() return null/throw
-//             SecurityException for apps without READ_PRIVILEGED_PHONE_STATE
-//             since Android 10. TikTok/Grab (our targets) do not have it.
-//   P1-1: is_sensitive_proc_path uses strncmp anchoring, not substring.
-//   P1-2: Signal handler now catches SIGSEGV/SIGBUS too, uses stack buffer
-//         and single async-safe write(2) instead of __android_log_print.
-//   P3-1: Shared tt_paths.hpp header replaces duplicated constants.
-//   P3-2: parse_blob trims trailing \r/\n/\t/space (handles CRLF-edited
-//         identity.prop files).
+
 
 #include <jni.h>
 #include <unistd.h>
@@ -53,7 +26,6 @@
 #include "zygisk.hpp"
 #include "tt_paths.hpp"
 
-// -------- memfd_create fallback (older bionic) ---------------------------
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif
@@ -72,7 +44,6 @@ static inline int tt_memfd_create(const char* name, unsigned flags) {
     return (int)syscall(__NR_memfd_create, name, flags);
 }
 
-// -------- Logging --------------------------------------------------------
 #define LOG_TAG        "TernakTT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -90,10 +61,6 @@ using zygisk::ServerSpecializeArgs;
 using tt::paths::CMD_GET_IDENTITY;
 using tt::paths::CMD_DO_MOUNTS;
 
-// =========================================================================
-//                    Identity blob (delivered by companion)
-// =========================================================================
-
 static std::map<std::string, std::string> g_id;
 
 static const std::string& val(const std::string& k) {
@@ -101,7 +68,6 @@ static const std::string& val(const std::string& k) {
     auto it = g_id.find(k);
     if (it != g_id.end() && !it->second.empty()) return it->second;
 
-    // Sensible defaults for keys not in identity.prop.
     static const std::map<std::string, std::string> defaults = {
         {"SYS_BOOT_COMPLETED",    "1"},
         {"GSM_OPERATOR_NUMERIC",  "51010"},
@@ -118,16 +84,12 @@ static const std::string& val(const std::string& k) {
         {"MEDIACODEC_MIN_RATE",   "8000"},
         {"MEDIACODEC_MAX_RATE",   "192000"},
         {"DEBUG_FORCE_RTL",       "false"},
-        {"MULTISIM_CONFIG",       "ss"},   // was empty in v2.0 -> LEAK
+        {"MULTISIM_CONFIG",       "ss"},
     };
     auto d = defaults.find(k);
     if (d != defaults.end()) return d->second;
     return empty;
 }
-
-// =========================================================================
-//                        L2: SystemProperties.native_get
-// =========================================================================
 
 static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
@@ -194,7 +156,7 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         {"dalvik.vm.isa.arm.features",      "default"},
         {"dalvik.vm.heapsize",              "512m"},
         {"ro.build.version.preview_sdk",    "0"},
-        {"telephony.active_modems.max_count","1"},   // from improvements/prop_extras_patch.hpp
+        {"telephony.active_modems.max_count","1"},
     };
 
     auto it = map.find(k);
@@ -211,18 +173,9 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         return env->NewStringUTF(sit->second.c_str());
     }
 
-    // Strict mode: never leak real values for unlisted keys.
-    // (v2.0 fell back to __system_property_get here, which was a data leak.)
     LOGD("L2 MISS-STRICT '%s' -> java default (no leak)", k.c_str());
     return j_def;
 }
-
-// =========================================================================
-//                     L7: SystemProperties int/long/bool + Build.getRadioVersion
-// =========================================================================
-// These were guarded behind #ifdef TT_DEBUG in v2.0 which meant release
-// builds leaked SDK_INT/security patch numbers whenever an app used
-// SystemProperties.getInt/getLong/getBoolean. Now installed unconditionally.
 
 static const std::map<std::string, jboolean>& tt_bool_spoof() {
     static const std::map<std::string, jboolean> m = {
@@ -269,7 +222,7 @@ static const std::map<std::string, jlong>& tt_long_spoof() {
 }
 
 static bool tt_should_suppress_key(const std::string& k) {
-    // log.looper.*.slow keys are debug-only chatter
+
     if (k.size() >= 11 + 5 &&
         k.compare(0, 11, "log.looper.") == 0 &&
         k.compare(k.size() - 5, 5, ".slow") == 0) {
@@ -279,8 +232,6 @@ static bool tt_should_suppress_key(const std::string& k) {
     return false;
 }
 
-// Handle the SDK_INT special case: even in the int-getter path, apps may query
-// ro.build.version.sdk expecting the spoofed value from identity.prop.
 static bool tt_lookup_int(const std::string& k, jint* out) {
     const auto& m = tt_int_spoof();
     auto it = m.find(k);
@@ -346,10 +297,6 @@ static jstring hook_build_radio(JNIEnv* env, jclass) {
     return env->NewStringUTF("");
 }
 
-// =========================================================================
-//                       L1: Build / Build$VERSION static fields
-// =========================================================================
-
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
     jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
@@ -394,10 +341,6 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 }
 
-// =========================================================================
-//                           Companion IPC helpers
-// =========================================================================
-
 static void request_companion_mounts(zygisk::Api* api) {
     if (!api) return;
     int fd = api->connectCompanion();
@@ -417,19 +360,13 @@ static void request_companion_mounts(zygisk::Api* api) {
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
-// =========================================================================
-//                           /proc sanitizer (PLT hook)
-// =========================================================================
-
 using openat_t = int (*)(int, const char*, int, ...);
 static openat_t orig_openat = nullptr;
 
-// Strict prefix + suffix check. v2.0 used substring which matched paths like
-// /data/foo/proc/bar/mounts (false positive).
 static bool is_sensitive_proc_path(const char* p) {
     if (!p) return false;
     if (::strncmp(p, "/proc/", 6) != 0) return false;
-    // Match /proc/<something>/(mountinfo|mounts|maps|status|cgroup)
+
     size_t len = ::strlen(p);
     auto ends_with = [&](const char* suf) {
         size_t sl = ::strlen(suf);
@@ -442,8 +379,6 @@ static bool is_sensitive_proc_path(const char* p) {
            ends_with("/cgroup");
 }
 
-// TLS guard to avoid unintended recursion through openat if any libc path
-// re-enters us (e.g., internal fopen -> openat).
 static thread_local bool tt_in_openat_hook = false;
 
 static int hook_openat(int dirfd, const char* path, int flags, ...) {
@@ -557,20 +492,10 @@ static void install_proc_sanitizer(Api* api) {
     }
 }
 
-// =========================================================================
-//                        Crash watchdog (async-signal-safe)
-// =========================================================================
-// v2.0 called __android_log_print from the signal handler which is NOT
-// async-signal-safe. Under real crashes (SIGSEGV/SIGBUS from a broken hook)
-// this could deadlock on the logd socket. We now format into a fixed stack
-// buffer with snprintf + issue a single write(2) to a pre-opened tag file.
-// snprintf is not strictly AS-safe either, but in practice it doesn't take
-// locks in bionic; this is the pragmatic compromise used by tombstoned.
-
 static struct sigaction g_prev_sig[NSIG];
 static char g_watchdog_pkg[128] = "?";
 static long g_load_time_ms = 0;
-static int  g_crash_log_fd = -1;   // best-effort: /dev/kmsg or /dev/null
+static int  g_crash_log_fd = -1;
 static volatile sig_atomic_t g_crash_count[NSIG] = {0};
 static const int CRASH_LIMIT = 3;
 
@@ -592,7 +517,7 @@ static const char* tt_sig_name(int sig) {
     }
 }
 
-static void tt_signal_handler(int sig, siginfo_t* info, void* /*ctx*/) {
+static void tt_signal_handler(int sig, siginfo_t* info, void*  ) {
     int n = 0;
     if (sig >= 0 && sig < NSIG) {
         g_crash_count[sig] = (sig_atomic_t)(g_crash_count[sig] + 1);
@@ -613,12 +538,11 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* /*ctx*/) {
             alive, n, CRASH_LIMIT);
         if (len > 0) {
             if (g_crash_log_fd >= 0) ::write(g_crash_log_fd, buf, (size_t)len);
-            // stderr write is also AS-safe on Android:
+
             ::write(2, buf, (size_t)len);
         }
     }
 
-    // Restore original handler (or default) and let it run.
     if (sig >= 0 && sig < NSIG) {
         struct sigaction* p = &g_prev_sig[sig];
         bool prev_is_real =
@@ -635,17 +559,13 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* /*ctx*/) {
             sigaction(sig, &dfl, nullptr);
         }
     }
-    // For SIGSEGV/SIGBUS/SIGABRT the default action terminates the process,
-    // so control does not return here in practice.
+
 }
 
 static void install_crash_watchdog(const std::string& pkg) {
     ::snprintf(g_watchdog_pkg, sizeof(g_watchdog_pkg), "%s", pkg.c_str());
     g_load_time_ms = tt_now_ms();
 
-    // Best-effort log sink for the AS-safe write path.
-    // /dev/kmsg is usually not writable by app UID, so this will typically
-    // fail and we'll fall back to write(2, ...) only. That's fine.
     if (g_crash_log_fd < 0) {
         g_crash_log_fd = ::open("/dev/kmsg",
                                 O_WRONLY | O_CLOEXEC | O_NONBLOCK);
@@ -657,8 +577,6 @@ static void install_crash_watchdog(const std::string& pkg) {
     sa.sa_sigaction = tt_signal_handler;
     sigemptyset(&sa.sa_mask);
 
-    // v2.0 skipped SIGSEGV/SIGBUS with a comment saying they were
-    // "uncatchable". They are catchable; only SIGKILL/SIGSTOP aren't.
     static const int sigs[] = { SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL, SIGSYS };
     for (int s : sigs) {
         g_crash_count[s] = 0;
@@ -667,10 +585,6 @@ static void install_crash_watchdog(const std::string& pkg) {
     LOGD("crash watchdog armed for %s (6 signals, limit=%d)",
          pkg.c_str(), CRASH_LIMIT);
 }
-
-// =========================================================================
-//                               Zygisk module
-// =========================================================================
 
 class TernakTT : public zygisk::ModuleBase {
 public:
@@ -703,7 +617,7 @@ public:
         if (::read(fd, &len, sizeof(len)) != (ssize_t)sizeof(len) || len > 65536) {
             ::close(fd); unload(); return;
         }
-        if (len == 0) { ::close(fd); unload(); return; }  // not a target
+        if (len == 0) { ::close(fd); unload(); return; }
 
         blob_.resize(len);
         size_t got = 0;
@@ -727,18 +641,8 @@ public:
         parse_blob();
         LOGD("parse_blob: %zu identity keys loaded", g_id.size());
 
-        // ---- L1: Build / Build$VERSION static fields
         install_build_hook(env_);
 
-        // ---- L2 + L7: SystemProperties.native_get{,_int,_long,_boolean}
-        //
-        // Prefer Zygisk's hookJniNativeMethods() over env->RegisterNatives():
-        // the Zygisk API saves the ORIGINAL fnPtr back into methods[i].fnPtr
-        // after the call, and it's safe to call from postAppSpecialize.
-        //
-        // We don't actually need the original pointers for these hooks (all
-        // spoof paths have a self-contained fallback), so we ignore the
-        // written-back fnPtr values.
         JNINativeMethod sp_methods[] = {
             {const_cast<char*>("native_get"),
              const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
@@ -757,7 +661,6 @@ public:
                                    sp_methods, 4);
         LOGD("L2+L7 SystemProperties hooks installed (%d methods)", 4);
 
-        // ---- L7: Build.getRadioVersion()
         JNINativeMethod build_methods[] = {
             {const_cast<char*>("getRadioVersion"),
              const_cast<char*>("()Ljava/lang/String;"),
@@ -765,13 +668,7 @@ public:
         };
         api_->hookJniNativeMethods(env_, "android/os/Build", build_methods, 1);
 
-        // ---- /proc sanitizer + native android_get_device_api_level
         install_proc_sanitizer(api_);
-
-        // Note: L3 (Settings.Secure.android_id) and L4 (GAID) are Java
-        // methods that dispatch via IContentProvider; we don't hook them
-        // here. They are handled by the settings_secure.xml bind-mount
-        // installed by the companion (see companion.cpp).
 
         install_crash_watchdog(pkg_);
     }
@@ -789,7 +686,6 @@ private:
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
 
-    // Trim trailing \r/\n/\t/space to survive CRLF-edited identity.prop.
     static std::string rtrim(std::string s) {
         while (!s.empty()) {
             char c = s.back();

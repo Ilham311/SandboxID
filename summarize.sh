@@ -1,5 +1,4 @@
 #!/system/bin/sh
-
 IN="$1"
 OUT="${2:-/proc/self/fd/1}"
 

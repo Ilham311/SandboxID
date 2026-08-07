@@ -1,26 +1,4 @@
-// ternak_tt v2 — secure_xml_template.hpp
-// Item #2 (CRITICAL): proper Android settings_secure.xml template.
-//
-// USAGE (in ternak-tt.cpp::generate_mount_files, replace the existing
-// XML-building block with):
-//   #include "improvements/secure_xml_template.hpp"
-//   std::string xml = tt::build_secure_xml(aid, gaid, /*version=*/210);
-//   std::string xml_path = std::string(MOUNTDIR) + "/settings_secure.xml";
-//   atomic_write(xml_path, xml);
-//   ::chmod(xml_path.c_str(), 0600);
-//   ::chown(xml_path.c_str(), 1000, 1000);
-//
-// The file matches the format Android's SettingsProvider actually persists,
-// so a bind-mount over /data/system/users/<uid>/settings_secure.xml is a
-// drop-in replacement (not blank-out).
-//
-// Reference: frameworks/base/packages/SettingsProvider/src/com/android/providers/settings/SettingsProvider.java
-// Real file example:
-//   <?xml version='1.0' encoding='utf-8' standalone='yes' ?>
-//   <settings version="210">
-//     <setting id="1" name="android_id" value="a1b2c3…" package="android" />
-//     ...
-//   </settings>
+
 
 #pragma once
 
@@ -54,9 +32,6 @@ inline void append_setting(std::string& out, int id, const char* name,
     out += "\" />\n";
 }
 
-// Build a valid Android settings_secure.xml with the given android_id and
-// optional advertising_id (GAID). Additional entries are safe defaults that
-// keep target apps happy without exposing device identity.
 inline std::string build_secure_xml(const std::string& android_id,
                                     const std::string& gaid,
                                     int settings_version = 210) {
@@ -79,8 +54,6 @@ inline std::string build_secure_xml(const std::string& android_id,
         append_setting(xml, id++, "limit_ad_tracking",  "0",  "com.google.android.gms");
     }
 
-    // Defense-in-depth: neutralize a few keys that some anti-fraud SDKs
-    // read directly (safe defaults that mimic a fresh device).
     append_setting(xml, id++, "development_settings_enabled", "0", "android");
     append_setting(xml, id++, "adb_enabled",                  "0", "android");
     append_setting(xml, id++, "install_non_market_apps",      "1", "android");
@@ -89,4 +62,4 @@ inline std::string build_secure_xml(const std::string& android_id,
     return xml;
 }
 
-}  // namespace tt
+}

@@ -1,5 +1,4 @@
 #!/system/bin/sh
-
 MODDIR="${0%/*}"
 BIN="$MODDIR/bin/ternak-tt"
 ROTATE="$MODDIR/rotate_ids.sh"
