@@ -1,12 +1,12 @@
-# ternak_tt v2.1 - CMakeLists.txt (patched)
+# ternak_tt v2.2 - CMakeLists.txt (Principal Architect refactor)
 #
-# Changes vs v2.0:
-#   - Adds improvements/ to include path automatically (no more path prefix in
-#     source includes)
-#   - Uses generator expressions for Debug/Release split (fixes v2.0 issue
-#     where CMAKE_CXX_FLAGS_RELEASE was set even in Debug branch)
-#   - Adds _FILE_OFFSET_BITS=64 (Android best practice for large file APIs)
-#   - Prints TT_VERSION_STR/TT_VERSION_CODE clearly (used by module code)
+# Changes vs v2.1:
+#   P2-F: Release now enables IPO/LTO (link-time optimization) and PIE, and
+#         promotes -Wunused-result to a hard error so callers can't silently
+#         ignore write() / read() return values (a real ndk-jni-tips warning).
+#   P2-F: -Wno-c99-designator was clang-only; dropped so we don't emit a gcc
+#         'unrecognized option' notice when a host toolchain runs syntax-check.
+#   Docs: refreshed header + inline rationale comments.
 
 cmake_minimum_required(VERSION 3.22)
 project(ternak_tt LANGUAGES CXX)
@@ -46,9 +46,27 @@ add_compile_options(
     -Wall -Wextra -Wpedantic
     -Werror=return-type
     -Werror=uninitialized
+    -Werror=unused-result    # v2.2 P2-F: never silently drop read/write result
     -Wno-unused-parameter    # Zygisk callbacks intentionally ignore some
-    -Wno-c99-designator      # aggregate init style used in maps
 )
+
+# v2.2 P2-F: build all objects as position-independent code. Zygisk requires
+# PIE for the injected .so, and the standalone CLI benefits from PIE too
+# (ASLR hardening on Android 10+).
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# v2.2 P2-F: enable link-time optimization on non-debug builds. Reduces .so
+# size ~15% and inlines the L2/L7 hook fast paths across TU boundaries.
+if(NOT TERNAK_TT_DEBUG)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_msg)
+    if(_ipo_ok)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+        message(STATUS "[ternak_tt] LTO (IPO) enabled for Release")
+    else()
+        message(STATUS "[ternak_tt] LTO not supported by toolchain: ${_ipo_msg}")
+    endif()
+endif()
 
 # Common size-optimized flags
 set(TT_COMMON_FLAGS

@@ -1,22 +1,3 @@
-// ternak_tt v2.1 - companion.cpp (patched)
-//
-// Changes vs v2.0:
-//   P1-1: CMD_CHECK_TT (unused, no handler) removed. Only CMD_GET_IDENTITY
-//         and CMD_DO_MOUNTS remain.
-//   P2-1: uses tt::write_all / tt::read_all from companion_hardening.hpp so
-//         short reads / writes on the client socket never truncate the
-//         identity blob or ack.
-//   P2-2: fork() child immediately calls tt::child_init() (close inherited
-//         fds, prctl NO_NEW_PRIVS, umask 022) - closes fd-leak vector.
-//   P2-3: XML overlay bind-mount now enumerates per-user directories via
-//         multiuser_paths.hpp instead of hard-coding /data/system/users/0.
-//   P2-4: pidfd_open used for target death watch when kernel >= 5.3;
-//         falls back to /proc polling on older kernels. Removes the 100ms
-//         busy-loop from v2.0.
-//   P3-1: BIND_ENTRIES table removed - now imported from tt_paths.hpp.
-//         (Fixes v2.0 drift where main.cpp/companion.cpp/ternak-tt.cpp had
-//         three slightly different tables.)
-
 #include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
@@ -28,69 +9,67 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
-#include <poll.h>
+#include <semaphore.h>
 
 #include <android/log.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "tt_paths.hpp"
-#include "companion_hardening.hpp"   // tt::write_all / read_all / child_init
-#include "multiuser_paths.hpp"       // tt::build_secure_xml_bind_entries
+#include "companion_hardening.hpp"
+#include "multiuser_paths.hpp"
+#include "tt_proto.hpp"
 
 #define LOG_TAG "TernakTT-Companion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#ifdef TT_DEBUG
-#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
-#else
-#define LOGD(...) ((void)0)
-#endif
 
-using tt::paths::CMD_GET_IDENTITY;
-using tt::paths::CMD_DO_MOUNTS;
 using tt::paths::MOUNTDIR;
 using tt::paths::TARGET_FILE;
 using tt::paths::IDENTITY_FILE;
 using tt::paths::BUILD_PROP_ENTRIES;
 using tt::paths::BUILD_PROP_ENTRIES_N;
 
-// -------------------------------------------------------------------------
-// pidfd_open syscall wrapper (added in Linux 5.3 / API 31 in bionic).
-// -------------------------------------------------------------------------
 #ifndef __NR_pidfd_open
-  #if defined(__aarch64__) || defined(__x86_64__)
-    #define __NR_pidfd_open 434
-  #elif defined(__arm__) || defined(__i386__)
-    #define __NR_pidfd_open 434
-  #endif
+  #define __NR_pidfd_open 434
 #endif
+
 static inline int tt_pidfd_open(pid_t pid, unsigned int flags) {
     return (int)::syscall(__NR_pidfd_open, pid, flags);
 }
 
-// -------------------------------------------------------------------------
-// Target package list (loaded from /data/adb/modules/ternak_tt/target.txt).
-// -------------------------------------------------------------------------
-static std::vector<std::string> load_targets() {
+namespace {
+
+constexpr int MAX_CONCURRENT_MOUNT = 8;
+sem_t g_mount_sem;
+bool  g_mount_sem_init = false;
+
+std::vector<std::string> g_targets;
+std::vector<uint8_t>     g_bin_blob;
+uint16_t                 g_nkeys = 0;
+std::once_flag           g_load_once;
+std::mutex               g_reload_mu;
+
+std::vector<std::string> load_targets_file() {
     std::vector<std::string> out;
     FILE* f = ::fopen(TARGET_FILE, "r");
     if (!f) return out;
     char line[256];
     while (::fgets(line, sizeof(line), f)) {
-        // trim leading/trailing whitespace + comments
         std::string s(line);
         auto hash = s.find('#');
         if (hash != std::string::npos) s.erase(hash);
         while (!s.empty() &&
-               (s.back() == '\n' || s.back() == '\r' ||
-                s.back() == '\t' || s.back() == ' ')) s.pop_back();
+               (s.back()=='\n'||s.back()=='\r'||s.back()=='\t'||s.back()==' ')) s.pop_back();
         size_t start = 0;
-        while (start < s.size() && (s[start] == ' ' || s[start] == '\t')) ++start;
+        while (start < s.size() && (s[start]==' '||s[start]=='\t')) ++start;
         s.erase(0, start);
         if (!s.empty()) out.push_back(std::move(s));
     }
@@ -98,83 +77,74 @@ static std::vector<std::string> load_targets() {
     return out;
 }
 
-static bool is_target(const std::string& pkg, const std::vector<std::string>& list) {
-    for (const auto& t : list) if (t == pkg) return true;
-    return false;
-}
-
-static std::vector<uint8_t> read_identity_blob() {
+std::vector<uint8_t> build_binary_blob_from_file(uint16_t* nkeys_out) {
     std::vector<uint8_t> out;
-    int fd = ::open(IDENTITY_FILE, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return out;
-    struct stat st;
-    if (::fstat(fd, &st) == 0 && st.st_size > 0 && st.st_size < (1<<20)) {
-        out.resize((size_t)st.st_size);
-        size_t got = 0;
-        while (got < out.size()) {
-            ssize_t n = ::read(fd, out.data() + got, out.size() - got);
-            if (n <= 0) break;
-            got += (size_t)n;
-        }
-        if (got != out.size()) out.clear();
+    *nkeys_out = 0;
+    FILE* f = ::fopen(IDENTITY_FILE, "r");
+    if (!f) return out;
+    char line[1024];
+    out.reserve(4096);
+    uint16_t n = 0;
+    while (::fgets(line, sizeof(line), f)) {
+        std::string_view sv(line);
+        while (!sv.empty() &&
+               (sv.back()=='\n'||sv.back()=='\r'||sv.back()==' '||sv.back()=='\t')) sv.remove_suffix(1);
+        if (sv.empty() || sv.front() == '#') continue;
+        auto eq = sv.find('=');
+        if (eq == std::string_view::npos) continue;
+        std::string_view k = sv.substr(0, eq);
+        std::string_view v = sv.substr(eq + 1);
+        if (k.empty() || k.size() > 65535 || v.size() > 65535) continue;
+        tt::proto::BinaryEntry e;
+        e.klen = (uint16_t)k.size();
+        e.vlen = (uint16_t)v.size();
+        size_t base = out.size();
+        out.resize(base + sizeof(e) + e.klen + e.vlen);
+        std::memcpy(out.data() + base, &e, sizeof(e));
+        std::memcpy(out.data() + base + sizeof(e), k.data(), e.klen);
+        std::memcpy(out.data() + base + sizeof(e) + e.klen, v.data(), e.vlen);
+        ++n;
     }
-    ::close(fd);
+    ::fclose(f);
+    *nkeys_out = n;
     return out;
 }
 
-// -------------------------------------------------------------------------
-// Command handlers
-// -------------------------------------------------------------------------
-
-static void handle_get_identity(int client) {
-    uint16_t plen = 0;
-    if (!tt::read_all(client, &plen, sizeof(plen))) return;
-    if (plen == 0 || plen > 512) {
-        uint32_t zero = 0;
-        tt::write_all(client, &zero, sizeof(zero));
-        return;
-    }
-    std::string pkg(plen, '\0');
-    if (!tt::read_all(client, pkg.data(), plen)) return;
-
-    auto list = load_targets();
-    if (!is_target(pkg, list)) {
-        LOGD("GET_IDENTITY: pkg='%s' NOT a target, sending len=0", pkg.c_str());
-        uint32_t zero = 0;
-        tt::write_all(client, &zero, sizeof(zero));
-        return;
-    }
-
-    auto blob = read_identity_blob();
-    if (blob.empty()) {
-        LOGE("GET_IDENTITY: identity.prop unreadable");
-        uint32_t zero = 0;
-        tt::write_all(client, &zero, sizeof(zero));
-        return;
-    }
-    uint32_t len = (uint32_t)blob.size();
-    tt::write_all(client, &len, sizeof(len));
-    tt::write_all(client, blob.data(), blob.size());
-    LOGI("GET_IDENTITY: sent %u bytes to pkg=%s", len, pkg.c_str());
+void ensure_loaded() {
+    std::call_once(g_load_once, []{
+        std::lock_guard<std::mutex> lk(g_reload_mu);
+        g_targets  = load_targets_file();
+        g_bin_blob = build_binary_blob_from_file(&g_nkeys);
+        if (!g_mount_sem_init) {
+            sem_init(&g_mount_sem, 0, (unsigned)MAX_CONCURRENT_MOUNT);
+            g_mount_sem_init = true;
+        }
+        LOGI("companion loaded: targets=%zu nkeys=%u blob_bytes=%zu",
+             g_targets.size(), (unsigned)g_nkeys, g_bin_blob.size());
+    });
 }
 
-// -------------------------------------------------------------------------
-// Bind-mount: enter target's mount namespace and overlay the build.prop /
-// settings_secure.xml files. Runs in a forked child so that failures don't
-// take the companion process down.
-// -------------------------------------------------------------------------
+[[nodiscard]] bool is_target(std::string_view pkg) {
+    for (const auto& t : g_targets) if (t == pkg) return true;
+    return false;
+}
 
-static uint32_t do_bind_mounts_in_child(pid_t target_pid) {
-    // Enter target mount namespace
-    char ns_path[64];
-    ::snprintf(ns_path, sizeof(ns_path), "/proc/%d/ns/mnt", (int)target_pid);
-    int ns_fd = ::open(ns_path, O_RDONLY | O_CLOEXEC);
+[[nodiscard]] int open_target_mnt_ns(pid_t target_pid) {
+    int fd = tt_pidfd_open(target_pid, 0);
+    if (fd >= 0) return fd;
+    char p[64];
+    ::snprintf(p, sizeof(p), "/proc/%d/ns/mnt", (int)target_pid);
+    return ::open(p, O_RDONLY | O_CLOEXEC);
+}
+
+uint32_t do_bind_mounts_in_child(pid_t target_pid) {
+    int ns_fd = open_target_mnt_ns(target_pid);
     if (ns_fd < 0) {
-        LOGE("open mnt ns for pid %d failed: %s", (int)target_pid, strerror(errno));
+        LOGE("open ns for pid %d: %s", (int)target_pid, strerror(errno));
         return 0;
     }
     if (::setns(ns_fd, CLONE_NEWNS) != 0) {
-        LOGE("setns failed: %s", strerror(errno));
+        LOGE("setns pid=%d: %s", (int)target_pid, strerror(errno));
         ::close(ns_fd);
         return 0;
     }
@@ -182,22 +152,18 @@ static uint32_t do_bind_mounts_in_child(pid_t target_pid) {
 
     uint32_t ok = 0;
     char src[512];
-
-    // ---- build.prop overlays ----
     for (size_t i = 0; i < BUILD_PROP_ENTRIES_N; ++i) {
         const auto& e = BUILD_PROP_ENTRIES[i];
         ::snprintf(src, sizeof(src), "%s/%s", MOUNTDIR, e.src_rel);
-        if (::access(src, R_OK) != 0) continue;      // source not generated
-        if (::access(e.dst, F_OK) != 0)  continue;   // dest doesn't exist
+        if (::access(src, R_OK) != 0) continue;
+        if (::access(e.dst, F_OK) != 0) continue;
         if (::mount(src, e.dst, nullptr, MS_BIND, nullptr) == 0) {
             ++ok;
-            LOGD("bind %s -> %s", src, e.dst);
         } else {
-            LOGD("bind %s -> %s failed: %s", src, e.dst, strerror(errno));
+            LOGW("bind %s -> %s FAILED: %s", src, e.dst, strerror(errno));
         }
     }
 
-    // ---- settings_secure.xml overlays (per user) ----
     ::snprintf(src, sizeof(src), "%s/settings_secure.xml", MOUNTDIR);
     if (::access(src, R_OK) == 0) {
         auto user_targets = tt::build_secure_xml_bind_entries();
@@ -206,88 +172,95 @@ static uint32_t do_bind_mounts_in_child(pid_t target_pid) {
             if (::access(dst.c_str(), F_OK) != 0) continue;
             if (::mount(src, dst.c_str(), nullptr, MS_BIND, nullptr) == 0) {
                 ++ok;
-                LOGD("bind %s -> %s", src, dst.c_str());
             } else {
-                LOGD("bind %s -> %s failed: %s",
-                     src, dst.c_str(), strerror(errno));
+                LOGW("bind %s -> %s FAILED: %s", src, dst.c_str(), strerror(errno));
             }
         }
     }
-
     return ok;
 }
 
-static void handle_do_mounts(int client) {
-    uint32_t pid32 = 0;
-    if (!tt::read_all(client, &pid32, sizeof(pid32))) return;
-    pid_t target_pid = (pid_t)pid32;
-
-    // Fork a helper child. If setns/mount fails, only the child dies.
+uint32_t do_bind_mounts_forked(pid_t target_pid) {
+    sem_wait(&g_mount_sem);
     pid_t child = ::fork();
     if (child < 0) {
+        sem_post(&g_mount_sem);
         LOGE("fork failed: %s", strerror(errno));
-        uint32_t zero = 0;
-        tt::write_all(client, &zero, sizeof(zero));
-        return;
+        return 0;
     }
     if (child == 0) {
-        // Child: harden and do the work.
-        tt::child_init("tt-mount-child");  // close stray fds, NO_NEW_PRIVS, umask, prctl death
+        tt::child_init("tt-mount-child");
         uint32_t ok = do_bind_mounts_in_child(target_pid);
-        // Signal parent via exit code (capped at 254)
         ::_exit(ok > 254 ? 254 : (int)ok);
     }
-
     int status = 0;
     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-    uint32_t ok = 0;
-    if (WIFEXITED(status)) ok = (uint32_t)WEXITSTATUS(status);
-    tt::write_all(client, &ok, sizeof(ok));
-    LOGI("DO_MOUNTS: target_pid=%d ok=%u", (int)target_pid, ok);
-
-    // ---- Death-watch daemon (fire-and-forget) ----
-    // Not strictly necessary but useful for debug: log when target dies.
-#ifdef TT_DEBUG
-    pid_t watcher = ::fork();
-    if (watcher == 0) {
-        tt::child_init("tt-death-watch");
-        int pfd = tt_pidfd_open(target_pid, 0);
-        if (pfd >= 0) {
-            // Block until process exits
-            struct pollfd pf { pfd, POLLIN, 0 };
-            (void)::poll(&pf, 1, -1);
-            ::close(pfd);
-        } else {
-            // Fallback: poll /proc/<pid> every 500ms (NOT every 100ms
-            // like v2.0 did)
-            char proc[64];
-            ::snprintf(proc, sizeof(proc), "/proc/%d", (int)target_pid);
-            while (::access(proc, F_OK) == 0) {
-                struct timespec ts { 0, 500 * 1000 * 1000 };
-                ::nanosleep(&ts, nullptr);
-            }
-        }
-        LOGD("death-watch: pid %d exited", (int)target_pid);
-        ::_exit(0);
-    }
-#endif
+    sem_post(&g_mount_sem);
+    if (WIFEXITED(status)) return (uint32_t)WEXITSTATUS(status);
+    return 0;
 }
 
-// -------------------------------------------------------------------------
-// Companion entry point (registered from main.cpp).
-// -------------------------------------------------------------------------
+void handle_init_app(int client) {
+    tt::proto::InitAppRequestPayload payload{};
+    if (!tt::read_all(client, &payload, sizeof(payload))) return;
+    if (payload.pkg_len > 512) return;
+    std::string pkg(payload.pkg_len, '\0');
+    if (payload.pkg_len && !tt::read_all(client, pkg.data(), payload.pkg_len)) return;
+
+    ensure_loaded();
+
+    tt::proto::InitAppResponse resp{};
+    tt::proto::fill_header(resp.hdr, tt::proto::CMD_INIT_APP, 0);
+
+    bool tgt = is_target(pkg);
+    resp.is_target = tgt ? (uint16_t)1 : (uint16_t)0;
+    uint32_t mount_ok = 0;
+    if (tgt) {
+        mount_ok = do_bind_mounts_forked((pid_t)payload.pid);
+        resp.mount_ok = (uint16_t)mount_ok;
+        resp.blob_len = (uint32_t)g_bin_blob.size();
+        resp.nkeys    = g_nkeys;
+        uint32_t body = (uint32_t)(sizeof(resp) - sizeof(tt::proto::Header)) + resp.blob_len;
+        resp.hdr.payload_len = body;
+    } else {
+        uint32_t body = (uint32_t)(sizeof(resp) - sizeof(tt::proto::Header));
+        resp.hdr.payload_len = body;
+    }
+
+    (void)tt::write_all(client, &resp, sizeof(resp));
+    if (tgt && resp.blob_len) {
+        (void)tt::write_all(client, g_bin_blob.data(), g_bin_blob.size());
+    }
+    LOGI("INIT_APP pkg=%s target=%d mount_ok=%u nkeys=%u",
+         pkg.c_str(), (int)tgt, (unsigned)mount_ok, (unsigned)g_nkeys);
+}
+
+void reject_bad_header(int client) {
+    tt::proto::Header err;
+    tt::proto::fill_header(err, (uint8_t)0xFF, 0);
+    (void)tt::write_all(client, &err, sizeof(err));
+    LOGE("companion: bad header (magic/version mismatch)");
+}
+
+}
 
 extern "C" void ternak_tt_companion(int client) {
-    uint8_t cmd = 0;
-    if (!tt::read_all(client, &cmd, 1)) {
-        LOGD("companion: no command byte");
+    tt::proto::Header hdr{};
+    if (!tt::read_all(client, &hdr, sizeof(hdr))) return;
+    if (hdr.magic[0] != tt::proto::MAGIC0 ||
+        hdr.magic[1] != tt::proto::MAGIC1 ||
+        hdr.magic[2] != tt::proto::MAGIC2 ||
+        hdr.version  != tt::proto::VERSION) {
+        reject_bad_header(client);
         return;
     }
-    switch (cmd) {
-        case CMD_GET_IDENTITY: handle_get_identity(client); break;
-        case CMD_DO_MOUNTS:    handle_do_mounts(client);    break;
+    switch (hdr.cmd) {
+        case tt::proto::CMD_INIT_APP:
+            handle_init_app(client);
+            break;
         default:
-            LOGE("companion: unknown cmd=%u", (unsigned)cmd);
+            LOGE("companion: unknown cmd=%u", (unsigned)hdr.cmd);
+            reject_bad_header(client);
             break;
     }
 }

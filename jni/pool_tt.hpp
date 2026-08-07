@@ -1,12 +1,10 @@
-// ternak_tt v2.1 - pool_tt.hpp (patched)
+// ternak_tt v2.2 - pool_tt.hpp
 //
-// Changes vs v2.0:
-//   - Adds `DeviceEntry` as the canonical name (kept `PixelEntry` alias for
-//     source-compat with v2.0). The pool has been multi-brand since v2.0 so
-//     the legacy name was misleading.
-//   - No pool data changes in this patch (that stays authored by hand).
-//   - Adds inline sanity check that catches obvious brand/model drift at
-//     compile time (constexpr, zero runtime cost).
+// v2.2 changes:
+//   - P2-G: `_all_have_brand` rewritten sebagai constexpr `for` loop
+//     (C++14+) — recursive template instantiation depth turun dari O(N)
+//     ke O(1). Compile lebih cepat dan tidak akan menyentuh limit -ftemplate-depth.
+//   - No pool data changes.
 
 #pragma once
 
@@ -70,14 +68,17 @@ static constexpr DeviceEntry TT_POOL[] = {
 static constexpr std::size_t TT_POOL_SIZE = sizeof(TT_POOL) / sizeof(TT_POOL[0]);
 
 // Compile-time consistency check: every entry must have brand + manufacturer.
-// (Cheap defense against typos in future pool additions.)
+// v2.2: rewritten as a constexpr `for` loop (C++14+) — O(1) template depth.
 namespace _tt_pool_check {
     template <std::size_t N>
-    constexpr bool _all_have_brand(const DeviceEntry (&pool)[N], std::size_t i = 0) {
-        return i >= N ||
-               (pool[i].brand && pool[i].brand[0] &&
-                pool[i].manufacturer && pool[i].manufacturer[0] &&
-                _all_have_brand(pool, i + 1));
+    constexpr bool _all_have_brand(const DeviceEntry (&pool)[N]) {
+        for (std::size_t i = 0; i < N; ++i) {
+            if (!(pool[i].brand && pool[i].brand[0] &&
+                  pool[i].manufacturer && pool[i].manufacturer[0])) {
+                return false;
+            }
+        }
+        return true;
     }
     static_assert(_all_have_brand(TT_POOL),
                   "TT_POOL entry missing brand or manufacturer");

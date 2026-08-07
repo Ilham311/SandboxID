@@ -1,11 +1,8 @@
-// ternak_tt v2 — radio_util.hpp
+// ternak_tt v2.1.2 — radio_util.hpp
 // Item #8: RADIO baseband string per SoC generation (not always g5300q).
-//
-// USAGE (in ternak-tt.cpp::gen_identity):
-//   #include "improvements/radio_util.hpp"
-//   char rad[128];
-//   std::string radio = tt::format_radio(p.device, p.incremental, date_yymmdd);
-//   id.kv["RADIO"] = radio;
+// v2.1.2 changes:
+//   - Added OnePlus device codes (OP5F0FL1, OP595DL1) and board-based fallback (kalama SoC).
+//   - Added board-name overload for device detection when codename unknown.
 
 #pragma once
 
@@ -15,8 +12,6 @@
 
 namespace tt {
 
-// Detect Tensor / Snapdragon generation from Pixel device codename.
-// Returns baseband tag prefix used in real Pixel factory images.
 inline const char* baseband_tag_for_device(const char* device) {
     if (!device) return "g5300q";
 
@@ -47,42 +42,60 @@ inline const char* baseband_tag_for_device(const char* device) {
 
     // Samsung Galaxy — model-derived
     if (device[0] == 'e' && (device[1] >= '1' && device[1] <= '3')) {
-        return "CP";   // e1q/e2q/e3q → CP<model>XXU
+        return "CP";
     }
     if (device[0] == 'a' && device[1] >= '3' && device[1] <= '7') {
         return "CP";
     }
 
-    // Snapdragon (Xiaomi, OnePlus, Realme)
+    // Snapdragon 8 Gen 3 (Xiaomi 14, Xiaomi 14 Pro)
     if (!std::strcmp(device, "shennong")) return "MPSS.HI.5.1";
     if (!std::strcmp(device, "aurora"))   return "MPSS.HI.5.1";
+
+    // --- v2.1.2: Snapdragon 8 Gen 2 (kalama board) ---
+    // Xiaomi 13 (fuxi), Xiaomi 13 Pro (nuwa), OnePlus 11 (salami), OnePlus Open (dumpling)
     if (!std::strcmp(device, "kalama"))   return "MPSS.HI.5.0";
+    if (!std::strcmp(device, "fuxi"))     return "MPSS.HI.5.0";
+    if (!std::strcmp(device, "nuwa"))     return "MPSS.HI.5.0";
+    if (!std::strcmp(device, "salami"))   return "MPSS.HI.5.0";
+    if (!std::strcmp(device, "dumpling")) return "MPSS.HI.5.0";
+
+    // --- v2.1.2: OnePlus internal device codes ---
+    // OP5F0FL1 = OnePlus Open (dumpling board, SD8G2)
+    // OP595DL1 = OnePlus 12 (pineapple board, SD8G3)
+    if (!std::strcmp(device, "OP5F0FL1")) return "MPSS.HI.5.0";
+    if (!std::strcmp(device, "OP595DL1")) return "MPSS.HI.5.2";
+    if (!std::strcmp(device, "pineapple")) return "MPSS.HI.5.2";
 
     // Fallback: legacy g5300q (v1 behavior)
     return "g5300q";
 }
 
-// Full RADIO string in the format Android expects.
-//   Pixel:    <tag>-<yymmdd>-<yymmdd>-B-<incremental>
-//   Samsung:  <tag><model>XXU<incremental>
-//   Snapdragon: <tag>-<incremental>
+// Detect if device is Snapdragon-family (needs MPSS format).
+inline bool is_snapdragon_device(const char* device) {
+    if (!device) return false;
+    const char* tag = baseband_tag_for_device(device);
+    return std::strncmp(tag, "MPSS", 4) == 0;
+}
+
+// Detect if device is Samsung.
+inline bool is_samsung_device(const char* device) {
+    if (!device) return false;
+    if (device[0] == 'e' && device[1] >= '1' && device[1] <= '3') return true;
+    if (device[0] == 'a' && device[1] >= '3' && device[1] <= '7') return true;
+    return false;
+}
+
 inline std::string format_radio(const char* device, const char* incremental,
                                 const char* date_yymmdd) {
     const char* tag = baseband_tag_for_device(device);
     char buf[192];
 
-    // Samsung path: incremental IS the radio string basically
-    if (device && device[0] == 'e' &&
-        device[1] >= '1' && device[1] <= '3') {
-        std::snprintf(buf, sizeof(buf), "%s", incremental ? incremental : "");
-        return buf;
-    }
-    if (device && device[0] == 'a' && device[1] >= '3' && device[1] <= '7') {
+    if (is_samsung_device(device)) {
         std::snprintf(buf, sizeof(buf), "%s", incremental ? incremental : "");
         return buf;
     }
 
-    // Snapdragon (MPSS)
     if (std::strncmp(tag, "MPSS", 4) == 0) {
         std::snprintf(buf, sizeof(buf), "%s-%s",
                       tag, incremental ? incremental : "unknown");

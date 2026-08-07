@@ -47,7 +47,8 @@
 
 #include "tt_paths.hpp"
 #include "pool_tt.hpp"
-#include "random_util.hpp"          // tt::random_hex / uuid_v4 / urandom_fill
+#include "random_util.hpp"
+#include "tt_bloom.hpp"
 #include "radio_util.hpp"           // tt::format_radio
 #include "secure_xml_template.hpp"  // tt::build_secure_xml
 
@@ -58,6 +59,7 @@ using tt::paths::MODE_FILE;
 using tt::paths::RESETPROP;
 using tt::paths::MOUNTDIR;
 using tt::paths::TARGET_FILE;
+using tt::paths::BLOOM_FILE;
 
 // -------------------------------------------------------------------------
 // Small helpers
@@ -158,17 +160,12 @@ struct Identity {
 };
 
 static std::string yymmdd_from_incremental(const char* incremental) {
-    // Best-effort: take today's date for the RADIO date component.
-    // (Pool incrementals like "12580211" don't encode a date, but Pixel
-    // RADIO strings usually reflect the modem firmware date, not build date.)
-    time_t t = ::time(nullptr);
-    struct tm tm;
-    ::localtime_r(&t, &tm);
-    char buf[8];
-    ::snprintf(buf, sizeof(buf), "%02d%02d%02d",
-               tm.tm_year - 100, tm.tm_mon + 1, tm.tm_mday);
-    (void)incremental;
-    return buf;
+    // v2.1.2: don't leak the freshen date. Use a stable synthetic date
+    // (year 2026 mid-quarter) so RADIO strings don't reveal when the user
+    // regenerated identity. Real Pixel factory images use modem-firmware
+    // dates that don't correlate with when the user installed the OTA.
+    (void)incremental;  // pool incrementals don't encode a date anyway
+    return "260315";    // fixed: 2026-03-15
 }
 
 static Identity gen_identity() {
@@ -274,17 +271,25 @@ static void generate_mount_files(const Identity& id) {
     auto gid = id.kv.find("GAID");
     if (aid != id.kv.end() && gid != id.kv.end()) {
         std::string xml = tt::build_secure_xml(aid->second, gid->second);
-        atomic_write(std::string(MOUNTDIR) + "/settings_secure.xml", xml);
+        const std::string xml_path = std::string(MOUNTDIR) + "/settings_secure.xml";
+        atomic_write(xml_path, xml);
+        // v2.1.2: match real Android settings_secure.xml permissions.
+        // Owner = system (uid 1000, gid 1000), mode 0600.
+        (void)::chmod(xml_path.c_str(), 0600);
+        (void)::chown(xml_path.c_str(), 1000, 1000);
     }
 }
 
 // -------------------------------------------------------------------------
-// Runtime prop injection via resetprop-rs (batched)
+// Runtime prop injection via resetprop-rs (batched, ARG_MAX-safe)
 // -------------------------------------------------------------------------
 // v2.0: fork+exec resetprop-rs per property (~200 forks).
 // v2.1: single sh -c with all commands concatenated (1 fork total).
-// If /system/bin/sh is not available (shouldn't happen on Android) we
-// silently skip - build.prop bind-mount is still in place.
+// v2.2 P2-C: split into <=24KB batches so we never bump the ARG_MAX ceiling
+//            (default 128KB on Android; long fingerprints could hit it).
+// v2.2 P3-C: RESETPROP path and prop key are also shell-quoted (defensive:
+//            if a future build ever ships a resetprop path with a space or
+//            special char, the command still parses correctly).
 static void apply_native(const Identity& id) {
     static const std::map<std::string, const char*> propmap = {
         {"BRAND",        "ro.product.brand"},
@@ -307,8 +312,8 @@ static void apply_native(const Identity& id) {
         {"RADIO",        "gsm.version.baseband"},
     };
 
-    // Shell-escape a value so it fits inside single quotes.
-    auto sq = [](const std::string& s) {
+    // Shell-escape any string so it fits inside single quotes.
+    auto sq = [](std::string_view s) {
         std::string out; out.reserve(s.size() + 2);
         out += '\'';
         for (char c : s) {
@@ -319,29 +324,83 @@ static void apply_native(const Identity& id) {
         return out;
     };
 
-    std::ostringstream cmd;
+    // Flush a batched command through a single fork+exec of sh -c.
+    auto run_batch = [](const std::string& cmd_str) {
+        if (cmd_str.empty()) return;
+        pid_t pid = ::fork();
+        if (pid < 0) return;
+        if (pid == 0) {
+            ::execl("/system/bin/sh", "sh", "-c", cmd_str.c_str(), (char*)nullptr);
+            ::_exit(127);
+        }
+        int status = 0;
+        while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    };
+
+    // v2.2 P2-C: keep each sh -c command under ARG_MAX_SAFE bytes.
+    // Real Android ARG_MAX is 128KB, we use 24KB as a very safe ceiling.
+    static constexpr std::size_t ARG_MAX_SAFE = 24u * 1024u;
+    const std::string rp_q = sq(RESETPROP);   // v2.2 P3-C: quote the path.
+    std::string batch;
+    batch.reserve(ARG_MAX_SAFE);
+
     for (const auto& [k, prop] : propmap) {
         auto it = id.kv.find(k);
         if (it == id.kv.end() || it->second.empty()) continue;
-        cmd << RESETPROP << " -n " << prop << " " << sq(it->second) << "; ";
-    }
-    std::string full = cmd.str();
-    if (full.empty()) return;
 
-    // Single fork + exec sh -c.
-    pid_t pid = ::fork();
-    if (pid < 0) return;
-    if (pid == 0) {
-        ::execl("/system/bin/sh", "sh", "-c", full.c_str(), (char*)nullptr);
-        ::_exit(127);
+        std::string one;
+        one.reserve(rp_q.size() + std::strlen(prop) + it->second.size() + 16);
+        one.append(rp_q).append(" -n ").append(sq(prop)).append(" ")
+           .append(sq(it->second)).append("; ");
+
+        if (!batch.empty() && batch.size() + one.size() > ARG_MAX_SAFE) {
+            run_batch(batch);
+            batch.clear();
+        }
+        batch.append(one);
     }
-    int status = 0;
-    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    run_batch(batch);
 }
 
 // -------------------------------------------------------------------------
 // Public sub-commands (freshen / status / wipe)
 // -------------------------------------------------------------------------
+
+static void write_bloom_file() {
+    tt::bloom::Filter bf;
+    bf.clear();
+    std::ifstream f(TARGET_FILE);
+    std::string line;
+    std::size_t added = 0;
+    while (std::getline(f, line)) {
+        auto hash = line.find('#');
+        if (hash != std::string::npos) line.erase(hash);
+        while (!line.empty() &&
+               (line.back()=='\n'||line.back()=='\r'||line.back()==' '||line.back()=='\t'))
+            line.pop_back();
+        std::size_t start = 0;
+        while (start < line.size() && (line[start]==' '||line[start]=='\t')) ++start;
+        line.erase(0, start);
+        if (line.empty()) continue;
+        bf.add(line);
+        ++added;
+    }
+    std::string tmp = std::string(BLOOM_FILE) + ".tmp";
+    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    ssize_t left = (ssize_t)sizeof(bf);
+    const char* p = reinterpret_cast<const char*>(&bf);
+    while (left > 0) {
+        ssize_t n = ::write(fd, p, (size_t)left);
+        if (n <= 0) { if (errno == EINTR) continue; ::close(fd); ::unlink(tmp.c_str()); return; }
+        left -= n; p += n;
+    }
+    ::fsync(fd);
+    ::close(fd);
+    if (::rename(tmp.c_str(), BLOOM_FILE) != 0) { ::unlink(tmp.c_str()); return; }
+    std::cout << "ternak-tt: bloom filter written (" << added << " targets, "
+              << sizeof(bf) << " bytes)\n";
+}
 
 static int cmd_freshen(int argc, char** argv) {
     (void)argc; (void)argv;
@@ -360,6 +419,7 @@ static int cmd_freshen(int argc, char** argv) {
     }
     atomic_write(MODE_FILE, "freshen\n");
     generate_mount_files(id);
+    write_bloom_file();
     apply_native(id);
 
     std::cout << "ternak-tt: freshen ok model=" << id.kv["MODEL"]
