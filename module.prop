@@ -1,6 +1,6 @@
 id=ternak_tt
 name=Ternak TT
-version=v2.3.0
-versionCode=230
+version=v2.3.1
+versionCode=231
 author=diru768
 description=Zygisk identity spoof + companion mount (T1-T5 refactor: single-roundtrip IPC, pidfd, flat lookup table, AS-safe crash watchdog, Bloom filter early-exit)
