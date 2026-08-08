@@ -60,7 +60,10 @@ std::mutex               g_reload_mu;
 std::vector<std::string> load_targets_file() {
     std::vector<std::string> out;
     FILE* f = ::fopen(TARGET_FILE, "r");
-    if (!f) return out;
+    if (!f) {
+        LOGE("cannot open %s errno=%d", TARGET_FILE, errno);
+        return out;
+    }
     char line[256];
     while (::fgets(line, sizeof(line), f)) {
         std::string s(line);
@@ -81,7 +84,10 @@ std::vector<uint8_t> build_binary_blob_from_file(uint16_t* nkeys_out) {
     std::vector<uint8_t> out;
     *nkeys_out = 0;
     FILE* f = ::fopen(IDENTITY_FILE, "r");
-    if (!f) return out;
+    if (!f) {
+        LOGE("cannot open %s errno=%d", IDENTITY_FILE, errno);
+        return out;
+    }
     char line[1024];
     out.reserve(4096);
     uint16_t n = 0;
@@ -119,8 +125,11 @@ void ensure_loaded() {
             sem_init(&g_mount_sem, 0, (unsigned)MAX_CONCURRENT_MOUNT);
             g_mount_sem_init = true;
         }
-        LOGI("companion loaded: targets=%zu nkeys=%u blob_bytes=%zu",
+        LOGI("companion loaded: targets=%zu nkeys=%u blob=%zu",
              g_targets.size(), (unsigned)g_nkeys, g_bin_blob.size());
+        for (size_t i = 0; i < g_targets.size() && i < 8; ++i) {
+            LOGI("  target[%zu] = [%s]", i, g_targets[i].c_str());
+        }
     });
 }
 
@@ -149,7 +158,6 @@ uint32_t do_bind_mounts_in_child(pid_t target_pid) {
         return 0;
     }
     ::close(ns_fd);
-
     uint32_t ok = 0;
     char src[512];
     for (size_t i = 0; i < BUILD_PROP_ENTRIES_N; ++i) {
@@ -163,7 +171,6 @@ uint32_t do_bind_mounts_in_child(pid_t target_pid) {
             LOGW("bind %s -> %s FAILED: %s", src, e.dst, strerror(errno));
         }
     }
-
     ::snprintf(src, sizeof(src), "%s/settings_secure.xml", MOUNTDIR);
     if (::access(src, R_OK) == 0) {
         auto user_targets = tt::build_secure_xml_bind_entries();
@@ -202,16 +209,23 @@ uint32_t do_bind_mounts_forked(pid_t target_pid) {
 
 void handle_init_app(int client) {
     tt::proto::InitAppRequestPayload payload{};
-    if (!tt::read_all(client, &payload, sizeof(payload))) return;
-    if (payload.pkg_len > 512) return;
+    if (!tt::read_all(client, &payload, sizeof(payload))) {
+        LOGE("handle_init_app: read payload FAILED errno=%d", errno);
+        return;
+    }
+    if (payload.pkg_len > 512) {
+        LOGE("handle_init_app: pkg_len too large %u", (unsigned)payload.pkg_len);
+        return;
+    }
     std::string pkg(payload.pkg_len, '\0');
-    if (payload.pkg_len && !tt::read_all(client, pkg.data(), payload.pkg_len)) return;
-
+    if (payload.pkg_len && !tt::read_all(client, pkg.data(), payload.pkg_len)) {
+        LOGE("handle_init_app: read pkg FAILED errno=%d", errno);
+        return;
+    }
+    LOGI("handle_init_app pkg=[%s] pid=%u", pkg.c_str(), (unsigned)payload.pid);
     ensure_loaded();
-
     tt::proto::InitAppResponse resp{};
     tt::proto::fill_header(resp.hdr, tt::proto::CMD_INIT_APP, 0);
-
     bool tgt = is_target(pkg);
     resp.is_target = tgt ? (uint16_t)1 : (uint16_t)0;
     uint32_t mount_ok = 0;
@@ -226,13 +240,19 @@ void handle_init_app(int client) {
         uint32_t body = (uint32_t)(sizeof(resp) - sizeof(tt::proto::Header));
         resp.hdr.payload_len = body;
     }
-
-    (void)tt::write_all(client, &resp, sizeof(resp));
-    if (tgt && resp.blob_len) {
-        (void)tt::write_all(client, g_bin_blob.data(), g_bin_blob.size());
+    LOGI("reply pkg=%s target=%d mount_ok=%u nkeys=%u blob=%u",
+         pkg.c_str(), (int)tgt, (unsigned)mount_ok,
+         (unsigned)g_nkeys, (unsigned)resp.blob_len);
+    if (!tt::write_all(client, &resp, sizeof(resp))) {
+        LOGE("handle_init_app: write resp FAILED errno=%d", errno);
+        return;
     }
-    LOGI("INIT_APP pkg=%s target=%d mount_ok=%u nkeys=%u",
-         pkg.c_str(), (int)tgt, (unsigned)mount_ok, (unsigned)g_nkeys);
+    if (tgt && resp.blob_len) {
+        if (!tt::write_all(client, g_bin_blob.data(), g_bin_blob.size())) {
+            LOGE("handle_init_app: write blob FAILED errno=%d", errno);
+            return;
+        }
+    }
 }
 
 void reject_bad_header(int client) {
@@ -245,8 +265,15 @@ void reject_bad_header(int client) {
 }
 
 extern "C" void ternak_tt_companion(int client) {
+    LOGI("companion enter fd=%d", client);
     tt::proto::Header hdr{};
-    if (!tt::read_all(client, &hdr, sizeof(hdr))) return;
+    if (!tt::read_all(client, &hdr, sizeof(hdr))) {
+        LOGE("companion: read hdr FAILED errno=%d", errno);
+        return;
+    }
+    LOGI("companion recv hdr: magic=[%02x %02x %02x] ver=%u cmd=%u len=%u",
+         (unsigned)hdr.magic[0], (unsigned)hdr.magic[1], (unsigned)hdr.magic[2],
+         (unsigned)hdr.version, (unsigned)hdr.cmd, hdr.payload_len);
     if (hdr.magic[0] != tt::proto::MAGIC0 ||
         hdr.magic[1] != tt::proto::MAGIC1 ||
         hdr.magic[2] != tt::proto::MAGIC2 ||

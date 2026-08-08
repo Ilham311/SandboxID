@@ -47,10 +47,10 @@
 
 #include "tt_paths.hpp"
 #include "pool_tt.hpp"
-#include "random_util.hpp"
-#include "tt_bloom.hpp"
+#include "random_util.hpp"          // tt::random_hex / uuid_v4 / urandom_fill
 #include "radio_util.hpp"           // tt::format_radio
 #include "secure_xml_template.hpp"  // tt::build_secure_xml
+#include "tt_bloom.hpp"
 
 using tt::paths::MODDIR;
 using tt::paths::IDENTITY_FILE;
@@ -59,7 +59,6 @@ using tt::paths::MODE_FILE;
 using tt::paths::RESETPROP;
 using tt::paths::MOUNTDIR;
 using tt::paths::TARGET_FILE;
-using tt::paths::BLOOM_FILE;
 
 // -------------------------------------------------------------------------
 // Small helpers
@@ -367,39 +366,52 @@ static void apply_native(const Identity& id) {
 // -------------------------------------------------------------------------
 
 static void write_bloom_file() {
-    tt::bloom::Filter bf;
-    bf.clear();
-    std::ifstream f(TARGET_FILE);
-    std::string line;
-    std::size_t added = 0;
-    while (std::getline(f, line)) {
-        auto hash = line.find('#');
-        if (hash != std::string::npos) line.erase(hash);
-        while (!line.empty() &&
-               (line.back()=='\n'||line.back()=='\r'||line.back()==' '||line.back()=='\t'))
-            line.pop_back();
-        std::size_t start = 0;
-        while (start < line.size() && (line[start]==' '||line[start]=='\t')) ++start;
-        line.erase(0, start);
-        if (line.empty()) continue;
-        bf.add(line);
+    using tt::paths::TARGET_FILE;
+    using tt::paths::BLOOM_FILE;
+    tt::bloom::Filter flt;
+    flt.clear();
+    FILE* f = ::fopen(TARGET_FILE, "r");
+    if (!f) {
+        std::fprintf(stderr, "[bloom] cannot open %s: %s\n", TARGET_FILE, strerror(errno));
+        return;
+    }
+    char line[256];
+    size_t added = 0;
+    while (::fgets(line, sizeof(line), f)) {
+        std::string s(line);
+        auto hash = s.find('#');
+        if (hash != std::string::npos) s.erase(hash);
+        while (!s.empty() &&
+               (s.back()=='\n'||s.back()=='\r'||s.back()=='\t'||s.back()==' ')) s.pop_back();
+        size_t start = 0;
+        while (start < s.size() && (s[start]==' '||s[start]=='\t')) ++start;
+        s.erase(0, start);
+        if (s.empty()) continue;
+        flt.add(s);
         ++added;
     }
+    ::fclose(f);
     std::string tmp = std::string(BLOOM_FILE) + ".tmp";
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0) return;
-    ssize_t left = (ssize_t)sizeof(bf);
-    const char* p = reinterpret_cast<const char*>(&bf);
-    while (left > 0) {
-        ssize_t n = ::write(fd, p, (size_t)left);
-        if (n <= 0) { if (errno == EINTR) continue; ::close(fd); ::unlink(tmp.c_str()); return; }
-        left -= n; p += n;
+    int fd = ::open(tmp.c_str(), O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644);
+    if (fd < 0) {
+        std::fprintf(stderr, "[bloom] open %s: %s\n", tmp.c_str(), strerror(errno));
+        return;
     }
+    ssize_t w = ::write(fd, flt.bits, sizeof(flt.bits));
     ::fsync(fd);
     ::close(fd);
-    if (::rename(tmp.c_str(), BLOOM_FILE) != 0) { ::unlink(tmp.c_str()); return; }
-    std::cout << "ternak-tt: bloom filter written (" << added << " targets, "
-              << sizeof(bf) << " bytes)\n";
+    if (w != (ssize_t)sizeof(flt.bits)) {
+        std::fprintf(stderr, "[bloom] short write %zd/%zu\n", w, sizeof(flt.bits));
+        ::unlink(tmp.c_str());
+        return;
+    }
+    if (::rename(tmp.c_str(), BLOOM_FILE) != 0) {
+        std::fprintf(stderr, "[bloom] rename: %s\n", strerror(errno));
+        ::unlink(tmp.c_str());
+        return;
+    }
+    std::fprintf(stdout, "[bloom] wrote %s (%zu entries, %zu bytes)\n",
+                 BLOOM_FILE, added, sizeof(flt.bits));
 }
 
 static int cmd_freshen(int argc, char** argv) {

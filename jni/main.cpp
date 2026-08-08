@@ -52,12 +52,8 @@ static inline int tt_memfd_create(const char* name, unsigned flags) {
 
 #define LOG_TAG "TernakTT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#ifdef TT_DEBUG
-#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
-#else
-#define LOGD(...) ((void)0)
-#endif
 
 #ifndef TT_VARIANT_TAG
 #ifdef TT_DEBUG
@@ -65,6 +61,10 @@ static inline int tt_memfd_create(const char* name, unsigned flags) {
 #else
 #define TT_VARIANT_TAG "release"
 #endif
+#endif
+
+#ifndef TT_VERSION_STR
+#define TT_VERSION_STR "0.0.0-unknown"
 #endif
 
 using zygisk::Api;
@@ -195,6 +195,10 @@ constexpr tt::StrKV L7_BOOL_SPOOF[] = {
     {"viewroot.profile_rendering",              "0"},
 };
 
+constexpr tt::StrKV L7_LONG_SPOOF[] = {
+    {"ro.gfx.driver_build_time", "1704067200"},
+};
+
 template <std::size_t N>
 [[nodiscard]] std::string_view lookup_sorted(const tt::StrKV (&arr)[N], std::string_view k) noexcept {
     auto it = std::lower_bound(std::begin(arr), std::end(arr), k,
@@ -238,7 +242,6 @@ jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
     tt::ScopedUtfChars key_utf(env, j_key);
     std::string_view k = key_utf.view();
-
     std::string_view id_key = lookup_sorted(L2_PROP_TO_ID, k);
     if (!id_key.empty()) {
         std::string_view v = id_val(id_key);
@@ -293,10 +296,6 @@ jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
     return def;
 }
 
-constexpr tt::StrKV L7_LONG_SPOOF[] = {
-    {"ro.gfx.driver_build_time", "1704067200"},
-};
-
 jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
     if (!j_key) return def;
     tt::ScopedUtfChars key_utf(env, j_key);
@@ -345,7 +344,7 @@ void set_int(JNIEnv* env, jclass c, const char* f, int v) {
     env->SetStaticIntField(c, id, v);
 }
 
-void install_build_hook(JNIEnv* env) {
+int install_build_hook(JNIEnv* env) {
     static constexpr tt::StrKV BUILD_FIELDS[] = {
         {"BRAND","BRAND"}, {"MANUFACTURER","MANUFACTURER"},
         {"MODEL","MODEL"}, {"DEVICE","DEVICE"}, {"PRODUCT","PRODUCT"},
@@ -355,27 +354,31 @@ void install_build_hook(JNIEnv* env) {
         {"HOST","HOST"}, {"USER","USER"}, {"TYPE","TYPE"},
         {"TAGS","TAGS"}, {"SERIAL","SERIAL"}, {"RADIO","RADIO"},
     };
+    int set_count = 0;
     jclass build = env->FindClass("android/os/Build");
     if (build) {
         for (const auto& e : BUILD_FIELDS) {
-            set_str(env, build, e.k.data(), id_val(e.v));
+            std::string_view v = id_val(e.v);
+            if (!v.empty()) { set_str(env, build, e.k.data(), v); ++set_count; }
         }
         env->DeleteLocalRef(build);
     } else {
         env->ExceptionClear();
+        LOGE("install_build_hook: FindClass(android/os/Build) FAILED");
     }
-
     jclass ver = env->FindClass("android/os/Build$VERSION");
     if (ver) {
         set_str(env, ver, "RELEASE",        id_val("RELEASE"));
         set_str(env, ver, "INCREMENTAL",    id_val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", id_val("SECURITY_PATCH"));
         int sdk = parse_positive_int(id_val("SDK_INT"));
-        if (sdk > 0) set_int(env, ver, "SDK_INT", sdk);
+        if (sdk > 0) { set_int(env, ver, "SDK_INT", sdk); ++set_count; }
         env->DeleteLocalRef(ver);
     } else {
         env->ExceptionClear();
+        LOGE("install_build_hook: FindClass(android/os/Build$VERSION) FAILED");
     }
+    return set_count;
 }
 
 using openat_t = int (*)(int, const char*, int, ...);
@@ -409,11 +412,9 @@ int hook_openat(int dirfd, const char* path, int flags, ...) {
     if (tt_in_openat_hook || !is_sensitive_proc_path(path)) {
         return orig_openat(dirfd, path, flags, mode);
     }
-
     tt_in_openat_hook = true;
     int real_fd = orig_openat(dirfd, path, flags, mode);
     if (real_fd < 0) { tt_in_openat_hook = false; return real_fd; }
-
     std::string content;
     content.reserve(8192);
     char buf[4096];
@@ -422,7 +423,6 @@ int hook_openat(int dirfd, const char* path, int flags, ...) {
         content.append(buf, static_cast<size_t>(n));
     }
     ::close(real_fd);
-
     std::string filtered;
     filtered.reserve(content.size());
     const char* const data = content.data();
@@ -446,7 +446,6 @@ int hook_openat(int dirfd, const char* path, int flags, ...) {
         filtered.append(line.data(), line.size());
         filtered.push_back('\n');
     }
-
     int mfd = tt_memfd_create("clean", MFD_CLOEXEC);
     if (mfd < 0) {
         tt_in_openat_hook = false;
@@ -502,7 +501,10 @@ void install_proc_sanitizer(Api* api) {
     if (!api) return;
     dev_t dev = 0;
     ino_t ino = 0;
-    if (!find_libc_dev_inode(&dev, &ino)) return;
+    if (!find_libc_dev_inode(&dev, &ino)) {
+        LOGW("install_proc_sanitizer: libc.so not found in /proc/self/maps");
+        return;
+    }
     api->pltHookRegister(dev, ino, "openat",
                          reinterpret_cast<void*>(hook_openat),
                          reinterpret_cast<void**>(&orig_openat));
@@ -512,7 +514,9 @@ void install_proc_sanitizer(Api* api) {
     api->pltHookRegister(dev, ino, "android_get_device_api_level",
                          reinterpret_cast<void*>(hook_api_level),
                          reinterpret_cast<void**>(&orig_api_level));
-    api->pltHookCommit();
+    bool ok = api->pltHookCommit();
+    LOGI("install_proc_sanitizer: pltHookCommit=%d orig_openat=%p orig_api_level=%p",
+         (int)ok, (void*)orig_openat, (void*)orig_api_level);
 }
 
 char g_watchdog_pkg[128] = "?";
@@ -550,12 +554,10 @@ void tt_signal_handler(int sig, siginfo_t* info, void*) {
     sigaddset(&blk, SIGPIPE);
     sigaddset(&blk, SIGCHLD);
     (void)sigprocmask(SIG_BLOCK, &blk, nullptr);
-
     int n = 0;
     if (sig >= 0 && sig < NSIG) {
         n = g_crash_count[sig].fetch_add(1, std::memory_order_relaxed) + 1;
     }
-
     if (n <= CRASH_LIMIT) {
         long alive = tt_now_ms() - g_load_time_ms;
         char buf[320];
@@ -570,23 +572,16 @@ void tt_signal_handler(int sig, siginfo_t* info, void*) {
         p += tt::as_safe::write_int_dec(buf + p, sizeof(buf) - p, (long)sig);
         p += tt::as_safe::write_str(buf + p, sizeof(buf) - p, "(");
         p += tt::as_safe::write_str(buf + p, sizeof(buf) - p, tt_sig_name(sig));
-        p += tt::as_safe::write_str(buf + p, sizeof(buf) - p, ") code=");
-        p += tt::as_safe::write_int_dec(buf + p, sizeof(buf) - p, info ? (long)info->si_code : 0L);
-        p += tt::as_safe::write_str(buf + p, sizeof(buf) - p, " addr=");
+        p += tt::as_safe::write_str(buf + p, sizeof(buf) - p, ") addr=");
         p += tt::as_safe::write_hex_ptr(buf + p, sizeof(buf) - p, info ? info->si_addr : nullptr);
-        p += tt::as_safe::write_str(buf + p, sizeof(buf) - p, " sender=");
-        p += tt::as_safe::write_int_dec(buf + p, sizeof(buf) - p, info ? (long)info->si_pid : 0L);
         p += tt::as_safe::write_str(buf + p, sizeof(buf) - p, " alive=");
         p += tt::as_safe::write_int_dec(buf + p, sizeof(buf) - p, alive);
         p += tt::as_safe::write_str(buf + p, sizeof(buf) - p, "ms hit=");
         p += tt::as_safe::write_int_dec(buf + p, sizeof(buf) - p, (long)n);
-        p += tt::as_safe::write_str(buf + p, sizeof(buf) - p, "/");
-        p += tt::as_safe::write_int_dec(buf + p, sizeof(buf) - p, (long)CRASH_LIMIT);
         if (p < sizeof(buf)) buf[p++] = '\n';
         if (g_crash_log_fd >= 0) (void)::write(g_crash_log_fd, buf, p);
         (void)::write(2, buf, p);
     }
-
     if (sig >= 0 && sig < NSIG) {
         struct sigaction* pv = &g_prev_sig[sig];
         bool prev_is_real =
@@ -609,13 +604,11 @@ void install_crash_watchdog(const std::string& pkg) {
     for (int i = 0; i < NSIG; ++i) g_crash_count[i].store(0, std::memory_order_relaxed);
     ::snprintf(g_watchdog_pkg, sizeof(g_watchdog_pkg), "%s", pkg.c_str());
     g_load_time_ms = tt_now_ms();
-
     stack_t ss;
     ss.ss_sp    = g_altstack;
     ss.ss_size  = sizeof(g_altstack);
     ss.ss_flags = 0;
     sigaltstack(&ss, nullptr);
-
     if (g_crash_log_fd < 0 && !pkg.empty()) {
         char logpath[256];
         ::snprintf(logpath, sizeof(logpath),
@@ -623,7 +616,6 @@ void install_crash_watchdog(const std::string& pkg) {
         g_crash_log_fd = ::open(logpath,
                                 O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     }
-
     struct sigaction sa;
     std::memset(&sa, 0, sizeof(sa));
     sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
@@ -635,14 +627,17 @@ void install_crash_watchdog(const std::string& pkg) {
     sigaddset(&sa.sa_mask, SIGFPE);
     sigaddset(&sa.sa_mask, SIGILL);
     sigaddset(&sa.sa_mask, SIGSYS);
-
     static const int sigs[] = { SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL, SIGSYS };
     for (int s : sigs) sigaction(s, &sa, &g_prev_sig[s]);
 }
 
 void load_bloom_filter() {
     int fd = ::open(tt::paths::BLOOM_FILE, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return;
+    if (fd < 0) {
+        LOGI("bloom filter: %s not present (errno=%d), bloom check disabled",
+             tt::paths::BLOOM_FILE, errno);
+        return;
+    }
     struct stat st;
     if (::fstat(fd, &st) == 0 && (size_t)st.st_size == sizeof(tt::bloom::Filter)) {
         void* m = ::mmap(nullptr, sizeof(tt::bloom::Filter),
@@ -651,7 +646,12 @@ void load_bloom_filter() {
             std::memcpy(&g_bloom, m, sizeof(tt::bloom::Filter));
             ::munmap(m, sizeof(tt::bloom::Filter));
             g_bloom_ready = true;
+            LOGI("bloom filter loaded (%zu bytes)", sizeof(tt::bloom::Filter));
+        } else {
+            LOGE("bloom mmap failed errno=%d", errno);
         }
+    } else {
+        LOGW("bloom size mismatch: %ld vs %zu", (long)st.st_size, sizeof(tt::bloom::Filter));
     }
     ::close(fd);
 }
@@ -664,6 +664,8 @@ public:
         api_ = api;
         env_ = env;
         load_bloom_filter();
+        LOGI("onLoad v" TT_VERSION_STR " variant=" TT_VARIANT_TAG
+             " bloom_ready=%d", (int)g_bloom_ready);
     }
 
     void preAppSpecialize(AppSpecializeArgs* args) override {
@@ -672,52 +674,77 @@ public:
             tt::ScopedUtfChars nn(env_, args->nice_name);
             pkg.assign(nn.view());
         }
-        if (pkg.empty()) { unload(); return; }
-        if (g_bloom_ready && !g_bloom.might_contain(pkg)) { unload(); return; }
-
+        if (pkg.empty()) {
+            LOGI("preAppSpecialize: empty nice_name, skip");
+            unload(); return;
+        }
+        LOGI("preAppSpecialize enter pkg=[%s] bloom_ready=%d",
+             pkg.c_str(), (int)g_bloom_ready);
+        if (g_bloom_ready && !g_bloom.might_contain(pkg)) {
+            LOGI("bloom miss: %s (skip)", pkg.c_str());
+            unload(); return;
+        }
         int fd = api_->connectCompanion();
-        if (fd < 0) { unload(); return; }
-
+        if (fd < 0) {
+            LOGE("connectCompanion FAILED pkg=%s errno=%d", pkg.c_str(), errno);
+            unload(); return;
+        }
         tt::proto::Header hdr;
         tt::proto::InitAppRequestPayload payload;
         payload.pid     = static_cast<uint32_t>(::getpid());
         payload.pkg_len = static_cast<uint16_t>(pkg.size());
         uint32_t plen   = (uint32_t)(sizeof(payload) + payload.pkg_len);
         tt::proto::fill_header(hdr, tt::proto::CMD_INIT_APP, plen);
-
         if (!tt::write_all(fd, &hdr, sizeof(hdr)) ||
             !tt::write_all(fd, &payload, sizeof(payload)) ||
             (payload.pkg_len && !tt::write_all(fd, pkg.data(), payload.pkg_len))) {
+            LOGE("IPC write FAILED pkg=%s errno=%d", pkg.c_str(), errno);
             ::close(fd); unload(); return;
         }
-
         tt::proto::InitAppResponse resp{};
-        if (!tt::read_all(fd, &resp, sizeof(resp))) { ::close(fd); unload(); return; }
-        if (!tt::proto::check_header(resp.hdr, tt::proto::CMD_INIT_APP) || !resp.is_target) {
+        if (!tt::read_all(fd, &resp, sizeof(resp))) {
+            LOGE("IPC read resp FAILED pkg=%s errno=%d", pkg.c_str(), errno);
             ::close(fd); unload(); return;
         }
-
-        if (resp.blob_len > (1u << 20)) { ::close(fd); unload(); return; }
+        if (!tt::proto::check_header(resp.hdr, tt::proto::CMD_INIT_APP)) {
+            LOGE("IPC bad hdr pkg=%s magic=[%02x %02x %02x] ver=%u cmd=%u",
+                 pkg.c_str(),
+                 (unsigned)resp.hdr.magic[0], (unsigned)resp.hdr.magic[1],
+                 (unsigned)resp.hdr.magic[2],
+                 (unsigned)resp.hdr.version, (unsigned)resp.hdr.cmd);
+            ::close(fd); unload(); return;
+        }
+        if (!resp.is_target) {
+            LOGI("companion: not target: %s", pkg.c_str());
+            ::close(fd); unload(); return;
+        }
+        if (resp.blob_len > (1u << 20)) {
+            LOGE("blob_len too large: %u pkg=%s", (unsigned)resp.blob_len, pkg.c_str());
+            ::close(fd); unload(); return;
+        }
         blob_.resize(resp.blob_len);
         if (resp.blob_len && !tt::read_all(fd, blob_.data(), resp.blob_len)) {
+            LOGE("IPC read blob FAILED pkg=%s len=%u errno=%d",
+                 pkg.c_str(), (unsigned)resp.blob_len, errno);
             ::close(fd); unload(); return;
         }
         ::close(fd);
-
         n_keys_   = resp.nkeys;
         mount_ok_ = resp.mount_ok;
         active_   = true;
         pkg_      = pkg;
-        LOGI("target: %s nkeys=%u mount_ok=%u [%s]",
-             pkg.c_str(), (unsigned)n_keys_, (unsigned)mount_ok_, TT_VARIANT_TAG);
+        LOGI("target OK: %s nkeys=%u mount_ok=%u blob=%u",
+             pkg.c_str(), (unsigned)n_keys_, (unsigned)mount_ok_,
+             (unsigned)resp.blob_len);
     }
 
     void postAppSpecialize(const AppSpecializeArgs*) override {
         if (!active_) return;
+        LOGI("postAppSpecialize enter pkg=%s", pkg_.c_str());
         parse_binary_blob();
-
-        install_build_hook(env_);
-
+        LOGI("blob parsed: %zu entries", g_id_flat.size());
+        int set_count = install_build_hook(env_);
+        LOGI("install_build_hook: %d fields set", set_count);
         JNINativeMethod sp_methods[] = {
             {const_cast<char*>("native_get"),
              const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
@@ -733,16 +760,19 @@ public:
              reinterpret_cast<void*>(hook_prop_get_bool)},
         };
         api_->hookJniNativeMethods(env_, "android/os/SystemProperties", sp_methods, 4);
-
+        int sp_ok = 0;
+        for (int i = 0; i < 4; ++i) if (sp_methods[i].fnPtr != nullptr) ++sp_ok;
+        LOGI("hook SystemProperties: %d/4 methods captured", sp_ok);
         JNINativeMethod build_methods[] = {
             {const_cast<char*>("getRadioVersion"),
              const_cast<char*>("()Ljava/lang/String;"),
              reinterpret_cast<void*>(hook_build_radio)},
         };
         api_->hookJniNativeMethods(env_, "android/os/Build", build_methods, 1);
-
+        LOGI("hook Build.getRadioVersion: fnPtr=%p", build_methods[0].fnPtr);
         install_proc_sanitizer(api_);
         install_crash_watchdog(pkg_);
+        LOGI("postAppSpecialize DONE pkg=%s", pkg_.c_str());
     }
 
     void preServerSpecialize(ServerSpecializeArgs*) override { unload(); }
