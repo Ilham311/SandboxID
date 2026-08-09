@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <!-- Add policies if needed, maybe wipe-data for removing profile? -->
+        <wipe-data />
+    </uses-policies>
+</device-admin>

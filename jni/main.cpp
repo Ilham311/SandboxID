@@ -669,17 +669,18 @@ public:
     }
 
     void preAppSpecialize(AppSpecializeArgs* args) override {
+        int userId = args->uid / 100000;
         std::string pkg;
         if (args && args->nice_name) {
             tt::ScopedUtfChars nn(env_, args->nice_name);
             pkg.assign(nn.view());
         }
         if (pkg.empty()) {
-            LOGI("preAppSpecialize: empty nice_name, skip");
+            LOGI("preAppSpecialize: empty nice_name, skip userId=%d", userId);
             unload(); return;
         }
-        LOGI("preAppSpecialize enter pkg=[%s] bloom_ready=%d",
-             pkg.c_str(), (int)g_bloom_ready);
+        LOGI("preAppSpecialize enter pkg=[%s] userId=%d bloom_ready=%d",
+             pkg.c_str(), userId, (int)g_bloom_ready);
         if (g_bloom_ready && !g_bloom.might_contain(pkg)) {
             LOGI("bloom miss: %s (skip)", pkg.c_str());
             unload(); return;

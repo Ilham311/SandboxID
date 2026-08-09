@@ -61,7 +61,24 @@ build_variant() {
   [ -f target.txt ] && cp target.txt "$PKG/"
   [ -f helpers.sh ] && cp helpers.sh "$PKG/"
   [ -f rotate_ids.sh ] && cp rotate_ids.sh "$PKG/"
+  [ -f create_profile.sh ] && cp create_profile.sh "$PKG/"
+  [ -f add_target.sh ] && cp add_target.sh "$PKG/"
+  [ -f remove_profile.sh ] && cp remove_profile.sh "$PKG/"
+  [ -f check_profile.sh ] && cp check_profile.sh "$PKG/"
   [ -d webroot ] && cp -R webroot "$PKG/"
+
+  if [ -d dpc ]; then
+    echo "  ==> Building DPC APK"
+    ./gradlew :dpc:assembleRelease
+    mkdir -p "$PKG/system/priv-app/TernakTTDpc"
+    # Sign it using the self-signed keystore if needed, but since gradle will
+    # generate an unsigned apk, we will just use that for now and user signs it or we create keystore
+    if [ ! -f dpc/ternak-dpc.jks ]; then
+        keytool -genkey -v -keystore dpc/ternak-dpc.jks -keyalg RSA -keysize 2048 -validity 10000 -alias dpc -storepass password -keypass password -dname "CN=TernakTT, OU=DPC, O=Ternak, L=Jakarta, ST=DKI, C=ID"
+    fi
+    /opt/android-sdk/build-tools/33.0.1/apksigner sign --ks dpc/ternak-dpc.jks --ks-pass pass:password dpc/build/outputs/apk/release/dpc-release-unsigned.apk
+    cp dpc/build/outputs/apk/release/dpc-release-unsigned.apk "$PKG/system/priv-app/TernakTTDpc/TernakTTDpc.apk"
+  fi
 
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"
