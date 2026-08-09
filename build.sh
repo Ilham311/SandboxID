@@ -77,7 +77,25 @@ build_variant() {
     if [ ! -f dpc/ternak-dpc.jks ]; then
         keytool -genkey -v -keystore dpc/ternak-dpc.jks -keyalg RSA -keysize 2048 -validity 10000 -alias dpc -storepass password -keypass password -dname "CN=TernakTT, OU=DPC, O=Ternak, L=Jakarta, ST=DKI, C=ID"
     fi
-    /opt/android-sdk/build-tools/33.0.1/apksigner sign --ks dpc/ternak-dpc.jks --ks-pass pass:password dpc/build/outputs/apk/release/dpc-release-unsigned.apk
+
+    # Dynamically find apksigner
+    APKSIGNER=""
+    if command -v apksigner >/dev/null 2>&1; then
+        APKSIGNER="apksigner"
+    elif [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/build-tools" ]; then
+        APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" -type f | sort -V | tail -n 1)
+    fi
+
+    if [ -z "$APKSIGNER" ] || [ ! -x "$APKSIGNER" ]; then
+        # Fallback for common locations if env vars aren't perfectly set
+        APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools /opt/android-sdk/build-tools -name "apksigner" -type f 2>/dev/null | sort -V | tail -n 1)
+    fi
+
+    if [ -n "$APKSIGNER" ] && [ -x "$APKSIGNER" ]; then
+        "$APKSIGNER" sign --ks dpc/ternak-dpc.jks --ks-pass pass:password dpc/build/outputs/apk/release/dpc-release-unsigned.apk
+    else
+        echo "  WARN: apksigner not found. APK will be left unsigned."
+    fi
     cp dpc/build/outputs/apk/release/dpc-release-unsigned.apk "$PKG/system/priv-app/TernakTTDpc/TernakTTDpc.apk"
   fi
 
