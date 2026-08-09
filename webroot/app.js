@@ -123,6 +123,17 @@ document.getElementById('wpAddTarget').addEventListener('click', () => {
   }
   wpAction('add_target.sh', pkg);
 });
+document.getElementById('wpForceStop').addEventListener('click', async () => {
+  const pkg = document.getElementById('wpTargetPkg').value.trim();
+  if (!pkg) {
+    toast('Please enter a target package name', 'error');
+    return;
+  }
+  const logEl = document.getElementById('wpLog');
+  logEl.textContent = `Force stopping ${pkg}...\n`;
+  const r = await safeExec(`am force-stop ${shq(pkg)} 2>&1`);
+  logEl.textContent += (r.ok ? `Stopped ${pkg}.` : (r.err && r.err.message || 'error'));
+});
 
 /* ---------- Persona ---------- */
 function parseProp(text) {

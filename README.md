@@ -12,6 +12,8 @@
 
 Spoofs the device identity that apps see: model, brand, manufacturer, build fingerprint, serial, per-app Android ID / SSAID, GAID, wlan/Bluetooth MAC, and device/BT name — all in one tap.
 
+**⚠️ MIUI/HyperOS Users Note:** POCO Launcher does not support displaying apps installed in a managed Work Profile. If you use the Work Profile feature to isolate spoofing targets, you must install a third-party launcher such as Lawnchair 14 or Nova Launcher to see the apps.
+
 </div>
 
 ---

@@ -14,6 +14,10 @@ if [ -f "$MODDIR/work_user_id" ]; then
     if ! pm list users | grep -q "UserInfo{$WORK_ID:"; then
         echo "Work profile $WORK_ID silently deleted by system. Removing work_user_id." >> /cache/ternak-tt-boot.log
         rm -f "$MODDIR/work_user_id"
+    else
+        # Re-apply restrictions for MIUI
+        pm set-user-restriction no_add_managed_profile 0
+        pm set-user-restriction no_add_user 0
     fi
 fi
 

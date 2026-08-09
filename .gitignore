@@ -17,3 +17,4 @@ local.properties
 Thumbs.db
 
 jni/zygisk.hpp
+dpc/ternak-dpc.jks

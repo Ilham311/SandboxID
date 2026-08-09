@@ -29,5 +29,24 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# 1. Append to target.txt and wp_added_targets.txt
+touch "$MODDIR/target.txt" "$MODDIR/wp_added_targets.txt"
+if ! grep -qxF "$TARGET_PKG" "$MODDIR/target.txt"; then
+    echo "$TARGET_PKG" >> "$MODDIR/target.txt"
+    echo "$TARGET_PKG" >> "$MODDIR/wp_added_targets.txt"
+    echo "Appended $TARGET_PKG to target.txt" | tee -a "$LOG"
+fi
+
+# 2. Regenerate bloom filter
+if [ -x "$MODDIR/bin/ternak-tt" ]; then
+    "$MODDIR/bin/ternak-tt" seed >> "$LOG" 2>&1
+    echo "Regenerated bloom filter." | tee -a "$LOG"
+else
+    echo "WARNING: ternak-tt binary not found, could not regenerate bloom filter." | tee -a "$LOG"
+fi
+
+# 3. Print user-facing hint
+echo "HINT: Restart target app or reboot to activate hook." | tee -a "$LOG"
+
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] OK: Target $TARGET_PKG added to work profile $WORK_ID" | tee -a "$LOG"
 exit 0

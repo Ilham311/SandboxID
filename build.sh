@@ -65,6 +65,7 @@ build_variant() {
   [ -f add_target.sh ] && cp add_target.sh "$PKG/"
   [ -f remove_profile.sh ] && cp remove_profile.sh "$PKG/"
   [ -f check_profile.sh ] && cp check_profile.sh "$PKG/"
+  [ -f uninstall.sh ] && cp uninstall.sh "$PKG/"
   [ -d webroot ] && cp -R webroot "$PKG/"
 
   if [ -d dpc ]; then

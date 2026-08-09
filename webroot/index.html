@@ -13,7 +13,7 @@
     <div class="logo">tt</div>
     <div>
       <div class="title">Ternak TT</div>
-      <div class="sub" id="version">v1.0.19</div>
+      <div class="sub" id="version">v2.4.0</div>
     </div>
   </div>
 </header>
@@ -56,6 +56,9 @@
   </section>
 
   <section id="wp" class="page">
+    <div class="hint" style="margin-bottom: 16px; color: #ffeb3b; font-weight: bold;">
+      ⚠️ MIUI/HyperOS users: install Lawnchair 14 or Nova Launcher — POCO Launcher does not support managed profile apps.
+    </div>
     <div class="row spread">
       <button id="wpCreate" class="primary">Create Work Profile</button>
       <button id="wpRemove" class="ghost">Remove Profile</button>
@@ -64,8 +67,9 @@
       <input type="text" id="wpTargetPkg" placeholder="Package name (e.g. com.example.app)" style="flex:1; margin-right: 8px;" autocapitalize="off" autocomplete="off" spellcheck="false" />
       <button id="wpAddTarget" class="primary sm">Add Target</button>
     </div>
-    <div class="row">
+    <div class="row spread">
       <button id="wpCheck" class="ghost sm">Check Profile Status</button>
+      <button id="wpForceStop" class="ghost sm">Force Stop Target</button>
     </div>
     <pre id="wpLog" style="margin-top: 16px; min-height: 120px; font-size: 0.85em;"></pre>
   </section>
