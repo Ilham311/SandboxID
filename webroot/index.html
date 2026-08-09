@@ -56,8 +56,13 @@
   </section>
 
   <section id="wp" class="page">
-    <div class="hint" style="margin-bottom: 16px; color: #ffeb3b; font-weight: bold;">
-      ⚠️ MIUI/HyperOS users: install Lawnchair 14 or Nova Launcher — POCO Launcher does not support managed profile apps.
+    <div class="notice warn">
+      <b>⚠️ MIUI / HyperOS users</b><br/>
+      POCO Launcher / MIUI Home does NOT show work profile apps.
+      Install <b>Lawnchair 14</b> or <b>Nova Launcher</b> to see the
+      badged target app icon on your home screen. Alternatively,
+      launch manually via:
+      <code>am start --user &lt;id&gt; -n &lt;pkg&gt;/&lt;activity&gt;</code>
     </div>
     <div class="row spread">
       <button id="wpCreate" class="primary">Create Work Profile</button>

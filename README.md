@@ -12,8 +12,6 @@
 
 Spoofs the device identity that apps see: model, brand, manufacturer, build fingerprint, serial, per-app Android ID / SSAID, GAID, wlan/Bluetooth MAC, and device/BT name — all in one tap.
 
-**⚠️ MIUI/HyperOS Users Note:** POCO Launcher does not support displaying apps installed in a managed Work Profile. If you use the Work Profile feature to isolate spoofing targets, you must install a third-party launcher such as Lawnchair 14 or Nova Launcher to see the apps.
-
 </div>
 
 ---
@@ -188,6 +186,17 @@ com.grabtaxi.passenger
 ```
 
 Edit the file, save, and the companion re-reads it on the next app spawn (mtime watch). Verify with:
+
+### MIUI / HyperOS launcher limitation
+
+POCO Launcher and MIUI Home do not render work profile apps in
+the app drawer, even though the managed profile is correctly
+provisioned. This is a Xiaomi launcher limitation, not a bug in
+Ternak TT.
+
+Workaround: install Lawnchair 14 or Nova Launcher, which correctly
+show work profile apps with a briefcase badge on the same home
+screen as your user 0 apps.
 
 ```bash
 su -c 'ternak-tt targets'
