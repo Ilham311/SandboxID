@@ -108,6 +108,9 @@ build_variant() {
   local ZIP="$OUT/ternak-tt-$VERSION-$V.zip"
   (cd "$PKG" && zip -r9 "$ZIP" . -x "*.DS_Store" >/dev/null)
   echo "  ==> Built: $ZIP ($(du -h "$ZIP" | cut -f1))"
+
+  # Clean up staging directory
+  rm -rf "$PKG"
 }
 
 case "$VARIANT" in
