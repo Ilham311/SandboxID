@@ -262,6 +262,8 @@ jobs:
       - name: Create tag if missing
         run: |
           set -eu
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           NV="${{ steps.version.outputs.new_version }}"
           git fetch --tags --force --prune
           if git rev-parse -q --verify "refs/tags/${NV}" >/dev/null; then
