@@ -1,293 +1,284 @@
-#include <fcntl.h>
-#include <sched.h>
-#include <signal.h>
-#include <sys/mount.h>
-#include <sys/prctl.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
-#include <sys/wait.h>
+
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
-#include <semaphore.h>
-
-#include <android/log.h>
-
+#include <sched.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <mutex>
+#include <cstdlib>
 #include <string>
-#include <string_view>
 #include <vector>
+#include <fstream>
+#include <sstream>
+#include <thread>
+#include <chrono>
+#include <signal.h>
+#include <time.h>
+#include <android/log.h>
 
-#include "tt_paths.hpp"
-#include "companion_hardening.hpp"
-#include "multiuser_paths.hpp"
-#include "tt_proto.hpp"
-
-#define LOG_TAG "TernakTT-Companion"
+#define LOG_TAG "TernakTTCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-
-using tt::paths::MOUNTDIR;
-using tt::paths::TARGET_FILE;
-using tt::paths::IDENTITY_FILE;
-using tt::paths::BUILD_PROP_ENTRIES;
-using tt::paths::BUILD_PROP_ENTRIES_N;
-
-#ifndef __NR_pidfd_open
-  #define __NR_pidfd_open 434
+#ifdef TT_DEBUG
+#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
+#define TT_VARIANT_TAG "debug"
+#else
+#define LOGD(...) ((void)0)
+#define TT_VARIANT_TAG "release"
 #endif
 
-static inline int tt_pidfd_open(pid_t pid, unsigned int flags) {
-    return (int)::syscall(__NR_pidfd_open, pid, flags);
-}
+static void watch_target_death(uint32_t pid);
 
-namespace {
+enum : uint8_t {
+    CMD_CHECK_TT     = 1,
+    CMD_GET_IDENTITY = 2,
+    CMD_DO_MOUNTS    = 3,
+};
 
-constexpr int MAX_CONCURRENT_MOUNT = 8;
-sem_t g_mount_sem;
-bool  g_mount_sem_init = false;
+static const char* IDENTITY_FILE = "/data/adb/modules/ternak_tt/identity.prop";
+#include <mutex>
+static const char* MOUNTDIR      = "/data/adb/modules/ternak_tt/mount";
+static const char* TARGET_FILE   = "/data/adb/modules/ternak_tt/target.txt";
 
-std::vector<std::string> g_targets;
-std::vector<uint8_t>     g_bin_blob;
-uint16_t                 g_nkeys = 0;
-std::once_flag           g_load_once;
-std::mutex               g_reload_mu;
+static std::vector<std::string> g_targets;
+static time_t                   g_targets_mtime = 0;
+static std::recursive_mutex g_targets_mtx;
 
-std::vector<std::string> load_targets_file() {
-    std::vector<std::string> out;
-    FILE* f = ::fopen(TARGET_FILE, "r");
-    if (!f) {
-        LOGE("cannot open %s errno=%d", TARGET_FILE, errno);
-        return out;
-    }
-    char line[256];
-    while (::fgets(line, sizeof(line), f)) {
-        std::string s(line);
-        auto hash = s.find('#');
-        if (hash != std::string::npos) s.erase(hash);
-        while (!s.empty() &&
-               (s.back()=='\n'||s.back()=='\r'||s.back()=='\t'||s.back()==' ')) s.pop_back();
-        size_t start = 0;
-        while (start < s.size() && (s[start]==' '||s[start]=='\t')) ++start;
-        s.erase(0, start);
-        if (!s.empty()) out.push_back(std::move(s));
-    }
-    ::fclose(f);
-    return out;
-}
-
-std::vector<uint8_t> build_binary_blob_from_file(uint16_t* nkeys_out) {
-    std::vector<uint8_t> out;
-    *nkeys_out = 0;
-    FILE* f = ::fopen(IDENTITY_FILE, "r");
-    if (!f) {
-        LOGE("cannot open %s errno=%d", IDENTITY_FILE, errno);
-        return out;
-    }
-    char line[1024];
-    out.reserve(4096);
-    uint16_t n = 0;
-    while (::fgets(line, sizeof(line), f)) {
-        std::string_view sv(line);
-        while (!sv.empty() &&
-               (sv.back()=='\n'||sv.back()=='\r'||sv.back()==' '||sv.back()=='\t')) sv.remove_suffix(1);
-        if (sv.empty() || sv.front() == '#') continue;
-        auto eq = sv.find('=');
-        if (eq == std::string_view::npos) continue;
-        std::string_view k = sv.substr(0, eq);
-        std::string_view v = sv.substr(eq + 1);
-        if (k.empty() || k.size() > 65535 || v.size() > 65535) continue;
-        tt::proto::BinaryEntry e;
-        e.klen = (uint16_t)k.size();
-        e.vlen = (uint16_t)v.size();
-        size_t base = out.size();
-        out.resize(base + sizeof(e) + e.klen + e.vlen);
-        std::memcpy(out.data() + base, &e, sizeof(e));
-        std::memcpy(out.data() + base + sizeof(e), k.data(), e.klen);
-        std::memcpy(out.data() + base + sizeof(e) + e.klen, v.data(), e.vlen);
-        ++n;
-    }
-    ::fclose(f);
-    *nkeys_out = n;
-    return out;
-}
-
-void ensure_loaded() {
-    std::call_once(g_load_once, []{
-        std::lock_guard<std::mutex> lk(g_reload_mu);
-        g_targets  = load_targets_file();
-        g_bin_blob = build_binary_blob_from_file(&g_nkeys);
-        if (!g_mount_sem_init) {
-            sem_init(&g_mount_sem, 0, (unsigned)MAX_CONCURRENT_MOUNT);
-            g_mount_sem_init = true;
+static void reload_targets_if_changed() {
+    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
+    struct stat st{};
+    bool have = (::stat(TARGET_FILE, &st) == 0);
+    if (!have) {
+        if (g_targets.empty()) {
+            g_targets = {
+                "com.zhiliaoapp.musically",
+                "com.ss.android.ugc.trill",
+                "com.zhiliaoapp.musically.go",
+                "com.grabtaxi.passenger",
+            };
+            LOGI("target.txt missing, using built-in defaults (%zu pkgs)",
+                 g_targets.size());
         }
-        LOGI("companion loaded: targets=%zu nkeys=%u blob=%zu",
-             g_targets.size(), (unsigned)g_nkeys, g_bin_blob.size());
-        for (size_t i = 0; i < g_targets.size() && i < 8; ++i) {
-            LOGI("  target[%zu] = [%s]", i, g_targets[i].c_str());
-        }
-    });
+        return;
+    }
+    if (!g_targets.empty() && st.st_mtime == g_targets_mtime) return;
+
+    std::ifstream f(TARGET_FILE);
+    std::vector<std::string> next;
+    std::string line;
+    while (std::getline(f, line)) {
+
+        size_t hash = line.find('#');
+        if (hash != std::string::npos) line.erase(hash);
+        while (!line.empty() &&
+               (line.back() == '\r' || line.back() == ' ' ||
+                line.back() == '\t' || line.back() == '\n'))
+            line.pop_back();
+        size_t s = line.find_first_not_of(" \t");
+        if (s == std::string::npos) continue;
+        line = line.substr(s);
+        if (line.empty()) continue;
+        next.push_back(line);
+    }
+    if (next.empty()) {
+        LOGE("target.txt has 0 valid entries; keeping previous list (%zu pkgs)",
+             g_targets.size());
+        g_targets_mtime = st.st_mtime;
+        return;
+    }
+    g_targets       = std::move(next);
+    g_targets_mtime = st.st_mtime;
+    LOGI("target.txt loaded: %zu pkg(s) mtime=%ld",
+         g_targets.size(), (long)st.st_mtime);
+#ifdef TT_DEBUG
+    for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
+#endif
 }
 
-[[nodiscard]] bool is_target(std::string_view pkg) {
+static bool is_target(const std::string& pkg) {
+    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
+    reload_targets_if_changed();
     for (const auto& t : g_targets) if (t == pkg) return true;
     return false;
 }
 
-[[nodiscard]] int open_target_mnt_ns(pid_t target_pid) {
-    int fd = tt_pidfd_open(target_pid, 0);
-    if (fd >= 0) return fd;
-    char p[64];
-    ::snprintf(p, sizeof(p), "/proc/%d/ns/mnt", (int)target_pid);
-    return ::open(p, O_RDONLY | O_CLOEXEC);
+struct BindEntry { const char* src_rel; const char* dst; };
+
+static const BindEntry BIND_ENTRIES[] = {
+    {"system/build.prop",     "/system/build.prop"},
+    {"vendor/build.prop",     "/vendor/build.prop"},
+    {"odm/build.prop",        "/odm/etc/build.prop"},
+    {"odm/build.prop",        "/odm/build.prop"},
+    {"product/build.prop",    "/product/etc/build.prop"},
+    {"product/build.prop",    "/product/build.prop"},
+    {"system_ext/build.prop", "/system_ext/etc/build.prop"},
+    {"system_ext/build.prop", "/system_ext/build.prop"},
+    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
+};
+
+static std::string read_file(const char* p) {
+    std::ifstream f(p);
+    if (!f) return "";
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
 }
 
-uint32_t do_bind_mounts_in_child(pid_t target_pid) {
-    int ns_fd = open_target_mnt_ns(target_pid);
-    if (ns_fd < 0) {
-        LOGE("open ns for pid %d: %s", (int)target_pid, strerror(errno));
+static uint32_t do_mounts_via_fork(uint32_t target_pid) {
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) {
+        LOGE("pipe failed: errno=%d", errno);
         return 0;
     }
-    if (::setns(ns_fd, CLONE_NEWNS) != 0) {
-        LOGE("setns pid=%d: %s", (int)target_pid, strerror(errno));
-        ::close(ns_fd);
+
+    pid_t child = ::fork();
+    if (child < 0) {
+        LOGE("fork failed: errno=%d", errno);
+        ::close(pipefd[0]); ::close(pipefd[1]);
         return 0;
     }
-    ::close(ns_fd);
-    uint32_t ok = 0;
-    char src[512];
-    for (size_t i = 0; i < BUILD_PROP_ENTRIES_N; ++i) {
-        const auto& e = BUILD_PROP_ENTRIES[i];
-        ::snprintf(src, sizeof(src), "%s/%s", MOUNTDIR, e.src_rel);
-        if (::access(src, R_OK) != 0) continue;
-        if (::access(e.dst, F_OK) != 0) continue;
-        if (::mount(src, e.dst, nullptr, MS_BIND, nullptr) == 0) {
-            ++ok;
+
+    if (child == 0) {
+
+        ::close(pipefd[0]);
+        LOGD("child: pid=%d parent_target=%u", getpid(), target_pid);
+
+        const size_t num_entries = sizeof(BIND_ENTRIES)/sizeof(BIND_ENTRIES[0]);
+        int src_fds[num_entries];
+        for (size_t i = 0; i < num_entries; ++i) {
+            std::string src = std::string(MOUNTDIR) + "/" + BIND_ENTRIES[i].src_rel;
+            src_fds[i] = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
+        }
+
+        char path[64];
+        ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
+        int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
+        LOGD("child: open %s -> fd=%d errno=%d", path, tgt_ns, errno);
+        uint32_t ok = 0, fail = 0, skip = 0;
+
+        if (tgt_ns < 0) {
+            LOGE("child: open %s failed errno=%d", path, errno);
+        } else if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
+            LOGE("child: setns->target failed errno=%d", errno);
+            ::close(tgt_ns);
         } else {
-            LOGW("bind %s -> %s FAILED: %s", src, e.dst, strerror(errno));
-        }
-    }
-    ::snprintf(src, sizeof(src), "%s/settings_secure.xml", MOUNTDIR);
-    if (::access(src, R_OK) == 0) {
-        auto user_targets = tt::build_secure_xml_bind_entries();
-        for (const auto& e : user_targets) {
-            const std::string& dst = e.dst;
-            if (::access(dst.c_str(), F_OK) != 0) continue;
-            if (::mount(src, dst.c_str(), nullptr, MS_BIND, nullptr) == 0) {
-                ++ok;
-            } else {
-                LOGW("bind %s -> %s FAILED: %s", src, dst.c_str(), strerror(errno));
+            LOGD("child: setns OK, entering %u bind loop", (unsigned)num_entries);
+            uint32_t skip_src = 0, skip_dst = 0;
+            for (size_t i = 0; i < num_entries; ++i) {
+                const auto& e = BIND_ENTRIES[i];
+                if (src_fds[i] < 0) {
+                    skip_src++; skip++; continue;
+                }
+                bool dst_ok = (::access(e.dst, F_OK) == 0);
+                if (!dst_ok) { skip_dst++; skip++; continue; }
+
+                char proc_fd_path[32];
+                ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
+
+                int rc = ::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr);
+                if (rc == 0) {
+                    ok++;
+                } else {
+                    fail++;
+                }
             }
+            LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
+                 "(skip_src=%u skip_dst=%u) [%s]",
+                 target_pid, ok, fail, skip, skip_src, skip_dst, TT_VARIANT_TAG);
+            ::close(tgt_ns);
         }
+
+        for (size_t i = 0; i < num_entries; ++i) {
+            if (src_fds[i] >= 0) ::close(src_fds[i]);
+        }
+
+        ::write(pipefd[1], &ok, sizeof(ok));
+        ::close(pipefd[1]);
+        ::_exit(0);
+    }
+
+    ::close(pipefd[1]);
+    uint32_t ok = 0;
+    ssize_t n = ::read(pipefd[0], &ok, sizeof(ok));
+    ::close(pipefd[0]);
+
+    watch_target_death(target_pid);
+    int status = 0;
+    ::waitpid(child, &status, 0);
+    if (n != (ssize_t)sizeof(ok)) {
+        LOGE("parent: read from child failed (n=%zd)", n);
+        return 0;
     }
     return ok;
 }
 
-uint32_t do_bind_mounts_forked(pid_t target_pid) {
-    sem_wait(&g_mount_sem);
-    pid_t child = ::fork();
-    if (child < 0) {
-        sem_post(&g_mount_sem);
-        LOGE("fork failed: %s", strerror(errno));
-        return 0;
-    }
-    if (child == 0) {
-        tt::child_init("tt-mount-child");
-        uint32_t ok = do_bind_mounts_in_child(target_pid);
-        ::_exit(ok > 254 ? 254 : (int)ok);
-    }
-    int status = 0;
-    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-    sem_post(&g_mount_sem);
-    if (WIFEXITED(status)) return (uint32_t)WEXITSTATUS(status);
-    return 0;
-}
+static void watch_target_death(uint32_t pid) {
+    std::thread([pid]() {
+        struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
 
-void handle_init_app(int client) {
-    tt::proto::InitAppRequestPayload payload{};
-    if (!tt::read_all(client, &payload, sizeof(payload))) {
-        LOGE("handle_init_app: read payload FAILED errno=%d", errno);
-        return;
-    }
-    if (payload.pkg_len > 512) {
-        LOGE("handle_init_app: pkg_len too large %u", (unsigned)payload.pkg_len);
-        return;
-    }
-    std::string pkg(payload.pkg_len, '\0');
-    if (payload.pkg_len && !tt::read_all(client, pkg.data(), payload.pkg_len)) {
-        LOGE("handle_init_app: read pkg FAILED errno=%d", errno);
-        return;
-    }
-    LOGI("handle_init_app pkg=[%s] pid=%u", pkg.c_str(), (unsigned)payload.pid);
-    ensure_loaded();
-    tt::proto::InitAppResponse resp{};
-    tt::proto::fill_header(resp.hdr, tt::proto::CMD_INIT_APP, 0);
-    bool tgt = is_target(pkg);
-    resp.is_target = tgt ? (uint16_t)1 : (uint16_t)0;
-    uint32_t mount_ok = 0;
-    if (tgt) {
-        mount_ok = do_bind_mounts_forked((pid_t)payload.pid);
-        resp.mount_ok = (uint16_t)mount_ok;
-        resp.blob_len = (uint32_t)g_bin_blob.size();
-        resp.nkeys    = g_nkeys;
-        uint32_t body = (uint32_t)(sizeof(resp) - sizeof(tt::proto::Header)) + resp.blob_len;
-        resp.hdr.payload_len = body;
-    } else {
-        uint32_t body = (uint32_t)(sizeof(resp) - sizeof(tt::proto::Header));
-        resp.hdr.payload_len = body;
-    }
-    LOGI("reply pkg=%s target=%d mount_ok=%u nkeys=%u blob=%u",
-         pkg.c_str(), (int)tgt, (unsigned)mount_ok,
-         (unsigned)g_nkeys, (unsigned)resp.blob_len);
-    if (!tt::write_all(client, &resp, sizeof(resp))) {
-        LOGE("handle_init_app: write resp FAILED errno=%d", errno);
-        return;
-    }
-    if (tgt && resp.blob_len) {
-        if (!tt::write_all(client, g_bin_blob.data(), g_bin_blob.size())) {
-            LOGE("handle_init_app: write blob FAILED errno=%d", errno);
+        for (int i = 0; i < 3600; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (::kill((pid_t)pid, 0) == 0) continue;
+            if (errno != ESRCH) continue;
+            struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
+            long ms = (t1.tv_sec - t0.tv_sec) * 1000L +
+                      (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+            LOGI("DEATH target pid=%u disappeared after %ldms "
+                 "(uncatchable exit: SIGKILL / LMK / normal exit) [%s]",
+                 pid, ms, TT_VARIANT_TAG);
             return;
         }
-    }
-}
-
-void reject_bad_header(int client) {
-    tt::proto::Header err;
-    tt::proto::fill_header(err, (uint8_t)0xFF, 0);
-    (void)tt::write_all(client, &err, sizeof(err));
-    LOGE("companion: bad header (magic/version mismatch)");
-}
-
+        LOGD("death watcher for pid=%u timed out after 30min", pid);
+    }).detach();
 }
 
 extern "C" void ternak_tt_companion(int client) {
-    LOGI("companion enter fd=%d", client);
-    tt::proto::Header hdr{};
-    if (!tt::read_all(client, &hdr, sizeof(hdr))) {
-        LOGE("companion: read hdr FAILED errno=%d", errno);
-        return;
-    }
-    LOGI("companion recv hdr: magic=[%02x %02x %02x] ver=%u cmd=%u len=%u",
-         (unsigned)hdr.magic[0], (unsigned)hdr.magic[1], (unsigned)hdr.magic[2],
-         (unsigned)hdr.version, (unsigned)hdr.cmd, hdr.payload_len);
-    if (hdr.magic[0] != tt::proto::MAGIC0 ||
-        hdr.magic[1] != tt::proto::MAGIC1 ||
-        hdr.magic[2] != tt::proto::MAGIC2 ||
-        hdr.version  != tt::proto::VERSION) {
-        reject_bad_header(client);
-        return;
-    }
-    switch (hdr.cmd) {
-        case tt::proto::CMD_INIT_APP:
-            handle_init_app(client);
+    LOGD("companion invoked: client=%d pid=%d [%s]",
+         client, getpid(), TT_VARIANT_TAG);
+    while (true) {
+        uint8_t cmd = 0;
+        if (::read(client, &cmd, 1) != 1) break;
+        LOGD("recv cmd=%u", cmd);
+
+        if (cmd == CMD_GET_IDENTITY) {
+
+            uint16_t plen = 0;
+            if (::read(client, &plen, sizeof(plen)) != (ssize_t)sizeof(plen)) break;
+            std::string pkg;
+            if (plen) {
+                pkg.resize(plen);
+                size_t got = 0;
+                while (got < plen) {
+                    ssize_t n = ::read(client, &pkg[got], plen - got);
+                    if (n <= 0) break;
+                    got += (size_t)n;
+                }
+                if (got != plen) break;
+            }
+            if (!is_target(pkg)) {
+                LOGD("REJECT pkg='%s' (not in target.txt)", pkg.c_str());
+                uint32_t z = 0;
+                ::write(client, &z, sizeof(z));
+                continue;
+            }
+            LOGD("ACCEPT pkg='%s'", pkg.c_str());
+            std::string d = read_file(IDENTITY_FILE);
+            uint32_t l = (uint32_t)d.size();
+            ::write(client, &l, sizeof(l));
+            if (l) ::write(client, d.data(), l);
+        } else if (cmd == CMD_DO_MOUNTS) {
+            uint32_t pid = 0;
+            if (::read(client, &pid, sizeof(pid)) != (ssize_t)sizeof(pid)) break;
+            if (pid == 0) { uint32_t z = 0; ::write(client, &z, sizeof(z)); break; }
+            uint32_t ok = do_mounts_via_fork(pid);
+            ::write(client, &ok, sizeof(ok));
+        } else {
             break;
-        default:
-            LOGE("companion: unknown cmd=%u", (unsigned)hdr.cmd);
-            reject_bad_header(client);
-            break;
+        }
     }
+    ::close(client);
 }
