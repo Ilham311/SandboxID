@@ -251,12 +251,15 @@ static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
         if (it != m.end()) {
             out = it->second;
             label = "SPOOF";
+        } else if (tt_should_suppress_key(k)) {
+            label = "SUPPRESS";   // keep def, do not read real prop
         } else {
             char buf[PROP_VALUE_MAX] = {0};
             if (__system_property_get(k.c_str(), buf) > 0) {
-                out = std::atoi(buf);
+                char* end = nullptr;
+                long v = std::strtol(buf, &end, 10);
+                if (end != buf) out = (jint)v;  // only if numeric
             }
-            if (tt_should_suppress_key(k)) label = "SUPPRESS";
         }
         LOGD("L7 SPI native_get_int('%s') def=%d -> %d [%s]", k.c_str(), def, out, label);
     }
