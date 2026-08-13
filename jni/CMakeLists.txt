@@ -8,12 +8,16 @@ option(TERNAK_TT_DEBUG "Enable verbose debug logging (LOGD)" OFF)
 if(TERNAK_TT_DEBUG)
     message(STATUS "[ternak_tt] BUILD VARIANT: DEBUG (verbose LOGD, no strip)")
     add_compile_definitions(TT_DEBUG=1)
+    # Note: -fno-exceptions + -fno-rtti with heavy STL usage (std::string, std::map, std::vector)
+    # means any bad_alloc will become an abort().
     set(COMMON "-Os -g -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-Wl,--gc-sections -Wl,--exclude-libs,ALL")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "-Wl,--gc-sections")
 else()
     message(STATUS "[ternak_tt] BUILD VARIANT: RELEASE (LOGD compiled out, stripped)")
+    # Note: -fno-exceptions + -fno-rtti with heavy STL usage (std::string, std::map, std::vector)
+    # means any bad_alloc will become an abort().
     set(COMMON "-Os -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE

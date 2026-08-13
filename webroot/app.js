@@ -264,7 +264,7 @@ function escapeHtml(s) {
 
 (async function boot() {
   try {
-    const r = await safeExec(`sed -n 's/^version=//p' ${shq(MODDIR)}/module.prop 2>/dev/null | head -n 1`);
+    const r = await safeExec(`sed -n 's/^version=//p' ${shq(MODDIR)}/module.prop 2>/dev/null | head -n 1 | tr -d '\r'`);
     if (r.ok && r.out.trim()) document.getElementById('version').textContent = r.out.trim();
   } catch (_) {}
   await safeExec(`mkdir -p ${shq(MODDIR)}/debug && touch ${shq(ROTATE_LOG)} ${shq(ACTION_LOG)}`);

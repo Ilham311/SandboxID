@@ -53,6 +53,26 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.0.28 (Unreleased)
+
+### Removed
+
+- **L3/L4/L5/L6 hooks removed**: The handlers and install stubs for `Settings.Secure`, `AdvertisingIdClient`, `WifiInfo`, and `TelephonyManager` were dead code (never registered with `RegisterNatives`). Removed to decrease risk; may be reintroduced properly in a future release.
+
+### Fixed
+
+- **CRLF sweep**: Fixed stray carriage returns across the repo.
+- **Shell script quoting**: Fixed variables in `customize.sh`, `service.sh`, `summarize.sh`, and `action.sh` to prevent word splitting.
+- **`action.sh` PIPESTATUS**: Replaced PIPESTATUS bashism with a reliable tempfile pattern for ash/mksh compatibility.
+- **`post-fs-data.sh`**: Resolved `ro.product.cpu.abi` correctly and added a timeout guard to the seed binary call.
+- **`service.sh`**: Replaced unbounded boot loop with max iterations limit, cleared `logcat.pid`/`journal.pid` upon start, and removed `logcat -c`.
+- **`rotate_ids.sh`**: Added a plaintext check to skip encrypting `bt_config.conf` natively on newer OSs, and autodetected the `wlan` interface.
+- **`customize.sh`**: Added unknown ABI abort, conditional binary permission application, and added NeoZygisk and ZygiskOnKernelSU paths.
+- **`helpers.sh`**: Prevented `setprop` from trying to set `ro.*` keys without `resetprop-rs`.
+- **`uninstall.sh`**: Added uninstall cleanup that safely manages log removal and backups display without deleting user/system data.
+
+---
+
 ## v1.0.18
 
 ### Added

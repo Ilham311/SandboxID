@@ -2,6 +2,15 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <poll.h>
+#include <sys/syscall.h>
+#ifndef __NR_pidfd_open
+#if defined(__aarch64__) || defined(__arm__) || defined(__x86_64__) || defined(__i386__)
+#define __NR_pidfd_open 434
+#else
+#define __NR_pidfd_open -1
+#endif
+#endif
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -34,7 +43,6 @@
 static void watch_target_death(uint32_t pid);
 
 enum : uint8_t {
-    CMD_CHECK_TT     = 1,
     CMD_GET_IDENTITY = 2,
     CMD_DO_MOUNTS    = 3,
 };
@@ -121,11 +129,22 @@ static const BindEntry BIND_ENTRIES[] = {
 };
 
 static std::string read_file(const char* p) {
-    std::ifstream f(p);
-    if (!f) return "";
-    std::stringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
+    int fd = ::open(p, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return "";
+    struct stat st;
+    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
+        ::close(fd);
+        return "";
+    }
+    size_t size = st.st_size;
+    if (size > 65536) size = 65536;
+    std::string out;
+    out.resize(size);
+    ssize_t got = ::read(fd, out.data(), size);
+    ::close(fd);
+    if (got > 0) out.resize(got);
+    else out.clear();
+    return out;
 }
 
 static uint32_t do_mounts_via_fork(uint32_t target_pid) {
@@ -216,24 +235,106 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     return ok;
 }
 
-static void watch_target_death(uint32_t pid) {
-    std::thread([pid]() {
-        struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+static std::mutex g_reaper_mtx;
+static std::vector<uint32_t> g_reaper_pids;
+static bool g_reaper_running = false;
 
-        for (int i = 0; i < 3600; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            if (::kill((pid_t)pid, 0) == 0) continue;
-            if (errno != ESRCH) continue;
-            struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-            long ms = (t1.tv_sec - t0.tv_sec) * 1000L +
-                      (t1.tv_nsec - t0.tv_nsec) / 1000000L;
-            LOGI("DEATH target pid=%u disappeared after %ldms "
-                 "(uncatchable exit: SIGKILL / LMK / normal exit) [%s]",
-                 pid, ms, TT_VARIANT_TAG);
-            return;
+static void reaper_thread_func() {
+    struct Target {
+        uint32_t pid;
+        int pidfd;
+        long start_ms;
+    };
+    std::vector<Target> targets;
+
+    auto now_ms = []() -> long {
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+        return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+    };
+
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(g_reaper_mtx);
+            for (uint32_t p : g_reaper_pids) {
+                int pfd = (int)::syscall(__NR_pidfd_open, p, 0);
+                targets.push_back({p, pfd, now_ms()});
+            }
+            g_reaper_pids.clear();
         }
-        LOGD("death watcher for pid=%u timed out after 30min", pid);
-    }).detach();
+
+        if (targets.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        std::vector<struct pollfd> pfds;
+        for (const auto& t : targets) {
+            if (t.pidfd >= 0) {
+                pfds.push_back({t.pidfd, POLLIN, 0});
+            }
+        }
+
+        if (!pfds.empty()) {
+            int ret = ::poll(pfds.data(), pfds.size(), 500);
+            if (ret > 0) {
+                for (size_t i = 0; i < targets.size(); ) {
+                    if (targets[i].pidfd >= 0) {
+                        bool signaled = false;
+                        for (const auto& pfd : pfds) {
+                            if (pfd.fd == targets[i].pidfd && (pfd.revents & POLLIN)) {
+                                signaled = true;
+                                break;
+                            }
+                        }
+                        if (signaled) {
+                            long alive = now_ms() - targets[i].start_ms;
+                            LOGI("DEATH target pid=%u disappeared after %ldms (pidfd) [%s]",
+                                 targets[i].pid, alive, TT_VARIANT_TAG);
+                            ::close(targets[i].pidfd);
+                            targets.erase(targets.begin() + i);
+                            continue;
+                        }
+                    }
+                    ++i;
+                }
+            }
+            for (size_t i = 0; i < targets.size(); ) {
+                if (now_ms() - targets[i].start_ms > 1800000L) {
+                    LOGD("death watcher for pid=%u timed out after 30min", targets[i].pid);
+                    if (targets[i].pidfd >= 0) ::close(targets[i].pidfd);
+                    targets.erase(targets.begin() + i);
+                    continue;
+                }
+                ++i;
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            for (size_t i = 0; i < targets.size(); ) {
+                if (::kill((pid_t)targets[i].pid, 0) != 0 && errno == ESRCH) {
+                    long alive = now_ms() - targets[i].start_ms;
+                    LOGI("DEATH target pid=%u disappeared after %ldms (kill) [%s]",
+                         targets[i].pid, alive, TT_VARIANT_TAG);
+                    targets.erase(targets.begin() + i);
+                    continue;
+                }
+                if (now_ms() - targets[i].start_ms > 1800000L) {
+                    LOGD("death watcher for pid=%u timed out after 30min", targets[i].pid);
+                    targets.erase(targets.begin() + i);
+                    continue;
+                }
+                ++i;
+            }
+        }
+    }
+}
+
+static void watch_target_death(uint32_t pid) {
+    std::lock_guard<std::mutex> lock(g_reaper_mtx);
+    if (!g_reaper_running) {
+        g_reaper_running = true;
+        std::thread(reaper_thread_func).detach();
+    }
+    g_reaper_pids.push_back(pid);
 }
 
 extern "C" void ternak_tt_companion(int client) {

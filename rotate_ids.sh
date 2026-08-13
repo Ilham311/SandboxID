@@ -105,15 +105,21 @@ randomize_wlan_mac() {
         log_warn "ip(8) not available; MAC only recorded in identity.prop"
         return 1
     fi
+    iface=$(ip -o link | awk -F': ' '/wlan[0-9]/{print $2; exit}')
+    if [ -z "$iface" ]; then
+        log_warn "No wlan interface found. MAC only recorded in identity.prop"
+        return 1
+    fi
+
     se_permissive
-    ip link set wlan0 down 2>/dev/null
+    ip link set "$iface" down 2>/dev/null
     sleep 1
-    if ip link set dev wlan0 address "$newmac" 2>/dev/null; then
+    if ip link set dev "$iface" address "$newmac" 2>/dev/null; then
         log_ok "MAC: $newmac"
     else
         log_warn "MAC rejected by driver (Android 10+ uses per-SSID MAC)"
     fi
-    ip link set wlan0 up 2>/dev/null
+    ip link set "$iface" up 2>/dev/null
 
     WCS=/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml
     if [ -f "$WCS" ]; then
@@ -148,6 +154,10 @@ rotate_bluetooth_mac() {
                  /data/misc/bluetooth/bt_config.conf \
                  /data/vendor/bluetooth/bt_config.conf; do
         [ -f "$btcfg" ] || continue
+        head -c 4096 "$btcfg" | grep -qE '^\[Adapter\]|^Address = ' || {
+            log_warn "$btcfg not plaintext, skipping (encrypted bt_config)"
+            continue
+        }
         owner=$(stat -c '%U:%G' "$btcfg" 2>/dev/null)
         mode=$(stat -c '%a' "$btcfg" 2>/dev/null)
         cp -f "$btcfg" "$BACKUP_DIR_ROOT/bt_config_addr.$(date +%s).conf" 2>/dev/null
@@ -199,6 +209,7 @@ sync_device_name() {
                  /data/misc/bluetooth/bt_config.conf \
                  /data/vendor/bluetooth/bt_config.conf; do
         [ -f "$btcfg" ] || continue
+        head -c 4096 "$btcfg" | grep -qE '^\[Adapter\]|^Address = ' || continue
         grep -q '^Name = ' "$btcfg" 2>/dev/null || continue
         owner=$(stat -c '%U:%G' "$btcfg" 2>/dev/null)
         mode=$(stat -c '%a' "$btcfg" 2>/dev/null)
