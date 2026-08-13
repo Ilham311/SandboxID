@@ -50,7 +50,7 @@ Ternak TT rotates the identity strings apps read at runtime. Property spoofing h
 
 - **1-tap Action** — `action.sh` runs `freshen` then `rotate_ids.sh all` so the KSU / Magisk manager Action button applies a complete rotation end-to-end. No manual `sh rotate_ids.sh` needed.
 - **Persona-consistent shell layer** — `sync_device_name`, `set_gaid_value`, `rotate_bluetooth_mac` all read from `identity.prop`, so the L1/L2 Java hooks and shell layer never disagree (fixes the `randomize_device_name` clash from earlier versions that picked a random `Galaxy S24-427` on top of a `Pixel 8` hook).
-- **7 hook layers** cover Java `Build.*`, `SystemProperties.native_get` (all typed variants), `Settings.Secure`, GAID stub, WiFi MAC/BSSID, and Telephony IMEI/subscriber ID.
+- **2 active hook layers** cover Java `Build.*` and `SystemProperties.native_get` (all typed variants).
 - **Companion fork + `setns` bind-mount overlay** rewrites `/system/build.prop`, `/vendor/build.prop`, `/odm/etc/build.prop`, `/product/etc/build.prop`, `/system_ext/etc/build.prop`, and `settings_secure.xml` inside the target's mount namespace — invisible to other apps.
 - **Post-fs-data early seed** generates identity + overlay files before Zygote starts, so the first TT/Grab spawn already gets 6/6 bind mounts (no first-boot race).
 - **Runtime whitelist** (`target.txt`) — add/remove targets by editing one file, no rebuild. Companion hot-reloads on mtime change.
@@ -94,7 +94,7 @@ Ternak TT rotates the identity strings apps read at runtime. Property spoofing h
 │                                                     v              │
 │                                     read target.txt (cached, mtime)│
 │  Zygisk .so  <────[blob or len=0]───  companion                    │
-│     └ if target: install 7 hook layers + request bind-mount        │
+│     └ if target: install 2 active hook layers + request bind-mount │
 │     └ companion forks child -> setns(target mnt ns) -> mount(BIND) │
 └─────────────────────────────────────────────────────┘
 ```

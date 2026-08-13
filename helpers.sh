@@ -18,6 +18,8 @@ log_ok()   { _log "[OK] $*"; }
 log_warn() { _log "[WARN] $*"; }
 log_err()  { _log "[ERR] $*"; }
 
+# Note: _SE_REF and _SE_PRIOR are not thread-safe if multiple rotate_ids.sh
+# instances are invoked concurrently. Concurrent rotate is undefined behavior.
 _SE_REF=0
 _SE_PRIOR=""
 se_permissive() {
@@ -86,6 +88,12 @@ rp_set() {
     if command -v resetprop-rs >/dev/null 2>&1; then
         resetprop-rs -n "$key" "$val" 2>/dev/null && return 0
     fi
+    case "$key" in
+        ro.*)
+            log_warn "cannot setprop ro.* without resetprop-rs"
+            return 1
+            ;;
+    esac
     setprop "$key" "$val" 2>/dev/null
 }
 

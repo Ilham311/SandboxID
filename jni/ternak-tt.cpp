@@ -196,6 +196,11 @@ static Identity gen_identity() {
 #define DBG(...) ((void)0)
 #endif
 
+// PERF: apply_native forks resetprop-rs serially (~60 calls, 2-4s on slow devices).
+// Batching with bounded background & + wait was considered (issue #21) but DEFERRED:
+// - Requires real-device benchmarking (>=200ms improvement threshold) not available in CI.
+// - Serial ordering avoids inter-property race conditions.
+// Revisit when a device timing harness is available. Do NOT batch speculatively.
 static void apply_native(const Identity& id) {
     DBG("apply_native: enter (identity has %zu kv pairs)", id.kv.size());
     auto get = [&](const char* k) -> std::string {

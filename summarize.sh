@@ -14,7 +14,7 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
 {
     echo "==============================================================="
     echo "Ternak TT — session log summary"
-    echo "Source  : $(basename $IN)"
+    echo "Source  : $(basename "$IN")"
     echo "Size    : $TOTAL_SIZE ($TOTAL_LINES lines)"
     echo "Digest  : $(date '+%Y-%m-%d %H:%M:%S %Z')"
     echo "==============================================================="
@@ -143,5 +143,5 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
 } > "$OUT"
 
 if [ "$OUT" != "/proc/self/fd/1" ]; then
-    echo "summary: $OUT ($(du -h $OUT | cut -f1), $(wc -l < $OUT) lines)" >&2
+    echo "summary: $OUT ($(du -h "$OUT" | cut -f1), $(wc -l < "$OUT") lines)" >&2
 fi

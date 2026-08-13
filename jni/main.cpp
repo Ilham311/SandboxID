@@ -56,7 +56,6 @@ using zygisk::AppSpecializeArgs;
 using zygisk::ServerSpecializeArgs;
 
 enum : uint8_t {
-    CMD_CHECK_TT     = 1,
     CMD_GET_IDENTITY = 2,
     CMD_DO_MOUNTS    = 3,
 };
@@ -182,69 +181,6 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
     return j_def;
 }
 
-static jstring (*orig_secure_get)(JNIEnv*, jclass, jobject, jstring) = nullptr;
-
-static jstring hook_secure_get(JNIEnv* env, jclass c, jobject cr, jstring name) {
-    if (name) {
-        const char* raw = env->GetStringUTFChars(name, nullptr);
-        std::string n(raw ? raw : "");
-        env->ReleaseStringUTFChars(name, raw);
-        LOGD("L3 Settings.Secure.getString('%s')", n.c_str());
-        if (n == "android_id") {
-            const std::string& aid = val("ANDROID_ID");
-            if (!aid.empty()) {
-                LOGD("L3 SPOOF android_id -> '%s'", aid.c_str());
-                return env->NewStringUTF(aid.c_str());
-            }
-        }
-
-        if (n == "bluetooth_address" || n == "bluetooth_name" ||
-            n == "advertising_id"   || n == "install_non_market_apps") {
-            LOGD("L3 LEAK  Settings.Secure '%s' queried (unhooked)", n.c_str());
-        }
-    }
-    return orig_secure_get ? orig_secure_get(env, c, cr, name) : nullptr;
-}
-
-static void install_secure_hook(JNIEnv* env) {
-    jclass c = env->FindClass("android/provider/Settings$Secure");
-    if (!c) { env->ExceptionClear(); return; }
-    env->ExceptionClear();
-    env->DeleteLocalRef(c);
-}
-
-static void install_gaid_hook(JNIEnv* env) {
-    jclass c = env->FindClass("com/google/android/gms/ads/identifier/AdvertisingIdClient$Info");
-    if (!c) { env->ExceptionClear(); return; }
-
-    env->DeleteLocalRef(c);
-}
-
-static jstring hook_wifi_mac(JNIEnv* env, jobject) {
-    LOGD("L5 WifiInfo.getMacAddress -> 02:00:00:00:00:00 (spoofed)");
-    return env->NewStringUTF("02:00:00:00:00:00");
-}
-static jstring hook_wifi_bssid(JNIEnv* env, jobject) {
-    LOGD("L5 WifiInfo.getBSSID -> 02:00:00:00:00:00 (spoofed)");
-    return env->NewStringUTF("02:00:00:00:00:00");
-}
-
-static void install_wifi_hook(JNIEnv* env) {
-    jclass c = env->FindClass("android/net/wifi/WifiInfo");
-    if (!c) { env->ExceptionClear(); return; }
-    env->ExceptionClear();
-    env->DeleteLocalRef(c);
-}
-
-static jstring hook_null_str(JNIEnv*, jobject) { return nullptr; }
-
-#ifdef TT_DEBUG
-
-static jstring hook_tel_deviceId(JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getDeviceId() -> null"); return nullptr; }
-static jstring hook_tel_imei    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getImei() -> null");     return nullptr; }
-static jstring hook_tel_subId   (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getSubscriberId() -> null"); return nullptr; }
-static jstring hook_tel_meid    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getMeid() -> null");     return nullptr; }
-#endif
 
 static const std::map<std::string, jboolean>& tt_bool_spoof() {
     static const std::map<std::string, jboolean> m = {
@@ -312,8 +248,19 @@ static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
         env->ReleaseStringUTFChars(j_key, r);
         const auto& m = tt_int_spoof();
         auto it = m.find(k);
-        if (it != m.end()) { out = it->second; label = "SPOOF"; }
-        else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
+        if (it != m.end()) {
+            out = it->second;
+            label = "SPOOF";
+        } else if (tt_should_suppress_key(k)) {
+            label = "SUPPRESS";   // keep def, do not read real prop
+        } else {
+            char buf[PROP_VALUE_MAX] = {0};
+            if (__system_property_get(k.c_str(), buf) > 0) {
+                char* end = nullptr;
+                long v = std::strtol(buf, &end, 10);
+                if (end != buf) out = (jint)v;  // only if numeric
+            }
+        }
         LOGD("L7 SPI native_get_int('%s') def=%d -> %d [%s]", k.c_str(), def, out, label);
     }
     return out;
@@ -327,8 +274,16 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
         env->ReleaseStringUTFChars(j_key, r);
         const auto& m = tt_long_spoof();
         auto it = m.find(k);
-        if (it != m.end()) { out = it->second; label = "SPOOF"; }
-        else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
+        if (it != m.end()) {
+            out = it->second;
+            label = "SPOOF";
+        } else {
+            char buf[PROP_VALUE_MAX] = {0};
+            if (__system_property_get(k.c_str(), buf) > 0) {
+                out = std::strtoll(buf, nullptr, 10);
+            }
+            if (tt_should_suppress_key(k)) label = "SUPPRESS";
+        }
         LOGD("L7 SPL native_get_long('%s') def=%lld -> %lld [%s]",
              k.c_str(), (long long)def, (long long)out, label);
     }
@@ -343,8 +298,17 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean 
         env->ReleaseStringUTFChars(j_key, r);
         const auto& m = tt_bool_spoof();
         auto it = m.find(k);
-        if (it != m.end()) { out = it->second; label = "SPOOF"; }
-        else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
+        if (it != m.end()) {
+            out = it->second;
+            label = "SPOOF";
+        } else {
+            char buf[PROP_VALUE_MAX] = {0};
+            if (__system_property_get(k.c_str(), buf) > 0) {
+                if (!strcmp(buf, "1") || !strcmp(buf, "true") || !strcmp(buf, "y") || !strcmp(buf, "yes") || !strcmp(buf, "on")) out = JNI_TRUE;
+                else if (!strcmp(buf, "0") || !strcmp(buf, "false") || !strcmp(buf, "n") || !strcmp(buf, "no") || !strcmp(buf, "off")) out = JNI_FALSE;
+            }
+            if (tt_should_suppress_key(k)) label = "SUPPRESS";
+        }
         LOGD("L7 SPB native_get_boolean('%s') def=%d -> %d [%s]",
              k.c_str(), (int)def, (int)out, label);
     }
@@ -393,12 +357,6 @@ static void install_leak_sensors(JNIEnv* env) {
 }
 #endif
 
-static void install_telephony_hook(JNIEnv* env) {
-    jclass c = env->FindClass("android/telephony/TelephonyManager");
-    if (!c) { env->ExceptionClear(); return; }
-    env->ExceptionClear();
-    env->DeleteLocalRef(c);
-}
 
 static struct sigaction g_prev_sig[NSIG];
 static std::string g_watchdog_pkg;
@@ -598,6 +556,7 @@ static int hook_openat(int dirfd, const char* path, int flags, ...) {
         filtered.push_back('\n');
     }
 
+    // FINGERPRINT: memfd size may differ from original file; acceptable for current threat model. See issue #28.
     int mfd = tt_memfd_create("clean", MFD_CLOEXEC);
     if (mfd < 0) return orig_openat(dirfd, path, flags, mode);
     if (!filtered.empty()) {
@@ -762,10 +721,6 @@ public:
                 env_->DeleteLocalRef(sp);
             } else env_->ExceptionClear();
         }
-        install_secure_hook(env_);
-        install_gaid_hook(env_);
-        install_wifi_hook(env_);
-        install_telephony_hook(env_);
 #ifdef TT_DEBUG
         install_leak_sensors(env_);
 #endif

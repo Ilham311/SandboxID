@@ -17,11 +17,15 @@ mkdir -p "$MODDIR/debug" 2>/dev/null
 RC_FRESHEN=0
 RC_ROTATE=0
 
+tmp="${TMPDIR:-/data/local/tmp}/ternak_tt.action.$$"
+trap 'rm -f "$tmp"' EXIT INT TERM HUP
+
 if [ -x "$BIN" ]; then
     echo "[Ternak TT] freshen (step 1/2)..."
     "$BIN" unlock >/dev/null 2>&1 || true
-    "$BIN" freshen 2>&1 | tee -a "$LOGFILE" "$ACTION_LOG"
-    RC_FRESHEN=${PIPESTATUS:-$?}
+    "$BIN" freshen > "$tmp" 2>&1
+    RC_FRESHEN=$?
+    tee -a "$LOGFILE" "$ACTION_LOG" < "$tmp" || true
     "$BIN" lock >/dev/null 2>&1 || true
     echo "[Ternak TT] auto-locked after freshen" | tee -a "$LOGFILE" "$ACTION_LOG"
 else
@@ -31,8 +35,9 @@ fi
 
 if [ -r "$ROTATE" ]; then
     echo "[Ternak TT] rotate_ids all (step 2/2)..."
-    MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all 2>&1 | tee -a "$LOGFILE" "$ACTION_LOG"
-    RC_ROTATE=${PIPESTATUS:-$?}
+    MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all > "$tmp" 2>&1
+    RC_ROTATE=$?
+    tee -a "$LOGFILE" "$ACTION_LOG" < "$tmp" || true
 else
     echo "[Ternak TT] WARN: rotate_ids.sh missing - skipping shell-layer rotation" | tee -a "$LOGFILE"
 fi
@@ -44,6 +49,7 @@ if [ "$RC_ROTATE" != "0" ] && [ "$RC_ROTATE" != "1" ]; then
 fi
 
 if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then
+    # shellcheck disable=SC2012
     LATEST=$(ls -1t "$MODDIR/debug"/session-*.log 2>/dev/null | head -1)
     if [ -n "$LATEST" ]; then
         OUTDIR="/sdcard/Download/ternak-tt-logs"
@@ -62,18 +68,22 @@ if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then
         gzip -c "$LATEST" > "$RAW_GZ" 2>/dev/null
 
         for pattern in "summary-*.txt" "crashes-*.log" "session-*.log.gz"; do
-            ls -1t $OUTDIR/$pattern 2>/dev/null | tail -n +11 | xargs rm -f 2>/dev/null
+            # shellcheck disable=SC2012
+            # shellcheck disable=SC2086 # intention is glob expansion
+            ls -1t "$OUTDIR"/$pattern 2>/dev/null | tail -n +11 | while read -r f; do
+                [ -e "$f" ] && rm -f "$f"
+            done
         done
 
         echo ""
         echo "[Ternak TT debug artifacts]"
         echo "  target: $OUTDIR/"
-        [ -f "$SUMMARY" ] && echo "  ok summary  $(basename $SUMMARY)  ($(du -h $SUMMARY | cut -f1))  <- SHARE THIS"
-        [ -f "$OUTDIR/crashes-$TS.log" ] && echo "  ok crashes  crashes-$TS.log  ($(du -h $OUTDIR/crashes-$TS.log | cut -f1))"
-        [ -f "$RAW_GZ" ] && echo "  ok raw.gz   $(basename $RAW_GZ)  ($(du -h $RAW_GZ | cut -f1))  <- full log if needed"
+        [ -f "$SUMMARY" ] && echo "  ok summary  $(basename "$SUMMARY")  ($(du -h "$SUMMARY" | cut -f1))  <- SHARE THIS"
+        [ -f "$OUTDIR/crashes-$TS.log" ] && echo "  ok crashes  crashes-$TS.log  ($(du -h "$OUTDIR/crashes-$TS.log" | cut -f1))"
+        [ -f "$RAW_GZ" ] && echo "  ok raw.gz   $(basename "$RAW_GZ")  ($(du -h "$RAW_GZ" | cut -f1))  <- full log if needed"
         echo ""
         echo "Share summary-*.txt first - small enough to paste."
     fi
 fi
 
-exit $RC_FRESHEN
+exit "$RC_FRESHEN"
