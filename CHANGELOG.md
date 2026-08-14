@@ -35,6 +35,8 @@ write-up and the list of COPG features intentionally **not** ported.
 
 ---
 
+## v1.0.29 (Unreleased)
+
 ### Fixed
 
 - **Dead proc-sanitizer subsystem removed** (`jni/main.cpp`): `install_proc_sanitizer` and its `openat` / `__openat` / `android_get_device_api_level` PLT hooks, `find_libc_dev_inode`, and the `memfd_create` helper were **never wired into the Zygisk lifecycle** (zero call sites). They shipped in every build as pure dead code. Removed to shrink the module and cut maintenance/attack surface; also retires the memfd file-size fingerprint anomaly (old issue #28).
