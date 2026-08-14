@@ -8,7 +8,6 @@
 #include <cstring>
 #include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include <sys/system_properties.h>
 #include <android/log.h>
 #include <string>
@@ -19,25 +18,6 @@
 #include <signal.h>
 #include <ctime>
 #include "zygisk.hpp"
-
-#ifndef MFD_CLOEXEC
-#define MFD_CLOEXEC 0x0001U
-#endif
-#include <sys/syscall.h>
-#ifndef __NR_memfd_create
-  #if defined(__aarch64__)
-    #define __NR_memfd_create 279
-  #elif defined(__arm__)
-    #define __NR_memfd_create 385
-  #elif defined(__x86_64__)
-    #define __NR_memfd_create 319
-  #elif defined(__i386__)
-    #define __NR_memfd_create 356
-  #endif
-#endif
-static inline int tt_memfd_create(const char* name, unsigned flags) {
-    return (int)syscall(__NR_memfd_create, name, flags);
-}
 
 #define LOG_TAG "TernakTT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -277,12 +257,13 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
         if (it != m.end()) {
             out = it->second;
             label = "SPOOF";
+        } else if (tt_should_suppress_key(k)) {
+            label = "SUPPRESS";   // keep def, do not read real prop
         } else {
             char buf[PROP_VALUE_MAX] = {0};
             if (__system_property_get(k.c_str(), buf) > 0) {
                 out = std::strtoll(buf, nullptr, 10);
             }
-            if (tt_should_suppress_key(k)) label = "SUPPRESS";
         }
         LOGD("L7 SPL native_get_long('%s') def=%lld -> %lld [%s]",
              k.c_str(), (long long)def, (long long)out, label);
@@ -301,13 +282,14 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean 
         if (it != m.end()) {
             out = it->second;
             label = "SPOOF";
+        } else if (tt_should_suppress_key(k)) {
+            label = "SUPPRESS";   // keep def, do not read real prop
         } else {
             char buf[PROP_VALUE_MAX] = {0};
             if (__system_property_get(k.c_str(), buf) > 0) {
                 if (!strcmp(buf, "1") || !strcmp(buf, "true") || !strcmp(buf, "y") || !strcmp(buf, "yes") || !strcmp(buf, "on")) out = JNI_TRUE;
                 else if (!strcmp(buf, "0") || !strcmp(buf, "false") || !strcmp(buf, "n") || !strcmp(buf, "no") || !strcmp(buf, "off")) out = JNI_FALSE;
             }
-            if (tt_should_suppress_key(k)) label = "SUPPRESS";
         }
         LOGD("L7 SPB native_get_boolean('%s') def=%d -> %d [%s]",
              k.c_str(), (int)def, (int)out, label);
@@ -384,7 +366,10 @@ static const char* tt_sig_name(int sig) {
 }
 static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
-    if (sig >= 0 && sig < NSIG) n = ++g_crash_count[sig];
+    if (sig >= 0 && sig < NSIG) {
+        n = g_crash_count[sig] + 1;
+        g_crash_count[sig] = n;
+    }
 
     if (n <= CRASH_LIMIT) {
         long alive = tt_now_ms() - g_load_time_ms;
@@ -480,18 +465,6 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 }
 
-static const char* MOUNTDIR = "/data/adb/modules/ternak_tt/mount";
-
-struct BindEntry { const char* src_rel; const char* dst; };
-static const BindEntry BIND_ENTRIES[] = {
-    {"system/build.prop",     "/system/build.prop"},
-    {"vendor/build.prop",     "/vendor/build.prop"},
-    {"odm/build.prop",        "/odm/build.prop"},
-    {"product/build.prop",    "/product/build.prop"},
-    {"system_ext/build.prop", "/system_ext/build.prop"},
-    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
-};
-
 static void request_companion_mounts(zygisk::Api* api) {
     if (!api) return;
     int fd = api->connectCompanion();
@@ -512,133 +485,6 @@ static void request_companion_mounts(zygisk::Api* api) {
         return;
     }
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
-}
-
-using openat_t = int (*)(int, const char*, int, ...);
-static openat_t orig_openat = nullptr;
-
-static bool is_sensitive_proc_path(const char* p) {
-    if (!p) return false;
-    if (!strstr(p, "/proc/")) return false;
-    if (strstr(p, "/mountinfo")) return true;
-    if (strstr(p, "/mounts"))    return true;
-    if (strstr(p, "/maps"))      return true;
-    return false;
-}
-
-static int hook_openat(int dirfd, const char* path, int flags, ...) {
-    mode_t mode = 0;
-    if (flags & (O_CREAT | O_TMPFILE)) {
-        va_list ap; va_start(ap, flags);
-        mode = va_arg(ap, int);
-        va_end(ap);
-    }
-    if (!orig_openat || !is_sensitive_proc_path(path)) {
-        return orig_openat ? orig_openat(dirfd, path, flags, mode)
-                           : ::openat(dirfd, path, flags, mode);
-    }
-    int real_fd = orig_openat(dirfd, path, flags, mode);
-    if (real_fd < 0) return real_fd;
-
-    std::string content;
-    char buf[4096];
-    ssize_t n;
-    while ((n = ::read(real_fd, buf, sizeof(buf))) > 0) content.append(buf, n);
-    ::close(real_fd);
-
-    std::string filtered;
-    std::istringstream iss(content);
-    std::string line;
-    while (std::getline(iss, line)) {
-        if (line.find("ternak_tt") != std::string::npos) continue;
-        if (line.find("ternak-tt") != std::string::npos) continue;
-        filtered.append(line);
-        filtered.push_back('\n');
-    }
-
-    // FINGERPRINT: memfd size may differ from original file; acceptable for current threat model. See issue #28.
-    int mfd = tt_memfd_create("clean", MFD_CLOEXEC);
-    if (mfd < 0) return orig_openat(dirfd, path, flags, mode);
-    if (!filtered.empty()) {
-        ::write(mfd, filtered.data(), filtered.size());
-    }
-    ::lseek(mfd, 0, SEEK_SET);
-    return mfd;
-}
-
-static bool find_libc_dev_inode(dev_t* dev_out, ino_t* ino_out) {
-    FILE* f = ::fopen("/proc/self/maps", "r");
-    if (!f) return false;
-    char line[512];
-    bool found = false;
-    while (::fgets(line, sizeof(line), f)) {
-
-        char* nl = ::strchr(line, '\n');
-        if (nl) *nl = 0;
-
-        char* sp = ::strrchr(line, ' ');
-        if (!sp) continue;
-        char* path = sp + 1;
-        size_t plen = ::strlen(path);
-        if (plen < 8) continue;
-        if (::strcmp(path + plen - 8, "/libc.so") != 0) continue;
-
-        unsigned long a1, a2, off;
-        char perms[8] = {0};
-        unsigned int dmaj = 0, dmin = 0;
-        unsigned long ino = 0;
-        if (::sscanf(line, "%lx-%lx %7s %lx %x:%x %lu",
-                     &a1, &a2, perms, &off, &dmaj, &dmin, &ino) == 7) {
-            *dev_out = (dev_t)((dmaj << 8) | dmin);
-            *ino_out = (ino_t)ino;
-            found = true;
-            break;
-        }
-    }
-    ::fclose(f);
-    return found;
-}
-
-using api_level_t = int (*)();
-static api_level_t orig_api_level = nullptr;
-
-static int hook_api_level() {
-    const std::string& sdk_str = val("SDK_INT");
-    if (!sdk_str.empty()) {
-        int spoofed = std::atoi(sdk_str.c_str());
-        if (spoofed > 0) {
-            LOGD("Native android_get_device_api_level() spoofed to %d", spoofed);
-            return spoofed;
-        }
-    }
-    return orig_api_level ? orig_api_level() : 0;
-}
-
-static void install_proc_sanitizer(Api* api) {
-    if (!api) return;
-    dev_t dev = 0;
-    ino_t ino = 0;
-    if (!find_libc_dev_inode(&dev, &ino)) {
-        LOGI("proc sanitizer: libc.so not found in maps (skip)");
-        return;
-    }
-    api->pltHookRegister(dev, ino, "openat",
-                         reinterpret_cast<void*>(hook_openat),
-                         reinterpret_cast<void**>(&orig_openat));
-    api->pltHookRegister(dev, ino, "__openat",
-                         reinterpret_cast<void*>(hook_openat),
-                         reinterpret_cast<void**>(&orig_openat));
-
-    api->pltHookRegister(dev, ino, "android_get_device_api_level",
-                         reinterpret_cast<void*>(hook_api_level),
-                         reinterpret_cast<void**>(&orig_api_level));
-
-    if (!api->pltHookCommit()) {
-        LOGI("proc sanitizer: PLT commit false (best-effort skipped)");
-    } else {
-        LOGI("proc sanitizer installed (dev=%lu ino=%lu)",
-             (unsigned long)dev, (unsigned long)ino);
-    }
 }
 
 class TernakTT : public zygisk::ModuleBase {
