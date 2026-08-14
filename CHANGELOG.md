@@ -9,6 +9,30 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.0.30 (Unreleased)
+
+Brings the **non-gaming, stealth** half of [COPG](https://github.com/AlirezaParsi/COPG)'s
+feature set to Ternak TT's fresh-persona model. Everything added here stays inside
+the module's existing safety envelope (safe identity strings, per-app scope, no
+resident inline hooks), so boot risk is unchanged.
+
+### Added
+
+- **Region persona — Timezone** (`jni/main.cpp`, `jni/ternak-tt.cpp`): each target app now reads a persona timezone. Applied per-app only via `java.util.TimeZone.setDefault`, the C-library `TZ`/`tzset`, and the existing `persist.sys.timezone` `native_get` hook — the real device timezone is never touched. Persona key `TIMEZONE` (default `Asia/Jakarta`).
+- **Region persona — Locale / Language** (`jni/main.cpp`, `jni/ternak-tt.cpp`): per-app locale via `java.util.Locale.setDefault(Locale.forLanguageTag(...))`, plus `ro.product.locale[.language|.region]` and `persist.sys.locale` in the app-scoped `build.prop` overlay and `native_get` hook. Persona keys `LOCALE` (BCP-47, default `id-ID`), `LOCALE_LANG`, `LOCALE_COUNTRY`.
+- **Region persona — SIM carrier** (`jni/pool_tt.hpp`, `jni/ternak-tt.cpp`): `freshen` now picks a region-consistent carrier (Indonesian pool) and wires it into the already-present `gsm.*operator.*` `native_get` hooks. Persona keys `GSM_OPERATOR_ALPHA`/`_NUMERIC`/`_ISO` (previously hard-coded fallbacks, now persona-driven).
+- **SoC device fields** (`jni/pool_tt.hpp`, `jni/main.cpp`, `jni/ternak-tt.cpp`): `Build.SOC_MANUFACTURER` / `Build.SOC_MODEL` (API 31+) and `ro.soc.manufacturer` / `ro.soc.model` are now spoofed to the correct Tensor generation for each Pixel in the pool.
+- **Opt-in fake uptime** (`jni/main.cpp`, `jni/ternak-tt.cpp`): when persona key `FAKE_UPTIME_MS` is set (>0), the three `android.os.SystemClock` readers (`uptimeMillis`, `elapsedRealtime`, `elapsedRealtimeNanos`) are re-implemented via `clock_gettime` + a constant offset, so an app distrusting a freshly-reset device sees a longer uptime. Off by default and reset by `freshen`. `currentTimeMillis` is deliberately left alone (shifting wall-clock breaks TLS).
+- **`ternak-tt set <KEY> <VALUE>`** (`jni/ternak-tt.cpp`): runtime upsert for the region/uptime persona fields, preserving all other keys (including shell-owned `WIFI_MAC` / `BLUETOOTH_*`). Allowlisted keys only; validates `FAKE_UPTIME_MS` is numeric.
+- **WebUI "Region" tab** (`webroot/`): edit timezone, locale, SIM carrier (name / MCC+MNC / ISO) and fake uptime with no reboot; the Persona tab now also shows SoC, timezone, locale, carrier and fake-uptime.
+
+### Notes
+
+- New spoofing surfaces are all **stealth / per-app scoped** and use the same `RegisterNatives`-on-native-methods + Java static-field techniques already in the module. No new native dependency, no inline/PLT hooking, no anti-cheat-unsafe resident hooks were introduced.
+- **Skipped by request (gaming) and by design (needs risky resident hooks):** GPU spoof, display refresh-rate spoof, CPU-flagship/`/proc/cpuinfo` spoof, DRM/Widevine level, WebView User-Agent, IMEI/Global-IMEI, App Set ID, VPN-hide, mock-location-hide, hide-developer-options, and the DND / brightness / keep-screen-on / DPI comfort tweaks. Rationale in the parity doc.
+
+---
+
 ## v1.0.29 (Unreleased)
 
 ### Fixed

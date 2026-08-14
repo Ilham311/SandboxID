@@ -88,6 +88,7 @@ document.querySelectorAll('.tab').forEach(btn => {
 
 function onTab(id) {
   if (id === 'persona') loadPersona();
+  else if (id === 'region') loadRegion();
   else if (id === 'rotate') loadRotate();
   else if (id === 'targets') loadTargets();
   else if (id === 'log') loadLog();
@@ -108,7 +109,11 @@ function parseProp(text) {
 
 const PERSONA_KEYS = [
   'MODEL', 'BRAND', 'MANUFACTURER', 'DEVICE', 'PRODUCT',
+  'SOC_MANUFACTURER', 'SOC_MODEL',
   'FINGERPRINT', 'SERIAL', 'RADIO',
+  'TIMEZONE', 'LOCALE',
+  'GSM_OPERATOR_ALPHA', 'GSM_OPERATOR_NUMERIC',
+  'FAKE_UPTIME_MS',
   'ANDROID_ID', 'GOOGLE_AID',
   'WIFI_MAC', 'BLUETOOTH_ADDR', 'BLUETOOTH_NAME',
 ];
@@ -146,6 +151,55 @@ document.getElementById('freshenBtn').addEventListener('click', async () => {
   await safeExec(cmd, 'Persona freshened + locked');
   btn.textContent = old; btn.disabled = false;
   loadPersona();
+});
+
+/* ---------- Region (timezone / locale / SIM / uptime) ---------- */
+const REGION_FIELDS = [
+  { id: 'rgTz',      key: 'TIMEZONE' },
+  { id: 'rgLocale',  key: 'LOCALE' },
+  { id: 'rgCarrier', key: 'GSM_OPERATOR_ALPHA' },
+  { id: 'rgMccmnc',  key: 'GSM_OPERATOR_NUMERIC' },
+  { id: 'rgIso',     key: 'GSM_OPERATOR_ISO' },
+  { id: 'rgUptime',  key: 'FAKE_UPTIME_MS' },
+];
+
+async function loadRegion() {
+  const r = await safeExec(`cat ${shq(IDENTITY)} 2>/dev/null || true`);
+  const kv = r.ok ? parseProp(r.out) : {};
+  for (const f of REGION_FIELDS) {
+    const el = document.getElementById(f.id);
+    if (el) el.value = kv[f.key] || '';
+  }
+  document.getElementById('rgStatus').textContent = '';
+}
+
+document.getElementById('rgReload').addEventListener('click', loadRegion);
+document.getElementById('rgSave').addEventListener('click', async () => {
+  const btn = document.getElementById('rgSave');
+  const old = btn.textContent; btn.disabled = true; btn.textContent = 'Saving\u2026';
+
+  const uptimeEl = document.getElementById('rgUptime');
+  if (uptimeEl && uptimeEl.value.trim() && !/^\d+$/.test(uptimeEl.value.trim())) {
+    toast('Fake uptime must be a whole number of milliseconds', 'error');
+    btn.textContent = old; btn.disabled = false;
+    return;
+  }
+
+  // Chain one `ternak-tt set` per field. Values (carrier names, timezones)
+  // may contain spaces, so each is single-quoted via shq.
+  const parts = REGION_FIELDS.map(f => {
+    let v = (document.getElementById(f.id).value || '').trim();
+    if (f.key === 'FAKE_UPTIME_MS' && v === '') v = '0';
+    return { key: f.key, v };
+  }).filter(p => p.v !== '' || p.key === 'FAKE_UPTIME_MS')
+    .map(p => `./bin/ternak-tt set ${shq(p.key)} ${shq(p.v)}`);
+  const cmd = `${ENV} && ${parts.join(' && ')} 2>&1`;
+  const r = await safeExec(cmd, 'Region saved \u00b7 reopen target app to apply');
+  if (r.ok) {
+    document.getElementById('rgStatus').textContent = 'Applies on next target-app launch';
+  }
+  btn.textContent = old; btn.disabled = false;
+  loadRegion();
 });
 
 /* ---------- Rotate ---------- */
