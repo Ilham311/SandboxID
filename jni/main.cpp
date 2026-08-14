@@ -1,4 +1,5 @@
 
+#ifndef TT_HOST_TEST
 #include <jni.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -34,11 +35,21 @@
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
 using zygisk::ServerSpecializeArgs;
+#else
+#include "../tests/host_stub.h"
+#include <vector>
+#include <string>
+#include <map>
+#include <cstring>
+#include <cstdlib>
+#endif
 
+#ifndef TT_HOST_TEST
 enum : uint8_t {
     CMD_GET_IDENTITY = 2,
     CMD_DO_MOUNTS    = 3,
 };
+#endif
 
 static std::map<std::string, std::string> g_id;
 
@@ -74,12 +85,157 @@ static const std::string& val(const std::string& k) {
     return empty;
 }
 
+enum class PropValueKind { Str, Int, Long, Bool };
+
+struct PropRule {
+    const char* key;
+    bool is_prefix;
+    const char* value_str;
+};
+
+static const PropRule g_prop_rules[] = {
+    // Prefix rules (mask the whole MIUI / perf-monitor surface)
+    {"ro.miui.",                          true, ""},
+    {"persist.sys.miui_",                 true, ""},
+    {"ro.mi.",                            true, ""},
+    {"persist.sys.turbosched.",           true, ""},
+    {"persist.sys.spc.",                  true, ""},
+    {"persist.sys.perfdebug.",            true, ""},
+    {"persist.sys.stability.",            true, ""},
+    {"persist.sys.scout_",                true, ""},
+    {"persist.sys.cachebuffer.",          true, ""},
+    {"persist.sys.dynamicbuffer.",        true, ""},
+    {"persist.sys.charlieprops.",         true, ""},
+    {"ro.config.miui_",                   true, ""},
+    {"ro.vendor.perf.scroll_opt",         true, ""},
+    {"ro.dulquersalmaan22.",              true, ""},
+    {"persist.sys.multi",                 true, ""},
+    {"sys.displayfeature_",               true, ""},
+    {"ro.df.effect.",                     true, ""},
+    {"ro.vendor.df.effect.",              true, ""},
+    {"persist.sys.vk_mode_",              true, ""},
+    {"persist.reboot.coredump",           true, ""},
+
+    // Exact rules
+    {"ro.product.mod_device",             false, "DEVICE"}, // Maps to identity
+    {"ro.gfx.driver.0",                   false, ""},
+    {"ro.gfx.driver.1",                   false, ""},
+    {"ro.gfx.driver_build_time",          false, "1704067200"},
+    {"ro.product.vndk.version",           false, "VNDK_VERSION"}, // Maps to identity
+    {"ro.vndk.version",                   false, "VNDK_VERSION"}, // Maps to identity
+    {"ro.board.api_level",                false, "BOARD_API_LEVEL"}, // Maps to identity
+    {"ro.board.first_api_level",          false, "BOARD_FIRST_API_LEVEL"}, // Maps to identity
+    {"ro.vendor.api_level",               false, "BOARD_API_LEVEL"}, // Maps to identity
+    {"ro.serialno",                       false, "SERIAL"}, // Maps to identity
+    {"ro.boot.serialno",                  false, "SERIAL"}, // Maps to identity
+    {"vendor.boot.serialno",              false, "SERIAL"}, // Maps to identity
+    {"persist.sys.zygote.start_pid",      false, ""},
+    {"sys.persist_screen_effect",         false, "0"},
+};
+
+static bool resolve_prop(const std::string& key, PropValueKind kind, std::string& out) {
+    const PropRule* best_prefix = nullptr;
+    size_t longest_prefix = 0;
+
+    for (const auto& rule : g_prop_rules) {
+        if (!rule.is_prefix) {
+            if (key == rule.key) {
+                // Exact match wins immediately
+                std::string v = rule.value_str;
+                // Check if it's an identity reference
+                if (v == "DEVICE" || v == "SERIAL" || v == "VNDK_VERSION" || v == "BOARD_API_LEVEL" || v == "BOARD_FIRST_API_LEVEL") {
+                    std::string mapped = val(v);
+                    if (mapped.empty()) {
+                        // Fallback derivation if identity.prop is old
+                        std::string release = val("RELEASE");
+                        if (v == "VNDK_VERSION" || v == "BOARD_FIRST_API_LEVEL") {
+                            if (release == "13") mapped = "33";
+                            else if (release == "14") mapped = "34";
+                            else if (release == "15") mapped = "35";
+                            else if (release == "16") mapped = "36";
+                            else mapped = "35";
+                        } else if (v == "BOARD_API_LEVEL") {
+                            if (release == "13") mapped = "202305";
+                            else if (release == "16") mapped = "202504";
+                            else mapped = "202404";
+                        }
+                    }
+                    v = mapped;
+                }
+
+                // An empty value_str means "suppress this key" (mask it as if
+                // unset). For string props that's a valid empty string, but
+                // for int/long/bool there is no sensible empty encoding, so
+                // report unresolved and let the caller keep the app's own
+                // default instead of fabricating a spoofed "0"/false.
+                if (kind == PropValueKind::Str) out = v;
+                else if (v.empty()) {
+                    return false;
+                }
+                else if (kind == PropValueKind::Int) {
+                    out = std::to_string(std::strtol(v.c_str(), nullptr, 10));
+                }
+                else if (kind == PropValueKind::Long) {
+                    out = std::to_string(std::strtoll(v.c_str(), nullptr, 10));
+                }
+                else if (kind == PropValueKind::Bool) {
+                    bool b = (v == "1" || v == "true" || v == "yes");
+                    out = b ? "1" : "0";
+                }
+                return true;
+            }
+        } else {
+            size_t rule_len = std::strlen(rule.key);
+            if (key.compare(0, rule_len, rule.key) == 0) {
+                if (rule_len > longest_prefix) {
+                    longest_prefix = rule_len;
+                    best_prefix = &rule;
+                }
+            }
+        }
+    }
+
+    if (best_prefix) {
+        std::string v = best_prefix->value_str;
+        // Same suppression semantics as the exact-match branch above: an
+        // empty value_str masks the key rather than spoofing a numeric/bool
+        // zero, so leave it unresolved and let the caller's app default
+        // stand for int/long/bool.
+        if (kind == PropValueKind::Str) out = v;
+        else if (v.empty()) {
+            return false;
+        }
+        else if (kind == PropValueKind::Int) {
+            out = std::to_string(std::strtol(v.c_str(), nullptr, 10));
+        }
+        else if (kind == PropValueKind::Long) {
+            out = std::to_string(std::strtoll(v.c_str(), nullptr, 10));
+        }
+        else if (kind == PropValueKind::Bool) {
+            bool b = (v == "1" || v == "true" || v == "yes");
+            out = b ? "1" : "0";
+        }
+        return true;
+    }
+
+    return false;
+}
+
+#ifdef TT_HOST_TEST
+// End of file for host test so we don't compile JNI hooks and Zygisk stuff
+#else
 static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
     const char* raw = env->GetStringUTFChars(j_key, nullptr);
     std::string k(raw ? raw : "");
     env->ReleaseStringUTFChars(j_key, raw);
     LOGD("L2 native_get('%s') requested", k.c_str());
+
+    std::string resolved_val;
+    if (resolve_prop(k, PropValueKind::Str, resolved_val)) {
+        LOGD("L2 SPOOF '%s' -> '%s'", k.c_str(), resolved_val.c_str());
+        return env->NewStringUTF(resolved_val.c_str());
+    }
 
     static const std::map<std::string, std::string> map = {
         {"ro.serialno",              "SERIAL"},
@@ -224,6 +380,21 @@ static bool tt_should_suppress_key(const std::string& k) {
 
     if (k.compare(0, 13, "debug.watson.") == 0)
         return true;
+
+    // Keys masked by an empty-value g_prop_rules entry (MIUI/perf-monitor
+    // prefixes, ro.gfx.driver.*, persist.sys.zygote.start_pid, ...) are
+    // suppressed the same way for int/long/bool hooks: resolve_prop() returns
+    // unresolved for these rather than spoofing a numeric 0, so without this
+    // check the caller would fall through and leak the real property value.
+    for (const auto& rule : g_prop_rules) {
+        if (rule.value_str[0] != '\0') continue;
+        if (rule.is_prefix) {
+            size_t rule_len = std::strlen(rule.key);
+            if (k.compare(0, rule_len, rule.key) == 0) return true;
+        } else if (k == rule.key) {
+            return true;
+        }
+    }
     return false;
 }
 
@@ -235,19 +406,26 @@ static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
         std::string k(r ? r : "");
         env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_int_spoof();
-        auto it = m.find(k);
-        if (it != m.end()) {
-            out = it->second;
+
+        std::string resolved_val;
+        if (resolve_prop(k, PropValueKind::Int, resolved_val)) {
+            out = (jint)std::strtol(resolved_val.c_str(), nullptr, 10);
             label = "SPOOF";
-        } else if (tt_should_suppress_key(k)) {
-            label = "SUPPRESS";   // keep def, do not read real prop
         } else {
-            char buf[PROP_VALUE_MAX] = {0};
-            if (__system_property_get(k.c_str(), buf) > 0) {
-                char* end = nullptr;
-                long v = std::strtol(buf, &end, 10);
-                if (end != buf) out = (jint)v;  // only if numeric
+            const auto& m = tt_int_spoof();
+            auto it = m.find(k);
+            if (it != m.end()) {
+                out = it->second;
+                label = "SPOOF";
+            } else if (tt_should_suppress_key(k)) {
+                label = "SUPPRESS";   // keep def, do not read real prop
+            } else {
+                char buf[PROP_VALUE_MAX] = {0};
+                if (__system_property_get(k.c_str(), buf) > 0) {
+                    char* end = nullptr;
+                    long v = std::strtol(buf, &end, 10);
+                    if (end != buf) out = (jint)v;  // only if numeric
+                }
             }
         }
         LOGD("L7 SPI native_get_int('%s') def=%d -> %d [%s]", k.c_str(), def, out, label);
@@ -261,17 +439,24 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
         std::string k(r ? r : "");
         env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_long_spoof();
-        auto it = m.find(k);
-        if (it != m.end()) {
-            out = it->second;
+
+        std::string resolved_val;
+        if (resolve_prop(k, PropValueKind::Long, resolved_val)) {
+            out = (jlong)std::strtoll(resolved_val.c_str(), nullptr, 10);
             label = "SPOOF";
-        } else if (tt_should_suppress_key(k)) {
-            label = "SUPPRESS";   // keep def, do not read real prop
         } else {
-            char buf[PROP_VALUE_MAX] = {0};
-            if (__system_property_get(k.c_str(), buf) > 0) {
-                out = std::strtoll(buf, nullptr, 10);
+            const auto& m = tt_long_spoof();
+            auto it = m.find(k);
+            if (it != m.end()) {
+                out = it->second;
+                label = "SPOOF";
+            } else if (tt_should_suppress_key(k)) {
+                label = "SUPPRESS";   // keep def, do not read real prop
+            } else {
+                char buf[PROP_VALUE_MAX] = {0};
+                if (__system_property_get(k.c_str(), buf) > 0) {
+                    out = std::strtoll(buf, nullptr, 10);
+                }
             }
         }
         LOGD("L7 SPL native_get_long('%s') def=%lld -> %lld [%s]",
@@ -286,18 +471,25 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean 
         const char* r = env->GetStringUTFChars(j_key, nullptr);
         std::string k(r ? r : "");
         env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_bool_spoof();
-        auto it = m.find(k);
-        if (it != m.end()) {
-            out = it->second;
+
+        std::string resolved_val;
+        if (resolve_prop(k, PropValueKind::Bool, resolved_val)) {
+            out = (resolved_val == "1") ? JNI_TRUE : JNI_FALSE;
             label = "SPOOF";
-        } else if (tt_should_suppress_key(k)) {
-            label = "SUPPRESS";   // keep def, do not read real prop
         } else {
-            char buf[PROP_VALUE_MAX] = {0};
-            if (__system_property_get(k.c_str(), buf) > 0) {
-                if (!strcmp(buf, "1") || !strcmp(buf, "true") || !strcmp(buf, "y") || !strcmp(buf, "yes") || !strcmp(buf, "on")) out = JNI_TRUE;
-                else if (!strcmp(buf, "0") || !strcmp(buf, "false") || !strcmp(buf, "n") || !strcmp(buf, "no") || !strcmp(buf, "off")) out = JNI_FALSE;
+            const auto& m = tt_bool_spoof();
+            auto it = m.find(k);
+            if (it != m.end()) {
+                out = it->second;
+                label = "SPOOF";
+            } else if (tt_should_suppress_key(k)) {
+                label = "SUPPRESS";   // keep def, do not read real prop
+            } else {
+                char buf[PROP_VALUE_MAX] = {0};
+                if (__system_property_get(k.c_str(), buf) > 0) {
+                    if (!strcmp(buf, "1") || !strcmp(buf, "true") || !strcmp(buf, "y") || !strcmp(buf, "yes") || !strcmp(buf, "on")) out = JNI_TRUE;
+                    else if (!strcmp(buf, "0") || !strcmp(buf, "false") || !strcmp(buf, "n") || !strcmp(buf, "no") || !strcmp(buf, "off")) out = JNI_FALSE;
+                }
             }
         }
         LOGD("L7 SPB native_get_boolean('%s') def=%d -> %d [%s]",
@@ -722,3 +914,4 @@ REGISTER_ZYGISK_MODULE(TernakTT)
 
 extern "C" void ternak_tt_companion(int client);
 REGISTER_ZYGISK_COMPANION(ternak_tt_companion)
+#endif

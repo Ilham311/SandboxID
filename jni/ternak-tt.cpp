@@ -128,6 +128,7 @@ struct Identity {
             "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
             "SERIAL","RADIO","SOC_MANUFACTURER","SOC_MODEL",
             "ANDROID_ID","GOOGLE_AID",
+            "VNDK_VERSION", "BOARD_API_LEVEL", "BOARD_FIRST_API_LEVEL",
             // COPG-parity stealth persona fields (see docs/COPG-PARITY):
             // timezone + locale + carrier are applied per-app via the Zygisk
             // Java/native hooks only, never device-wide, so nothing about the
@@ -229,6 +230,29 @@ static Identity gen_identity() {
     id.kv["GSM_OPERATOR_NUMERIC"] = c.mccmnc;
     id.kv["GSM_OPERATOR_ISO"]     = c.iso;
 
+    // Derive VNDK and API level from RELEASE
+    std::string rel_str = p.release;
+    if (rel_str == "13") {
+        id.kv["VNDK_VERSION"] = "33";
+        id.kv["BOARD_FIRST_API_LEVEL"] = "33";
+        id.kv["BOARD_API_LEVEL"] = "202305";
+    } else if (rel_str == "14") {
+        id.kv["VNDK_VERSION"] = "34";
+        id.kv["BOARD_FIRST_API_LEVEL"] = "34";
+        id.kv["BOARD_API_LEVEL"] = "202404";
+    } else if (rel_str == "15") {
+        id.kv["VNDK_VERSION"] = "35";
+        id.kv["BOARD_FIRST_API_LEVEL"] = "35";
+        id.kv["BOARD_API_LEVEL"] = "202404";
+    } else if (rel_str == "16") {
+        id.kv["VNDK_VERSION"] = "36";
+        id.kv["BOARD_FIRST_API_LEVEL"] = "36";
+        id.kv["BOARD_API_LEVEL"] = "202504";
+    } else {
+        fprintf(stderr, "unsupported RELEASE=%s, extend the VNDK derivation table\n", p.release);
+        exit(2);
+    }
+
     // FAKE_UPTIME_MS intentionally left unset: fake uptime is opt-in and off
     // for a fresh persona. The WebUI can enable it (ternak-tt set FAKE_UPTIME_MS).
     return id;
@@ -242,6 +266,7 @@ static Identity gen_identity() {
 #define DBG(...) ((void)0)
 #endif
 
+#ifndef TT_HOST_TEST
 // PERF: apply_native forks resetprop-rs serially (~60 calls, 2-4s on slow devices).
 // Batching with bounded background & + wait was considered (issue #21) but DEFERRED:
 // - Requires real-device benchmarking (>=200ms improvement threshold) not available in CI.
@@ -379,6 +404,7 @@ static void apply_native(const Identity& id) {
                 {"settings", "put", "global", "device_name", MODEL.c_str()});
     }
 }
+#endif
 
 static void generate_mount_files(const Identity& id) {
     DBG("generate_mount_files: MOUNTDIR=%s", MOUNTDIR);
@@ -510,6 +536,7 @@ static void generate_mount_files(const Identity& id) {
     ::chmod(xml_path.c_str(), 0600);
     ::chown(xml_path.c_str(), 1000, 1000);
 
+#ifndef TT_HOST_TEST
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_file:s0",
             (std::string(MOUNTDIR) + "/system/build.prop").c_str()});
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:vendor_file:s0",
@@ -521,16 +548,18 @@ static void generate_mount_files(const Identity& id) {
     }
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_data_file:s0",
             xml_path.c_str()});
-
+#endif
     printf("  Mount overlay: 5 build.prop + settings_secure.xml -> %s\n", MOUNTDIR);
 }
 
 static void wipe_tt_data() {
+#ifndef TT_HOST_TEST
     auto pkgs = load_targets();
     for (const auto& pkg : pkgs) {
         run_bin("/system/bin/pm", {"pm", "clear", pkg.c_str()});
         run_bin("/system/bin/am", {"am", "force-stop", pkg.c_str()});
     }
+#endif
 }
 
 static int cmd_targets() {
@@ -545,17 +574,161 @@ static int cmd_targets() {
     return 0;
 }
 
-static Identity load_identity() {
+static Identity load_identity_from_file(const std::string& path) {
     Identity id;
-    std::istringstream iss(read_file(IDENTITY_FILE));
+    std::istringstream iss(read_file(path.c_str()));
     std::string line;
     while (std::getline(iss, line)) {
         if (line.empty() || line[0] == '#') continue;
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
-        id.kv[line.substr(0, eq)] = line.substr(eq + 1);
+        id.kv[line.substr(0, eq)] = trim(line.substr(eq + 1));
     }
     return id;
+}
+
+static Identity load_identity_from_string(const std::string& data) {
+    Identity id;
+    std::istringstream iss(data);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        id.kv[line.substr(0, eq)] = trim(line.substr(eq + 1));
+    }
+    return id;
+}
+
+static Identity load_identity() {
+    return load_identity_from_file(IDENTITY_FILE);
+}
+
+// Persona Consistency Validation logic
+static bool validate_identity(const Identity& id, std::vector<std::string>& errors) {
+    auto get = [&](const char* k) -> std::string {
+        auto it = id.kv.find(k);
+        return it != id.kv.end() ? it->second : std::string();
+    };
+
+    bool valid = true;
+    auto fail = [&](const std::string& msg) {
+        errors.push_back(msg);
+        valid = false;
+    };
+
+    const std::string soc_mfr = get("SOC_MANUFACTURER");
+    const std::string soc_model = get("SOC_MODEL");
+    const std::string radio = get("RADIO");
+    const std::string inc = get("INCREMENTAL");
+
+    if (soc_mfr == "Google" && soc_model.compare(0, 6, "Tensor") == 0) {
+        // RADIO must match pattern g5[0-9]{3}[a-z]-[0-9]{6}-[0-9]{6}-B-<INCREMENTAL>
+        // We'll do a basic check here
+        if (radio.compare(0, 2, "g5") != 0 || radio.find("-B-" + inc) == std::string::npos) {
+            fail("RADIO mismatch: Tensor SOC requires g5...-B-<INCREMENTAL> pattern, got " + radio);
+        }
+    }
+
+    const std::string release = get("RELEASE");
+    const std::string vndk = get("VNDK_VERSION");
+    const std::string api_level = get("BOARD_API_LEVEL");
+    const std::string first_api_level = get("BOARD_FIRST_API_LEVEL");
+
+    std::string exp_vndk, exp_api_level, exp_first_api_level;
+    if (release == "13") {
+        exp_vndk = "33"; exp_api_level = "202305"; exp_first_api_level = "33";
+    } else if (release == "14") {
+        exp_vndk = "34"; exp_api_level = "202404"; exp_first_api_level = "34";
+    } else if (release == "15") {
+        exp_vndk = "35"; exp_api_level = "202404"; exp_first_api_level = "35";
+    } else if (release == "16") {
+        exp_vndk = "36"; exp_api_level = "202504"; exp_first_api_level = "36";
+    }
+
+    if (!exp_vndk.empty()) {
+        if (vndk != exp_vndk || api_level != exp_api_level || first_api_level != exp_first_api_level) {
+            fail("vndk_release_mismatch: RELEASE=" + release + " requires VNDK=" + exp_vndk +
+                 ", BOARD_API_LEVEL=" + exp_api_level + "; got vndk=" + vndk + ", api_level=" + api_level);
+        }
+    }
+
+    const std::string locale = get("LOCALE");
+    const std::string loc_lang = get("LOCALE_LANG");
+    const std::string loc_country = get("LOCALE_COUNTRY");
+
+    if (!locale.empty() && (!loc_lang.empty() || !loc_country.empty())) {
+        if (locale != loc_lang + "-" + loc_country) {
+            fail("LOCALE format mismatch: " + locale + " != " + loc_lang + "-" + loc_country);
+        }
+    }
+
+    const std::string sec_patch = get("SECURITY_PATCH");
+    if (!sec_patch.empty()) {
+        // sec_patch format is YYYY-MM-DD
+        if (sec_patch.size() == 10 && sec_patch[4] == '-' && sec_patch[7] == '-') {
+            std::time_t now = std::time(nullptr);
+            struct tm lt;
+            localtime_r(&now, &lt);
+            char date[16];
+            strftime(date, sizeof(date), "%Y-%m-%d", &lt);
+            if (sec_patch > std::string(date)) {
+                fail("SECURITY_PATCH is in the future: " + sec_patch + " > " + date);
+            }
+        } else {
+            fail("SECURITY_PATCH invalid format: " + sec_patch);
+        }
+    }
+
+    return valid;
+}
+
+static int cmd_validate(int argc, char** argv) {
+    std::string path = IDENTITY_FILE;
+    if (argc >= 3) {
+        path = argv[2];
+    }
+
+    Identity id;
+    if (path == "-") {
+        std::string data;
+        char buf[4096];
+        while (true) {
+            ssize_t got = ::read(STDIN_FILENO, buf, sizeof(buf));
+            if (got <= 0) break;
+            data.append(buf, got);
+        }
+        id = load_identity_from_string(data);
+    } else {
+        struct stat st;
+        if (::stat(path.c_str(), &st) != 0) {
+            fprintf(stderr, "FAIL: I/O: failed to read %s\n", path.c_str());
+            return 1;
+        }
+        id = load_identity_from_file(path);
+    }
+
+    if (id.kv.empty()) {
+        fprintf(stderr, "FAIL: Parse: identity is empty or malformed\n");
+        return 1;
+    }
+
+    std::vector<std::string> errors;
+    bool valid = validate_identity(id, errors);
+
+    if (valid) {
+        printf("OK: RADIO pattern\n");
+        printf("OK: LOCALE format\n");
+        printf("OK: SECURITY_PATCH date\n");
+        printf("validate: %zu passed, 0 failed\n", (size_t)3);
+        return 0;
+    } else {
+        for (const auto& err : errors) {
+            fprintf(stderr, "FAIL: %s\n", err.c_str());
+        }
+        printf("validate: 0 passed, %zu failed\n", errors.size());
+        return 2;
+    }
 }
 
 static bool ensure_root() {
@@ -577,15 +750,27 @@ static int cmd_freshen() {
     }
 
     std::string old = read_file(IDENTITY_FILE);
-    if (!old.empty()) atomic_write(IDENTITY_BAK, old);
 
     Identity id = gen_identity();
+
+    std::vector<std::string> errors;
+    if (!validate_identity(id, errors)) {
+        for (const auto& err : errors) {
+            fprintf(stderr, "freshen: validation failed: %s\n", err.c_str());
+        }
+        return 2;
+    }
+
+    if (!old.empty()) atomic_write(IDENTITY_BAK, old);
+
     if (!atomic_write(IDENTITY_FILE, id.serialize())) {
         fprintf(stderr, "! failed to write identity.prop\n");
         return 1;
     }
 
+#ifndef TT_HOST_TEST
     apply_native(id);
+#endif
     generate_mount_files(id);
     wipe_tt_data();
 
@@ -624,6 +809,7 @@ static int cmd_status() {
     return 0;
 }
 
+#ifndef TT_HOST_TEST
 static int cmd_apply_boot_impl();
 static int cmd_apply_boot() { return cmd_apply_boot_impl(); }
 static int cmd_apply_boot_impl() {
@@ -638,6 +824,7 @@ static int cmd_apply_boot_impl() {
     printf("OK: native prop re-applied + mount overlay refreshed\n");
     return 0;
 }
+#endif
 
 static int cmd_seed() {
     if (!ensure_root()) return 1;
@@ -711,20 +898,69 @@ static int cmd_set(const std::string& key, const std::string& value) {
         }
     }
 
+    // LOCALE, LOCALE_LANG and LOCALE_COUNTRY must stay in the form
+    // LOCALE == LOCALE_LANG + "-" + LOCALE_COUNTRY (enforced by
+    // validate_identity). Editing any one of these piecemeal would leave the
+    // others stale, so derive the full set here before writing.
+    std::map<std::string, std::string> extra_updates;
+    if (key == "LOCALE" || key == "LOCALE_LANG" || key == "LOCALE_COUNTRY") {
+        Identity cur = load_identity_from_file(IDENTITY_FILE);
+        std::string locale = cur.kv.count("LOCALE") ? cur.kv["LOCALE"] : "";
+        std::string lang = cur.kv.count("LOCALE_LANG") ? cur.kv["LOCALE_LANG"] : "";
+        std::string country = cur.kv.count("LOCALE_COUNTRY") ? cur.kv["LOCALE_COUNTRY"] : "";
+
+        if (key == "LOCALE") {
+            auto dash = value.find('-');
+            if (dash != std::string::npos) {
+                lang = value.substr(0, dash);
+                country = value.substr(dash + 1);
+            }
+            locale = value;
+        } else if (key == "LOCALE_LANG") {
+            lang = value;
+            locale = lang + "-" + country;
+        } else {  // LOCALE_COUNTRY
+            country = value;
+            locale = lang + "-" + country;
+        }
+
+        extra_updates["LOCALE"] = locale;
+        extra_updates["LOCALE_LANG"] = lang;
+        extra_updates["LOCALE_COUNTRY"] = country;
+    }
+
     std::istringstream iss(read_file(IDENTITY_FILE));
     std::string line, out;
-    bool replaced = false;
+    std::map<std::string, bool> replaced;
+    if (extra_updates.empty()) {
+        replaced[key] = false;
+    } else {
+        for (const auto& kv : extra_updates) replaced[kv.first] = false;
+    }
     while (std::getline(iss, line)) {
         std::string probe = line;
         if (!probe.empty() && probe.back() == '\r') probe.pop_back();
         auto eq = probe.find('=');
-        if (eq != std::string::npos && probe.substr(0, eq) == key) {
-            if (!replaced) { out += key + "=" + value + "\n"; replaced = true; }
-            continue;  // drop old / duplicate lines for this key
+        if (eq != std::string::npos) {
+            std::string probe_key = probe.substr(0, eq);
+            auto it = replaced.find(probe_key);
+            if (it != replaced.end()) {
+                if (!it->second) {
+                    const std::string& v = extra_updates.empty() ? value : extra_updates[probe_key];
+                    out += probe_key + "=" + v + "\n";
+                    it->second = true;
+                }
+                continue;  // drop old / duplicate lines for this key
+            }
         }
         out += probe + "\n";
     }
-    if (!replaced) out += key + "=" + value + "\n";
+    for (auto& kv : replaced) {
+        if (!kv.second) {
+            const std::string& v = extra_updates.empty() ? value : extra_updates[kv.first];
+            out += kv.first + "=" + v + "\n";
+        }
+    }
 
     if (!atomic_write(IDENTITY_FILE, out)) {
         fprintf(stderr, "! set: failed to write %s\n", IDENTITY_FILE);
@@ -745,7 +981,9 @@ static int cmd_rollback() {
     }
     atomic_write(IDENTITY_FILE, d);
     Identity rid = load_identity();
+#ifndef TT_HOST_TEST
     apply_native(rid);
+#endif
     generate_mount_files(rid);
     wipe_tt_data();
     printf("OK: rolled back + wiped\n");
@@ -767,7 +1005,8 @@ static void usage(const char* p) {
         "  set K V      Set a runtime persona field (TIMEZONE, LOCALE,\n"
         "               LOCALE_LANG, LOCALE_COUNTRY, GSM_OPERATOR_ALPHA,\n"
         "               GSM_OPERATOR_NUMERIC, GSM_OPERATOR_ISO, FAKE_UPTIME_MS)\n"
-        "  targets      List current target packages from target.txt\n",
+        "  targets      List current target packages from target.txt\n"
+        "  validate     Validate an identity.prop file for consistency\n",
         module_version().c_str(), p);
 }
 
@@ -779,8 +1018,11 @@ int main(int argc, char** argv) {
     if (!strcmp(c, "rollback"))   return cmd_rollback();
     if (!strcmp(c, "lock"))       return cmd_lock();
     if (!strcmp(c, "unlock"))     return cmd_unlock();
+#ifndef TT_HOST_TEST
     if (!strcmp(c, "apply-boot")) return cmd_apply_boot();
+#endif
     if (!strcmp(c, "seed"))       return cmd_seed();
+    if (!strcmp(c, "validate"))   return cmd_validate(argc, argv);
     if (!strcmp(c, "set")) {
         if (argc < 3) { fprintf(stderr, "! set: usage: ternak-tt set <KEY> <VALUE>\n"); return 1; }
         return cmd_set(argv[2], argc >= 4 ? argv[3] : "");

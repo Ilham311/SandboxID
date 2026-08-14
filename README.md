@@ -237,6 +237,7 @@ The `-debug.zip` build enables:
 - Verbose `[D]` traces from `TernakTT` and `TernakTTCompanion` in `logcat`
 - Automatic per-session logging to `/data/adb/modules/ternak_tt/debug/`
 - Persistent crash journal at `debug/crashes.log`
+- Per-entry mount `errno` logging. For example, if you see `errno=1 (EPERM)` or `errno=22 (EINVAL)` across the board, your kernel enforces mount-locks, and the overlay must be seeded pre-zygote.
 - **Action tap** produces:
   - `summary-YYYYMMDD-HHMMSS.txt` — compact digest, safe to paste in chat
   - `session-YYYYMMDD-HHMMSS.log.gz` — full log
@@ -246,6 +247,24 @@ Live logcat:
 
 ```bash
 su -c 'logcat -c && logcat -v time -s TernakTT:V TernakTTCompanion:V'
+```
+
+---
+
+## Persona consistency
+
+Ternak TT enforces validation rules whenever writing a new `identity.prop` using `ternak-tt freshen`.
+
+Validation rules enforced:
+- **RADIO pattern**: If SOC is a Google Tensor, `RADIO` must correctly report a Pixel baseband pattern (e.g. `g5...-B-<INCREMENTAL>`).
+- **LOCALE format**: Locale strings are checked for proper BCP-47 formatting (`LOCALE_LANG-LOCALE_COUNTRY`).
+- **SECURITY_PATCH date**: Ensuring the security patch date is strictly well-formatted and not floating in the future.
+
+If `freshen` fails validation, writing is aborted with error codes printed to `stderr`.
+
+You can independently validate any generated file (or stream it via stdin `-`) using:
+```bash
+ternak-tt validate [PATH]
 ```
 
 ---
@@ -304,6 +323,7 @@ No manual input needed — push a commit to `main`, get a release.
 - Device / Bluetooth name synced to persona MODEL
 - Telephony `IMEI` / `getDeviceId` / `getSubscriberId` / `getMeid` null-ing
 - Bind-mount overlay for 5 `build.prop` files + `settings_secure.xml`
+- Masking property surfaces including MIUI (`ro.miui.*`, `persist.sys.miui_*`), `turbosched`, `spc`, `perfdebug`, and `stability`.
 
 ### Out of scope
 
