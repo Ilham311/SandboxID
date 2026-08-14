@@ -19,7 +19,7 @@ and [Semantic Versioning](https://semver.org/).
 - **Debug typed-hook `SUPPRESS` leak** (`jni/main.cpp`): `native_get_long` / `native_get_boolean` read the real system property *before* labelling the key `SUPPRESS`, leaking the value they were meant to suppress. They now skip the read, matching `native_get_int`.
 - **Version strings unified** (`jni/ternak-tt.cpp`, `customize.sh`, `webroot/index.html`): the CLI banner (was `v1.0.1`), synthetic `build.prop` header (was `v1.0.3`), install banner (was `v1.0.19`), and WebUI header (was `v1.0.19`) drifted from `module.prop`. They now derive the version from `module.prop` instead of hardcoding it.
 - **`generate_uuid` fallback emitted a malformed UUID** (`helpers.sh`): the non-`/proc` path skipped a hex digit and never set the RFC 4122 variant nibble. Fixed to produce a conformant v4 UUID.
-- **Release notes "What's new" was always empty** (`.github/workflows/build.yml`): the changelog extractor searched for `### vX.Y.Z` headings and required an exact line match, but this file uses `## vX.Y.Z` with `(Unreleased)` / date suffixes. It now matches `## vX.Y.Z` by prefix.
+- **Release notes "What's new" was always empty** (`.github/workflows/build.yml`): the changelog extractor searched for `### vX.Y.Z` headings and required an exact line match, but this file uses `## vX.Y.Z` with `(Unreleased)` / date suffixes. The fix (match `## vX.Y.Z` by prefix) is provided as a patch in the PR description for a maintainer with `workflow` token scope to apply, since automation tokens cannot modify workflow files.
 - **CHANGELOG structure** (`CHANGELOG.md`): removed a duplicate `# Changelog` H1 and restored the orphaned `v1.0.19` section to chronological order.
 - **Minor**: removed a `cat | awk` (UUOC) in `service.sh`.
 
