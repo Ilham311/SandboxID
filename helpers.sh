@@ -53,12 +53,17 @@ generate_uuid() {
         return
     fi
     r=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | cut -c1-32)
-    printf '%s-%s-4%s-%s-%s\n' \
-        "$(echo "$r" | cut -c1-8)" \
-        "$(echo "$r" | cut -c9-12)" \
-        "$(echo "$r" | cut -c14-16)" \
-        "$(echo "$r" | cut -c17-20)" \
-        "$(echo "$r" | cut -c21-32)"
+    # RFC 4122 v4: version nibble = 4 (group 3), variant nibble in {8,9,a,b} (group 4).
+    vch=$(printf '%s' "$r" | cut -c17)
+    vidx=$(( 0x${vch:-0} % 4 ))
+    vsel=$(printf '%s' "89ab" | cut -c$((vidx + 1)))
+    printf '%s-%s-4%s-%s%s-%s\n' \
+        "$(printf '%s' "$r" | cut -c1-8)" \
+        "$(printf '%s' "$r" | cut -c9-12)" \
+        "$(printf '%s' "$r" | cut -c14-16)" \
+        "$vsel" \
+        "$(printf '%s' "$r" | cut -c18-20)" \
+        "$(printf '%s' "$r" | cut -c21-32)"
 }
 
 generate_mac() {
