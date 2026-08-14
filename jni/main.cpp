@@ -1,5 +1,5 @@
 
-#include "../include/jni.h"
+#include <jni.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -8,14 +8,13 @@
 #include <cstring>
 #include <sys/mount.h>
 #include <sys/stat.h>
-#include "../include/sys/system_properties.h"
-#include "../include/android/log.h"
+#include <sys/system_properties.h>
+#include <android/log.h>
 #include <string>
 #include <map>
 #include <vector>
 #include <sstream>
 #include <cstdlib>
-#include <string_view>
 #include <string_view>
 #include <signal.h>
 #include <ctime>
@@ -725,7 +724,7 @@ private:
             size_t eq = line.find('=');
             if (eq == std::string_view::npos) continue;
 
-            g_id.emplace(std::string(line.substr(0, eq)), std::string(line.substr(eq + 1)));
+            g_id.insert_or_assign(std::string(line.substr(0, eq)), std::string(line.substr(eq + 1)));
         }
     }
 };

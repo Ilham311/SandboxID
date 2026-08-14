@@ -573,7 +573,7 @@ static Identity load_identity() {
         if (line.empty() || line[0] == '#') continue;
         size_t eq = line.find('=');
         if (eq == std::string_view::npos) continue;
-        id.kv.emplace(std::string(line.substr(0, eq)), std::string(line.substr(eq + 1)));
+        id.kv.insert_or_assign(std::string(line.substr(0, eq)), std::string(line.substr(eq + 1)));
     }
     return id;
 }

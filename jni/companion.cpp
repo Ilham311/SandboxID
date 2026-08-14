@@ -27,7 +27,7 @@
 #include <chrono>
 #include <signal.h>
 #include <time.h>
-#include "../include/android/log.h"
+#include <android/log.h>
 #include <shared_mutex>
 
 #define LOG_TAG "TernakTTCompanion"
