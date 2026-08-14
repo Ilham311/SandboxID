@@ -9,6 +9,21 @@ and [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.0.31 (Unreleased)
+
+### Fixed
+- Fixed an issue where kernel mount-lock restrictions prevented bind-mount overlay configurations. Added manual overlay failure `errno` reporting directly in `logcat` with pre-fork overlay fallback bypass detection.
+- Fixed MIUI/HyperOS properties leakage. Implemented an exact/prefix resolution rule engine for SystemProperties spoofing (masking `ro.miui.*`, `turbosched`, `perfdebug`, `stability`, etc.)
+- Validated persona identity consistency across VNDK versions. Derived `VNDK_VERSION`, `BOARD_API_LEVEL`, and `BOARD_FIRST_API_LEVEL` mapping them dynamically against the `RELEASE` key within `gen_identity` instead of failing with stale fallback hardcodes.
+- `ternak-tt` execution aborts during generation if inconsistencies exist in baseband patterns (`RADIO`), `LOCALE` format, and `SECURITY_PATCH` rules.
+
+### Added
+- Added the `ternak-tt validate [PATH|-]` subcommand for diagnosing `identity.prop` configurations locally and across automation scripting via STDIN.
+- Included host-level C++ tests (`tests/run_tests.sh`) to automatically assert validity via `.github/workflows/build.yml` before CI build deployment.
+- Increased `read_file` internal capacity to a safer 256 KiB maximum bound in `jni/companion.cpp`.
+
+---
+
 ## v1.0.30 (Unreleased)
 
 Brings the **non-gaming, stealth** half of [COPG](https://github.com/AlirezaParsi/COPG)'s

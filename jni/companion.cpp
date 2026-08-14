@@ -131,19 +131,25 @@ static const BindEntry BIND_ENTRIES[] = {
 static std::string read_file(const char* p) {
     int fd = ::open(p, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return "";
-    struct stat st;
-    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
-        ::close(fd);
-        return "";
-    }
-    size_t size = st.st_size;
-    if (size > 65536) size = 65536;
+
     std::string out;
-    out.resize(size);
-    ssize_t got = ::read(fd, out.data(), size);
+    char buf[4096];
+    size_t total = 0;
+    constexpr size_t MAX_SIZE = 262144; // 256 KB
+
+    while (true) {
+        ssize_t got = ::read(fd, buf, sizeof(buf));
+        if (got <= 0) break;
+
+        if (total + got > MAX_SIZE) {
+            out.append(buf, MAX_SIZE - total);
+            LOGE("read_file: %s exceeded 256KB ceiling, truncated.", p);
+            break;
+        }
+        out.append(buf, got);
+        total += got;
+    }
     ::close(fd);
-    if (got > 0) out.resize(got);
-    else out.clear();
     return out;
 }
 
@@ -158,8 +164,9 @@ struct MountReport {
     uint32_t skip;
     uint32_t skip_src;
     uint32_t skip_dst;
-    int32_t  stage;   // 0 = bind loop ran, 1 = open target ns failed, 2 = setns failed
+    int32_t  stage;   // 0 = bind loop ran, 1 = open target ns failed, 2 = setns failed, 3 = already mounted
     int32_t  err;     // errno captured for stage 1/2
+    int32_t  mount_errno[16];   // 0 = ok/skipped, else errno
 };
 
 static uint32_t do_mounts_via_fork(uint32_t target_pid) {
@@ -202,17 +209,82 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
             rep.stage = 2; rep.err = errno;
             ::close(tgt_ns);
         } else {
-            rep.stage = 0;
-            for (size_t i = 0; i < num_entries; ++i) {
-                const auto& e = BIND_ENTRIES[i];
-                if (src_fds[i] < 0) { rep.skip_src++; rep.skip++; continue; }
-                if (::access(e.dst, F_OK) != 0) { rep.skip_dst++; rep.skip++; continue; }
+            // Check if pre-fork overlay is already present
+            int mnt_fd = ::open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
+            bool already_mounted = false;
+            uint32_t pre_mounted_count = 0;
+            if (mnt_fd >= 0) {
+                char buf[16384];
+                ssize_t n = ::read(mnt_fd, buf, sizeof(buf) - 1);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    char* line = buf;
+                    while (line && *line) {
+                        char* next_line = ::strchr(line, '\n');
+                        if (next_line) {
+                            *next_line = '\0';
+                            next_line++;
+                        }
 
-                char proc_fd_path[32];
-                ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
+                        // Parse mountinfo line
+                        // Format: 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
+                        // Fields are space-separated. 4th field is root (source), 5th is mount point (dest).
+                        int field_idx = 1;
+                        char* p = line;
+                        char* root_src = nullptr;
+                        char* mount_dst = nullptr;
+                        while (*p) {
+                            while (*p == ' ') p++;
+                            if (!*p) break;
+                            char* field_start = p;
+                            while (*p && *p != ' ') p++;
+                            if (*p) {
+                                *p = '\0';
+                                p++;
+                            }
+                            if (field_idx == 4) root_src = field_start;
+                            else if (field_idx == 5) mount_dst = field_start;
 
-                if (::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr) == 0) rep.ok++;
-                else rep.fail++;
+                            if (field_idx == 5) break;
+                            field_idx++;
+                        }
+
+                        if (root_src && mount_dst) {
+                            for (size_t i = 0; i < num_entries; ++i) {
+                                if (::strcmp(mount_dst, BIND_ENTRIES[i].dst) == 0 ||
+                                    ::strcmp(root_src, BIND_ENTRIES[i].dst) == 0) {
+                                    pre_mounted_count++;
+                                    already_mounted = true;
+                                    break;
+                                }
+                            }
+                        }
+                        line = next_line;
+                    }
+                }
+                ::close(mnt_fd);
+            }
+
+            if (already_mounted) {
+                rep.stage = 3;
+                rep.ok = pre_mounted_count;
+            } else {
+                rep.stage = 0;
+                for (size_t i = 0; i < num_entries; ++i) {
+                    const auto& e = BIND_ENTRIES[i];
+                    if (src_fds[i] < 0) { rep.skip_src++; rep.skip++; continue; }
+                    if (::access(e.dst, F_OK) != 0) { rep.skip_dst++; rep.skip++; continue; }
+
+                    char proc_fd_path[32];
+                    ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
+
+                    if (::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr) == 0) {
+                        rep.ok++;
+                    } else {
+                        rep.fail++;
+                        if (i < 16) rep.mount_errno[i] = errno;
+                    }
+                }
             }
             ::close(tgt_ns);
         }
@@ -248,9 +320,31 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
         LOGE("child: setns->target failed errno=%d", rep.err);
         return 0;
     }
+    if (rep.stage == 3) {
+        LOGI("pre-fork overlay already present for pid=%u, skipping runtime bind", target_pid);
+        return rep.ok;
+    }
+
     LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
          "(skip_src=%u skip_dst=%u) [%s]",
          target_pid, rep.ok, rep.fail, rep.skip, rep.skip_src, rep.skip_dst, TT_VARIANT_TAG);
+
+    bool mount_locked = false;
+    for (size_t i = 0; i < num_entries && i < 16; ++i) {
+        if (rep.mount_errno[i] != 0) {
+            LOGE("mount fail idx=%zu dst=%s errno=%d (%s)",
+                 i, BIND_ENTRIES[i].dst, rep.mount_errno[i],
+                 strerror(rep.mount_errno[i]));
+            if (rep.mount_errno[i] == EPERM || rep.mount_errno[i] == EINVAL) {
+                mount_locked = true;
+            }
+        }
+    }
+    if (mount_locked) {
+        LOGE("mount blocked by kernel mount-lock; overlay must be "
+             "seeded pre-zygote via post-fs-data.sh");
+    }
+
     return rep.ok;
 }
 
