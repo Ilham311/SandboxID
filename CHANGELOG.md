@@ -1,5 +1,54 @@
 # Changelog
 
+All notable changes to Ternak TT are recorded here. The GitHub Actions workflow
+reads the matching `## vX.Y.Z` section to build `release_notes.md` automatically
+on every release.
+
+Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and [Semantic Versioning](https://semver.org/).
+
+---
+
+## v1.0.29 (Unreleased)
+
+### Fixed
+
+- **Dead proc-sanitizer subsystem removed** (`jni/main.cpp`): `install_proc_sanitizer` and its `openat` / `__openat` / `android_get_device_api_level` PLT hooks, `find_libc_dev_inode`, and the `memfd_create` helper were **never wired into the Zygisk lifecycle** (zero call sites). They shipped in every build as pure dead code. Removed to shrink the module and cut maintenance/attack surface; also retires the memfd file-size fingerprint anomaly (old issue #28).
+- **Unused mount tables removed** (`jni/main.cpp`): the `MOUNTDIR` constant and a duplicate `BIND_ENTRIES[]` table were unreferenced — the authoritative copy lives in `jni/companion.cpp`.
+- **Companion mount child made async-fork-safe** (`jni/companion.cpp`): `do_mounts_via_fork` forked from a process that can already be running the death-reaper thread, then called `std::string` / `__android_log_print` in the child — a fork-in-multithreaded-process deadlock hazard. The child now uses only stack buffers and raw syscalls and reports counters over the pipe; all logging moved to the parent. Mount semantics and log-line formats are unchanged.
+- **Debug typed-hook `SUPPRESS` leak** (`jni/main.cpp`): `native_get_long` / `native_get_boolean` read the real system property *before* labelling the key `SUPPRESS`, leaking the value they were meant to suppress. They now skip the read, matching `native_get_int`.
+- **Version strings unified** (`jni/ternak-tt.cpp`, `customize.sh`, `webroot/index.html`): the CLI banner (was `v1.0.1`), synthetic `build.prop` header (was `v1.0.3`), install banner (was `v1.0.19`), and WebUI header (was `v1.0.19`) drifted from `module.prop`. They now derive the version from `module.prop` instead of hardcoding it.
+- **`generate_uuid` fallback emitted a malformed UUID** (`helpers.sh`): the non-`/proc` path skipped a hex digit and never set the RFC 4122 variant nibble. Fixed to produce a conformant v4 UUID.
+- **Release notes "What's new" was always empty** (`.github/workflows/build.yml`): the changelog extractor searched for `### vX.Y.Z` headings and required an exact line match, but this file uses `## vX.Y.Z` with `(Unreleased)` / date suffixes. It now matches `## vX.Y.Z` by prefix.
+- **CHANGELOG structure** (`CHANGELOG.md`): removed a duplicate `# Changelog` H1 and restored the orphaned `v1.0.19` section to chronological order.
+- **Minor**: removed a `cat | awk` (UUOC) in `service.sh`.
+
+### Notes
+
+- No new spoofing surfaces or identifiers were added. This release is a correctness, safety, and hygiene pass only.
+
+---
+
+## v1.0.28 (Unreleased)
+
+### Removed
+
+- **L3/L4/L5/L6 hooks removed**: The handlers and install stubs for `Settings.Secure`, `AdvertisingIdClient`, `WifiInfo`, and `TelephonyManager` were dead code (never registered with `RegisterNatives`). Removed to decrease risk; may be reintroduced properly in a future release.
+
+### Fixed
+
+- **CRLF sweep**: Fixed stray carriage returns across the repo.
+- **Shell script quoting**: Fixed variables in `customize.sh`, `service.sh`, `summarize.sh`, and `action.sh` to prevent word splitting.
+- **`action.sh` PIPESTATUS**: Replaced PIPESTATUS bashism with a reliable tempfile pattern for ash/mksh compatibility.
+- **`post-fs-data.sh`**: Resolved `ro.product.cpu.abi` correctly and added a timeout guard to the seed binary call.
+- **`service.sh`**: Replaced unbounded boot loop with max iterations limit, cleared `logcat.pid`/`journal.pid` upon start, and removed `logcat -c`.
+- **`rotate_ids.sh`**: Added a plaintext check to skip encrypting `bt_config.conf` natively on newer OSs, and autodetected the `wlan` interface.
+- **`customize.sh`**: Added unknown ABI abort, conditional binary permission application, and added NeoZygisk and ZygiskOnKernelSU paths.
+- **`helpers.sh`**: Prevented `setprop` from trying to set `ro.*` keys without `resetprop-rs`.
+- **`uninstall.sh`**: Added uninstall cleanup that safely manages log removal and backups display without deleting user/system data.
+
+---
+
 ## v1.0.19 (2026-07-27)
 
 ### Action button is now 1-tap ready
@@ -39,37 +88,6 @@
 4. `randomize_wlan_mac` — wlan0 MAC + wipes `WifiConfigStore.xml`.
 5. `rotate_bluetooth_mac` — BT adapter MAC + `bt_config.conf` Address.
 6. `sync_device_name` — device_name/bluetooth_name/`bt_config.conf` Name = `identity.prop` MODEL.
-
----
-
-# Changelog
-
-All notable changes to Ternak TT are recorded here. The GitHub Actions workflow
-reads the matching `## vX.Y.Z` section to build `release_notes.md` automatically
-on every release.
-
-Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
-and [Semantic Versioning](https://semver.org/).
-
----
-
-## v1.0.28 (Unreleased)
-
-### Removed
-
-- **L3/L4/L5/L6 hooks removed**: The handlers and install stubs for `Settings.Secure`, `AdvertisingIdClient`, `WifiInfo`, and `TelephonyManager` were dead code (never registered with `RegisterNatives`). Removed to decrease risk; may be reintroduced properly in a future release.
-
-### Fixed
-
-- **CRLF sweep**: Fixed stray carriage returns across the repo.
-- **Shell script quoting**: Fixed variables in `customize.sh`, `service.sh`, `summarize.sh`, and `action.sh` to prevent word splitting.
-- **`action.sh` PIPESTATUS**: Replaced PIPESTATUS bashism with a reliable tempfile pattern for ash/mksh compatibility.
-- **`post-fs-data.sh`**: Resolved `ro.product.cpu.abi` correctly and added a timeout guard to the seed binary call.
-- **`service.sh`**: Replaced unbounded boot loop with max iterations limit, cleared `logcat.pid`/`journal.pid` upon start, and removed `logcat -c`.
-- **`rotate_ids.sh`**: Added a plaintext check to skip encrypting `bt_config.conf` natively on newer OSs, and autodetected the `wlan` interface.
-- **`customize.sh`**: Added unknown ABI abort, conditional binary permission application, and added NeoZygisk and ZygiskOnKernelSU paths.
-- **`helpers.sh`**: Prevented `setprop` from trying to set `ro.*` keys without `resetprop-rs`.
-- **`uninstall.sh`**: Added uninstall cleanup that safely manages log removal and backups display without deleting user/system data.
 
 ---
 
