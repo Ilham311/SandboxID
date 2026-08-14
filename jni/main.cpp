@@ -421,12 +421,12 @@ static void install_crash_watchdog(const std::string& pkg) {
     sa.sa_sigaction = tt_signal_handler;
     sigemptyset(&sa.sa_mask);
 
-    static const int sigs[] = { SIGABRT, SIGFPE, SIGILL, SIGSYS };
+    static const int sigs[] = { SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSYS };
     for (int s : sigs) {
         g_crash_count[s] = 0;
         sigaction(s, &sa, &g_prev_sig[s]);
     }
-    LOGD("crash watchdog armed for %s (4 signals: ABRT/FPE/ILL/SYS, limit=%d)",
+    LOGD("crash watchdog armed for %s (6 signals: SEGV/ABRT/BUS/FPE/ILL/SYS, limit=%d)",
          pkg.c_str(), CRASH_LIMIT);
 }
 
