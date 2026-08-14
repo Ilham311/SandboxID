@@ -538,17 +538,18 @@ static void install_locale_hook(JNIEnv* env) {
 // alone on purpose — shifting wall-clock time breaks TLS/cert validation.
 static jlong g_uptime_offset_ms = 0;
 
-static jlong tt_sysclock_uptime_millis(JNIEnv*, jclass) {
+// @CriticalNative handlers take no JNIEnv/jclass
+static jlong tt_sysclock_uptime_millis() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (jlong)(ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL) + g_uptime_offset_ms;
 }
-static jlong tt_sysclock_elapsed_realtime(JNIEnv*, jclass) {
+static jlong tt_sysclock_elapsed_realtime() {
     struct timespec ts;
     clock_gettime(CLOCK_BOOTTIME, &ts);
     return (jlong)(ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL) + g_uptime_offset_ms;
 }
-static jlong tt_sysclock_elapsed_realtime_nanos(JNIEnv*, jclass) {
+static jlong tt_sysclock_elapsed_realtime_nanos() {
     struct timespec ts;
     clock_gettime(CLOCK_BOOTTIME, &ts);
     return (jlong)(ts.tv_sec * 1000000000LL + ts.tv_nsec)
@@ -559,7 +560,9 @@ static void install_uptime_hook(JNIEnv* env) {
     const std::string v = val("FAKE_UPTIME_MS");
     if (v.empty()) return;                       // opt-in: off unless persona sets it
     long long off = std::strtoll(v.c_str(), nullptr, 10);
+    constexpr long long MAX_UPTIME_MS = 10LL * 365 * 24 * 60 * 60 * 1000; // ~10y
     if (off <= 0) return;
+    if (off > MAX_UPTIME_MS) off = MAX_UPTIME_MS;
     g_uptime_offset_ms = (jlong)off;
 
     jclass sc = env->FindClass("android/os/SystemClock");

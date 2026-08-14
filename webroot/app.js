@@ -190,8 +190,9 @@ document.getElementById('rgSave').addEventListener('click', async () => {
   const parts = REGION_FIELDS.map(f => {
     let v = (document.getElementById(f.id).value || '').trim();
     if (f.key === 'FAKE_UPTIME_MS' && v === '') v = '0';
-    return `./bin/ternak-tt set ${shq(f.key)} ${shq(v)}`;
-  });
+    return { key: f.key, v };
+  }).filter(p => p.v !== '' || p.key === 'FAKE_UPTIME_MS')
+    .map(p => `./bin/ternak-tt set ${shq(p.key)} ${shq(p.v)}`);
   const cmd = `${ENV} && ${parts.join(' && ')} 2>&1`;
   const r = await safeExec(cmd, 'Region saved \u00b7 reopen target app to apply');
   if (r.ok) {

@@ -14,9 +14,7 @@ and [Semantic Versioning](https://semver.org/).
 Brings the **non-gaming, stealth** half of [COPG](https://github.com/AlirezaParsi/COPG)'s
 feature set to Ternak TT's fresh-persona model. Everything added here stays inside
 the module's existing safety envelope (safe identity strings, per-app scope, no
-resident inline hooks), so boot risk is unchanged. See
-[`docs/COPG-PARITY-v1.0.30.md`](docs/COPG-PARITY-v1.0.30.md) for the full research
-write-up and the list of COPG features intentionally **not** ported.
+resident inline hooks), so boot risk is unchanged.
 
 ### Added
 
