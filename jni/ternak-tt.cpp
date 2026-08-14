@@ -93,6 +93,20 @@ static std::string trim(std::string s) {
     return s;
 }
 
+// Single source of truth for the version string: read it from module.prop at
+// runtime so the CLI banner and synthetic build.prop never drift from the
+// value the release pipeline stamps into module.prop.
+static std::string module_version() {
+    std::istringstream iss(read_file(std::string(MODDIR) + "/module.prop"));
+    std::string line;
+    const std::string key = "version=";
+    while (std::getline(iss, line)) {
+        if (line.compare(0, key.size(), key) == 0)
+            return trim(line.substr(key.size()));
+    }
+    return "unknown";
+}
+
 static void run_bin(const char* path, std::vector<const char*> argv) {
     pid_t pid = fork();
     if (pid == 0) {
@@ -364,7 +378,7 @@ static void generate_mount_files(const Identity& id) {
     const std::string HOST         = g("HOST");
 
     std::string base;
-    base += "# Ternak TT synthetic build.prop (v1.0.3)\n";
+    base += "# Ternak TT synthetic build.prop (" + module_version() + ")\n";
     auto add = [&](const char* k, const std::string& v) {
         if (!v.empty()) { base += k; base += '='; base += v; base += '\n'; }
     };
@@ -619,7 +633,7 @@ static int cmd_rollback() {
 
 static void usage(const char* p) {
     fprintf(stderr,
-        "Ternak TT v1.0.1 - TikTok Zygisk fresh persona (standalone)\n\n"
+        "Ternak TT %s - TikTok Zygisk fresh persona (standalone)\n\n"
         "Usage: %s <command>\n\n"
         "  freshen      Rotate identity + wipe TT app data (main action)\n"
         "  status       Print current identity.prop\n"
@@ -630,7 +644,7 @@ static void usage(const char* p) {
         "  seed         Fast bootstrap: identity + mount overlay only\n"
         "               (used by post-fs-data.sh, no native/wipe)\n"
         "  targets      List current target packages from target.txt\n",
-        p);
+        module_version().c_str(), p);
 }
 
 int main(int argc, char** argv) {

@@ -2,7 +2,8 @@
 # shellcheck disable=SC2034
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.19"
+MODULE_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
+ui_print "- Ternak TT ${MODULE_VER:-(version unknown)}"
 ui_print "- Spoofs device identity apps see:"
 ui_print "-   model, brand, manufacturer, fingerprint, serial"
 ui_print "-   per-app Android ID / SSAID"

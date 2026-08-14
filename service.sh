@@ -30,8 +30,7 @@ if [ -f "$MODDIR/debug_variant" ]; then
         echo "==================================================="
         echo "Ternak TT debug session"
         echo "Boot time : $(date '+%Y-%m-%d %H:%M:%S %Z')"
-        # shellcheck disable=SC2002
-        echo "Uptime    : $(cat /proc/uptime 2>/dev/null | awk '{print $1"s"}')"
+        echo "Uptime    : $(awk '{print $1"s"}' /proc/uptime 2>/dev/null)"
         echo "Module    : $(grep '^version=' "$MODDIR"/module.prop | cut -d= -f2)"
         echo "Kernel    : $(uname -r)"
         echo "Android   : $(getprop ro.build.version.release) (SDK $(getprop ro.build.version.sdk))"

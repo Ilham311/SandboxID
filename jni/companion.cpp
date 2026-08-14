@@ -147,6 +147,21 @@ static std::string read_file(const char* p) {
     return out;
 }
 
+// Result the forked child ships back to the parent over a pipe. The child runs
+// after fork() in a process that may already have background threads (the death
+// reaper), so it must stay strictly async-fork-safe: syscalls + stack buffers
+// only, no heap allocation and no liblog calls. All logging happens in the
+// parent, from the values reported here.
+struct MountReport {
+    uint32_t ok;
+    uint32_t fail;
+    uint32_t skip;
+    uint32_t skip_src;
+    uint32_t skip_dst;
+    int32_t  stage;   // 0 = bind loop ran, 1 = open target ns failed, 2 = setns failed
+    int32_t  err;     // errno captured for stage 1/2
+};
+
 static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     int pipefd[2];
     if (::pipe(pipefd) != 0) {
@@ -161,53 +176,44 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
         return 0;
     }
 
+    constexpr size_t num_entries = sizeof(BIND_ENTRIES)/sizeof(BIND_ENTRIES[0]);
+
     if (child == 0) {
-
+        // ---- async-fork-safe region: no malloc, no liblog ----
         ::close(pipefd[0]);
-        LOGD("child: pid=%d parent_target=%u", getpid(), target_pid);
 
-        const size_t num_entries = sizeof(BIND_ENTRIES)/sizeof(BIND_ENTRIES[0]);
         int src_fds[num_entries];
         for (size_t i = 0; i < num_entries; ++i) {
-            std::string src = std::string(MOUNTDIR) + "/" + BIND_ENTRIES[i].src_rel;
-            src_fds[i] = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
+            char src[256];
+            ::snprintf(src, sizeof(src), "%s/%s", MOUNTDIR, BIND_ENTRIES[i].src_rel);
+            src_fds[i] = ::open(src, O_RDONLY | O_CLOEXEC);
         }
 
         char path[64];
         ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
         int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
-        LOGD("child: open %s -> fd=%d errno=%d", path, tgt_ns, errno);
-        uint32_t ok = 0, fail = 0, skip = 0;
+
+        MountReport rep;
+        ::memset(&rep, 0, sizeof(rep));
 
         if (tgt_ns < 0) {
-            LOGE("child: open %s failed errno=%d", path, errno);
+            rep.stage = 1; rep.err = errno;
         } else if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
-            LOGE("child: setns->target failed errno=%d", errno);
+            rep.stage = 2; rep.err = errno;
             ::close(tgt_ns);
         } else {
-            LOGD("child: setns OK, entering %u bind loop", (unsigned)num_entries);
-            uint32_t skip_src = 0, skip_dst = 0;
+            rep.stage = 0;
             for (size_t i = 0; i < num_entries; ++i) {
                 const auto& e = BIND_ENTRIES[i];
-                if (src_fds[i] < 0) {
-                    skip_src++; skip++; continue;
-                }
-                bool dst_ok = (::access(e.dst, F_OK) == 0);
-                if (!dst_ok) { skip_dst++; skip++; continue; }
+                if (src_fds[i] < 0) { rep.skip_src++; rep.skip++; continue; }
+                if (::access(e.dst, F_OK) != 0) { rep.skip_dst++; rep.skip++; continue; }
 
                 char proc_fd_path[32];
                 ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
 
-                int rc = ::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr);
-                if (rc == 0) {
-                    ok++;
-                } else {
-                    fail++;
-                }
+                if (::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr) == 0) rep.ok++;
+                else rep.fail++;
             }
-            LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
-                 "(skip_src=%u skip_dst=%u) [%s]",
-                 target_pid, ok, fail, skip, skip_src, skip_dst, TT_VARIANT_TAG);
             ::close(tgt_ns);
         }
 
@@ -215,24 +221,37 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
             if (src_fds[i] >= 0) ::close(src_fds[i]);
         }
 
-        ::write(pipefd[1], &ok, sizeof(ok));
+        ::write(pipefd[1], &rep, sizeof(rep));
         ::close(pipefd[1]);
         ::_exit(0);
     }
 
     ::close(pipefd[1]);
-    uint32_t ok = 0;
-    ssize_t n = ::read(pipefd[0], &ok, sizeof(ok));
+    MountReport rep;
+    ::memset(&rep, 0, sizeof(rep));
+    ssize_t n = ::read(pipefd[0], &rep, sizeof(rep));
     ::close(pipefd[0]);
 
     watch_target_death(target_pid);
     int status = 0;
     ::waitpid(child, &status, 0);
-    if (n != (ssize_t)sizeof(ok)) {
+
+    if (n != (ssize_t)sizeof(rep)) {
         LOGE("parent: read from child failed (n=%zd)", n);
         return 0;
     }
-    return ok;
+    if (rep.stage == 1) {
+        LOGE("child: open /proc/%u/ns/mnt failed errno=%d", target_pid, rep.err);
+        return 0;
+    }
+    if (rep.stage == 2) {
+        LOGE("child: setns->target failed errno=%d", rep.err);
+        return 0;
+    }
+    LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
+         "(skip_src=%u skip_dst=%u) [%s]",
+         target_pid, rep.ok, rep.fail, rep.skip, rep.skip_src, rep.skip_dst, TT_VARIANT_TAG);
+    return rep.ok;
 }
 
 static std::mutex g_reaper_mtx;
