@@ -10,15 +10,15 @@ if(TERNAK_TT_DEBUG)
     add_compile_definitions(TT_DEBUG=1)
     # Note: -fno-exceptions + -fno-rtti with heavy STL usage (std::string, std::map, std::vector)
     # means any bad_alloc will become an abort().
-    set(COMMON "-Os -g -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
-    set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
+    set(COMMON "-Os -g -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Werror=return-type")
+    set(CMAKE_CXX_FLAGS_DEBUG "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-Wl,--gc-sections -Wl,--exclude-libs,ALL")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "-Wl,--gc-sections")
 else()
     message(STATUS "[ternak_tt] BUILD VARIANT: RELEASE (LOGD compiled out, stripped)")
     # Note: -fno-exceptions + -fno-rtti with heavy STL usage (std::string, std::map, std::vector)
     # means any bad_alloc will become an abort().
-    set(COMMON "-Os -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
+    set(COMMON "-Os -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Werror=return-type")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE
         "-Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL")
@@ -28,7 +28,7 @@ endif()
 
 add_library(ternak_tt SHARED main.cpp companion.cpp)
 target_include_directories(ternak_tt PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(ternak_tt PRIVATE log)
+# target_link_libraries(ternak_tt PRIVATE log)
 
 add_executable(ternak-tt ternak-tt.cpp)
 target_include_directories(ternak-tt PRIVATE ${CMAKE_SOURCE_DIR})

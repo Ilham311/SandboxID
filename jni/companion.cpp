@@ -27,7 +27,8 @@
 #include <chrono>
 #include <signal.h>
 #include <time.h>
-#include <android/log.h>
+#include "../include/android/log.h"
+#include <shared_mutex>
 
 #define LOG_TAG "TernakTTCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -54,12 +55,24 @@ static const char* TARGET_FILE   = "/data/adb/modules/ternak_tt/target.txt";
 
 static std::vector<std::string> g_targets;
 static time_t                   g_targets_mtime = 0;
-static std::recursive_mutex g_targets_mtx;
+static std::shared_mutex g_targets_mtx;
 
 static void reload_targets_if_changed() {
-    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     struct stat st{};
     bool have = (::stat(TARGET_FILE, &st) == 0);
+
+    {
+        std::shared_lock<std::shared_mutex> r_lock(g_targets_mtx);
+        if (!have) {
+            if (!g_targets.empty()) return;
+        } else if (!g_targets.empty() && st.st_mtime == g_targets_mtime) {
+            return;
+        }
+    }
+
+    std::unique_lock<std::shared_mutex> w_lock(g_targets_mtx);
+    // Double-check after acquiring write lock
+    have = (::stat(TARGET_FILE, &st) == 0);
     if (!have) {
         if (g_targets.empty()) {
             g_targets = {
@@ -79,7 +92,6 @@ static void reload_targets_if_changed() {
     std::vector<std::string> next;
     std::string line;
     while (std::getline(f, line)) {
-
         size_t hash = line.find('#');
         if (hash != std::string::npos) line.erase(hash);
         while (!line.empty() &&
@@ -108,8 +120,8 @@ static void reload_targets_if_changed() {
 }
 
 static bool is_target(const std::string& pkg) {
-    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     reload_targets_if_changed();
+    std::shared_lock<std::shared_mutex> lock(g_targets_mtx);
     for (const auto& t : g_targets) if (t == pkg) return true;
     return false;
 }

@@ -1,5 +1,5 @@
 
-#include <jni.h>
+#include "../include/jni.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -8,13 +8,15 @@
 #include <cstring>
 #include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/system_properties.h>
-#include <android/log.h>
+#include "../include/sys/system_properties.h"
+#include "../include/android/log.h"
 #include <string>
 #include <map>
 #include <vector>
 #include <sstream>
 #include <cstdlib>
+#include <string_view>
+#include <string_view>
 #include <signal.h>
 #include <ctime>
 #include "zygisk.hpp"
@@ -706,14 +708,24 @@ private:
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
     void parse_blob() {
-        std::string s(blob_.begin(), blob_.end());
-        std::istringstream iss(s);
-        std::string line;
-        while (std::getline(iss, line)) {
+        if (blob_.empty()) return;
+        std::string_view s(reinterpret_cast<const char*>(blob_.data()), blob_.size());
+
+        size_t start = 0;
+        while (start < s.size()) {
+            size_t end = s.find('\n', start);
+            if (end == std::string_view::npos) {
+                end = s.size();
+            }
+            std::string_view line = s.substr(start, end - start);
+            start = end + 1;
+
             if (line.empty() || line[0] == '#') continue;
-            auto eq = line.find('=');
-            if (eq == std::string::npos) continue;
-            g_id[line.substr(0, eq)] = line.substr(eq + 1);
+
+            size_t eq = line.find('=');
+            if (eq == std::string_view::npos) continue;
+
+            g_id.emplace(std::string(line.substr(0, eq)), std::string(line.substr(eq + 1)));
         }
     }
 };

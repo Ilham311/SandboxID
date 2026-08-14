@@ -11,6 +11,7 @@
 #include <fstream>
 #include <sstream>
 #include <random>
+#include <string_view>
 #include <chrono>
 #include <ctime>
 #include <cstring>
@@ -85,24 +86,34 @@ static std::string read_file(const std::string& p) {
     return ss.str();
 }
 
-static std::string trim(std::string s) {
+static std::string trim(std::string_view s) {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
-        s.pop_back();
+        s.remove_suffix(1);
     size_t st = s.find_first_not_of(" \t");
-    if (st != std::string::npos) s = s.substr(st);
-    return s;
+    if (st != std::string_view::npos) s.remove_prefix(st);
+    return std::string(s);
 }
 
 // Single source of truth for the version string: read it from module.prop at
 // runtime so the CLI banner and synthetic build.prop never drift from the
 // value the release pipeline stamps into module.prop.
 static std::string module_version() {
-    std::istringstream iss(read_file(std::string(MODDIR) + "/module.prop"));
-    std::string line;
-    const std::string key = "version=";
-    while (std::getline(iss, line)) {
-        if (line.compare(0, key.size(), key) == 0)
+    std::string content = read_file(std::string(MODDIR) + "/module.prop");
+    std::string_view s(content);
+    const std::string_view key = "version=";
+
+    size_t start = 0;
+    while (start < s.size()) {
+        size_t end = s.find('\n', start);
+        if (end == std::string_view::npos) {
+            end = s.size();
+        }
+        std::string_view line = s.substr(start, end - start);
+        start = end + 1;
+
+        if (line.compare(0, key.size(), key) == 0) {
             return trim(line.substr(key.size()));
+        }
     }
     return "unknown";
 }
@@ -547,13 +558,22 @@ static int cmd_targets() {
 
 static Identity load_identity() {
     Identity id;
-    std::istringstream iss(read_file(IDENTITY_FILE));
-    std::string line;
-    while (std::getline(iss, line)) {
+    std::string content = read_file(IDENTITY_FILE);
+    std::string_view s(content);
+
+    size_t start = 0;
+    while (start < s.size()) {
+        size_t end = s.find('\n', start);
+        if (end == std::string_view::npos) {
+            end = s.size();
+        }
+        std::string_view line = s.substr(start, end - start);
+        start = end + 1;
+
         if (line.empty() || line[0] == '#') continue;
-        auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        id.kv[line.substr(0, eq)] = line.substr(eq + 1);
+        size_t eq = line.find('=');
+        if (eq == std::string_view::npos) continue;
+        id.kv.emplace(std::string(line.substr(0, eq)), std::string(line.substr(eq + 1)));
     }
     return id;
 }
@@ -711,20 +731,34 @@ static int cmd_set(const std::string& key, const std::string& value) {
         }
     }
 
-    std::istringstream iss(read_file(IDENTITY_FILE));
-    std::string line, out;
+    std::string content = read_file(IDENTITY_FILE);
+    std::string_view s(content);
+    std::string out;
     bool replaced = false;
-    while (std::getline(iss, line)) {
-        std::string probe = line;
-        if (!probe.empty() && probe.back() == '\r') probe.pop_back();
-        auto eq = probe.find('=');
-        if (eq != std::string::npos && probe.substr(0, eq) == key) {
-            if (!replaced) { out += key + "=" + value + "\n"; replaced = true; }
-            continue;  // drop old / duplicate lines for this key
+
+    size_t start = 0;
+    while (start < s.size()) {
+        size_t end = s.find('\n', start);
+        if (end == std::string_view::npos) {
+            end = s.size();
         }
-        out += probe + "\n";
+        std::string_view line = s.substr(start, end - start);
+        start = end + 1;
+
+        std::string_view probe = line;
+        if (!probe.empty() && probe.back() == '\r') probe.remove_suffix(1);
+
+        size_t eq = probe.find('=');
+        if (eq != std::string_view::npos && probe.substr(0, eq) == key) {
+            if (!replaced) {
+                out.append(key).append("=").append(value).append("\n");
+                replaced = true;
+            }
+            continue;
+        }
+        out.append(probe).append("\n");
     }
-    if (!replaced) out += key + "=" + value + "\n";
+    if (!replaced) out.append(key).append("=").append(value).append("\n");
 
     if (!atomic_write(IDENTITY_FILE, out)) {
         fprintf(stderr, "! set: failed to write %s\n", IDENTITY_FILE);
