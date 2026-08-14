@@ -5,6 +5,9 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifndef TT_HOST_TEST
+#include <sys/mount.h>
+#endif
 #include <string>
 #include <vector>
 #include <map>
@@ -75,6 +78,15 @@ static bool atomic_write(const std::string& p, const std::string& data) {
     ::close(fd);
     if (w != (ssize_t)data.size()) { ::unlink(tmp.c_str()); return false; }
     return ::rename(tmp.c_str(), p.c_str()) == 0;
+}
+
+static bool write_in_place(const std::string& p, const std::string& data) {
+    int fd = ::open(p.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return false;
+    ssize_t w = ::write(fd, data.data(), data.size());
+    ::fsync(fd);
+    ::close(fd);
+    return w == (ssize_t)data.size();
 }
 
 static std::string read_file(const std::string& p) {
@@ -196,11 +208,27 @@ static Identity gen_identity() {
              p.product, p.release, p.id, p.incremental);
     id.kv["DESCRIPTION"] = desc;
 
-    std::time_t now = std::time(nullptr);
-    struct tm lt;
-    localtime_r(&now, &lt);
+    std::string sp = p.security_patch; // YYYY-MM-DD
+    int sp_year = 2024, sp_mon = 1, sp_day = 1;
+    if (sp.size() >= 10) {
+        sp_year = std::stoi(sp.substr(0, 4));
+        sp_mon = std::stoi(sp.substr(5, 2));
+        sp_day = std::stoi(sp.substr(8, 2));
+    }
+    struct tm sp_tm = {0};
+    sp_tm.tm_year = sp_year - 1900;
+    sp_tm.tm_mon = sp_mon - 1;
+    sp_tm.tm_mday = sp_day;
+    std::time_t sp_time = mktime(&sp_tm);
+
+    // Subtract random 30-120 days
+    std::uniform_int_distribution<> dist(30, 120);
+    std::time_t radio_time = sp_time - (dist(g) * 86400);
+    struct tm rad_tm;
+    localtime_r(&radio_time, &rad_tm);
+
     char date[16];
-    strftime(date, sizeof(date), "%y%m%d", &lt);
+    strftime(date, sizeof(date), "%y%m%d", &rad_tm);
     char rad[128];
     snprintf(rad, sizeof(rad), "g5300q-%s-%s-B-%s", date, date, p.incremental);
     id.kv["RADIO"] = rad;
@@ -508,7 +536,7 @@ static void generate_mount_files(const Identity& id) {
         if (!DEVICE.empty())       c += pfx + "device="       + DEVICE       + "\n";
         if (!PRODUCT.empty())      c += pfx + "name="         + PRODUCT      + "\n";
         std::string path = std::string(MOUNTDIR) + "/" + p.dir + "/build.prop";
-        atomic_write(path, c);
+        write_in_place(path, c);
         ::chmod(path.c_str(), 0644);
     }
 
@@ -531,7 +559,7 @@ static void generate_mount_files(const Identity& id) {
     xml += "</settings>\n";
 
     std::string xml_path = std::string(MOUNTDIR) + "/settings_secure.xml";
-    atomic_write(xml_path, xml);
+    write_in_place(xml_path, xml);
 
     ::chmod(xml_path.c_str(), 0600);
     ::chown(xml_path.c_str(), 1000, 1000);
@@ -622,11 +650,26 @@ static bool validate_identity(const Identity& id, std::vector<std::string>& erro
     const std::string radio = get("RADIO");
     const std::string inc = get("INCREMENTAL");
 
+    const std::string sec_patch = get("SECURITY_PATCH");
+    int sec_year = 9999;
+    if (sec_patch.size() >= 4) sec_year = std::stoi(sec_patch.substr(0, 4));
+
     if (soc_mfr == "Google" && soc_model.compare(0, 6, "Tensor") == 0) {
         // RADIO must match pattern g5[0-9]{3}[a-z]-[0-9]{6}-[0-9]{6}-B-<INCREMENTAL>
-        // We'll do a basic check here
         if (radio.compare(0, 2, "g5") != 0 || radio.find("-B-" + inc) == std::string::npos) {
             fail("RADIO mismatch: Tensor SOC requires g5...-B-<INCREMENTAL> pattern, got " + radio);
+        } else {
+            // Check dates from RADIO (positions 7..12 and 14..19)
+            if (radio.size() >= 20) {
+                std::string d1_str = radio.substr(7, 6);
+                std::string d2_str = radio.substr(14, 6);
+                int y1 = 2000 + std::stoi(d1_str.substr(0, 2));
+                int y2 = 2000 + std::stoi(d2_str.substr(0, 2));
+
+                if (y1 > sec_year || y2 > sec_year) {
+                    fail("radio_date_future: RADIO date (" + d1_str + " / " + d2_str + ") > SECURITY_PATCH year (" + std::to_string(sec_year) + ")");
+                }
+            }
         }
     }
 
@@ -663,7 +706,6 @@ static bool validate_identity(const Identity& id, std::vector<std::string>& erro
         }
     }
 
-    const std::string sec_patch = get("SECURITY_PATCH");
     if (!sec_patch.empty()) {
         // sec_patch format is YYYY-MM-DD
         if (sec_patch.size() == 10 && sec_patch[4] == '-' && sec_patch[7] == '-') {
@@ -826,6 +868,55 @@ static int cmd_apply_boot_impl() {
 }
 #endif
 
+#ifndef TT_HOST_TEST
+static int cmd_mount_overlay() {
+    struct BindEntry { const char* src_rel; const char* dst; };
+    static const BindEntry BIND_ENTRIES[] = {
+        {"system/build.prop",     "/system/build.prop"},
+        {"vendor/build.prop",     "/vendor/build.prop"},
+        {"odm/build.prop",        "/odm/etc/build.prop"},
+        {"odm/build.prop",        "/odm/build.prop"},
+        {"product/build.prop",    "/product/etc/build.prop"},
+        {"product/build.prop",    "/product/build.prop"},
+        {"system_ext/build.prop", "/system_ext/etc/build.prop"},
+        {"system_ext/build.prop", "/system_ext/build.prop"},
+        {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
+    };
+
+    int ok_count = 0;
+    for (const auto& e : BIND_ENTRIES) {
+        std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
+
+        // 1. Verify src is readable
+        if (::access(src.c_str(), R_OK) != 0) continue;
+
+        // 2. Verify dst is a regular file
+        struct stat st;
+        if (::lstat(e.dst, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+
+        // Try binding directly
+        if (::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr) == 0) {
+            ok_count++;
+            continue;
+        }
+
+        // If EROFS or EACCES, dst's parent might be on a read-only bind itself
+        // Remount the parent directory rw MS_REMOUNT|MS_BIND before the bind
+        std::string dst_str = e.dst;
+        size_t last_slash = dst_str.find_last_of('/');
+        if (last_slash != std::string::npos) {
+            std::string dst_parent = dst_str.substr(0, last_slash);
+            if (dst_parent.empty()) dst_parent = "/";
+            ::mount(nullptr, dst_parent.c_str(), nullptr, MS_REMOUNT | MS_BIND, nullptr);
+            if (::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr) == 0) {
+                ok_count++;
+            }
+        }
+    }
+    return ok_count;
+}
+#endif
+
 static int cmd_seed() {
     if (!ensure_root()) return 1;
     Identity id;
@@ -842,7 +933,12 @@ static int cmd_seed() {
         }
     }
     generate_mount_files(id);
+#ifndef TT_HOST_TEST
+    int mount_rc = cmd_mount_overlay();
+    printf("OK: seed complete (overlay mounted: %d/9)\n", mount_rc);
+#else
     printf("OK: seed complete (mount overlay ready at %s)\n", MOUNTDIR);
+#endif
     return 0;
 }
 
@@ -898,69 +994,20 @@ static int cmd_set(const std::string& key, const std::string& value) {
         }
     }
 
-    // LOCALE, LOCALE_LANG and LOCALE_COUNTRY must stay in the form
-    // LOCALE == LOCALE_LANG + "-" + LOCALE_COUNTRY (enforced by
-    // validate_identity). Editing any one of these piecemeal would leave the
-    // others stale, so derive the full set here before writing.
-    std::map<std::string, std::string> extra_updates;
-    if (key == "LOCALE" || key == "LOCALE_LANG" || key == "LOCALE_COUNTRY") {
-        Identity cur = load_identity_from_file(IDENTITY_FILE);
-        std::string locale = cur.kv.count("LOCALE") ? cur.kv["LOCALE"] : "";
-        std::string lang = cur.kv.count("LOCALE_LANG") ? cur.kv["LOCALE_LANG"] : "";
-        std::string country = cur.kv.count("LOCALE_COUNTRY") ? cur.kv["LOCALE_COUNTRY"] : "";
-
-        if (key == "LOCALE") {
-            auto dash = value.find('-');
-            if (dash != std::string::npos) {
-                lang = value.substr(0, dash);
-                country = value.substr(dash + 1);
-            }
-            locale = value;
-        } else if (key == "LOCALE_LANG") {
-            lang = value;
-            locale = lang + "-" + country;
-        } else {  // LOCALE_COUNTRY
-            country = value;
-            locale = lang + "-" + country;
-        }
-
-        extra_updates["LOCALE"] = locale;
-        extra_updates["LOCALE_LANG"] = lang;
-        extra_updates["LOCALE_COUNTRY"] = country;
-    }
-
     std::istringstream iss(read_file(IDENTITY_FILE));
     std::string line, out;
-    std::map<std::string, bool> replaced;
-    if (extra_updates.empty()) {
-        replaced[key] = false;
-    } else {
-        for (const auto& kv : extra_updates) replaced[kv.first] = false;
-    }
+    bool replaced = false;
     while (std::getline(iss, line)) {
         std::string probe = line;
         if (!probe.empty() && probe.back() == '\r') probe.pop_back();
         auto eq = probe.find('=');
-        if (eq != std::string::npos) {
-            std::string probe_key = probe.substr(0, eq);
-            auto it = replaced.find(probe_key);
-            if (it != replaced.end()) {
-                if (!it->second) {
-                    const std::string& v = extra_updates.empty() ? value : extra_updates[probe_key];
-                    out += probe_key + "=" + v + "\n";
-                    it->second = true;
-                }
-                continue;  // drop old / duplicate lines for this key
-            }
+        if (eq != std::string::npos && probe.substr(0, eq) == key) {
+            if (!replaced) { out += key + "=" + value + "\n"; replaced = true; }
+            continue;  // drop old / duplicate lines for this key
         }
         out += probe + "\n";
     }
-    for (auto& kv : replaced) {
-        if (!kv.second) {
-            const std::string& v = extra_updates.empty() ? value : extra_updates[kv.first];
-            out += kv.first + "=" + v + "\n";
-        }
-    }
+    if (!replaced) out += key + "=" + value + "\n";
 
     if (!atomic_write(IDENTITY_FILE, out)) {
         fprintf(stderr, "! set: failed to write %s\n", IDENTITY_FILE);

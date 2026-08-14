@@ -214,21 +214,11 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
             bool already_mounted = false;
             uint32_t pre_mounted_count = 0;
             if (mnt_fd >= 0) {
-                // mountinfo can exceed a single fixed-size buffer on devices
-                // with many mounts (containers, multi-user, etc.), so read
-                // the whole file in a growable buffer rather than a single
-                // bounded read that would silently truncate and miss entries
-                // past the cutoff.
-                std::string data;
-                char chunk[16384];
-                ssize_t n;
-                while ((n = ::read(mnt_fd, chunk, sizeof(chunk))) > 0) {
-                    data.append(chunk, n);
-                }
-                if (!data.empty()) {
-                    std::vector<char> buf(data.begin(), data.end());
-                    buf.push_back('\0');
-                    char* line = buf.data();
+                char buf[16384];
+                ssize_t n = ::read(mnt_fd, buf, sizeof(buf) - 1);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    char* line = buf;
                     while (line && *line) {
                         char* next_line = ::strchr(line, '\n');
                         if (next_line) {
