@@ -23,13 +23,14 @@ void test_resolve_prop() {
     assert(found);
     assert(out == "");
 
+    // Suppressed (empty-value) prefix rules must report unresolved for
+    // int/long/bool so callers keep the app's own default instead of a
+    // fabricated "0"/false.
     found = resolve_prop("persist.sys.miui_optimization", PropValueKind::Int, out);
-    assert(found);
-    assert(out == "0");
+    assert(!found);
 
     found = resolve_prop("persist.sys.turbosched.some_key", PropValueKind::Bool, out);
-    assert(found);
-    assert(out == "0");
+    assert(!found);
 
     // Test unknown keys fall through
     found = resolve_prop("ro.unknown.key", PropValueKind::Str, out);

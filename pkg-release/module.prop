@@ -1,7 +1,0 @@
-id=ternak_tt
-name=Ternak TT — Zygisk Fresh Persona
-version=v1.0.30
-versionCode=126
-author=Ilham311
-description=Spoofs the device identity that apps see: model, brand, manufacturer, SoC, build fingerprint, serial number, each app's Android ID / SSAID, plus a region persona (timezone, locale/language, SIM carrier) and opt-in fake uptime. Property spoofing happens pre-zygote; timezone/locale/carrier/uptime are applied per-target-app only (never device-wide). It only changes safe identity strings, so it avoids risky hardware or framework changes that can break boot. 1-tap Action: freshen writes a new identity.prop, then rotate_ids.sh syncs the shell layer (SSAID wipe, GAID, wlan MAC, Bluetooth MAC, device/BT name) to the same persona for consistency. Region fields are editable at runtime from the WebUI (no reboot). Targets TikTok (musically/trill/lite) + Grab Passenger; whitelist editable at runtime via target.txt (hot-reloaded, no rebuild).
-updateJson=https://raw.githubusercontent.com/Ilham311/Tt/main/update.json

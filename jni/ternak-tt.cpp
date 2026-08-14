@@ -898,20 +898,69 @@ static int cmd_set(const std::string& key, const std::string& value) {
         }
     }
 
+    // LOCALE, LOCALE_LANG and LOCALE_COUNTRY must stay in the form
+    // LOCALE == LOCALE_LANG + "-" + LOCALE_COUNTRY (enforced by
+    // validate_identity). Editing any one of these piecemeal would leave the
+    // others stale, so derive the full set here before writing.
+    std::map<std::string, std::string> extra_updates;
+    if (key == "LOCALE" || key == "LOCALE_LANG" || key == "LOCALE_COUNTRY") {
+        Identity cur = load_identity_from_file(IDENTITY_FILE);
+        std::string locale = cur.kv.count("LOCALE") ? cur.kv["LOCALE"] : "";
+        std::string lang = cur.kv.count("LOCALE_LANG") ? cur.kv["LOCALE_LANG"] : "";
+        std::string country = cur.kv.count("LOCALE_COUNTRY") ? cur.kv["LOCALE_COUNTRY"] : "";
+
+        if (key == "LOCALE") {
+            auto dash = value.find('-');
+            if (dash != std::string::npos) {
+                lang = value.substr(0, dash);
+                country = value.substr(dash + 1);
+            }
+            locale = value;
+        } else if (key == "LOCALE_LANG") {
+            lang = value;
+            locale = lang + "-" + country;
+        } else {  // LOCALE_COUNTRY
+            country = value;
+            locale = lang + "-" + country;
+        }
+
+        extra_updates["LOCALE"] = locale;
+        extra_updates["LOCALE_LANG"] = lang;
+        extra_updates["LOCALE_COUNTRY"] = country;
+    }
+
     std::istringstream iss(read_file(IDENTITY_FILE));
     std::string line, out;
-    bool replaced = false;
+    std::map<std::string, bool> replaced;
+    if (extra_updates.empty()) {
+        replaced[key] = false;
+    } else {
+        for (const auto& kv : extra_updates) replaced[kv.first] = false;
+    }
     while (std::getline(iss, line)) {
         std::string probe = line;
         if (!probe.empty() && probe.back() == '\r') probe.pop_back();
         auto eq = probe.find('=');
-        if (eq != std::string::npos && probe.substr(0, eq) == key) {
-            if (!replaced) { out += key + "=" + value + "\n"; replaced = true; }
-            continue;  // drop old / duplicate lines for this key
+        if (eq != std::string::npos) {
+            std::string probe_key = probe.substr(0, eq);
+            auto it = replaced.find(probe_key);
+            if (it != replaced.end()) {
+                if (!it->second) {
+                    const std::string& v = extra_updates.empty() ? value : extra_updates[probe_key];
+                    out += probe_key + "=" + v + "\n";
+                    it->second = true;
+                }
+                continue;  // drop old / duplicate lines for this key
+            }
         }
         out += probe + "\n";
     }
-    if (!replaced) out += key + "=" + value + "\n";
+    for (auto& kv : replaced) {
+        if (!kv.second) {
+            const std::string& v = extra_updates.empty() ? value : extra_updates[kv.first];
+            out += kv.first + "=" + v + "\n";
+        }
+    }
 
     if (!atomic_write(IDENTITY_FILE, out)) {
         fprintf(stderr, "! set: failed to write %s\n", IDENTITY_FILE);
