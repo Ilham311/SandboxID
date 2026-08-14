@@ -126,7 +126,15 @@ struct Identity {
             "BOARD","HARDWARE","FINGERPRINT","ID","DISPLAY","DESCRIPTION",
             "BOOTLOADER","HOST","USER","TYPE","TAGS",
             "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
-            "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
+            "SERIAL","RADIO","SOC_MANUFACTURER","SOC_MODEL",
+            "ANDROID_ID","GOOGLE_AID",
+            // COPG-parity stealth persona fields (see docs/COPG-PARITY):
+            // timezone + locale + carrier are applied per-app via the Zygisk
+            // Java/native hooks only, never device-wide, so nothing about the
+            // real device changes. FAKE_UPTIME_MS is opt-in (empty = off).
+            "TIMEZONE","LOCALE","LOCALE_LANG","LOCALE_COUNTRY",
+            "GSM_OPERATOR_ALPHA","GSM_OPERATOR_NUMERIC","GSM_OPERATOR_ISO",
+            "FAKE_UPTIME_MS",
         };
         std::string out;
         for (const auto& k : order) {
@@ -199,6 +207,30 @@ static Identity gen_identity() {
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
+
+    // --- COPG-parity stealth identity fields --------------------------------
+    // SoC is well-known per Pixel generation, so we can spoof it truthfully
+    // (a Pixel 8 must report Tensor G3). Wrong values would be a detection
+    // vector, so we only set what we know.
+    id.kv["SOC_MANUFACTURER"] = "Google";
+    id.kv["SOC_MODEL"]        = p.soc;
+
+    // Region persona: default to the ID market (Asia/Jakarta + id-ID) so the
+    // timezone, locale and SIM carrier all agree. Users can override any of
+    // these at runtime from the WebUI ("Region" tab -> ternak-tt set).
+    id.kv["TIMEZONE"]       = "Asia/Jakarta";
+    id.kv["LOCALE"]         = "id-ID";
+    id.kv["LOCALE_LANG"]    = "id";
+    id.kv["LOCALE_COUNTRY"] = "ID";
+
+    constexpr size_t NC = sizeof(TT_CARRIERS) / sizeof(TT_CARRIERS[0]);
+    const CarrierEntry& c = TT_CARRIERS[g() % NC];
+    id.kv["GSM_OPERATOR_ALPHA"]   = c.name;
+    id.kv["GSM_OPERATOR_NUMERIC"] = c.mccmnc;
+    id.kv["GSM_OPERATOR_ISO"]     = c.iso;
+
+    // FAKE_UPTIME_MS intentionally left unset: fake uptime is opt-in and off
+    // for a fresh persona. The WebUI can enable it (ternak-tt set FAKE_UPTIME_MS).
     return id;
 }
 
@@ -244,6 +276,8 @@ static void apply_native(const Identity& id) {
     const std::string TYPE         = get("TYPE");
     const std::string USER_        = get("USER");
     const std::string HOST         = get("HOST");
+    const std::string SOC_MFR      = get("SOC_MANUFACTURER");
+    const std::string SOC_MODEL    = get("SOC_MODEL");
 
     std::vector<Rp> rp = {
 
@@ -316,6 +350,9 @@ static void apply_native(const Identity& id) {
         {"gsm.version.baseband",               RADIO},
         {"ro.build.expect.baseband",           RADIO},
 
+        {"ro.soc.manufacturer",                SOC_MFR},
+        {"ro.soc.model",                       SOC_MODEL},
+
         {"ro.bootloader",                      std::string("unknown")},
         {"ro.boot.bootloader",                 std::string("unknown")},
     };
@@ -376,6 +413,11 @@ static void generate_mount_files(const Identity& id) {
     const std::string TYPE         = g("TYPE");
     const std::string USER_        = g("USER");
     const std::string HOST         = g("HOST");
+    const std::string SOC_MFR      = g("SOC_MANUFACTURER");
+    const std::string SOC_MODEL    = g("SOC_MODEL");
+    const std::string LOCALE       = g("LOCALE");
+    const std::string LOCALE_LANG  = g("LOCALE_LANG");
+    const std::string LOCALE_CC    = g("LOCALE_COUNTRY");
 
     std::string base;
     base += "# Ternak TT synthetic build.prop (" + module_version() + ")\n";
@@ -414,6 +456,14 @@ static void generate_mount_files(const Identity& id) {
     add("ro.build.product",                   DEVICE);
     add("gsm.version.baseband",               RADIO);
     add("ro.build.expect.baseband",           RADIO);
+    add("ro.soc.manufacturer",                SOC_MFR);
+    add("ro.soc.model",                       SOC_MODEL);
+    // Locale lives in the app-scoped build.prop overlay only (bind-mounted into
+    // the target's mount namespace), so anti-fraud SDKs that parse build.prop
+    // read the persona locale while the real device UI language is untouched.
+    add("ro.product.locale",                  LOCALE);
+    add("ro.product.locale.language",         LOCALE_LANG);
+    add("ro.product.locale.region",           LOCALE_CC);
 
     struct { const char* dir; const char* pfx; } parts[] = {
         {"system",     "ro.product.system."},
@@ -548,6 +598,14 @@ static int cmd_freshen() {
     printf("  SERIAL      : %s\n", id.kv["SERIAL"].c_str());
     printf("  ANDROID_ID  : %s\n", id.kv["ANDROID_ID"].c_str());
     printf("  GAID        : %s\n", id.kv["GOOGLE_AID"].c_str());
+    printf("  SOC         : %s %s\n",
+           id.kv["SOC_MANUFACTURER"].c_str(), id.kv["SOC_MODEL"].c_str());
+    printf("  TIMEZONE    : %s\n", id.kv["TIMEZONE"].c_str());
+    printf("  LOCALE      : %s\n", id.kv["LOCALE"].c_str());
+    printf("  CARRIER     : %s (%s / %s)\n",
+           id.kv["GSM_OPERATOR_ALPHA"].c_str(),
+           id.kv["GSM_OPERATOR_NUMERIC"].c_str(),
+           id.kv["GSM_OPERATOR_ISO"].c_str());
     printf("  SEC PATCH   : %s\n", id.kv["SECURITY_PATCH"].c_str());
 
     auto pkgs = load_targets();
@@ -615,6 +673,69 @@ static int cmd_unlock() {
     return 0;
 }
 
+// Runtime-editable persona fields exposed to the WebUI "Region" tab. Only the
+// stealth, per-app-scoped fields are settable here; the core device profile
+// (model/fingerprint/serial) is owned by `freshen` and must not be poked
+// piecemeal, or the persona would drift out of internal consistency.
+static bool is_settable_key(const std::string& k) {
+    static const char* allow[] = {
+        "TIMEZONE", "LOCALE", "LOCALE_LANG", "LOCALE_COUNTRY",
+        "GSM_OPERATOR_ALPHA", "GSM_OPERATOR_NUMERIC", "GSM_OPERATOR_ISO",
+        "FAKE_UPTIME_MS",
+    };
+    for (const char* a : allow) if (k == a) return true;
+    return false;
+}
+
+// Line-based key upsert that preserves every other line (including shell-owned
+// keys like WIFI_MAC / BLUETOOTH_ADDR that rotate_ids.sh appends). We do NOT go
+// through Identity::serialize here because that would drop any key outside its
+// fixed order list.
+static int cmd_set(const std::string& key, const std::string& value) {
+    if (!ensure_root()) return 1;
+    if (key.empty() || !is_settable_key(key)) {
+        fprintf(stderr, "! set: key '%s' is not runtime-settable\n", key.c_str());
+        return 1;
+    }
+    // Values are single-line prop entries; a newline would corrupt the file.
+    if (value.find('\n') != std::string::npos || value.find('\r') != std::string::npos) {
+        fprintf(stderr, "! set: value must not contain newlines\n");
+        return 1;
+    }
+    if (key == "FAKE_UPTIME_MS" && !value.empty()) {
+        for (char ch : value) {
+            if (ch < '0' || ch > '9') {
+                fprintf(stderr, "! set: FAKE_UPTIME_MS must be a non-negative integer (ms)\n");
+                return 1;
+            }
+        }
+    }
+
+    std::istringstream iss(read_file(IDENTITY_FILE));
+    std::string line, out;
+    bool replaced = false;
+    while (std::getline(iss, line)) {
+        std::string probe = line;
+        if (!probe.empty() && probe.back() == '\r') probe.pop_back();
+        auto eq = probe.find('=');
+        if (eq != std::string::npos && probe.substr(0, eq) == key) {
+            if (!replaced) { out += key + "=" + value + "\n"; replaced = true; }
+            continue;  // drop old / duplicate lines for this key
+        }
+        out += probe + "\n";
+    }
+    if (!replaced) out += key + "=" + value + "\n";
+
+    if (!atomic_write(IDENTITY_FILE, out)) {
+        fprintf(stderr, "! set: failed to write %s\n", IDENTITY_FILE);
+        return 1;
+    }
+    ::chmod(IDENTITY_FILE, 0644);
+    printf("OK: %s=%s\n", key.c_str(), value.c_str());
+    printf("  (reopen the target app to apply; run `ternak-tt apply-boot` to sync props)\n");
+    return 0;
+}
+
 static int cmd_rollback() {
     if (!ensure_root()) return 1;
     std::string d = read_file(IDENTITY_BAK);
@@ -643,6 +764,9 @@ static void usage(const char* p) {
         "  apply-boot   Re-apply native prop (used by service.sh)\n"
         "  seed         Fast bootstrap: identity + mount overlay only\n"
         "               (used by post-fs-data.sh, no native/wipe)\n"
+        "  set K V      Set a runtime persona field (TIMEZONE, LOCALE,\n"
+        "               LOCALE_LANG, LOCALE_COUNTRY, GSM_OPERATOR_ALPHA,\n"
+        "               GSM_OPERATOR_NUMERIC, GSM_OPERATOR_ISO, FAKE_UPTIME_MS)\n"
         "  targets      List current target packages from target.txt\n",
         module_version().c_str(), p);
 }
@@ -657,6 +781,10 @@ int main(int argc, char** argv) {
     if (!strcmp(c, "unlock"))     return cmd_unlock();
     if (!strcmp(c, "apply-boot")) return cmd_apply_boot();
     if (!strcmp(c, "seed"))       return cmd_seed();
+    if (!strcmp(c, "set")) {
+        if (argc < 3) { fprintf(stderr, "! set: usage: ternak-tt set <KEY> <VALUE>\n"); return 1; }
+        return cmd_set(argv[2], argc >= 4 ? argv[3] : "");
+    }
     if (!strcmp(c, "targets"))    return cmd_targets();
     usage(argv[0]);
     return 1;

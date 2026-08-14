@@ -150,6 +150,26 @@ select {
 
 .hint { color: #666; font-size: 12px; }
 
+.field { margin-bottom: 12px; }
+.field label {
+  display: block;
+  color: #888;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+input[type="text"], input:not([type]) {
+  width: 100%;
+  background: #101010;
+  color: #fafafa;
+  border: 1px solid #1c1c1c;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  outline: none;
+}
+input[type="text"]:focus, input:not([type]):focus { border-color: #3ba1ff; }
+
 pre#logBody {
   background: #0d0d0d;
   border: 1px solid #1c1c1c;

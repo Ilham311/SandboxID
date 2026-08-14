@@ -10,7 +10,7 @@
 ![Android](https://img.shields.io/badge/android-13%2B-brightgreen)
 ![Zygisk](https://img.shields.io/badge/zygisk-ZygiskNext%20%7C%20HMA--OSS%20%7C%20ReZygisk-orange)
 
-Spoofs the device identity that apps see: model, brand, manufacturer, build fingerprint, serial, per-app Android ID / SSAID, GAID, wlan/Bluetooth MAC, and device/BT name — all in one tap.
+Spoofs the device identity that apps see: model, brand, manufacturer, SoC, build fingerprint, serial, per-app Android ID / SSAID, GAID, wlan/Bluetooth MAC, device/BT name, plus a per-app region persona (timezone, locale, SIM carrier) and opt-in fake uptime — all in one tap.
 
 </div>
 
@@ -58,6 +58,9 @@ Ternak TT rotates the identity strings apps read at runtime. Property spoofing h
 - **wlan MAC + WifiConfigStore backup** — backs up `WifiConfigStore.xml` before deleting, no silent wifi loss.
 - **SSAID surgical wipe** — per-user `settings_ssaid.xml` backed up then removed; system_server regenerates a clean SSAID at next boot.
 - **Auto-rotating backups** — every destructive op copies the target file into `$MODDIR/backups/` first (`backup_rotate` keeps 10).
+- **Region persona (COPG-parity, non-gaming)** — per-target-app **timezone**, **locale/language** (BCP-47) and **SIM carrier** (name / MCC+MNC / ISO), applied in-process only (`TimeZone.setDefault`, `Locale.setDefault`, `TZ`/`tzset`, `gsm.*` + `ro.product.locale` hooks) so the real device is never reconfigured. Editable at runtime from the WebUI **Region** tab (`ternak-tt set`), no reboot. See [`docs/COPG-PARITY-v1.0.30.md`](docs/COPG-PARITY-v1.0.30.md).
+- **SoC identity** — `Build.SOC_MANUFACTURER` / `SOC_MODEL` + `ro.soc.*` spoofed to the correct Tensor generation for the chosen Pixel.
+- **Opt-in fake uptime** — persona `FAKE_UPTIME_MS` re-implements the three `SystemClock` uptime readers with a constant offset (monotonic-preserving) for anti-fraud flows that distrust freshly-reset devices. Off by default.
 - **Reboot-idempotent identity** — `WIFI_MAC`, `BLUETOOTH_ADDR`, `BLUETOOTH_NAME` persisted to `identity.prop` so the next tap keeps the same values until an explicit re-rotate.
 - **Crash watchdog** catches `SIGABRT` / `SIGFPE` / `SIGILL` / `SIGSYS`, rate-limited to 3 per signal, and restores `SIG_DFL` so ART's tombstone flow still fires.
 - **Debug variant** auto-captures per-boot session logs (`session-YYYYMMDD-HHMMSS.log`), produces a chat-shareable summary on Action tap, keeps a persistent `crashes.log` journal.
@@ -210,11 +213,18 @@ Written by `freshen`, read by native prop apply, Zygisk hooks, and `rotate_ids.s
 | `FINGERPRINT`, `ID`, `DISPLAY` | `freshen` | Build metadata |
 | `SERIAL` | `freshen` | `Build.SERIAL`, `ro.serialno`, `ro.boot.serialno` |
 | `RADIO` | `freshen` | `Build.RADIO`, `gsm.version.baseband` |
+| `SOC_MANUFACTURER`, `SOC_MODEL` | `freshen` | `Build.SOC_*` (API 31+), `ro.soc.*` |
 | `ANDROID_ID` | `freshen` | Per-app `Settings.Secure.ANDROID_ID` (L1/L2 hook) |
 | `GOOGLE_AID` | `freshen` | GAID (also written by `set_gaid_value` if missing) |
+| `TIMEZONE` | `freshen` / `set` | Per-app timezone (`TimeZone.setDefault`, `TZ`, `persist.sys.timezone` hook) |
+| `LOCALE`, `LOCALE_LANG`, `LOCALE_COUNTRY` | `freshen` / `set` | Per-app locale (`Locale.setDefault`, `ro.product.locale*`) |
+| `GSM_OPERATOR_ALPHA`, `GSM_OPERATOR_NUMERIC`, `GSM_OPERATOR_ISO` | `freshen` / `set` | Per-app SIM carrier (`gsm.*operator.*` hooks) |
+| `FAKE_UPTIME_MS` | `set` | Opt-in fake uptime offset in ms (empty/0 = off); `SystemClock` hooks |
 | `WIFI_MAC` | `rotate_ids.sh` | Persisted wlan0 MAC (v1.0.19+) |
 | `BLUETOOTH_ADDR` | `rotate_ids.sh` | Persisted BT adapter MAC (v1.0.19+) |
 | `BLUETOOTH_NAME` | `rotate_ids.sh` | Optional override for device/BT name (v1.0.19+); if unset, uses `MODEL` |
+
+`ternak-tt set <KEY> <VALUE>` upserts the region/uptime fields (allowlisted) at runtime while preserving every other key; the WebUI **Region** tab uses it.
 
 Use `identity_get KEY` / `identity_persist KEY VALUE` from `helpers.sh` for programmatic access. Atomic upsert via awk + rename.
 

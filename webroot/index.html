@@ -20,6 +20,7 @@
 
 <nav>
   <button class="tab active" data-tab="persona">Persona</button>
+  <button class="tab" data-tab="region">Region</button>
   <button class="tab" data-tab="rotate">Rotate</button>
   <button class="tab" data-tab="targets">Targets</button>
   <button class="tab" data-tab="log">Log</button>
@@ -32,6 +33,40 @@
       <button id="refreshBtn" class="ghost">Refresh</button>
     </div>
     <div id="identity" class="kv"></div>
+  </section>
+
+  <section id="region" class="page">
+    <div class="hint">Timezone, locale and SIM carrier are applied per-target-app only (never device-wide). Changes take effect the next time a target app is launched.</div>
+    <div class="field">
+      <label for="rgTz">Timezone (IANA)</label>
+      <input id="rgTz" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="Asia/Jakarta">
+    </div>
+    <div class="field">
+      <label for="rgLocale">Locale (BCP-47)</label>
+      <input id="rgLocale" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="id-ID">
+    </div>
+    <div class="field">
+      <label for="rgCarrier">SIM carrier name</label>
+      <input id="rgCarrier" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="Telkomsel">
+    </div>
+    <div class="field">
+      <label for="rgMccmnc">Carrier MCC+MNC</label>
+      <input id="rgMccmnc" spellcheck="false" inputmode="numeric" autocomplete="off" placeholder="51010">
+    </div>
+    <div class="field">
+      <label for="rgIso">Carrier country ISO</label>
+      <input id="rgIso" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="id">
+    </div>
+    <div class="field">
+      <label for="rgUptime">Fake uptime (ms, 0 = off)</label>
+      <input id="rgUptime" spellcheck="false" inputmode="numeric" autocomplete="off" placeholder="0">
+      <div class="hint">Opt-in. Makes apps read a device that has been up longer (e.g. 864000000 = 10 days). Off by default; reset by Freshen.</div>
+    </div>
+    <div class="row">
+      <button id="rgSave" class="primary sm">Save region</button>
+      <button id="rgReload" class="ghost sm">Reload</button>
+      <div id="rgStatus" class="hint"></div>
+    </div>
   </section>
 
   <section id="rotate" class="page">

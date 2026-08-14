@@ -53,7 +53,10 @@ static const std::string& val(const std::string& k) {
         {"GSM_OPERATOR_ALPHA",    "Telkomsel"},
         {"GSM_OPERATOR_ISO",      "id"},
         {"BUILD_CHARACTERISTICS", "default"},
-        {"PERSIST_TIMEZONE",      "Asia/Jakarta"},
+        {"TIMEZONE",              "Asia/Jakarta"},
+        {"LOCALE",                "id-ID"},
+        {"LOCALE_LANG",           "id"},
+        {"LOCALE_COUNTRY",        "ID"},
         {"CPU_ABI",               "arm64-v8a"},
         {"CPU_ABI2",              ""},
         {"CPU_ABILIST",           "arm64-v8a,armeabi-v7a,armeabi"},
@@ -109,7 +112,13 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
         {"gsm.operator.iso-country", "GSM_OPERATOR_ISO"},
         {"gsm.sim.operator.iso-country", "GSM_OPERATOR_ISO"},
         {"ro.build.characteristics", "BUILD_CHARACTERISTICS"},
-        {"persist.sys.timezone",     "PERSIST_TIMEZONE"},
+        {"persist.sys.timezone",     "TIMEZONE"},
+        {"persist.sys.locale",       "LOCALE"},
+        {"ro.product.locale",        "LOCALE"},
+        {"ro.product.locale.language", "LOCALE_LANG"},
+        {"ro.product.locale.region", "LOCALE_COUNTRY"},
+        {"ro.soc.manufacturer",      "SOC_MANUFACTURER"},
+        {"ro.soc.model",             "SOC_MODEL"},
         {"ro.product.cpu.abi",       "CPU_ABI"},
         {"ro.product.cpu.abi2",      "CPU_ABI2"},
         {"ro.product.cpu.abilist",   "CPU_ABILIST"},
@@ -446,6 +455,8 @@ static void install_build_hook(JNIEnv* env) {
             {"DISPLAY","DISPLAY"}, {"BOOTLOADER","BOOTLOADER"},
             {"HOST","HOST"}, {"USER","USER"}, {"TYPE","TYPE"},
             {"TAGS","TAGS"}, {"SERIAL","SERIAL"}, {"RADIO","RADIO"},
+            // API 31+ fields; set_str no-ops via ExceptionClear if absent.
+            {"SOC_MANUFACTURER","SOC_MANUFACTURER"}, {"SOC_MODEL","SOC_MODEL"},
         };
         for (const auto& [fn, k] : f) set_str(env, build, fn, val(k));
         env->DeleteLocalRef(build);
@@ -463,6 +474,108 @@ static void install_build_hook(JNIEnv* env) {
         }
         env->DeleteLocalRef(ver);
     } else env->ExceptionClear();
+}
+
+// Apply the persona timezone + locale to *this* app process only. These are
+// COPG's "stealth, system-side" locale/timezone: we shift the process defaults
+// (java.util.TimeZone / java.util.Locale) plus the C-library TZ, so the app and
+// its native code read the persona region without any device-wide change.
+static void install_locale_hook(JNIEnv* env) {
+    const std::string tz = val("TIMEZONE");
+    if (!tz.empty()) {
+        setenv("TZ", tz.c_str(), 1);
+        tzset();
+        jclass tzc = env->FindClass("java/util/TimeZone");
+        if (tzc) {
+            jmethodID get = env->GetStaticMethodID(
+                tzc, "getTimeZone", "(Ljava/lang/String;)Ljava/util/TimeZone;");
+            jmethodID setDef = env->GetStaticMethodID(
+                tzc, "setDefault", "(Ljava/util/TimeZone;)V");
+            if (get && setDef) {
+                jstring js = env->NewStringUTF(tz.c_str());
+                jobject tzo = env->CallStaticObjectMethod(tzc, get, js);
+                if (tzo) {
+                    env->CallStaticVoidMethod(tzc, setDef, tzo);
+                    env->DeleteLocalRef(tzo);
+                }
+                if (js) env->DeleteLocalRef(js);
+            }
+            env->ExceptionClear();
+            env->DeleteLocalRef(tzc);
+            LOGD("L3 timezone default set to '%s'", tz.c_str());
+        } else env->ExceptionClear();
+    }
+
+    const std::string tag = val("LOCALE");   // BCP-47, e.g. "id-ID"
+    if (!tag.empty()) {
+        jclass lc = env->FindClass("java/util/Locale");
+        if (lc) {
+            jmethodID forTag = env->GetStaticMethodID(
+                lc, "forLanguageTag", "(Ljava/lang/String;)Ljava/util/Locale;");
+            jmethodID setDef = env->GetStaticMethodID(
+                lc, "setDefault", "(Ljava/util/Locale;)V");
+            if (forTag && setDef) {
+                jstring js = env->NewStringUTF(tag.c_str());
+                jobject lo = env->CallStaticObjectMethod(lc, forTag, js);
+                if (lo) {
+                    env->CallStaticVoidMethod(lc, setDef, lo);
+                    env->DeleteLocalRef(lo);
+                }
+                if (js) env->DeleteLocalRef(js);
+            }
+            env->ExceptionClear();
+            env->DeleteLocalRef(lc);
+            LOGD("L3 locale default set to '%s'", tag.c_str());
+        } else env->ExceptionClear();
+    }
+}
+
+// Opt-in fake uptime. We re-implement the three SystemClock readers the
+// platform backs with clock_gettime and add a fixed offset, so an app that
+// distrusts a freshly-reset device sees a phone that has been up for a while.
+// The offset is constant, so all three stay monotonic and their deltas (what
+// timers/animations actually use) are unchanged. currentTimeMillis is left
+// alone on purpose — shifting wall-clock time breaks TLS/cert validation.
+static jlong g_uptime_offset_ms = 0;
+
+static jlong tt_sysclock_uptime_millis(JNIEnv*, jclass) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (jlong)(ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL) + g_uptime_offset_ms;
+}
+static jlong tt_sysclock_elapsed_realtime(JNIEnv*, jclass) {
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    return (jlong)(ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL) + g_uptime_offset_ms;
+}
+static jlong tt_sysclock_elapsed_realtime_nanos(JNIEnv*, jclass) {
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    return (jlong)(ts.tv_sec * 1000000000LL + ts.tv_nsec)
+         + g_uptime_offset_ms * 1000000LL;
+}
+
+static void install_uptime_hook(JNIEnv* env) {
+    const std::string v = val("FAKE_UPTIME_MS");
+    if (v.empty()) return;                       // opt-in: off unless persona sets it
+    long long off = std::strtoll(v.c_str(), nullptr, 10);
+    if (off <= 0) return;
+    g_uptime_offset_ms = (jlong)off;
+
+    jclass sc = env->FindClass("android/os/SystemClock");
+    if (!sc) { env->ExceptionClear(); return; }
+    JNINativeMethod m[] = {
+        {const_cast<char*>("uptimeMillis"),        const_cast<char*>("()J"),
+         reinterpret_cast<void*>(tt_sysclock_uptime_millis)},
+        {const_cast<char*>("elapsedRealtime"),     const_cast<char*>("()J"),
+         reinterpret_cast<void*>(tt_sysclock_elapsed_realtime)},
+        {const_cast<char*>("elapsedRealtimeNanos"), const_cast<char*>("()J"),
+         reinterpret_cast<void*>(tt_sysclock_elapsed_realtime_nanos)},
+    };
+    env->RegisterNatives(sc, m, 3);
+    env->ExceptionClear();
+    env->DeleteLocalRef(sc);
+    LOGI("fake uptime enabled: +%lld ms", (long long)off);
 }
 
 static void request_companion_mounts(zygisk::Api* api) {
@@ -567,6 +680,9 @@ public:
                 env_->DeleteLocalRef(sp);
             } else env_->ExceptionClear();
         }
+
+        install_locale_hook(env_);
+        install_uptime_hook(env_);
 #ifdef TT_DEBUG
         install_leak_sensors(env_);
 #endif
