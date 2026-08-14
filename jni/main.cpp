@@ -78,7 +78,7 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
     if (!j_key) return j_def;
     const char* raw = env->GetStringUTFChars(j_key, nullptr);
     std::string k(raw ? raw : "");
-    env->ReleaseStringUTFChars(j_key, raw);
+    if (raw) env->ReleaseStringUTFChars(j_key, raw);
     LOGD("L2 native_get('%s') requested", k.c_str());
 
     static const std::map<std::string, std::string> map = {
@@ -234,7 +234,7 @@ static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
         std::string k(r ? r : "");
-        env->ReleaseStringUTFChars(j_key, r);
+        if (r) env->ReleaseStringUTFChars(j_key, r);
         const auto& m = tt_int_spoof();
         auto it = m.find(k);
         if (it != m.end()) {
@@ -260,7 +260,7 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
         std::string k(r ? r : "");
-        env->ReleaseStringUTFChars(j_key, r);
+        if (r) env->ReleaseStringUTFChars(j_key, r);
         const auto& m = tt_long_spoof();
         auto it = m.find(k);
         if (it != m.end()) {
@@ -285,7 +285,7 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean 
     if (j_key) {
         const char* r = env->GetStringUTFChars(j_key, nullptr);
         std::string k(r ? r : "");
-        env->ReleaseStringUTFChars(j_key, r);
+        if (r) env->ReleaseStringUTFChars(j_key, r);
         const auto& m = tt_bool_spoof();
         auto it = m.find(k);
         if (it != m.end()) {
@@ -616,7 +616,7 @@ public:
         if (args && args->nice_name) {
             const char* raw = env_->GetStringUTFChars(args->nice_name, nullptr);
             pkg = raw ? raw : "";
-            env_->ReleaseStringUTFChars(args->nice_name, raw);
+            if (raw) env_->ReleaseStringUTFChars(args->nice_name, raw);
         }
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
         if (pkg.empty()) { unload(); return; }
