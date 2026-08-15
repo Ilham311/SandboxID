@@ -125,14 +125,8 @@ static int safe_stoi(const std::string& s, int fallback) {
     // Check for range errors (long limits or int limits)
     if (errno == ERANGE || val < INT_MIN || val > INT_MAX) return fallback;
 
-    // Skip any trailing whitespaces
-    while (std::isspace(static_cast<unsigned char>(*endptr))) {
-        ++endptr;
-    }
-
-    // If there is trailing non-whitespace junk, return fallback
-    if (*endptr != '\0') return fallback;
-
+    // Like std::stoi, trailing non-numeric junk after the parsed number is
+    // ignored rather than treated as an error.
     return static_cast<int>(val);
 }
 
