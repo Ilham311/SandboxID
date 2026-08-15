@@ -19,6 +19,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <climits>
+#include <cctype>
 #include "pool_tt.hpp"
 
 static const char* MODDIR         = "/data/adb/modules/ternak_tt";
@@ -108,13 +110,24 @@ static std::string trim(std::string s) {
 // std::stoi throws on non-numeric or empty input; identity fields are
 // untrusted (read from a file that may be hand-edited or corrupted), so a
 // throwing parse would crash the process. Fall back to `fallback` instead.
+// The module is built with -fno-exceptions (see jni/CMakeLists.txt),
+// so try/catch is not allowed here. Use std::strtol instead.
 static int safe_stoi(const std::string& s, int fallback) {
     if (s.empty()) return fallback;
-    try {
-        return std::stoi(s);
-    } catch (const std::exception&) {
-        return fallback;
-    }
+    const char* start = s.c_str();
+    char* endptr = nullptr;
+    errno = 0;
+    long val = std::strtol(start, &endptr, 10);
+
+    // Check if no digits were consumed
+    if (endptr == start) return fallback;
+
+    // Check for range errors (long limits or int limits)
+    if (errno == ERANGE || val < INT_MIN || val > INT_MAX) return fallback;
+
+    // Like std::stoi, trailing non-numeric junk after the parsed number is
+    // ignored rather than treated as an error.
+    return static_cast<int>(val);
 }
 
 // Single source of truth for the version string: read it from module.prop at
