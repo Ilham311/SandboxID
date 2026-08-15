@@ -164,6 +164,7 @@ struct MountReport {
     uint32_t skip;
     uint32_t skip_src;
     uint32_t skip_dst;
+    uint32_t preseeded;  // subset of ok that was already bound before we entered
     int32_t  stage;   // 0 = bind loop ran, 1 = open target ns failed, 2 = setns failed, 3 = already mounted
     int32_t  err;     // errno captured for stage 1/2
     int32_t  mount_errno[16];   // 0 = ok/skipped, else errno
@@ -209,10 +210,18 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
             rep.stage = 2; rep.err = errno;
             ::close(tgt_ns);
         } else {
-            // Check if pre-fork overlay is already present
-            int mnt_fd = ::open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
-            bool already_mounted = false;
+            // Track which bind targets are already covered in this namespace,
+            // one bit per BIND_ENTRIES slot. The previous code toggled a single
+            // "already_mounted" bool the moment ANY entry matched — which meant
+            // a partial pre-fs-data overlay (say, 3 of 9 mounts landed but 6
+            // failed on a device that only exposes /system-as-root) caused the
+            // runtime loop to skip ALL 9 binds, leaving 6/9 build.props
+            // unspoofed forever. Now each slot is independent.
+            bool preseeded[num_entries];
+            for (size_t i = 0; i < num_entries; ++i) preseeded[i] = false;
             uint32_t pre_mounted_count = 0;
+
+            int mnt_fd = ::open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
             if (mnt_fd >= 0) {
                 char buf[16384];
                 size_t carry = 0; // bytes of an unterminated partial line kept from the previous chunk
@@ -241,12 +250,18 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
                         *next_line = '\0';
                         next_line++;
 
-                        // Parse mountinfo line
-                        // Format: 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
-                        // Fields are space-separated. 4th field is root (source), 5th is mount point (dest).
+                        // mountinfo layout (see proc(5)):
+                        //   36 35 98:0 /root /mnt rw,... shared:1 - ext3 /dev/root ...
+                        //   ^1 ^2 ^3    ^4    ^5  ^6     ^7...    - fs  source ...
+                        // Field 4 is the *root of the source fs* (e.g. "/" for a
+                        // typical bind), NOT the source path. The previous
+                        // implementation compared field 4 against BIND_ENTRIES[].dst
+                        // which is semantically wrong — it happened to match when
+                        // the whole /system was bind-mounted at "/" (root_src="/system"),
+                        // but that's a coincidence and misfires elsewhere.
+                        // We now compare only field 5 (mount destination).
                         int field_idx = 1;
                         char* p = line;
-                        char* root_src = nullptr;
                         char* mount_dst = nullptr;
                         while (*p) {
                             while (*p == ' ') p++;
@@ -257,20 +272,19 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
                                 *p = '\0';
                                 p++;
                             }
-                            if (field_idx == 4) root_src = field_start;
-                            else if (field_idx == 5) mount_dst = field_start;
-
-                            if (field_idx == 5) break;
+                            if (field_idx == 5) { mount_dst = field_start; break; }
                             field_idx++;
                         }
 
-                        if (root_src && mount_dst) {
+                        if (mount_dst) {
                             for (size_t i = 0; i < num_entries; ++i) {
-                                if (::strcmp(mount_dst, BIND_ENTRIES[i].dst) == 0 ||
-                                    ::strcmp(root_src, BIND_ENTRIES[i].dst) == 0) {
+                                if (!preseeded[i] &&
+                                    ::strcmp(mount_dst, BIND_ENTRIES[i].dst) == 0) {
+                                    preseeded[i] = true;
                                     pre_mounted_count++;
-                                    already_mounted = true;
-                                    break;
+                                    // Do not break: two BIND_ENTRIES may share a
+                                    // dst (they don't today, but future entries
+                                    // like /odm/build.prop might duplicate).
                                 }
                             }
                         }
@@ -297,13 +311,20 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
                 ::close(mnt_fd);
             }
 
-            if (already_mounted) {
+            // If every slot is already covered, short-circuit exactly like
+            // before. Otherwise skip only the covered slots and bind the rest —
+            // the partial-recovery case the old bool logic could not express.
+            if (pre_mounted_count == num_entries) {
                 rep.stage = 3;
                 rep.ok = pre_mounted_count;
+                rep.preseeded = pre_mounted_count;
             } else {
                 rep.stage = 0;
+                rep.ok = pre_mounted_count;   // count pre-seeded as ok too
+                rep.preseeded = pre_mounted_count;
                 for (size_t i = 0; i < num_entries; ++i) {
                     const auto& e = BIND_ENTRIES[i];
+                    if (preseeded[i]) continue;
                     if (src_fds[i] < 0) { rep.skip_src++; rep.skip++; continue; }
                     if (::access(e.dst, F_OK) != 0) { rep.skip_dst++; rep.skip++; continue; }
 
@@ -311,6 +332,12 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
                     ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
 
                     if (::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr) == 0) {
+                        // Best-effort MS_PRIVATE on the new mount so it doesn't
+                        // propagate through any peer group the target inherited
+                        // from Zygote. If the kernel rejects the private flip,
+                        // the mount stays shared — same as pre-fix — so we
+                        // ignore the return value.
+                        ::mount(nullptr, e.dst, nullptr, MS_PRIVATE, nullptr);
                         rep.ok++;
                     } else {
                         rep.fail++;
@@ -353,13 +380,16 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
         return 0;
     }
     if (rep.stage == 3) {
-        LOGI("pre-fork overlay already present for pid=%u, skipping runtime bind", target_pid);
+        LOGI("pre-fork overlay already present for pid=%u (%u/%u slots), skipping runtime bind",
+             target_pid, rep.preseeded, (uint32_t)num_entries);
         return rep.ok;
     }
 
-    LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
+    LOGI("child mount for pid=%u: %u ok (%u pre-seeded + %u new), %u fail, %u skip "
          "(skip_src=%u skip_dst=%u) [%s]",
-         target_pid, rep.ok, rep.fail, rep.skip, rep.skip_src, rep.skip_dst, TT_VARIANT_TAG);
+         target_pid, rep.ok, rep.preseeded,
+         rep.ok - rep.preseeded,
+         rep.fail, rep.skip, rep.skip_src, rep.skip_dst, TT_VARIANT_TAG);
 
     bool mount_locked = false;
     for (size_t i = 0; i < num_entries && i < 16; ++i) {

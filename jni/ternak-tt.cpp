@@ -216,7 +216,9 @@ static Identity gen_identity() {
     id.kv["RELEASE"]         = p.release;
     id.kv["SDK_INT"]         = std::to_string(p.sdk);
     id.kv["SECURITY_PATCH"]  = p.security_patch;
-    id.kv["BOOTLOADER"]      = "unknown";
+    // BOOTLOADER is overwritten below with a device-consistent value; the "unknown"
+    // literal that used to live here was written into ro.bootloader and stood out
+    // in every fingerprint (no shipping Pixel reports that string).
     id.kv["HOST"]            = "abfarm-release";
     id.kv["USER"]            = "android-build";
     id.kv["TYPE"]            = "user";
@@ -233,30 +235,61 @@ static Identity gen_identity() {
              p.product, p.release, p.id, p.incremental);
     id.kv["DESCRIPTION"] = desc;
 
+    // --- RADIO / baseband ----------------------------------------------------
+    // A real Pixel modem string looks like:
+    //     g5300q-241015-241028-B-12244875
+    //                ^d1     ^d2
+    // where d1 is the RIL compile date and d2 is the OTA sign-off date (a few
+    // days later, never identical). Setting both to the same value was a
+    // deterministic fingerprint of the previous rotator, and hardcoding the
+    // "g5300q" prefix regardless of SoC generation made "Pixel 6 reporting a
+    // G3-era modem" a trivial anti-fraud tell.
+    //
+    // We now:
+    //   1. Anchor the two dates a few days apart, both in UTC (timegm) so the
+    //      generator behaves the same regardless of the box's local TZ.
+    //   2. Pick the chipset-appropriate prefix from PixelEntry.baseband_prefix.
     std::string sp = p.security_patch; // YYYY-MM-DD
     int sp_year = 2024, sp_mon = 1, sp_day = 1;
     if (sp.size() >= 10) {
         sp_year = safe_stoi(sp.substr(0, 4), sp_year);
-        sp_mon = safe_stoi(sp.substr(5, 2), sp_mon);
-        sp_day = safe_stoi(sp.substr(8, 2), sp_day);
+        sp_mon  = safe_stoi(sp.substr(5, 2), sp_mon);
+        sp_day  = safe_stoi(sp.substr(8, 2), sp_day);
     }
     struct tm sp_tm = {0};
     sp_tm.tm_year = sp_year - 1900;
-    sp_tm.tm_mon = sp_mon - 1;
+    sp_tm.tm_mon  = sp_mon - 1;
     sp_tm.tm_mday = sp_day;
-    std::time_t sp_time = mktime(&sp_tm);
+    // timegm interprets the tm as UTC. mktime uses the process TZ, which would
+    // shift the generated date by a day on a device that's set to UTC-negative
+    // and whose SECURITY_PATCH is early in the month.
+    std::time_t sp_time = timegm(&sp_tm);
 
-    // Subtract random 30-120 days
-    std::uniform_int_distribution<> dist(30, 120);
-    std::time_t radio_time = sp_time - (dist(g) * 86400);
-    struct tm rad_tm;
-    localtime_r(&radio_time, &rad_tm);
+    // OTA sign-off (d2) sits between 30 and 120 days before the security patch
+    // ships. RIL compile (d1) is 1-14 days earlier than the OTA sign-off. This
+    // keeps the two dates monotonically ordered and never equal.
+    std::uniform_int_distribution<> back_dist(30, 120);
+    std::uniform_int_distribution<> gap_dist(1, 14);
+    std::time_t d2_time = sp_time - (back_dist(g) * 86400LL);
+    std::time_t d1_time = d2_time - (gap_dist(g)  * 86400LL);
+    struct tm d1_tm{}, d2_tm{};
+    gmtime_r(&d1_time, &d1_tm);
+    gmtime_r(&d2_time, &d2_tm);
 
-    char date[16];
-    strftime(date, sizeof(date), "%y%m%d", &rad_tm);
+    char d1_str[16], d2_str[16];
+    strftime(d1_str, sizeof(d1_str), "%y%m%d", &d1_tm);
+    strftime(d2_str, sizeof(d2_str), "%y%m%d", &d2_tm);
     char rad[128];
-    snprintf(rad, sizeof(rad), "g5300q-%s-%s-B-%s", date, date, p.incremental);
+    snprintf(rad, sizeof(rad), "%s-%s-%s-B-%s",
+             p.baseband_prefix, d1_str, d2_str, p.incremental);
     id.kv["RADIO"] = rad;
+
+    // BOOTLOADER: real Pixels report "<device>-<board-rev>-<incremental>". The
+    // previous "unknown" value stood out because no shipping Pixel ever writes
+    // that literal string to ro.bootloader in a release build.
+    char bl[128];
+    snprintf(bl, sizeof(bl), "%s-1.0-%s", p.device, p.incremental);
+    id.kv["BOOTLOADER"] = bl;
 
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
@@ -349,6 +382,7 @@ static void apply_native(const Identity& id) {
     const std::string SDK_INT      = get("SDK_INT");
     const std::string SECPATCH     = get("SECURITY_PATCH");
     const std::string INCREMENTAL  = get("INCREMENTAL");
+    const std::string BOOTLOADER   = get("BOOTLOADER");
     const std::string RADIO        = get("RADIO");
     const std::string TAGS         = get("TAGS");
     const std::string TYPE         = get("TYPE");
@@ -431,8 +465,8 @@ static void apply_native(const Identity& id) {
         {"ro.soc.manufacturer",                SOC_MFR},
         {"ro.soc.model",                       SOC_MODEL},
 
-        {"ro.bootloader",                      std::string("unknown")},
-        {"ro.boot.bootloader",                 std::string("unknown")},
+        {"ro.bootloader",                      BOOTLOADER},
+        {"ro.boot.bootloader",                 BOOTLOADER},
     };
 
     if (::access(RESETPROP, X_OK) == 0) {
@@ -479,6 +513,7 @@ static void generate_mount_files(const Identity& id) {
     const std::string DEVICE       = g("DEVICE");
     const std::string PRODUCT      = g("PRODUCT");
     const std::string BOARD        = g("BOARD");
+    const std::string BOOTLOADER   = g("BOOTLOADER");
     const std::string ID_          = g("ID");
     const std::string FP           = g("FINGERPRINT");
     const std::string DISPLAY      = g("DISPLAY");
@@ -530,8 +565,8 @@ static void generate_mount_files(const Identity& id) {
     add("ro.build.version.sdk",               SDK);
     add("ro.build.version.security_patch",    SECPATCH);
     add("ro.build.version.incremental",       INCREMENTAL);
-    add("ro.bootloader",                      std::string("unknown"));
-    add("ro.boot.bootloader",                 std::string("unknown"));
+    add("ro.bootloader",                      BOOTLOADER);
+    add("ro.boot.bootloader",                 BOOTLOADER);
     add("ro.build.product",                   DEVICE);
     add("gsm.version.baseband",               RADIO);
     add("ro.build.expect.baseband",           RADIO);
@@ -684,20 +719,71 @@ static bool validate_identity(const Identity& id, std::vector<std::string>& erro
     if (sec_patch.size() >= 4) sec_year = safe_stoi(sec_patch.substr(0, 4), sec_year);
 
     if (soc_mfr == "Google" && soc_model.compare(0, 6, "Tensor") == 0) {
-        // RADIO must match pattern g5[0-9]{3}[a-z]-[0-9]{6}-[0-9]{6}-B-<INCREMENTAL>
-        if (radio.compare(0, 2, "g5") != 0 || radio.find("-B-" + inc) == std::string::npos) {
-            fail("RADIO mismatch: Tensor SOC requires g5...-B-<INCREMENTAL> pattern, got " + radio);
-        } else {
-            // Check dates from RADIO (positions 7..12 and 14..19)
-            if (radio.size() >= 20) {
-                std::string d1_str = radio.substr(7, 6);
-                std::string d2_str = radio.substr(14, 6);
+        // Every Tensor-era baseband is "<prefix>-YYMMDD-YYMMDD-B-<INCREMENTAL>".
+        // The prefix is chipset-scoped, not "g5300q for everyone" — Pixel 6/6a
+        // uses g5123b, Pixel 7 series uses g5300b, Pixel 8/9 uses g5300q, and
+        // Pixel 10 uses g5300s. Reject any RADIO that doesn't match the
+        // chipset-appropriate family and doesn't have INCREMENTAL as its suffix.
+        //
+        // For SoC families we don't have hard data on, we fall back to the
+        // shared "starts with g5" check to stay permissive rather than block a
+        // fresh Pixel entry that the pool hasn't been taught about yet.
+        const char* want_prefix = nullptr;
+        if      (soc_model == "Tensor")     want_prefix = "g5123b";
+        else if (soc_model == "Tensor G2")  want_prefix = "g5300b";
+        else if (soc_model == "Tensor G3")  want_prefix = "g5300q";
+        else if (soc_model == "Tensor G4")  want_prefix = "g5300q";
+        else if (soc_model == "Tensor G5")  want_prefix = "g5300s";
+
+        bool prefix_ok = want_prefix
+            ? radio.compare(0, std::strlen(want_prefix), want_prefix) == 0
+            : radio.compare(0, 2, "g5") == 0;
+
+        if (!prefix_ok || radio.find("-B-" + inc) == std::string::npos) {
+            fail("RADIO mismatch: " + soc_model + " expects prefix "
+                 + (want_prefix ? want_prefix : "g5") + " and -B-<INCREMENTAL="
+                 + inc + "> suffix, got " + radio);
+        } else if (radio.size() >= 20) {
+            // Format is "<prefix>-YYMMDD-YYMMDD-...". Locate the two dates by
+            // scanning from the tail so a longer prefix (e.g. "g5300b") does
+            // not shift the fixed-offset positions the old parser assumed.
+            //
+            // We index from just after the leading prefix + "-", parse d1 and
+            // d2, and require d1 <= d2. Real Pixel modem strings never carry
+            // "start > end" and never carry "start == end" either — the OTA
+            // sign-off happens 1-14 days after RIL compile.
+            const size_t pfx_len = want_prefix
+                ? std::strlen(want_prefix)
+                : radio.find('-');
+            if (pfx_len != std::string::npos && radio.size() >= pfx_len + 14
+                && radio[pfx_len] == '-' && radio[pfx_len + 7] == '-') {
+                std::string d1_str = radio.substr(pfx_len + 1, 6);
+                std::string d2_str = radio.substr(pfx_len + 8, 6);
+
+                // Convert YYMMDD to a comparable integer (YYYYMMDD in 20xx).
+                auto parse6 = [&](const std::string& s) -> long {
+                    if (s.size() != 6) return -1;
+                    for (char c : s) if (c < '0' || c > '9') return -1;
+                    return 200000L * 100 + std::strtol(s.c_str(), nullptr, 10);
+                };
+                long d1 = parse6(d1_str);
+                long d2 = parse6(d2_str);
+                if (d1 < 0 || d2 < 0) {
+                    fail("RADIO date parse: " + d1_str + " / " + d2_str);
+                } else if (d1 > d2) {
+                    fail("RADIO dates out of order: d1=" + d1_str
+                         + " > d2=" + d2_str);
+                }
+
                 int y1 = 2000 + safe_stoi(d1_str.substr(0, 2), 0);
                 int y2 = 2000 + safe_stoi(d2_str.substr(0, 2), 0);
-
                 if (y1 > sec_year || y2 > sec_year) {
-                    fail("radio_date_future: RADIO date (" + d1_str + " / " + d2_str + ") > SECURITY_PATCH year (" + std::to_string(sec_year) + ")");
+                    fail("radio_date_future: RADIO date (" + d1_str + " / "
+                         + d2_str + ") > SECURITY_PATCH year ("
+                         + std::to_string(sec_year) + ")");
                 }
+            } else {
+                fail("RADIO layout: could not locate two YYMMDD dates in " + radio);
             }
         }
     }
@@ -808,6 +894,34 @@ static bool ensure_root() {
         return false;
     }
     return true;
+}
+
+// Rotate the pool `iters` times, running validate_identity on each generated
+// persona. This is the regression net for gen_identity: every future edit to
+// pool_tt.hpp or the RADIO / VNDK derivation must keep this loop green.
+// Runs in both host and target builds so CI can wire it into tests/run_tests.sh.
+static int cmd_selfcheck(int argc, char** argv) {
+    int iters = 200;
+    if (argc >= 3) {
+        int v = safe_stoi(argv[2], -1);
+        if (v > 0) iters = v;
+    }
+    int failed = 0;
+    for (int i = 0; i < iters; ++i) {
+        Identity id = gen_identity();
+        std::vector<std::string> errors;
+        if (!validate_identity(id, errors)) {
+            failed++;
+            fprintf(stderr, "iter %d FAILED (MODEL=%s SOC=%s RADIO=%s):\n",
+                    i,
+                    id.kv["MODEL"].c_str(),
+                    id.kv["SOC_MODEL"].c_str(),
+                    id.kv["RADIO"].c_str());
+            for (const auto& e : errors) fprintf(stderr, "  - %s\n", e.c_str());
+        }
+    }
+    printf("selfcheck: %d iterations, %d failed\n", iters, failed);
+    return failed == 0 ? 0 : 2;
 }
 
 static int cmd_freshen() {
@@ -923,24 +1037,31 @@ static int cmd_mount_overlay() {
         struct stat st;
         if (::lstat(e.dst, &st) != 0 || !S_ISREG(st.st_mode)) continue;
 
-        // Try binding directly
+        // Bind mount does NOT require write access to the underlying filesystem
+        // — the kernel just overlays the source dentry on top of the target,
+        // and the destination fs stays as ro as it was. The previous code
+        // tried to "MS_REMOUNT|MS_BIND" the parent on EACCES/EROFS, which is
+        // both wrong (bind can't be blocked by fs ro) and dangerous (it drops
+        // the ro flag on /system, /vendor, etc. across the *global* mount
+        // namespace we're standing in at seed time).
+        //
+        // If mount(2) fails here, the two realistic causes are:
+        //   * EPERM/EINVAL  — kernel mount-lock; must be seeded pre-zygote via
+        //                     post-fs-data.sh, no userspace remedy.
+        //   * EACCES        — SELinux; needs a policy exception, not a remount.
+        // We report the errno and move on; overlay stealth is preserved.
         if (::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr) == 0) {
+            // Detach this new mount from the shared/master group so subsequent
+            // rotations don't propagate through peers. Best-effort: kernels
+            // that reject MS_PRIVATE on a fresh bind fall back to shared, which
+            // is the pre-fix behaviour.
+            ::mount(nullptr, e.dst, nullptr, MS_PRIVATE, nullptr);
             ok_count++;
             continue;
         }
 
-        // If EROFS or EACCES, dst's parent might be on a read-only bind itself
-        // Remount the parent directory rw MS_REMOUNT|MS_BIND before the bind
-        std::string dst_str = e.dst;
-        size_t last_slash = dst_str.find_last_of('/');
-        if (last_slash != std::string::npos) {
-            std::string dst_parent = dst_str.substr(0, last_slash);
-            if (dst_parent.empty()) dst_parent = "/";
-            ::mount(nullptr, dst_parent.c_str(), nullptr, MS_REMOUNT | MS_BIND, nullptr);
-            if (::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr) == 0) {
-                ok_count++;
-            }
-        }
+        fprintf(stderr, "! mount %s -> %s failed: errno=%d (%s)\n",
+                src.c_str(), e.dst, errno, strerror(errno));
     }
     return ok_count;
 }
@@ -1111,7 +1232,8 @@ static void usage(const char* p) {
         "               LOCALE_LANG, LOCALE_COUNTRY, GSM_OPERATOR_ALPHA,\n"
         "               GSM_OPERATOR_NUMERIC, GSM_OPERATOR_ISO, FAKE_UPTIME_MS)\n"
         "  targets      List current target packages from target.txt\n"
-        "  validate     Validate an identity.prop file for consistency\n",
+        "  validate     Validate an identity.prop file for consistency\n"
+        "  selfcheck [N] Regenerate + validate the persona N times (default 200)\n",
         module_version().c_str(), p);
 }
 
@@ -1133,6 +1255,7 @@ int main(int argc, char** argv) {
         return cmd_set(argv[2], argc >= 4 ? argv[3] : "");
     }
     if (!strcmp(c, "targets"))    return cmd_targets();
+    if (!strcmp(c, "selfcheck"))  return cmd_selfcheck(argc, argv);
     usage(argv[0]);
     return 1;
 }

@@ -34,4 +34,22 @@ if $DIR/ternak-tt-host validate $DIR/fixtures/identity.bad_vndk.prop; then
     exit 1
 fi
 
+echo "Testing bad radio prefix persona (Tensor+g5300q must be rejected)..."
+if $DIR/ternak-tt-host validate $DIR/fixtures/identity.bad_radio_prefix.prop; then
+    echo "ERROR: bad radio prefix persona passed validation (it should fail)"
+    exit 1
+fi
+
+echo "Testing bad radio dates persona (d1 > d2 must be rejected)..."
+if $DIR/ternak-tt-host validate $DIR/fixtures/identity.bad_radio_dates.prop; then
+    echo "ERROR: bad radio dates persona passed validation (it should fail)"
+    exit 1
+fi
+
+echo "Running selfcheck: gen_identity -> validate_identity x 500..."
+if ! $DIR/ternak-tt-host selfcheck 500; then
+    echo "ERROR: selfcheck detected persona/validator drift"
+    exit 1
+fi
+
 echo "All persona validation tests passed."
