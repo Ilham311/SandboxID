@@ -214,27 +214,32 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
             bool already_mounted = false;
             uint32_t pre_mounted_count = 0;
             if (mnt_fd >= 0) {
-                // mountinfo can exceed a single fixed-size buffer on devices
-                // with many mounts (containers, multi-user, etc.), so read
-                // the whole file in a growable buffer rather than a single
-                // bounded read that would silently truncate and miss entries
-                // past the cutoff.
-                std::string data;
-                char chunk[16384];
-                ssize_t n;
-                while ((n = ::read(mnt_fd, chunk, sizeof(chunk))) > 0) {
-                    data.append(chunk, n);
-                }
-                if (!data.empty()) {
-                    std::vector<char> buf(data.begin(), data.end());
-                    buf.push_back('\0');
-                    char* line = buf.data();
-                    while (line && *line) {
-                        char* next_line = ::strchr(line, '\n');
-                        if (next_line) {
-                            *next_line = '\0';
-                            next_line++;
+                char buf[16384];
+                size_t carry = 0; // bytes of an unterminated partial line kept from the previous chunk
+                for (;;) {
+                    ssize_t n = ::read(mnt_fd, buf + carry, sizeof(buf) - 1 - carry);
+                    if (n <= 0) break;
+                    size_t total = carry + (size_t)n;
+                    buf[total] = '\0';
+
+                    char* line = buf;
+                    char* last_newline = nullptr;
+                    {
+                        // Find the last newline in this chunk so we know where the
+                        // trailing partial line (if any) begins.
+                        char* p = buf + total;
+                        while (p > buf) {
+                            --p;
+                            if (*p == '\n') { last_newline = p; break; }
                         }
+                    }
+
+                    char* scan_end = last_newline ? last_newline + 1 : buf;
+                    while (line < scan_end && *line) {
+                        char* next_line = ::strchr(line, '\n');
+                        if (!next_line || next_line >= scan_end) break;
+                        *next_line = '\0';
+                        next_line++;
 
                         // Parse mountinfo line
                         // Format: 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
@@ -270,6 +275,23 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
                             }
                         }
                         line = next_line;
+                    }
+
+                    // Carry over any trailing partial line (no newline yet) to the
+                    // front of the buffer for the next read, instead of dropping it.
+                    size_t remaining = buf + total - scan_end;
+                    if (remaining > 0 && remaining < sizeof(buf) - 1) {
+                        ::memmove(buf, scan_end, remaining);
+                        carry = remaining;
+                    } else {
+                        // No newline found in a full buffer, or nothing left: drop
+                        // the oversized/partial remainder and resync on next read.
+                        carry = 0;
+                    }
+
+                    if (sizeof(buf) - 1 - carry == 0) {
+                        // Buffer full with no newline; reset to avoid infinite loop.
+                        carry = 0;
                     }
                 }
                 ::close(mnt_fd);

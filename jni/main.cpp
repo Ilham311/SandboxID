@@ -110,6 +110,14 @@ static const PropRule g_prop_rules[] = {
     {"ro.vendor.perf.scroll_opt",         true, ""},
     {"ro.dulquersalmaan22.",              true, ""},
     {"persist.sys.multi",                 true, ""},
+    {"persist.sys.muilt",                 true, ""},
+    {"persist.vendor.dpm.",               true, ""},
+    {"persist.sys.debug.app.",            true, ""},
+    {"persist.sys.debug.scout_",          true, ""},
+    {"persist.sys.debug.scout.",          true, ""},
+    {"persist.omni.",                     true, ""},
+    {"persist.mtbf.",                     true, ""},
+    {"sys.forcedark.",                    true, ""},
     {"sys.displayfeature_",               true, ""},
     {"ro.df.effect.",                     true, ""},
     {"ro.vendor.df.effect.",              true, ""},
@@ -163,20 +171,12 @@ static bool resolve_prop(const std::string& key, PropValueKind kind, std::string
                     v = mapped;
                 }
 
-                // An empty value_str means "suppress this key" (mask it as if
-                // unset). For string props that's a valid empty string, but
-                // for int/long/bool there is no sensible empty encoding, so
-                // report unresolved and let the caller keep the app's own
-                // default instead of fabricating a spoofed "0"/false.
                 if (kind == PropValueKind::Str) out = v;
-                else if (v.empty()) {
-                    return false;
-                }
                 else if (kind == PropValueKind::Int) {
-                    out = std::to_string(std::strtol(v.c_str(), nullptr, 10));
+                    out = v.empty() ? "0" : std::to_string(std::strtol(v.c_str(), nullptr, 10));
                 }
                 else if (kind == PropValueKind::Long) {
-                    out = std::to_string(std::strtoll(v.c_str(), nullptr, 10));
+                    out = v.empty() ? "0" : std::to_string(std::strtoll(v.c_str(), nullptr, 10));
                 }
                 else if (kind == PropValueKind::Bool) {
                     bool b = (v == "1" || v == "true" || v == "yes");
@@ -197,19 +197,12 @@ static bool resolve_prop(const std::string& key, PropValueKind kind, std::string
 
     if (best_prefix) {
         std::string v = best_prefix->value_str;
-        // Same suppression semantics as the exact-match branch above: an
-        // empty value_str masks the key rather than spoofing a numeric/bool
-        // zero, so leave it unresolved and let the caller's app default
-        // stand for int/long/bool.
         if (kind == PropValueKind::Str) out = v;
-        else if (v.empty()) {
-            return false;
-        }
         else if (kind == PropValueKind::Int) {
-            out = std::to_string(std::strtol(v.c_str(), nullptr, 10));
+            out = v.empty() ? "0" : std::to_string(std::strtol(v.c_str(), nullptr, 10));
         }
         else if (kind == PropValueKind::Long) {
-            out = std::to_string(std::strtoll(v.c_str(), nullptr, 10));
+            out = v.empty() ? "0" : std::to_string(std::strtoll(v.c_str(), nullptr, 10));
         }
         else if (kind == PropValueKind::Bool) {
             bool b = (v == "1" || v == "true" || v == "yes");
@@ -380,21 +373,6 @@ static bool tt_should_suppress_key(const std::string& k) {
 
     if (k.compare(0, 13, "debug.watson.") == 0)
         return true;
-
-    // Keys masked by an empty-value g_prop_rules entry (MIUI/perf-monitor
-    // prefixes, ro.gfx.driver.*, persist.sys.zygote.start_pid, ...) are
-    // suppressed the same way for int/long/bool hooks: resolve_prop() returns
-    // unresolved for these rather than spoofing a numeric 0, so without this
-    // check the caller would fall through and leak the real property value.
-    for (const auto& rule : g_prop_rules) {
-        if (rule.value_str[0] != '\0') continue;
-        if (rule.is_prefix) {
-            size_t rule_len = std::strlen(rule.key);
-            if (k.compare(0, rule_len, rule.key) == 0) return true;
-        } else if (k == rule.key) {
-            return true;
-        }
-    }
     return false;
 }
 
