@@ -105,6 +105,18 @@ static std::string trim(std::string s) {
     return s;
 }
 
+// std::stoi throws on non-numeric or empty input; identity fields are
+// untrusted (read from a file that may be hand-edited or corrupted), so a
+// throwing parse would crash the process. Fall back to `fallback` instead.
+static int safe_stoi(const std::string& s, int fallback) {
+    if (s.empty()) return fallback;
+    try {
+        return std::stoi(s);
+    } catch (const std::exception&) {
+        return fallback;
+    }
+}
+
 // Single source of truth for the version string: read it from module.prop at
 // runtime so the CLI banner and synthetic build.prop never drift from the
 // value the release pipeline stamps into module.prop.
@@ -211,9 +223,9 @@ static Identity gen_identity() {
     std::string sp = p.security_patch; // YYYY-MM-DD
     int sp_year = 2024, sp_mon = 1, sp_day = 1;
     if (sp.size() >= 10) {
-        sp_year = std::stoi(sp.substr(0, 4));
-        sp_mon = std::stoi(sp.substr(5, 2));
-        sp_day = std::stoi(sp.substr(8, 2));
+        sp_year = safe_stoi(sp.substr(0, 4), sp_year);
+        sp_mon = safe_stoi(sp.substr(5, 2), sp_mon);
+        sp_day = safe_stoi(sp.substr(8, 2), sp_day);
     }
     struct tm sp_tm = {0};
     sp_tm.tm_year = sp_year - 1900;
@@ -536,7 +548,9 @@ static void generate_mount_files(const Identity& id) {
         if (!DEVICE.empty())       c += pfx + "device="       + DEVICE       + "\n";
         if (!PRODUCT.empty())      c += pfx + "name="         + PRODUCT      + "\n";
         std::string path = std::string(MOUNTDIR) + "/" + p.dir + "/build.prop";
-        write_in_place(path, c);
+        if (!write_in_place(path, c)) {
+            fprintf(stderr, "! failed to write %s (partial overlay, persona may be inconsistent)\n", path.c_str());
+        }
         ::chmod(path.c_str(), 0644);
     }
 
@@ -559,7 +573,9 @@ static void generate_mount_files(const Identity& id) {
     xml += "</settings>\n";
 
     std::string xml_path = std::string(MOUNTDIR) + "/settings_secure.xml";
-    write_in_place(xml_path, xml);
+    if (!write_in_place(xml_path, xml)) {
+        fprintf(stderr, "! failed to write %s (partial file, android_id/GAID overlay may be stale)\n", xml_path.c_str());
+    }
 
     ::chmod(xml_path.c_str(), 0600);
     ::chown(xml_path.c_str(), 1000, 1000);
@@ -652,7 +668,7 @@ static bool validate_identity(const Identity& id, std::vector<std::string>& erro
 
     const std::string sec_patch = get("SECURITY_PATCH");
     int sec_year = 9999;
-    if (sec_patch.size() >= 4) sec_year = std::stoi(sec_patch.substr(0, 4));
+    if (sec_patch.size() >= 4) sec_year = safe_stoi(sec_patch.substr(0, 4), sec_year);
 
     if (soc_mfr == "Google" && soc_model.compare(0, 6, "Tensor") == 0) {
         // RADIO must match pattern g5[0-9]{3}[a-z]-[0-9]{6}-[0-9]{6}-B-<INCREMENTAL>
@@ -663,8 +679,8 @@ static bool validate_identity(const Identity& id, std::vector<std::string>& erro
             if (radio.size() >= 20) {
                 std::string d1_str = radio.substr(7, 6);
                 std::string d2_str = radio.substr(14, 6);
-                int y1 = 2000 + std::stoi(d1_str.substr(0, 2));
-                int y2 = 2000 + std::stoi(d2_str.substr(0, 2));
+                int y1 = 2000 + safe_stoi(d1_str.substr(0, 2), 0);
+                int y2 = 2000 + safe_stoi(d2_str.substr(0, 2), 0);
 
                 if (y1 > sec_year || y2 > sec_year) {
                     fail("radio_date_future: RADIO date (" + d1_str + " / " + d2_str + ") > SECURITY_PATCH year (" + std::to_string(sec_year) + ")");
@@ -994,20 +1010,49 @@ static int cmd_set(const std::string& key, const std::string& value) {
         }
     }
 
+    // LOCALE, LOCALE_LANG and LOCALE_COUNTRY must stay consistent with the
+    // "LANG-COUNTRY" == LOCALE invariant enforced by validate_identity(),
+    // so setting any one of them also recomputes the other two.
+    std::map<std::string, std::string> updates;
+    if (key == "LOCALE") {
+        auto dash = value.find('-');
+        if (dash == std::string::npos) {
+            fprintf(stderr, "! set: LOCALE must be in lang-COUNTRY form (e.g. en-US)\n");
+            return 1;
+        }
+        updates["LOCALE"]         = value;
+        updates["LOCALE_LANG"]    = value.substr(0, dash);
+        updates["LOCALE_COUNTRY"] = value.substr(dash + 1);
+    } else if (key == "LOCALE_LANG" || key == "LOCALE_COUNTRY") {
+        Identity cur = load_identity_from_file(IDENTITY_FILE);
+        std::string lang    = key == "LOCALE_LANG"    ? value : cur.kv["LOCALE_LANG"];
+        std::string country = key == "LOCALE_COUNTRY" ? value : cur.kv["LOCALE_COUNTRY"];
+        updates["LOCALE_LANG"]    = lang;
+        updates["LOCALE_COUNTRY"] = country;
+        updates["LOCALE"]         = lang + "-" + country;
+    } else {
+        updates[key] = value;
+    }
+
     std::istringstream iss(read_file(IDENTITY_FILE));
     std::string line, out;
-    bool replaced = false;
+    std::map<std::string, bool> replaced;
+    for (const auto& u : updates) replaced[u.first] = false;
     while (std::getline(iss, line)) {
         std::string probe = line;
         if (!probe.empty() && probe.back() == '\r') probe.pop_back();
         auto eq = probe.find('=');
-        if (eq != std::string::npos && probe.substr(0, eq) == key) {
-            if (!replaced) { out += key + "=" + value + "\n"; replaced = true; }
+        std::string k = eq != std::string::npos ? probe.substr(0, eq) : std::string();
+        auto it = updates.find(k);
+        if (it != updates.end()) {
+            if (!replaced[k]) { out += k + "=" + it->second + "\n"; replaced[k] = true; }
             continue;  // drop old / duplicate lines for this key
         }
         out += probe + "\n";
     }
-    if (!replaced) out += key + "=" + value + "\n";
+    for (const auto& u : updates) {
+        if (!replaced[u.first]) out += u.first + "=" + u.second + "\n";
+    }
 
     if (!atomic_write(IDENTITY_FILE, out)) {
         fprintf(stderr, "! set: failed to write %s\n", IDENTITY_FILE);

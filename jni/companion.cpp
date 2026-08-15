@@ -215,16 +215,31 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
             uint32_t pre_mounted_count = 0;
             if (mnt_fd >= 0) {
                 char buf[16384];
-                ssize_t n = ::read(mnt_fd, buf, sizeof(buf) - 1);
-                if (n > 0) {
-                    buf[n] = '\0';
+                size_t carry = 0; // bytes of an unterminated partial line kept from the previous chunk
+                for (;;) {
+                    ssize_t n = ::read(mnt_fd, buf + carry, sizeof(buf) - 1 - carry);
+                    if (n <= 0) break;
+                    size_t total = carry + (size_t)n;
+                    buf[total] = '\0';
+
                     char* line = buf;
-                    while (line && *line) {
-                        char* next_line = ::strchr(line, '\n');
-                        if (next_line) {
-                            *next_line = '\0';
-                            next_line++;
+                    char* last_newline = nullptr;
+                    {
+                        // Find the last newline in this chunk so we know where the
+                        // trailing partial line (if any) begins.
+                        char* p = buf + total;
+                        while (p > buf) {
+                            --p;
+                            if (*p == '\n') { last_newline = p; break; }
                         }
+                    }
+
+                    char* scan_end = last_newline ? last_newline + 1 : buf;
+                    while (line < scan_end && *line) {
+                        char* next_line = ::strchr(line, '\n');
+                        if (!next_line || next_line >= scan_end) break;
+                        *next_line = '\0';
+                        next_line++;
 
                         // Parse mountinfo line
                         // Format: 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
@@ -260,6 +275,23 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
                             }
                         }
                         line = next_line;
+                    }
+
+                    // Carry over any trailing partial line (no newline yet) to the
+                    // front of the buffer for the next read, instead of dropping it.
+                    size_t remaining = buf + total - scan_end;
+                    if (remaining > 0 && remaining < sizeof(buf) - 1) {
+                        ::memmove(buf, scan_end, remaining);
+                        carry = remaining;
+                    } else {
+                        // No newline found in a full buffer, or nothing left: drop
+                        // the oversized/partial remainder and resync on next read.
+                        carry = 0;
+                    }
+
+                    if (sizeof(buf) - 1 - carry == 0) {
+                        // Buffer full with no newline; reset to avoid infinite loop.
+                        carry = 0;
                     }
                 }
                 ::close(mnt_fd);
