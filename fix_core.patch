@@ -1,0 +1,92 @@
+--- jni/companion.cpp
++++ jni/companion.cpp
+@@ -19,6 +19,7 @@
+ #include <signal.h>
+ #include <time.h>
+ #include <android/log.h>
++#include <mutex>
+
+ #define LOG_TAG "TernakTTCompanion"
+ #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+@@ -45,8 +46,11 @@
+
+ static std::vector<std::string> g_targets;
+ static time_t                   g_targets_mtime = 0;
++static std::recursive_mutex g_targets_mtx;
+
+ static void reload_targets_if_changed() {
++    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
+     struct stat st{};
+     bool have = (::stat(TARGET_FILE, &st) == 0);
+     if (!have) {
+@@ -104,6 +108,7 @@
+ }
+
+ static bool is_target(const std::string& pkg) {
++    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
+     reload_targets_if_changed();
+     for (const auto& t : g_targets) if (t == pkg) return true;
+     return false;
+@@ -141,6 +146,14 @@
+
+         ::close(pipefd[0]);
+         LOGD("child: pid=%d parent_target=%u", getpid(), target_pid);
++
++        const size_t num_entries = sizeof(BIND_ENTRIES)/sizeof(BIND_ENTRIES[0]);
++        int src_fds[num_entries];
++        for (size_t i = 0; i < num_entries; ++i) {
++            std::string src = std::string(MOUNTDIR) + "/" + BIND_ENTRIES[i].src_rel;
++            src_fds[i] = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
++        }
+
+         char path[64];
+         ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
+@@ -154,23 +167,23 @@
+             LOGE("child: setns->target failed errno=%d", errno);
+             ::close(tgt_ns);
+         } else {
+-            LOGD("child: setns OK, entering %u bind loop",
+-                 (unsigned)(sizeof(BIND_ENTRIES)/sizeof(BIND_ENTRIES[0])));
++            LOGD("child: setns OK, entering %u bind loop", (unsigned)num_entries);
+             uint32_t skip_src = 0, skip_dst = 0;
+-            for (const auto& e : BIND_ENTRIES) {
+-                std::string src = std::string(MOUNTDIR) + "/" + e.src_rel;
+-                bool src_ok = (::access(src.c_str(), F_OK) == 0);
+-                bool dst_ok = (::access(e.dst,        F_OK) == 0);
+-                LOGD("  bind check: src=%s(%d) dst=%s(%d)",
+-                     src.c_str(), src_ok, e.dst, dst_ok);
+-                if (!src_ok) { skip_src++; skip++; continue; }
++            for (size_t i = 0; i < num_entries; ++i) {
++                const auto& e = BIND_ENTRIES[i];
++                if (src_fds[i] < 0) {
++                    skip_src++; skip++; continue;
++                }
++                bool dst_ok = (::access(e.dst, F_OK) == 0);
+                 if (!dst_ok) { skip_dst++; skip++; continue; }
+-                int rc = ::mount(src.c_str(), e.dst, nullptr, MS_BIND, nullptr);
++
++                char proc_fd_path[32];
++                ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
++
++                int rc = ::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr);
+                 if (rc == 0) {
+                     ok++;
+-                    LOGD("  bind OK: %s -> %s", src.c_str(), e.dst);
+                 } else {
+                     fail++;
+-                    LOGE("child: bind fail %s -> %s errno=%d",
+-                         src.c_str(), e.dst, errno);
+                 }
+             }
+             LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
+@@ -178,6 +191,10 @@
+                  target_pid, ok, fail, skip, skip_src, skip_dst, TT_VARIANT_TAG);
+             ::close(tgt_ns);
+         }
++
++        for (size_t i = 0; i < num_entries; ++i) {
++            if (src_fds[i] >= 0) ::close(src_fds[i]);
++        }
+
+         ::write(pipefd[1], &ok, sizeof(ok));
+         ::close(pipefd[1]);
