@@ -130,6 +130,28 @@ static int safe_stoi(const std::string& s, int fallback) {
     return static_cast<int>(val);
 }
 
+// Compile-time "%Y-%m-%d" from the toolchain's __DATE__ macro (format
+// "Mon DD YYYY", e.g. "Aug 17 2026"). Used as a fallback anchor for the
+// SECURITY_PATCH-in-the-future check so a device/CI box with a stale or
+// unset wall clock doesn't flag pool dates that are legitimately in the
+// past relative to when the binary was actually built.
+static std::string build_date_ymd() {
+    static const char* months[] = {
+        "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
+    };
+    const char* d = __DATE__; // "Mon DD YYYY"
+    char mon[4] = {d[0], d[1], d[2], 0};
+    int month = 1;
+    for (int i = 0; i < 12; ++i) {
+        if (std::strncmp(mon, months[i], 3) == 0) { month = i + 1; break; }
+    }
+    int day = safe_stoi(std::string(d + 4, 2), 1);
+    int year = safe_stoi(std::string(d + 7, 4), 1970);
+    char out[16];
+    snprintf(out, sizeof(out), "%04d-%02d-%02d", year, month, day);
+    return std::string(out);
+}
+
 // Single source of truth for the version string: read it from module.prop at
 // runtime so the CLI banner and synthetic build.prop never drift from the
 // value the release pipeline stamps into module.prop.
@@ -760,10 +782,23 @@ static bool validate_identity(const Identity& id, std::vector<std::string>& erro
                 std::string d1_str = radio.substr(pfx_len + 1, 6);
                 std::string d2_str = radio.substr(pfx_len + 8, 6);
 
-                // Convert YYMMDD to a comparable integer (YYYYMMDD in 20xx).
+                // Convert YYMMDD to a comparable integer (YYYYMMDD in 20xx),
+                // validating that MM and DD are actually a real calendar date
+                // rather than just six digits. A modem string with MM=13 or
+                // DD=32 would previously slip past this check as long as
+                // d1 <= d2 numerically.
                 auto parse6 = [&](const std::string& s) -> long {
                     if (s.size() != 6) return -1;
                     for (char c : s) if (c < '0' || c > '9') return -1;
+                    int yy  = safe_stoi(s.substr(0, 2), -1);
+                    int mm  = safe_stoi(s.substr(2, 2), -1);
+                    int dd  = safe_stoi(s.substr(4, 2), -1);
+                    if (yy < 0 || mm < 1 || mm > 12 || dd < 1) return -1;
+                    static const int days_in_month[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+                    int year = 2000 + yy;
+                    bool leap = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+                    int max_day = days_in_month[mm - 1] + ((mm == 2 && leap) ? 1 : 0);
+                    if (dd > max_day) return -1;
                     return 200000L * 100 + std::strtol(s.c_str(), nullptr, 10);
                 };
                 long d1 = parse6(d1_str);
@@ -829,8 +864,17 @@ static bool validate_identity(const Identity& id, std::vector<std::string>& erro
             localtime_r(&now, &lt);
             char date[16];
             strftime(date, sizeof(date), "%Y-%m-%d", &lt);
-            if (sec_patch > std::string(date)) {
-                fail("SECURITY_PATCH is in the future: " + sec_patch + " > " + date);
+            // Guard against machines whose wall clock lags behind the pool's
+            // maintained dates (e.g. a CI runner or freshly-flashed device
+            // with an unset/incorrect RTC). __DATE__ is the toolchain's build
+            // date, which is always >= whatever SECURITY_PATCH the pool was
+            // last refreshed with, so use whichever of "now" and "build day"
+            // is later as the future-check anchor rather than trusting the
+            // live clock alone.
+            const std::string build_date = build_date_ymd();
+            const std::string anchor = build_date > std::string(date) ? build_date : std::string(date);
+            if (sec_patch > anchor) {
+                fail("SECURITY_PATCH is in the future: " + sec_patch + " > " + anchor);
             }
         } else {
             fail("SECURITY_PATCH invalid format: " + sec_patch);
