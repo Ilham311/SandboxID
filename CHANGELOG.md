@@ -1,5 +1,124 @@
 # Changelog
 
+## v1.0.27 (2026-08-18)
+
+Rilis ini fokus ke **anti-leak identitas** (menutup nilai asli perangkat yang masih
+bocor setelah persona Pixel dipasang) dan **anti-boot-loop** (mencegah persona yang
+SDK-nya lebih tinggi dari OS asli). Semua temuan berasal dari trace alur boot → app
+spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
+
+### ⚠️ LEAK — SoC codename asli bocor lewat `ro.hardware` / `ro.board.platform`
+
+- **Apa:** `ro.hardware` dan `ro.board.platform` kini di-drive dari persona (Tensor
+  codename `gs101`/`gs201`/`zuma`/`zumapro`/`laguna`) secara end-to-end — field
+  `platform` baru di `pool_tt.hpp`, di-set oleh `gen_identity`, diserialisasi ke
+  `identity.prop`, dipetakan di `hook_prop_get` (L2), lalu ditulis oleh `apply_native`
+  (resetprop) **dan** `generate_mount_files` (build.prop sintetis).
+- **Kenapa:** Versi sebelumnya sudah membuang hard-code `"qcom"`/`"sm8250"` dari tabel
+  static default (benar — itu kontradiksi dengan Pixel/Tensor), TAPI tidak pernah
+  memasang penggantinya: `gen_identity` tak men-set `BOARD_PLATFORM`, `serialize()`
+  membuangnya, `apply_native`/build.prop tak menulis `ro.hardware`. Akibatnya kedua
+  key jatuh ke chain `__system_property_get` → **SoC asli perangkat bocor** (mis.
+  Snapdragon), padahal `Build.MODEL` mengklaim Pixel. Kombinasi Pixel-model +
+  SoC-Qualcomm adalah sinyal deteksi yang kuat.
+- **Mitigasi / catatan:** `gs101`/`gs201` sudah diverifikasi ke perangkat nyata.
+  `zuma`/`zumapro`/`laguna` masih *widely-reported* dan **harus diverifikasi** ke unit
+  asli / AOSP sebelum rilis luas — codename yang salah adalah tell baru (ditandai di
+  komentar `pool_tt.hpp`).
+
+### ⚠️ LEAK — nama pasar asli bocor lewat `ro.product.marketname`
+
+- **Apa:** Tambah pemetaan `ro.product.marketname` + `ro.product.vendor.marketname`
+  → `MARKETNAME` di `hook_prop_get`, `MARKETNAME = model` di `gen_identity`, dan
+  penulisannya di `apply_native` + build.prop.
+- **Kenapa:** Key ini tak pernah dipetakan → app yang membaca `ro.product.marketname`
+  mendapat nama pasar **perangkat asli** (mis. "Galaxy S23") sementara `Build.MODEL`
+  bilang "Pixel 8". Inkonsistensi yang langsung terlihat.
+
+### ⚠️ BOOT RISK — SDK gating (persona tak boleh lebih tinggi dari OS asli)
+
+- **Apa:** `gen_identity` sekarang membaca SDK perangkat via `device_sdk()`
+  (`ro.build.version.sdk`) lalu memfilter kandidat persona ke `sdk <= device_sdk`
+  dan memilih acak dari yang lolos. Jika pembacaan SDK gagal, fallback ke persona
+  ber-SDK **terendah** + warning (bukan ambil sembarang). Komentar `main.cpp` soal
+  injeksi `SDK_INT` diperbaiki agar akurat ("does not exceed", bukan "equals").
+- **Kenapa:** Sebelumnya persona dipilih acak dari seluruh pool tanpa melihat SDK
+  asli. Jika `SDK_INT` persona **lebih tinggi** dari OS asli, app membaca
+  `Build.VERSION.SDK_INT` lalu memanggil API framework yang belum ada di OS tersebut
+  → `NoSuchMethodError` / crash / ANR.
+- **Mitigasi:** Arah gating hanya turun (downgrade-only), yang memang arah aman;
+  downgrade (persona ≤ device) tidak memicu API yang belum ada.
+
+### ⚠️ LEAK — overlay mount dijamin tak merembes ke namespace zygote
+
+- **Apa:** Setelah `setns` ke mount-namespace privat app, child companion kini
+  menandai pohon namespace `MS_SLAVE | MS_REC` pada `"/"` sebelum melakukan bind.
+  Bind-nya sendiri memang sudah dijalankan di `postAppSpecialize` (setelah app
+  `unshare(CLONE_NEWNS)` di `SpecializeCommon`), bukan di `preAppSpecialize`.
+- **Kenapa:** Jika bind terjadi sebelum app unshare — atau jika root namespace app
+  masih `MS_SHARED` — overlay build.prop bisa **merembes ke namespace zygote** dan
+  otomatis nge-spoof **setiap app yang lahir sesudahnya** (global leak, bukan per-app).
+  `MS_SLAVE` memutus propagasi keluar sebagai belt-and-suspenders di atas timing
+  `postAppSpecialize` yang sudah benar.
+- **Mitigasi:** Best-effort — kegagalan `MS_SLAVE` bersifat non-fatal karena timing
+  post-specialize sudah menjaga isolasi utama.
+
+### Changed — RADIO (baseband) stabil per-persona
+
+- **Apa:** `RADIO` / `gsm.version.baseband` kini diturunkan stabil dari persona:
+  `modem_prefix(platform)` (mis. `gs101`→`g5123b`) + tanggal dari `security_patch`
+  + potongan `incremental` — bukan lagi tanggal hari-ini + string modem hard-code.
+- **Kenapa:** Versi lama meregenerasi RADIO dengan tanggal `localtime` **setiap
+  `freshen`** → baseband berubah tiap rotasi dan tidak match platform persona.
+  Baseband yang berubah tanpa OTA adalah anomali; sekarang tetap sama untuk persona
+  yang sama.
+- **Catatan:** Nilai `modem_prefix` bersifat *best-effort* dan sebaiknya diverifikasi
+  ke firmware Pixel asli.
+
+### Changed — hapus "detection tell" di build.prop sintetis
+
+- **Apa:** Komentar header `# Ternak TT synthetic build.prop (v1.0.3)` dan
+  `# Partition alias` dihapus dari file mount, diganti header standar
+  `# begin build properties`.
+- **Kenapa:** App yang membaca `/system/build.prop` bisa `grep` string "Ternak TT" /
+  "synthetic" → fingerprint modul yang trivial. build.prop asli tak pernah memuat nama
+  modul.
+
+### Changed — companion fork-safety + diagnostik mount
+
+- **Apa:** Child hasil `fork()` di companion tidak lagi memanggil `__android_log_print`
+  sama sekali; ia mengumpulkan hasil ke POD `MountResult` (ok/fail/skip + errno per
+  mount) dan mengirimnya ke **thread parent** via pipe, yang kemudian melakukan
+  logging. VLA `src_fds` diganti `std::array<int, BIND_ENTRIES_N>`.
+- **Kenapa:** Companion multi-thread (satu thread per `connectCompanion`). Memanggil
+  liblog di child setelah `fork()` berisiko **deadlock** karena mutex liblog dapat
+  terwarisi dalam keadaan terkunci (fork tak menyalin thread pemegang lock). VLA
+  berukuran non-konstan juga non-standar padahal jumlah bind entry compile-time
+  constant.
+- **Bonus:** errno per-mount (`EPERM`=SELinux/caps, `EINVAL`=flags, `ENOENT`=target
+  tak ada) kini di-log parent untuk memudahkan diagnosa bind gagal.
+
+### Changed — single source of truth (`tt_config.hpp`)
+
+- **Apa:** Enum `Cmd`, path, tabel `BindEntry`, dan fallback properti dipindah ke
+  `tt_config.hpp`; duplikatnya di `main.cpp`/`companion.cpp` dihapus. Ditambah path
+  `IDENTITY_BAK`/`MODE_FILE`/`RESETPROP` dan array `MOUNT_PARTS[]` yang dipakai CLI.
+- **Kenapa:** Sebelumnya `main.cpp` mendaftar 6 bind entry sementara `companion.cpp`
+  9 — **drift** yang membuat overlay tidak konsisten. Satu sumber menghapus kelas bug
+  ini dan membuat data auditable di satu tempat.
+
+### Fixed — identity.prop kosong saat spawn (race dengan `seed`)
+
+- **Apa:** `CMD_GET_IDENTITY` di companion kini me-retry baca `identity.prop` 3×100ms
+  bila kosong (file sedang mid-replace / seed telat), lalu `LOGE` pesan actionable
+  ("run `ternak-tt seed`/`freshen`"). Balasan kosong tetap fail-safe (app dianggap
+  non-target, tidak crash).
+- **Kenapa:** `identity.prop` seharusnya sudah ada sebelum zygote (post-fs-data
+  `seed`), tapi jika seed gagal/telat app menerima blob kosong tanpa jejak. Retry +
+  LOGE menutup jendela race kecil dan membuat kegagalan terlihat di logcat.
+
+---
+
 ## v1.0.19 (2026-07-27)
 
 ### Action button is now 1-tap ready

@@ -17,14 +17,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include "pool_tt.hpp"
+#include "tt_config.hpp"
+#include <sys/system_properties.h>   // __system_property_get (SDK gating)
 
-static const char* MODDIR         = "/data/adb/modules/ternak_tt";
-static const char* IDENTITY_FILE  = "/data/adb/modules/ternak_tt/identity.prop";
-static const char* IDENTITY_BAK   = "/data/adb/modules/ternak_tt/identity.prop.bak";
-static const char* MODE_FILE      = "/data/adb/modules/ternak_tt/identity.mode";
-static const char* RESETPROP      = "/data/adb/modules/ternak_tt/bin/resetprop-rs";
-static const char* MOUNTDIR       = "/data/adb/modules/ternak_tt/mount";
-static const char* TARGET_FILE    = "/data/adb/modules/ternak_tt/target.txt";
+// Paths come from tt_config.hpp (single source of truth). Aliased to keep the
+// short names used throughout this file.
+static const char* MODDIR         = tt::MODDIR;
+static const char* IDENTITY_FILE  = tt::IDENTITY_FILE;
+static const char* IDENTITY_BAK   = tt::IDENTITY_BAK;
+static const char* MODE_FILE      = tt::MODE_FILE;
+static const char* RESETPROP      = tt::RESETPROP;
+static const char* MOUNTDIR       = tt::MOUNTDIR;
+static const char* TARGET_FILE    = tt::TARGET_FILE;
 
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
@@ -108,8 +112,8 @@ struct Identity {
     std::map<std::string, std::string> kv;
     std::string serialize() const {
         static const std::vector<std::string> order = {
-            "BRAND","MANUFACTURER","MODEL","DEVICE","PRODUCT",
-            "BOARD","HARDWARE","FINGERPRINT","ID","DISPLAY","DESCRIPTION",
+            "BRAND","MANUFACTURER","MODEL","MARKETNAME","DEVICE","PRODUCT",
+            "BOARD","HARDWARE","BOARD_PLATFORM","FINGERPRINT","ID","DISPLAY","DESCRIPTION",
             "BOOTLOADER","HOST","USER","TYPE","TAGS",
             "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
             "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
@@ -137,20 +141,51 @@ static std::string uuid_v4() {
     return h;
 }
 
+// Read the device's REAL SDK so we never pick a persona whose SDK is HIGHER
+// than the OS: injecting a higher Build.VERSION.SDK_INT makes apps call
+// framework APIs that don't physically exist on this OS -> crash. Downgrade
+// (persona SDK <= device SDK) is safe: apps just take older code paths.
+static int device_sdk() {
+    char b[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("ro.build.version.sdk", b) > 0) return atoi(b);
+    return 0;
+}
+
 static Identity gen_identity() {
     std::random_device rd;
     std::mt19937 g(rd());
     constexpr size_t N = sizeof(TT_POOL) / sizeof(TT_POOL[0]);
-    const PixelEntry& p = TT_POOL[g() % N];
+
+    // SDK-safe persona selection: only personas whose SDK <= device SDK. If the
+    // device SDK is unreadable (dev<=0), stay conservative and fall through to the
+    // lowest-SDK entry rather than risking a high-SDK (upgrade) pick.
+    int dev = device_sdk();
+    std::vector<size_t> cand;
+    for (size_t i = 0; i < N; ++i)
+        if (dev > 0 && TT_POOL[i].sdk <= dev) cand.push_back(i);
+    size_t idx;
+    if (!cand.empty()) {
+        idx = cand[g() % cand.size()];
+    } else {
+        // Device SDK below every persona (Android < 13, out of spec). Pick the
+        // lowest-SDK entry and warn — least-bad option, still technically an upgrade.
+        idx = 0;
+        for (size_t i = 1; i < N; ++i) if (TT_POOL[i].sdk < TT_POOL[idx].sdk) idx = i;
+        fprintf(stderr, "! device SDK %d below all personas; using SDK %d (upgrade, risky)\n",
+                dev, TT_POOL[idx].sdk);
+    }
+    const PixelEntry& p = TT_POOL[idx];
 
     Identity id;
     id.kv["BRAND"]           = "google";
     id.kv["MANUFACTURER"]    = "Google";
     id.kv["MODEL"]           = p.model;
+    id.kv["MARKETNAME"]      = p.model;   // Pixel market name == model ("Pixel 6")
     id.kv["DEVICE"]          = p.device;
     id.kv["PRODUCT"]         = p.product;
     id.kv["BOARD"]           = p.board;
     id.kv["HARDWARE"]        = p.board;
+    id.kv["BOARD_PLATFORM"]  = p.platform;   // ro.board.platform (Tensor codename)
     id.kv["ID"]              = p.id;
     id.kv["INCREMENTAL"]     = p.incremental;
     id.kv["RELEASE"]         = p.release;
@@ -173,13 +208,32 @@ static Identity gen_identity() {
              p.product, p.release, p.id, p.incremental);
     id.kv["DESCRIPTION"] = desc;
 
-    std::time_t now = std::time(nullptr);
-    struct tm lt;
-    localtime_r(&now, &lt);
-    char date[16];
-    strftime(date, sizeof(date), "%y%m%d", &lt);
+    // RADIO (gsm.version.baseband) must be STABLE per persona, never today's date
+    // (a baseband whose date == first-launch date is anomalous to fingerprinters).
+    // Real Tensor Pixel baseband ~ "<modem>-<ver>-<yymmdd>-B-<build>". The modem
+    // prefix is per-generation (best-effort — verify like `platform`); date comes
+    // from the persona's security_patch (fixed) and the build from its incremental,
+    // so re-running freshen never changes RADIO for the same persona.
+    auto modem_prefix = [](const char* plat) -> const char* {
+        if (!plat) return "g5123b";
+        if (!strcmp(plat, "gs101"))   return "g5123b";  // Pixel 6  (Exynos modem)
+        if (!strcmp(plat, "gs201"))   return "g5300b";  // Pixel 7
+        if (!strcmp(plat, "zuma"))    return "g5300q";  // Pixel 8
+        if (!strcmp(plat, "zumapro")) return "g5400";   // Pixel 9
+        if (!strcmp(plat, "laguna"))  return "g5500";   // Pixel 10
+        return "g5123b";
+    };
+    char pdate[8] = "000000";                            // security_patch YYYY-MM-DD -> YYMMDD
+    if (std::strlen(p.security_patch) >= 10) {
+        pdate[0] = p.security_patch[2]; pdate[1] = p.security_patch[3];
+        pdate[2] = p.security_patch[5]; pdate[3] = p.security_patch[6];
+        pdate[4] = p.security_patch[8]; pdate[5] = p.security_patch[9];
+    }
+    std::string incr  = p.incremental;                   // last 6 digits as "version" field
+    std::string incr6 = incr.size() > 6 ? incr.substr(incr.size() - 6) : incr;
     char rad[128];
-    snprintf(rad, sizeof(rad), "g5300q-%s-%s-B-%s", date, date, p.incremental);
+    snprintf(rad, sizeof(rad), "%s-%s-%s-B-%s",
+             modem_prefix(p.platform), incr6.c_str(), pdate, p.incremental);
     id.kv["RADIO"] = rad;
 
     id.kv["SERIAL"]     = random_hex(8, true);
@@ -225,6 +279,9 @@ static void apply_native(const Identity& id) {
     const std::string TYPE         = get("TYPE");
     const std::string USER_        = get("USER");
     const std::string HOST         = get("HOST");
+    const std::string HARDWARE     = get("HARDWARE");
+    const std::string PLATFORM     = get("BOARD_PLATFORM");
+    const std::string MARKETNAME   = get("MARKETNAME");
 
     std::vector<Rp> rp = {
 
@@ -276,6 +333,10 @@ static void apply_native(const Identity& id) {
 
         {"ro.product.board",                   BOARD},
         {"ro.build.product",                   DEVICE},
+
+        {"ro.hardware",                        HARDWARE},
+        {"ro.board.platform",                  PLATFORM},
+        {"ro.product.marketname",              MARKETNAME},
 
         {"ro.build.id",                        ID_},
         {"ro.build.display.id",                DISPLAY},
@@ -332,8 +393,8 @@ static void generate_mount_files(const Identity& id) {
     };
 
     ::mkdir(MOUNTDIR, 0755);
-    for (const char* sub : {"system", "vendor", "odm", "product", "system_ext"}) {
-        std::string d = std::string(MOUNTDIR) + "/" + sub;
+    for (size_t i = 0; i < tt::MOUNT_PARTS_N; ++i) {
+        std::string d = std::string(MOUNTDIR) + "/" + tt::MOUNT_PARTS[i];
         ::mkdir(d.c_str(), 0755);
     }
 
@@ -357,9 +418,14 @@ static void generate_mount_files(const Identity& id) {
     const std::string TYPE         = g("TYPE");
     const std::string USER_        = g("USER");
     const std::string HOST         = g("HOST");
+    const std::string HARDWARE     = g("HARDWARE");
+    const std::string PLATFORM     = g("BOARD_PLATFORM");
+    const std::string MARKETNAME   = g("MARKETNAME");
 
     std::string base;
-    base += "# Ternak TT synthetic build.prop (v1.0.3)\n";
+    // No "synthetic"/module-name marker in the file itself — a real build.prop
+    // never announces it was generated by us; that string would be a trivial tell.
+    base += "# begin build properties\n";
     auto add = [&](const char* k, const std::string& v) {
         if (!v.empty()) { base += k; base += '='; base += v; base += '\n'; }
     };
@@ -378,6 +444,9 @@ static void generate_mount_files(const Identity& id) {
     add("ro.product.device",                  DEVICE);
     add("ro.product.name",                    PRODUCT);
     add("ro.product.board",                   BOARD);
+    add("ro.hardware",                        HARDWARE);
+    add("ro.board.platform",                  PLATFORM);
+    add("ro.product.marketname",              MARKETNAME);
     add("ro.build.id",                        ID_);
     add("ro.build.display.id",                DISPLAY);
     add("ro.build.description",               DESC);
@@ -406,7 +475,6 @@ static void generate_mount_files(const Identity& id) {
     for (const auto& p : parts) {
         std::string c = base;
         std::string pfx = p.pfx;
-        c += "# Partition alias (" + std::string(p.dir) + ")\n";
         if (!MODEL.empty())        c += pfx + "model="        + MODEL        + "\n";
         if (!BRAND.empty())        c += pfx + "brand="        + BRAND        + "\n";
         if (!MANUFACTURER.empty()) c += pfx + "manufacturer=" + MANUFACTURER + "\n";

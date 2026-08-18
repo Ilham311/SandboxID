@@ -1,43 +1,42 @@
 
+// main.cpp — Ternak TT Zygisk module (in-process layer)
+//
+// Responsibilities in the app process:
+//   L1  Build / Build.VERSION static-field injection (SetStaticObjectField)
+//   L2  SystemProperties.native_get hook (Java prop reads) via hookJniNativeMethods
+//   L7  (debug only) leak sensors on native_get_int/long/boolean
+//   +   trigger the companion's per-app build.prop bind-mounts, in postAppSpecialize
+//   +   async-signal-safe crash watchdog (diagnostic)
+//
+// What this file deliberately does NOT do (see report / git history):
+//   - No /proc openat "sanitizer": PLT-hooking libc's own dev/inode cannot
+//     intercept libc-internal open()/openat() (fopen→open is intra-libc), so it
+//     was a double no-op. Mount concealment is delegated to the Zygisk provider
+//     (ReZygisk/NeoZygisk/Zygisk-Assistant) + FORCE_DENYLIST_UNMOUNT.
+//   - No Settings.Secure / WifiInfo / TelephonyManager "hooks": those methods
+//     are NOT native, so RegisterNatives/hookJniNativeMethods cannot bind them.
+//     Proper interception needs LSPlant (roadmap).
+
 #include <jni.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <cstdarg>
+#include <sched.h>
 #include <cstdio>
 #include <cstring>
-#include <sys/mount.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
+#include <cstdlib>
+#include <cstdint>
 #include <sys/system_properties.h>
 #include <android/log.h>
 #include <string>
 #include <map>
 #include <vector>
 #include <sstream>
-#include <cstdlib>
 #include <signal.h>
 #include <ctime>
+#include <thread>
 #include "zygisk.hpp"
-
-#ifndef MFD_CLOEXEC
-#define MFD_CLOEXEC 0x0001U
-#endif
-#include <sys/syscall.h>
-#ifndef __NR_memfd_create
-  #if defined(__aarch64__)
-    #define __NR_memfd_create 279
-  #elif defined(__arm__)
-    #define __NR_memfd_create 385
-  #elif defined(__x86_64__)
-    #define __NR_memfd_create 319
-  #elif defined(__i386__)
-    #define __NR_memfd_create 356
-  #endif
-#endif
-static inline int tt_memfd_create(const char* name, unsigned flags) {
-    return (int)syscall(__NR_memfd_create, name, flags);
-}
+#include "tt_config.hpp"
 
 #define LOG_TAG "TernakTT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -55,109 +54,92 @@ using zygisk::Api;
 using zygisk::AppSpecializeArgs;
 using zygisk::ServerSpecializeArgs;
 
-enum : uint8_t {
-    CMD_CHECK_TT     = 1,
-    CMD_GET_IDENTITY = 2,
-    CMD_DO_MOUNTS    = 3,
-};
-
+// Identity table for the current process. Populated once from the companion
+// blob in postAppSpecialize (each app is a separate forked process, so a global
+// is per-process and needs no locking).
 static std::map<std::string, std::string> g_id;
 
+// Resolve an identity key: prefer the parsed blob, then the auditable fallbacks
+// in tt::VAL_DEFAULTS. Returns a reference into stable storage.
 static const std::string& val(const std::string& k) {
     static const std::string empty;
     auto it = g_id.find(k);
     if (it != g_id.end() && !it->second.empty()) return it->second;
 
-    static const std::map<std::string, std::string> defaults = {
-        {"SYS_BOOT_COMPLETED",    "1"},
-        {"GSM_OPERATOR_NUMERIC",  "51010"},
-        {"GSM_OPERATOR_ALPHA",    "Telkomsel"},
-        {"GSM_OPERATOR_ISO",      "id"},
-        {"BUILD_CHARACTERISTICS", "default"},
-        {"PERSIST_TIMEZONE",      "Asia/Jakarta"},
-        {"CPU_ABI",               "arm64-v8a"},
-        {"CPU_ABI2",              ""},
-        {"CPU_ABILIST",           "arm64-v8a,armeabi-v7a,armeabi"},
-        {"CPU_ABILIST64",         "arm64-v8a"},
-        {"CPU_ABILIST32",         "armeabi-v7a,armeabi"},
-        {"DALVIK_HEAPGROWTHLIMIT","256m"},
-        {"MEDIACODEC_MIN_RATE",   "8000"},
-        {"MEDIACODEC_MAX_RATE",   "192000"},
-
-        {"DEBUG_FORCE_RTL",       "false"},
-        {"MULTISIM_CONFIG",       ""},
-    };
+    // Build the fallback map once from the header table.
+    static const std::map<std::string, std::string> defaults = [] {
+        std::map<std::string, std::string> m;
+        for (size_t i = 0; i < tt::VAL_DEFAULTS_N; ++i)
+            m.emplace(tt::VAL_DEFAULTS[i].k, tt::VAL_DEFAULTS[i].v);
+        return m;
+    }();
     auto d = defaults.find(k);
     if (d != defaults.end()) return d->second;
     return empty;
 }
 
-static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) {
+// ============================================================ L2: prop hook ==
+// Original SystemProperties.native_get, captured by hookJniNativeMethods so we
+// can chain unmapped keys to the real reader instead of fabricating a value.
+static jstring (*orig_native_get)(JNIEnv*, jclass, jstring, jstring) = nullptr;
+
+static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
     const char* raw = env->GetStringUTFChars(j_key, nullptr);
     std::string k(raw ? raw : "");
     env->ReleaseStringUTFChars(j_key, raw);
-    LOGD("L2 native_get('%s') requested", k.c_str());
+    LOGD("L2 native_get('%s')", k.c_str());
 
+    // ro.* / gsm.* key -> identity key. ro.hardware and ro.board.platform are
+    // now driven from the persona (Tensor codename), never a hard-coded SoC.
     static const std::map<std::string, std::string> map = {
-        {"ro.serialno",              "SERIAL"},
-        {"ro.boot.serialno",         "SERIAL"},
-        {"ro.build.fingerprint",     "FINGERPRINT"},
-        {"ro.bootimage.build.fingerprint", "FINGERPRINT"},
-        {"ro.product.model",         "MODEL"},
-        {"ro.product.brand",         "BRAND"},
-        {"ro.product.manufacturer",  "MANUFACTURER"},
-        {"ro.product.device",        "DEVICE"},
-        {"ro.product.name",          "PRODUCT"},
-        {"ro.product.board",         "BOARD"},
-        {"ro.build.id",              "ID"},
-        {"ro.build.display.id",      "DISPLAY"},
-        {"ro.build.description",     "DESCRIPTION"},
-        {"ro.build.version.release", "RELEASE"},
-        {"ro.build.version.sdk",     "SDK_INT"},
+        {"ro.serialno",                     "SERIAL"},
+        {"ro.boot.serialno",                "SERIAL"},
+        {"ro.build.fingerprint",            "FINGERPRINT"},
+        {"ro.bootimage.build.fingerprint",  "FINGERPRINT"},
+        {"ro.product.model",                "MODEL"},
+        {"ro.product.brand",                "BRAND"},
+        {"ro.product.manufacturer",         "MANUFACTURER"},
+        {"ro.product.device",               "DEVICE"},
+        {"ro.product.name",                 "PRODUCT"},
+        {"ro.product.marketname",           "MARKETNAME"},
+        {"ro.product.vendor.marketname",    "MARKETNAME"},
+        {"ro.product.board",                "BOARD"},
+        {"ro.hardware",                     "HARDWARE"},
+        {"ro.board.platform",               "BOARD_PLATFORM"},
+        {"ro.build.id",                     "ID"},
+        {"ro.build.display.id",             "DISPLAY"},
+        {"ro.build.description",            "DESCRIPTION"},
+        {"ro.build.version.release",        "RELEASE"},
+        {"ro.build.version.sdk",            "SDK_INT"},
         {"ro.build.version.security_patch", "SECURITY_PATCH"},
         {"ro.build.version.incremental",    "INCREMENTAL"},
-        {"gsm.version.baseband",     "RADIO"},
+        {"gsm.version.baseband",            "RADIO"},
 
-        {"sys.boot_completed",       "SYS_BOOT_COMPLETED"},
+        {"sys.boot_completed",              "SYS_BOOT_COMPLETED"},
 
-        {"debug.force_rtl",          "DEBUG_FORCE_RTL"},
-        {"persist.radio.multisim.config", "MULTISIM_CONFIG"},
-        {"gsm.operator.numeric",     "GSM_OPERATOR_NUMERIC"},
-        {"gsm.sim.operator.numeric", "GSM_OPERATOR_NUMERIC"},
-        {"gsm.operator.alpha",       "GSM_OPERATOR_ALPHA"},
-        {"gsm.sim.operator.alpha",   "GSM_OPERATOR_ALPHA"},
-        {"gsm.operator.iso-country", "GSM_OPERATOR_ISO"},
-        {"gsm.sim.operator.iso-country", "GSM_OPERATOR_ISO"},
-        {"ro.build.characteristics", "BUILD_CHARACTERISTICS"},
-        {"persist.sys.timezone",     "PERSIST_TIMEZONE"},
-        {"ro.product.cpu.abi",       "CPU_ABI"},
-        {"ro.product.cpu.abi2",      "CPU_ABI2"},
-        {"ro.product.cpu.abilist",   "CPU_ABILIST"},
-        {"ro.product.cpu.abilist64", "CPU_ABILIST64"},
-        {"ro.product.cpu.abilist32", "CPU_ABILIST32"},
-        {"dalvik.vm.heapgrowthlimit","DALVIK_HEAPGROWTHLIMIT"},
-        {"ro.mediacodec.min_sample_rate", "MEDIACODEC_MIN_RATE"},
-        {"ro.mediacodec.max_sample_rate", "MEDIACODEC_MAX_RATE"},
-        {"ro.build.user",            "USER"},
-        {"ro.build.host",            "HOST"},
-        {"ro.build.tags",            "TAGS"},
-        {"ro.build.type",            "TYPE"},
-    };
-
-    static const std::map<std::string, std::string> static_defaults = {
-        {"gsm.operator.isroaming",         "false"},
-        {"ro.zygote",                      "zygote64_32"},
-        {"ro.hardware",                    "qcom"},
-        {"ro.board.platform",              "sm8250"},
-        {"ro.dalvik.vm.native.bridge",     "0"},
-        {"ro.allow.mock.location",         "0"},
-        {"dalvik.vm.isa.arm64.variant",    "generic"},
-        {"dalvik.vm.isa.arm64.features",   "default"},
-        {"dalvik.vm.isa.arm.variant",      "generic"},
-        {"dalvik.vm.isa.arm.features",     "default"},
-        {"dalvik.vm.heapsize",             "512m"},
-        {"ro.build.version.preview_sdk",   "0"},
+        {"debug.force_rtl",                 "DEBUG_FORCE_RTL"},
+        {"persist.radio.multisim.config",   "MULTISIM_CONFIG"},
+        {"gsm.operator.numeric",            "GSM_OPERATOR_NUMERIC"},
+        {"gsm.sim.operator.numeric",        "GSM_OPERATOR_NUMERIC"},
+        {"gsm.operator.alpha",              "GSM_OPERATOR_ALPHA"},
+        {"gsm.sim.operator.alpha",          "GSM_OPERATOR_ALPHA"},
+        {"gsm.operator.iso-country",        "GSM_OPERATOR_ISO"},
+        {"gsm.sim.operator.iso-country",    "GSM_OPERATOR_ISO"},
+        {"ro.build.characteristics",        "BUILD_CHARACTERISTICS"},
+        {"persist.sys.timezone",            "PERSIST_TIMEZONE"},
+        {"ro.product.cpu.abi",              "CPU_ABI"},
+        {"ro.product.cpu.abi2",             "CPU_ABI2"},
+        {"ro.product.cpu.abilist",          "CPU_ABILIST"},
+        {"ro.product.cpu.abilist64",        "CPU_ABILIST64"},
+        {"ro.product.cpu.abilist32",        "CPU_ABILIST32"},
+        {"dalvik.vm.heapgrowthlimit",       "DALVIK_HEAPGROWTHLIMIT"},
+        {"ro.mediacodec.min_sample_rate",   "MEDIACODEC_MIN_RATE"},
+        {"ro.mediacodec.max_sample_rate",   "MEDIACODEC_MAX_RATE"},
+        {"ro.build.user",                   "USER"},
+        {"ro.build.host",                   "HOST"},
+        {"ro.build.tags",                   "TAGS"},
+        {"ro.build.type",                   "TYPE"},
     };
 
     auto it = map.find(k);
@@ -168,83 +150,43 @@ static jstring hook_prop_get(JNIEnv* env, jclass, jstring j_key, jstring j_def) 
             return env->NewStringUTF(v.c_str());
         }
     }
-    auto sit = static_defaults.find(k);
-    if (sit != static_defaults.end()) {
-        LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), sit->second.c_str());
-        return env->NewStringUTF(sit->second.c_str());
+    // Identity-independent, persona-consistent static answers.
+    for (size_t i = 0; i < tt::STATIC_PROP_DEFAULTS_N; ++i) {
+        if (k == tt::STATIC_PROP_DEFAULTS[i].k) {
+            LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), tt::STATIC_PROP_DEFAULTS[i].v);
+            return env->NewStringUTF(tt::STATIC_PROP_DEFAULTS[i].v);
+        }
     }
+    // Unmapped: chain to the real native_get (reads the prop store, already
+    // globally spoofed by resetprop for the ro.* identity keys).
+    if (orig_native_get) return orig_native_get(env, clazz, j_key, j_def);
     char buf[PROP_VALUE_MAX] = {0};
-    if (__system_property_get(k.c_str(), buf) > 0) {
-        LOGD("L2 LEAK  '%s' -> '%s' (unhooked, real value returned)", k.c_str(), buf);
-        return env->NewStringUTF(buf);
-    }
-    LOGD("L2 MISS  '%s' -> default", k.c_str());
+    if (__system_property_get(k.c_str(), buf) > 0) return env->NewStringUTF(buf);
     return j_def;
 }
 
-static jstring (*orig_secure_get)(JNIEnv*, jclass, jobject, jstring) = nullptr;
-
-static jstring hook_secure_get(JNIEnv* env, jclass c, jobject cr, jstring name) {
-    if (name) {
-        const char* raw = env->GetStringUTFChars(name, nullptr);
-        std::string n(raw ? raw : "");
-        env->ReleaseStringUTFChars(name, raw);
-        LOGD("L3 Settings.Secure.getString('%s')", n.c_str());
-        if (n == "android_id") {
-            const std::string& aid = val("ANDROID_ID");
-            if (!aid.empty()) {
-                LOGD("L3 SPOOF android_id -> '%s'", aid.c_str());
-                return env->NewStringUTF(aid.c_str());
-            }
-        }
-
-        if (n == "bluetooth_address" || n == "bluetooth_name" ||
-            n == "advertising_id"   || n == "install_non_market_apps") {
-            LOGD("L3 LEAK  Settings.Secure '%s' queried (unhooked)", n.c_str());
-        }
-    }
-    return orig_secure_get ? orig_secure_get(env, c, cr, name) : nullptr;
+// Install L2 via the Zygisk-coordinated API (plays nice with other modules that
+// also hook SystemProperties) and capture the original for chaining.
+static void install_prop_hook(Api* api, JNIEnv* env) {
+    JNINativeMethod m = {
+        const_cast<char*>("native_get"),
+        const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+        reinterpret_cast<void*>(hook_prop_get),
+    };
+    api->hookJniNativeMethods(env, "android/os/SystemProperties", &m, 1);
+    // hookJniNativeMethods writes the previous fnPtr back into m.fnPtr.
+    orig_native_get = reinterpret_cast<jstring (*)(JNIEnv*, jclass, jstring, jstring)>(m.fnPtr);
+    if (orig_native_get)
+        LOGD("L2 native_get hooked (orig=%p)", reinterpret_cast<void*>(orig_native_get));
+    else
+        LOGE("L2 native_get hook did not bind (method missing?)");
 }
 
-static void install_secure_hook(JNIEnv* env) {
-    jclass c = env->FindClass("android/provider/Settings$Secure");
-    if (!c) { env->ExceptionClear(); return; }
-    env->ExceptionClear();
-    env->DeleteLocalRef(c);
-}
-
-static void install_gaid_hook(JNIEnv* env) {
-    jclass c = env->FindClass("com/google/android/gms/ads/identifier/AdvertisingIdClient$Info");
-    if (!c) { env->ExceptionClear(); return; }
-
-    env->DeleteLocalRef(c);
-}
-
-static jstring hook_wifi_mac(JNIEnv* env, jobject) {
-    LOGD("L5 WifiInfo.getMacAddress -> 02:00:00:00:00:00 (spoofed)");
-    return env->NewStringUTF("02:00:00:00:00:00");
-}
-static jstring hook_wifi_bssid(JNIEnv* env, jobject) {
-    LOGD("L5 WifiInfo.getBSSID -> 02:00:00:00:00:00 (spoofed)");
-    return env->NewStringUTF("02:00:00:00:00:00");
-}
-
-static void install_wifi_hook(JNIEnv* env) {
-    jclass c = env->FindClass("android/net/wifi/WifiInfo");
-    if (!c) { env->ExceptionClear(); return; }
-    env->ExceptionClear();
-    env->DeleteLocalRef(c);
-}
-
-static jstring hook_null_str(JNIEnv*, jobject) { return nullptr; }
-
+// ==================================================== L7: leak sensors (dbg) ==
 #ifdef TT_DEBUG
-
-static jstring hook_tel_deviceId(JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getDeviceId() -> null"); return nullptr; }
-static jstring hook_tel_imei    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getImei() -> null");     return nullptr; }
-static jstring hook_tel_subId   (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getSubscriberId() -> null"); return nullptr; }
-static jstring hook_tel_meid    (JNIEnv*, jobject) { LOGD("L6 TelephonyManager.getMeid() -> null");     return nullptr; }
-#endif
+static jint     (*orig_get_int)(JNIEnv*, jclass, jstring, jint)     = nullptr;
+static jlong    (*orig_get_long)(JNIEnv*, jclass, jstring, jlong)   = nullptr;
+static jboolean (*orig_get_bool)(JNIEnv*, jclass, jstring, jboolean)= nullptr;
 
 static const std::map<std::string, jboolean>& tt_bool_spoof() {
     static const std::map<std::string, jboolean> m = {
@@ -289,127 +231,101 @@ static const std::map<std::string, jlong>& tt_long_spoof() {
     };
     return m;
 }
-
 static bool tt_should_suppress_key(const std::string& k) {
-
     if (k.size() >= 11 + 5 &&
         k.compare(0, 11, "log.looper.") == 0 &&
         k.compare(k.size() - 5, 5, ".slow") == 0)
         return true;
-
     if (k.compare(0, 13, "debug.watson.") == 0)
         return true;
     return false;
 }
 
-#ifdef TT_DEBUG
-static jint hook_prop_get_int(JNIEnv* env, jclass, jstring j_key, jint def) {
-    jint out = def;
-    const char* label = "LEAK";
-    if (j_key) {
-        const char* r = env->GetStringUTFChars(j_key, nullptr);
-        std::string k(r ? r : "");
-        env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_int_spoof();
-        auto it = m.find(k);
-        if (it != m.end()) { out = it->second; label = "SPOOF"; }
-        else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
-        LOGD("L7 SPI native_get_int('%s') def=%d -> %d [%s]", k.c_str(), def, out, label);
-    }
-    return out;
+static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def) {
+    if (!j_key) return def;
+    const char* r = env->GetStringUTFChars(j_key, nullptr);
+    std::string k(r ? r : "");
+    env->ReleaseStringUTFChars(j_key, r);
+    const auto& m = tt_int_spoof();
+    auto it = m.find(k);
+    if (it != m.end()) { LOGD("L7 SPI '%s' -> %d", k.c_str(), it->second); return it->second; }
+    if (tt_should_suppress_key(k)) { LOGD("L7 SPI SUPPRESS '%s'", k.c_str()); return def; }
+    return orig_get_int ? orig_get_int(env, clazz, j_key, def) : def;
 }
-static jlong hook_prop_get_long(JNIEnv* env, jclass, jstring j_key, jlong def) {
-    jlong out = def;
-    const char* label = "LEAK";
-    if (j_key) {
-        const char* r = env->GetStringUTFChars(j_key, nullptr);
-        std::string k(r ? r : "");
-        env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_long_spoof();
-        auto it = m.find(k);
-        if (it != m.end()) { out = it->second; label = "SPOOF"; }
-        else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
-        LOGD("L7 SPL native_get_long('%s') def=%lld -> %lld [%s]",
-             k.c_str(), (long long)def, (long long)out, label);
-    }
-    return out;
+static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong def) {
+    if (!j_key) return def;
+    const char* r = env->GetStringUTFChars(j_key, nullptr);
+    std::string k(r ? r : "");
+    env->ReleaseStringUTFChars(j_key, r);
+    const auto& m = tt_long_spoof();
+    auto it = m.find(k);
+    if (it != m.end()) { LOGD("L7 SPL '%s' -> %lld", k.c_str(), (long long)it->second); return it->second; }
+    if (tt_should_suppress_key(k)) { LOGD("L7 SPL SUPPRESS '%s'", k.c_str()); return def; }
+    return orig_get_long ? orig_get_long(env, clazz, j_key, def) : def;
 }
-static jboolean hook_prop_get_bool(JNIEnv* env, jclass, jstring j_key, jboolean def) {
-    jboolean out = def;
-    const char* label = "LEAK";
-    if (j_key) {
-        const char* r = env->GetStringUTFChars(j_key, nullptr);
-        std::string k(r ? r : "");
-        env->ReleaseStringUTFChars(j_key, r);
-        const auto& m = tt_bool_spoof();
-        auto it = m.find(k);
-        if (it != m.end()) { out = it->second; label = "SPOOF"; }
-        else if (tt_should_suppress_key(k)) { label = "SUPPRESS"; }
-        LOGD("L7 SPB native_get_boolean('%s') def=%d -> %d [%s]",
-             k.c_str(), (int)def, (int)out, label);
-    }
-    return out;
-}
-static jstring hook_build_radio(JNIEnv* env, jclass) {
-    LOGD("L7 Build.getRadioVersion() called [LEAK — returning empty]");
-    return env->NewStringUTF("");
-}
-static void install_leak_sensors(JNIEnv* env) {
-
-    {
-        jclass sp = env->FindClass("android/os/SystemProperties");
-        if (sp) {
-            JNINativeMethod m[] = {
-                {const_cast<char*>("native_get_int"),
-                 const_cast<char*>("(Ljava/lang/String;I)I"),
-                 reinterpret_cast<void*>(hook_prop_get_int)},
-                {const_cast<char*>("native_get_long"),
-                 const_cast<char*>("(Ljava/lang/String;J)J"),
-                 reinterpret_cast<void*>(hook_prop_get_long)},
-                {const_cast<char*>("native_get_boolean"),
-                 const_cast<char*>("(Ljava/lang/String;Z)Z"),
-                 reinterpret_cast<void*>(hook_prop_get_bool)},
-            };
-            env->RegisterNatives(sp, m, 3);
-            env->ExceptionClear();
-            env->DeleteLocalRef(sp);
-            LOGD("L7 leak sensors installed on SystemProperties (int/long/bool)");
-        } else env->ExceptionClear();
-    }
-
-    {
-        jclass b = env->FindClass("android/os/Build");
-        if (b) {
-            JNINativeMethod m = {
-                const_cast<char*>("getRadioVersion"),
-                const_cast<char*>("()Ljava/lang/String;"),
-                reinterpret_cast<void*>(hook_build_radio)};
-            env->RegisterNatives(b, &m, 1);
-            env->ExceptionClear();
-            env->DeleteLocalRef(b);
-            LOGD("L7 leak sensor installed on Build.getRadioVersion");
-        } else env->ExceptionClear();
-    }
-}
-#endif
-
-static void install_telephony_hook(JNIEnv* env) {
-    jclass c = env->FindClass("android/telephony/TelephonyManager");
-    if (!c) { env->ExceptionClear(); return; }
-    env->ExceptionClear();
-    env->DeleteLocalRef(c);
+static jboolean hook_prop_get_bool(JNIEnv* env, jclass clazz, jstring j_key, jboolean def) {
+    if (!j_key) return def;
+    const char* r = env->GetStringUTFChars(j_key, nullptr);
+    std::string k(r ? r : "");
+    env->ReleaseStringUTFChars(j_key, r);
+    const auto& m = tt_bool_spoof();
+    auto it = m.find(k);
+    if (it != m.end()) { LOGD("L7 SPB '%s' -> %d", k.c_str(), (int)it->second); return it->second; }
+    if (tt_should_suppress_key(k)) { LOGD("L7 SPB SUPPRESS '%s'", k.c_str()); return def; }
+    return orig_get_bool ? orig_get_bool(env, clazz, j_key, def) : def;
 }
 
+// NOTE: Build.getRadioVersion() is intentionally NOT hooked — it is a plain Java
+// wrapper over SystemProperties.get("gsm.version.baseband"), which the L2 hook
+// already covers. RegisterNatives on it fails silently (it isn't native).
+static void install_leak_sensors(Api* api, JNIEnv* env) {
+    JNINativeMethod m[3] = {
+        {const_cast<char*>("native_get_int"),
+         const_cast<char*>("(Ljava/lang/String;I)I"),
+         reinterpret_cast<void*>(hook_prop_get_int)},
+        {const_cast<char*>("native_get_long"),
+         const_cast<char*>("(Ljava/lang/String;J)J"),
+         reinterpret_cast<void*>(hook_prop_get_long)},
+        {const_cast<char*>("native_get_boolean"),
+         const_cast<char*>("(Ljava/lang/String;Z)Z"),
+         reinterpret_cast<void*>(hook_prop_get_bool)},
+    };
+    api->hookJniNativeMethods(env, "android/os/SystemProperties", m, 3);
+    orig_get_int  = reinterpret_cast<jint (*)(JNIEnv*, jclass, jstring, jint)>(m[0].fnPtr);
+    orig_get_long = reinterpret_cast<jlong (*)(JNIEnv*, jclass, jstring, jlong)>(m[1].fnPtr);
+    orig_get_bool = reinterpret_cast<jboolean (*)(JNIEnv*, jclass, jstring, jboolean)>(m[2].fnPtr);
+    LOGD("L7 leak sensors installed (int/long/bool)");
+}
+#endif // TT_DEBUG
+
+// ================================================== crash watchdog (AS-safe) ==
+// The signal handler must be async-signal-safe: it may NOT call
+// __android_log_print / malloc / std::string ops. So it only clock_gettime()s,
+// packs a fixed POD, does ONE non-blocking write() to a self-pipe, then chains
+// to the previous handler. A normal drain thread reads the pipe and LOGE()s.
+// (signal-safety(7): write/clock_gettime/sigaction/raise/sched_yield are safe.)
+struct TtCrashRec {
+    uint32_t magic;
+    int32_t  sig;
+    int32_t  code;
+    int32_t  sender;
+    int32_t  pid;
+    int32_t  hit;
+    int64_t  alive_ms;
+    void*    addr;
+};
+static const uint32_t TT_CRASH_MAGIC = 0x54544352u; // 'TTCR'
+
+static int         g_crash_pipe[2] = {-1, -1};
+static char        g_watchdog_pkg_buf[128] = {0};
+static int64_t     g_load_time_ms = 0;
 static struct sigaction g_prev_sig[NSIG];
-static std::string g_watchdog_pkg;
-static long        g_load_time_ms = 0;
-
 static volatile sig_atomic_t g_crash_count[NSIG] = {0};
-static const int CRASH_LIMIT = 3;
+static const int   CRASH_LIMIT = 3;
 
-static long tt_now_ms() {
+static int64_t tt_now_ms() {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long)(ts.tv_sec * 1000L + ts.tv_nsec / 1000000L);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 static const char* tt_sig_name(int sig) {
     switch (sig) {
@@ -418,84 +334,115 @@ static const char* tt_sig_name(int sig) {
         case SIGBUS:  return "SIGBUS";
         case SIGILL:  return "SIGILL";
         case SIGFPE:  return "SIGFPE";
-        case SIGTERM: return "SIGTERM";
-        case SIGPIPE: return "SIGPIPE";
         case SIGSYS:  return "SIGSYS";
         default:      return "?";
     }
 }
+
+// Normal-context thread: safe to use liblog here.
+static void tt_crash_drain_loop() {
+    TtCrashRec rec;
+    while (tt::read_full(g_crash_pipe[0], &rec, sizeof(rec))) {
+        if (rec.magic != TT_CRASH_MAGIC) continue;
+        LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%lldms hit=%d/%d",
+             TT_VARIANT_TAG, g_watchdog_pkg_buf, rec.pid, rec.sig, tt_sig_name(rec.sig),
+             rec.code, rec.addr, rec.sender, (long long)rec.alive_ms, rec.hit, CRASH_LIMIT);
+    }
+}
+
 static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
     if (sig >= 0 && sig < NSIG) n = ++g_crash_count[sig];
 
-    if (n <= CRASH_LIMIT) {
-        long alive = tt_now_ms() - g_load_time_ms;
-
-        LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%ldms hit=%d/%d",
-             TT_VARIANT_TAG,
-             g_watchdog_pkg.c_str(), getpid(),
-             sig, tt_sig_name(sig),
-             info ? info->si_code : 0,
-             info ? info->si_addr : nullptr,
-             info ? info->si_pid  : 0,
-             alive, n, CRASH_LIMIT);
+    if (n <= CRASH_LIMIT && g_crash_pipe[1] >= 0) {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        TtCrashRec rec;
+        rec.magic    = TT_CRASH_MAGIC;
+        rec.sig      = sig;
+        rec.code     = info ? info->si_code : 0;
+        rec.sender   = info ? info->si_pid  : 0;
+        rec.pid      = (int)getpid();
+        rec.hit      = n;
+        rec.alive_ms = ((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000) - g_load_time_ms;
+        rec.addr     = info ? info->si_addr : nullptr;
+        ssize_t wr = ::write(g_crash_pipe[1], &rec, sizeof(rec)); // non-blocking, best-effort
+        (void)wr;
+        sched_yield(); // give the drain thread a chance to log before we chain
     }
 
+    // Chain to the previous handler (sigchain shim -> debuggerd) so tombstones
+    // are still produced. Calling it directly (not restore-to-SIG_DFL) preserves
+    // the debuggerd chain, per art/sigchainlib.
     if (sig >= 0 && sig < NSIG) {
-
         struct sigaction* p = &g_prev_sig[sig];
-        bool prev_is_real =
-            ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction != nullptr) ||
-            (!(p->sa_flags & SA_SIGINFO) &&
-             p->sa_handler != SIG_DFL && p->sa_handler != SIG_IGN &&
-             p->sa_handler != nullptr);
-        if (prev_is_real) {
-            sigaction(sig, p, nullptr);
+        if ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction) {
+            p->sa_sigaction(sig, info, ctx);
+        } else if (!(p->sa_flags & SA_SIGINFO) && p->sa_handler &&
+                   p->sa_handler != SIG_DFL && p->sa_handler != SIG_IGN) {
+            p->sa_handler(sig);
         } else {
-            struct sigaction dfl;
-            memset(&dfl, 0, sizeof(dfl));
-            dfl.sa_handler = SIG_DFL;
-            sigaction(sig, &dfl, nullptr);
+            signal(sig, SIG_DFL);
+            raise(sig);
         }
     }
-
 }
+
+// Diagnostic only. SIGSYS is intentionally NOT hooked: zygote's seccomp policy
+// raises SIGSYS on violations, and shadowing it would mask real seccomp events.
 static void install_crash_watchdog(const std::string& pkg) {
-    g_watchdog_pkg  = pkg;
-    g_load_time_ms  = tt_now_ms();
+    static bool armed = false;
+    if (armed) return;
+
+    strncpy(g_watchdog_pkg_buf, pkg.c_str(), sizeof(g_watchdog_pkg_buf) - 1);
+    g_load_time_ms = tt_now_ms();
+
+    if (pipe2(g_crash_pipe, O_CLOEXEC) == 0) {
+        int fl = fcntl(g_crash_pipe[1], F_GETFL, 0);
+        if (fl >= 0) fcntl(g_crash_pipe[1], F_SETFL, fl | O_NONBLOCK); // never block in handler
+        std::thread(tt_crash_drain_loop).detach();
+    } else {
+        g_crash_pipe[0] = g_crash_pipe[1] = -1; // no pipe: handler just chains, no logging
+        LOGE("crash watchdog: pipe2 failed errno=%d (logging disabled, chaining still armed)", errno);
+    }
+
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
     sa.sa_sigaction = tt_signal_handler;
     sigemptyset(&sa.sa_mask);
 
-    static const int sigs[] = { SIGABRT, SIGFPE, SIGILL, SIGSYS };
+    static const int sigs[] = { SIGABRT, SIGFPE, SIGILL };
     for (int s : sigs) {
         g_crash_count[s] = 0;
         sigaction(s, &sa, &g_prev_sig[s]);
     }
-    LOGD("crash watchdog armed for %s (4 signals: ABRT/FPE/ILL/SYS, limit=%d)",
-         pkg.c_str(), CRASH_LIMIT);
+    armed = true;
+    LOGD("crash watchdog armed for %s (ABRT/FPE/ILL, limit=%d)", pkg.c_str(), CRASH_LIMIT);
 }
 
+// ============================================ L1: Build static-field inject ==
+// Every JNI call after Get*FieldID is guarded with ExceptionCheck+ExceptionClear.
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
     jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
-    if (!id) { env->ExceptionClear(); return; }
+    if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
     jstring j = env->NewStringUTF(v.c_str());
+    if (!j || env->ExceptionCheck()) { env->ExceptionClear(); return; }
     env->SetStaticObjectField(c, id, j);
+    if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(j);
 }
 static void set_int(JNIEnv* env, jclass c, const char* f, int v) {
     jfieldID id = env->GetStaticFieldID(c, f, "I");
-    if (!id) { env->ExceptionClear(); return; }
+    if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
     env->SetStaticIntField(c, id, v);
+    if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
 static void install_build_hook(JNIEnv* env) {
     jclass build = env->FindClass("android/os/Build");
-    if (build) {
-        static const std::vector<std::pair<const char*, const char*>> f = {
+    if (build && !env->ExceptionCheck()) {
+        static const std::pair<const char*, const char*> f[] = {
             {"BRAND","BRAND"}, {"MANUFACTURER","MANUFACTURER"},
             {"MODEL","MODEL"}, {"DEVICE","DEVICE"}, {"PRODUCT","PRODUCT"},
             {"BOARD","BOARD"}, {"HARDWARE","HARDWARE"},
@@ -509,10 +456,15 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 
     jclass ver = env->FindClass("android/os/Build$VERSION");
-    if (ver) {
+    if (ver && !env->ExceptionCheck()) {
         set_str(env, ver, "RELEASE",        val("RELEASE"));
         set_str(env, ver, "INCREMENTAL",    val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", val("SECURITY_PATCH"));
+        // SDK_INT is only injected with a persona whose SDK does NOT exceed the
+        // real device's SDK — guaranteed by ternak-tt's SDK-safe persona
+        // selection, which filters the pool to sdk <= device sdk (downgrade is
+        // safe, upgrade is not). Injecting a *higher* SDK than the OS actually
+        // is would make apps call framework APIs that don't exist -> crash.
         const std::string& s = val("SDK_INT");
         if (!s.empty()) {
             int sdk = std::atoi(s.c_str());
@@ -522,172 +474,27 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 }
 
-static const char* MOUNTDIR = "/data/adb/modules/ternak_tt/mount";
-
-struct BindEntry { const char* src_rel; const char* dst; };
-static const BindEntry BIND_ENTRIES[] = {
-    {"system/build.prop",     "/system/build.prop"},
-    {"vendor/build.prop",     "/vendor/build.prop"},
-    {"odm/build.prop",        "/odm/build.prop"},
-    {"product/build.prop",    "/product/build.prop"},
-    {"system_ext/build.prop", "/system_ext/build.prop"},
-    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
-};
-
-static void request_companion_mounts(zygisk::Api* api) {
-    if (!api) return;
-    int fd = api->connectCompanion();
-    if (fd < 0) { LOGE("companion connect for mounts failed"); return; }
-
-    uint8_t cmd = CMD_DO_MOUNTS;
+// ================================================ companion bind-mount call ==
+// Reuses the socket opened (and exemptFd'd) in preAppSpecialize. Called from
+// postAppSpecialize so the app has already unshared its mount namespace.
+static void request_companion_mounts(int fd) {
+    uint8_t cmd  = tt::CMD_DO_MOUNTS;
     uint32_t pid = (uint32_t)::getpid();
-    if (::write(fd, &cmd, 1) != 1 ||
-        ::write(fd, &pid, sizeof(pid)) != (ssize_t)sizeof(pid)) {
-        LOGE("companion write failed");
-        ::close(fd); return;
-    }
-    uint32_t ok = 0;
-    ssize_t n = ::read(fd, &ok, sizeof(ok));
-    ::close(fd);
-    if (n != (ssize_t)sizeof(ok)) {
-        LOGE("companion read ack failed");
+    if (!tt::write_full(fd, &cmd, 1) || !tt::write_full(fd, &pid, sizeof(pid))) {
+        LOGE("companion DO_MOUNTS write failed (socket unusable post-specialize?)");
         return;
     }
+    uint32_t ok = 0;
+    if (!tt::read_full(fd, &ok, sizeof(ok))) { LOGE("companion mount ack failed"); return; }
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
-using openat_t = int (*)(int, const char*, int, ...);
-static openat_t orig_openat = nullptr;
-
-static bool is_sensitive_proc_path(const char* p) {
-    if (!p) return false;
-    if (!strstr(p, "/proc/")) return false;
-    if (strstr(p, "/mountinfo")) return true;
-    if (strstr(p, "/mounts"))    return true;
-    if (strstr(p, "/maps"))      return true;
-    return false;
-}
-
-static int hook_openat(int dirfd, const char* path, int flags, ...) {
-    mode_t mode = 0;
-    if (flags & (O_CREAT | O_TMPFILE)) {
-        va_list ap; va_start(ap, flags);
-        mode = va_arg(ap, int);
-        va_end(ap);
-    }
-    if (!orig_openat || !is_sensitive_proc_path(path)) {
-        return orig_openat ? orig_openat(dirfd, path, flags, mode)
-                           : ::openat(dirfd, path, flags, mode);
-    }
-    int real_fd = orig_openat(dirfd, path, flags, mode);
-    if (real_fd < 0) return real_fd;
-
-    std::string content;
-    char buf[4096];
-    ssize_t n;
-    while ((n = ::read(real_fd, buf, sizeof(buf))) > 0) content.append(buf, n);
-    ::close(real_fd);
-
-    std::string filtered;
-    std::istringstream iss(content);
-    std::string line;
-    while (std::getline(iss, line)) {
-        if (line.find("ternak_tt") != std::string::npos) continue;
-        if (line.find("ternak-tt") != std::string::npos) continue;
-        filtered.append(line);
-        filtered.push_back('\n');
-    }
-
-    int mfd = tt_memfd_create("clean", MFD_CLOEXEC);
-    if (mfd < 0) return orig_openat(dirfd, path, flags, mode);
-    if (!filtered.empty()) {
-        ::write(mfd, filtered.data(), filtered.size());
-    }
-    ::lseek(mfd, 0, SEEK_SET);
-    return mfd;
-}
-
-static bool find_libc_dev_inode(dev_t* dev_out, ino_t* ino_out) {
-    FILE* f = ::fopen("/proc/self/maps", "r");
-    if (!f) return false;
-    char line[512];
-    bool found = false;
-    while (::fgets(line, sizeof(line), f)) {
-
-        char* nl = ::strchr(line, '\n');
-        if (nl) *nl = 0;
-
-        char* sp = ::strrchr(line, ' ');
-        if (!sp) continue;
-        char* path = sp + 1;
-        size_t plen = ::strlen(path);
-        if (plen < 8) continue;
-        if (::strcmp(path + plen - 8, "/libc.so") != 0) continue;
-
-        unsigned long a1, a2, off;
-        char perms[8] = {0};
-        unsigned int dmaj = 0, dmin = 0;
-        unsigned long ino = 0;
-        if (::sscanf(line, "%lx-%lx %7s %lx %x:%x %lu",
-                     &a1, &a2, perms, &off, &dmaj, &dmin, &ino) == 7) {
-            *dev_out = (dev_t)((dmaj << 8) | dmin);
-            *ino_out = (ino_t)ino;
-            found = true;
-            break;
-        }
-    }
-    ::fclose(f);
-    return found;
-}
-
-using api_level_t = int (*)();
-static api_level_t orig_api_level = nullptr;
-
-static int hook_api_level() {
-    const std::string& sdk_str = val("SDK_INT");
-    if (!sdk_str.empty()) {
-        int spoofed = std::atoi(sdk_str.c_str());
-        if (spoofed > 0) {
-            LOGD("Native android_get_device_api_level() spoofed to %d", spoofed);
-            return spoofed;
-        }
-    }
-    return orig_api_level ? orig_api_level() : 0;
-}
-
-static void install_proc_sanitizer(Api* api) {
-    if (!api) return;
-    dev_t dev = 0;
-    ino_t ino = 0;
-    if (!find_libc_dev_inode(&dev, &ino)) {
-        LOGI("proc sanitizer: libc.so not found in maps (skip)");
-        return;
-    }
-    api->pltHookRegister(dev, ino, "openat",
-                         reinterpret_cast<void*>(hook_openat),
-                         reinterpret_cast<void**>(&orig_openat));
-    api->pltHookRegister(dev, ino, "__openat",
-                         reinterpret_cast<void*>(hook_openat),
-                         reinterpret_cast<void**>(&orig_openat));
-
-    api->pltHookRegister(dev, ino, "android_get_device_api_level",
-                         reinterpret_cast<void*>(hook_api_level),
-                         reinterpret_cast<void**>(&orig_api_level));
-
-    if (!api->pltHookCommit()) {
-        LOGI("proc sanitizer: PLT commit false (best-effort skipped)");
-    } else {
-        LOGI("proc sanitizer installed (dev=%lu ino=%lu)",
-             (unsigned long)dev, (unsigned long)ino);
-    }
-}
-
+// ================================================================== module ==
 class TernakTT : public zygisk::ModuleBase {
 public:
     void onLoad(Api* api, JNIEnv* env) override {
         api_ = api; env_ = env;
-        LOGD("onLoad build=%s api=%p env=%p pid=%d uid=%d",
-             TT_VARIANT_TAG, api, env, getpid(), getuid());
+        LOGD("onLoad build=%s pid=%d uid=%d", TT_VARIANT_TAG, getpid(), getuid());
     }
 
     void preAppSpecialize(AppSpecializeArgs* args) override {
@@ -702,87 +509,74 @@ public:
 
         int fd = api_->connectCompanion();
         LOGD("connectCompanion() -> fd=%d", fd);
-        if (fd < 0) { LOGD("companion connect failed for pkg='%s'", pkg.c_str()); unload(); return; }
+        if (fd < 0) { unload(); return; }
+        // Keep this socket usable across the specialize boundary (fd sanitizer /
+        // denylist unmount would otherwise close it before postAppSpecialize).
+        api_->exemptFd(fd);
 
-        uint8_t cmd = CMD_GET_IDENTITY;
-        write(fd, &cmd, 1);
+        uint8_t cmd   = tt::CMD_GET_IDENTITY;
         uint16_t plen = (uint16_t)pkg.size();
-        write(fd, &plen, sizeof(plen));
-        if (plen) write(fd, pkg.data(), plen);
+        if (!tt::write_full(fd, &cmd, 1) ||
+            !tt::write_full(fd, &plen, sizeof(plen)) ||
+            (plen && !tt::write_full(fd, pkg.data(), plen))) {
+            ::close(fd); unload(); return;
+        }
 
         uint32_t len = 0;
-        if (read(fd, &len, sizeof(len)) != sizeof(len) || len > 65536) {
-            close(fd); unload(); return;
+        if (!tt::read_full(fd, &len, sizeof(len)) || len > tt::MAX_IDENTITY_BLOB) {
+            ::close(fd); unload(); return;
         }
-        if (len == 0) {
+        if (len == 0) { // not a target (or identity genuinely absent after retries)
+            LOGD("pkg='%s' not a target", pkg.c_str());
+            ::close(fd); unload(); return;
+        }
 
-            LOGD("pkg='%s' not a target (companion), unloading", pkg.c_str());
-            close(fd); unload(); return;
-        }
         blob_.resize(len);
-        size_t got = 0;
-        while (got < len) {
-            ssize_t n = read(fd, blob_.data() + got, len - got);
-            if (n <= 0) break;
-            got += (size_t)n;
-        }
-        close(fd);
-        if (got != len) { unload(); return; }
+        if (!tt::read_full(fd, blob_.data(), len)) { ::close(fd); unload(); return; }
 
-        active_ = true;
-        pkg_ = pkg;
+        active_  = true;
+        pkg_     = pkg;
+        comp_fd_ = fd; // DO NOT close: reused for CMD_DO_MOUNTS in postAppSpecialize
         LOGI("target: %s (%u B) [%s]", pkg.c_str(), len, TT_VARIANT_TAG);
-        LOGD("identity blob head='%.120s'",
-             std::string(blob_.begin(), blob_.begin() + (len < 120 ? len : 120)).c_str());
-
-        request_companion_mounts(api_);
     }
 
     void postAppSpecialize(const AppSpecializeArgs*) override {
         if (!active_) return;
-        parse_blob();
-        LOGD("parse_blob: %zu identity keys loaded", g_id.size());
-#ifdef TT_DEBUG
-        for (auto& kv : g_id) {
-            LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
-        }
-#endif
-        install_build_hook(env_);
-        LOGD("L1 install_build_hook done");
 
-        {
-            jclass sp = env_->FindClass("android/os/SystemProperties");
-            if (sp) {
-                JNINativeMethod m = {
-                    const_cast<char*>("native_get"),
-                    const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
-                    reinterpret_cast<void*>(hook_prop_get)};
-                env_->RegisterNatives(sp, &m, 1);
-                env_->ExceptionClear();
-                env_->DeleteLocalRef(sp);
-            } else env_->ExceptionClear();
-        }
-        install_secure_hook(env_);
-        install_gaid_hook(env_);
-        install_wifi_hook(env_);
-        install_telephony_hook(env_);
+        parse_blob();
+        LOGD("parse_blob: %zu identity keys", g_id.size());
+
+        install_build_hook(env_);          // L1
+        install_prop_hook(api_, env_);     // L2
 #ifdef TT_DEBUG
-        install_leak_sensors(env_);
+        install_leak_sensors(api_, env_);  // L7
+        for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
         install_crash_watchdog(pkg_);
 
+        // Trigger the bind-mounts HERE (not in preAppSpecialize). By post-specialize
+        // the app has its OWN mount namespace (unshared in SpecializeCommon), so the
+        // companion joins the app's ns and the overlay cannot leak into zygote —
+        // which would otherwise spoof every subsequently-spawned app. See report.
+        if (comp_fd_ >= 0) {
+            request_companion_mounts(comp_fd_);
+            ::close(comp_fd_);
+            comp_fd_ = -1;
+        }
     }
 
     void preServerSpecialize(ServerSpecializeArgs*) override { unload(); }
 
 private:
     Api* api_ = nullptr;
-    std::string pkg_;
     JNIEnv* env_ = nullptr;
+    std::string pkg_;
     bool active_ = false;
+    int comp_fd_ = -1;
     std::vector<uint8_t> blob_;
 
     void unload() {
+        // Safe here: called only before any hook is installed (non-targets).
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
     void parse_blob() {

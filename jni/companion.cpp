@@ -1,8 +1,21 @@
 
+// companion.cpp — Ternak TT root companion (Zygisk companion daemon side)
+//
+// Runs in a long-lived root daemon in the GLOBAL (init) mount namespace. Each
+// connectCompanion() from an app spawns a new THREAD here running
+// ternak_tt_companion(client). Two jobs:
+//   CMD_GET_IDENTITY : is_target(pkg)? -> stream identity.prop bytes back
+//   CMD_DO_MOUNTS    : fork a throwaway child that joins the app's PRIVATE mount
+//                      namespace and bind-mounts the synthetic build.prop set.
+//
+// All framing goes through tt::read_full/write_full so a truncated/rogue peer
+// can never desync us. Paths/commands/bind-table come from tt_config.hpp (single
+// source of truth shared with main.cpp) — no local duplicates.
+
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <sched.h>
+#include <sched.h>          // setns, CLONE_NEWNS
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -12,13 +25,15 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <array>
 #include <fstream>
 #include <sstream>
 #include <thread>
 #include <chrono>
-#include <signal.h>
+#include <mutex>
 #include <time.h>
 #include <android/log.h>
+#include "tt_config.hpp"
 
 #define LOG_TAG "TernakTTCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -33,25 +48,18 @@
 
 static void watch_target_death(uint32_t pid);
 
-enum : uint8_t {
-    CMD_CHECK_TT     = 1,
-    CMD_GET_IDENTITY = 2,
-    CMD_DO_MOUNTS    = 3,
-};
-
-static const char* IDENTITY_FILE = "/data/adb/modules/ternak_tt/identity.prop";
-#include <mutex>
-static const char* MOUNTDIR      = "/data/adb/modules/ternak_tt/mount";
-static const char* TARGET_FILE   = "/data/adb/modules/ternak_tt/target.txt";
-
+// ------------------------------------------------------- target.txt cache ---
 static std::vector<std::string> g_targets;
 static time_t                   g_targets_mtime = 0;
-static std::recursive_mutex g_targets_mtx;
+static std::recursive_mutex     g_targets_mtx;
 
+// Reload target.txt only when its mtime changed (hot-reload). Falls back to the
+// built-in defaults when the file is absent, and KEEPS the previous list if the
+// file is present but parses to zero entries (never accidentally empty).
 static void reload_targets_if_changed() {
     std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     struct stat st{};
-    bool have = (::stat(TARGET_FILE, &st) == 0);
+    bool have = (::stat(tt::TARGET_FILE, &st) == 0);
     if (!have) {
         if (g_targets.empty()) {
             g_targets = {
@@ -60,18 +68,16 @@ static void reload_targets_if_changed() {
                 "com.zhiliaoapp.musically.go",
                 "com.grabtaxi.passenger",
             };
-            LOGI("target.txt missing, using built-in defaults (%zu pkgs)",
-                 g_targets.size());
+            LOGI("target.txt missing, using built-in defaults (%zu pkgs)", g_targets.size());
         }
         return;
     }
     if (!g_targets.empty() && st.st_mtime == g_targets_mtime) return;
 
-    std::ifstream f(TARGET_FILE);
+    std::ifstream f(tt::TARGET_FILE);
     std::vector<std::string> next;
     std::string line;
     while (std::getline(f, line)) {
-
         size_t hash = line.find('#');
         if (hash != std::string::npos) line.erase(hash);
         while (!line.empty() &&
@@ -85,40 +91,25 @@ static void reload_targets_if_changed() {
         next.push_back(line);
     }
     if (next.empty()) {
-        LOGE("target.txt has 0 valid entries; keeping previous list (%zu pkgs)",
-             g_targets.size());
+        LOGE("target.txt has 0 valid entries; keeping previous list (%zu pkgs)", g_targets.size());
         g_targets_mtime = st.st_mtime;
         return;
     }
     g_targets       = std::move(next);
     g_targets_mtime = st.st_mtime;
-    LOGI("target.txt loaded: %zu pkg(s) mtime=%ld",
-         g_targets.size(), (long)st.st_mtime);
+    LOGI("target.txt loaded: %zu pkg(s) mtime=%ld", g_targets.size(), (long)st.st_mtime);
 #ifdef TT_DEBUG
     for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
 #endif
 }
 
 static bool is_target(const std::string& pkg) {
+    if (pkg.empty()) return false;
     std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     reload_targets_if_changed();
     for (const auto& t : g_targets) if (t == pkg) return true;
     return false;
 }
-
-struct BindEntry { const char* src_rel; const char* dst; };
-
-static const BindEntry BIND_ENTRIES[] = {
-    {"system/build.prop",     "/system/build.prop"},
-    {"vendor/build.prop",     "/vendor/build.prop"},
-    {"odm/build.prop",        "/odm/etc/build.prop"},
-    {"odm/build.prop",        "/odm/build.prop"},
-    {"product/build.prop",    "/product/etc/build.prop"},
-    {"product/build.prop",    "/product/build.prop"},
-    {"system_ext/build.prop", "/system_ext/etc/build.prop"},
-    {"system_ext/build.prop", "/system_ext/build.prop"},
-    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
-};
 
 static std::string read_file(const char* p) {
     std::ifstream f(p);
@@ -127,6 +118,19 @@ static std::string read_file(const char* p) {
     ss << f.rdbuf();
     return ss.str();
 }
+
+// ------------------------------------------------------------ mount worker ---
+// Per-mount outcome, filled by the forked child and shipped back to the parent
+// THREAD via the pipe. The child does NO logging: the companion is multi-threaded
+// and calling __android_log_print after fork() risks a liblog mutex inherited in
+// a locked state (fork-safety). The parent (a normal thread) logs instead.
+struct MountResult {
+    uint32_t ok = 0, fail = 0, skip = 0, skip_src = 0, skip_dst = 0;
+    int32_t  ns_open_errno   = 0;   // open(/proc/pid/ns/mnt) errno, 0 = ok
+    int32_t  setns_errno     = 0;   // setns errno, 0 = ok
+    int32_t  first_fail_idx  = -1;  // BIND_ENTRIES index of first failed bind
+    int32_t  first_fail_errno= 0;
+};
 
 static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     int pipefd[2];
@@ -143,140 +147,167 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     }
 
     if (child == 0) {
-
+        // ---- child: no liblog here (fork-safety); report via pipe only ----
         ::close(pipefd[0]);
-        LOGD("child: pid=%d parent_target=%u", getpid(), target_pid);
+        MountResult r;
 
-        const size_t num_entries = sizeof(BIND_ENTRIES)/sizeof(BIND_ENTRIES[0]);
-        int src_fds[num_entries];
-        for (size_t i = 0; i < num_entries; ++i) {
-            std::string src = std::string(MOUNTDIR) + "/" + BIND_ENTRIES[i].src_rel;
+        // Open all source fds in OUR (root) namespace BEFORE setns — the module
+        // dir may be denylist-unmounted inside the app ns, so we must grab the
+        // fds while still in root, then bind them in via /proc/self/fd/N.
+        std::array<int, tt::BIND_ENTRIES_N> src_fds{};
+        for (size_t i = 0; i < tt::BIND_ENTRIES_N; ++i) {
+            std::string src = std::string(tt::MOUNTDIR) + "/" + tt::BIND_ENTRIES[i].src_rel;
             src_fds[i] = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
         }
 
         char path[64];
         ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
         int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
-        LOGD("child: open %s -> fd=%d errno=%d", path, tgt_ns, errno);
-        uint32_t ok = 0, fail = 0, skip = 0;
-
         if (tgt_ns < 0) {
-            LOGE("child: open %s failed errno=%d", path, errno);
+            r.ns_open_errno = errno;
         } else if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
-            LOGE("child: setns->target failed errno=%d", errno);
+            r.setns_errno = errno;
             ::close(tgt_ns);
         } else {
-            LOGD("child: setns OK, entering %u bind loop", (unsigned)num_entries);
-            uint32_t skip_src = 0, skip_dst = 0;
-            for (size_t i = 0; i < num_entries; ++i) {
-                const auto& e = BIND_ENTRIES[i];
-                if (src_fds[i] < 0) {
-                    skip_src++; skip++; continue;
-                }
-                bool dst_ok = (::access(e.dst, F_OK) == 0);
-                if (!dst_ok) { skip_dst++; skip++; continue; }
+            // Defensive: mark this (app-private) namespace's tree MS_SLAVE so our
+            // binds can never propagate back to zygote/root even if the app ns
+            // root is still MS_SHARED. Best-effort; failure is non-fatal.
+            ::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr);
+
+            for (size_t i = 0; i < tt::BIND_ENTRIES_N; ++i) {
+                const auto& e = tt::BIND_ENTRIES[i];
+                if (src_fds[i] < 0) { r.skip_src++; r.skip++; continue; }
+                if (::access(e.dst, F_OK) != 0) { r.skip_dst++; r.skip++; continue; }
 
                 char proc_fd_path[32];
                 ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
-
-                int rc = ::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr);
-                if (rc == 0) {
-                    ok++;
+                if (::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr) == 0) {
+                    r.ok++;
                 } else {
-                    fail++;
+                    if (r.first_fail_idx < 0) { r.first_fail_idx = (int)i; r.first_fail_errno = errno; }
+                    r.fail++;
                 }
             }
-            LOGI("child mount for pid=%u: %u ok, %u fail, %u skip "
-                 "(skip_src=%u skip_dst=%u) [%s]",
-                 target_pid, ok, fail, skip, skip_src, skip_dst, TT_VARIANT_TAG);
             ::close(tgt_ns);
         }
 
-        for (size_t i = 0; i < num_entries; ++i) {
+        for (size_t i = 0; i < tt::BIND_ENTRIES_N; ++i)
             if (src_fds[i] >= 0) ::close(src_fds[i]);
-        }
 
-        ::write(pipefd[1], &ok, sizeof(ok));
+        tt::write_full(pipefd[1], &r, sizeof(r));
         ::close(pipefd[1]);
         ::_exit(0);
     }
 
+    // ---- parent thread: read the child's result, then log it here ----
     ::close(pipefd[1]);
-    uint32_t ok = 0;
-    ssize_t n = ::read(pipefd[0], &ok, sizeof(ok));
+    MountResult r;
+    bool got = tt::read_full(pipefd[0], &r, sizeof(r));
     ::close(pipefd[0]);
 
     watch_target_death(target_pid);
     int status = 0;
     ::waitpid(child, &status, 0);
-    if (n != (ssize_t)sizeof(ok)) {
-        LOGE("parent: read from child failed (n=%zd)", n);
+
+    if (!got) {
+        LOGE("mount child for pid=%u produced no result (crashed?)", target_pid);
         return 0;
     }
-    return ok;
+    if (r.ns_open_errno) {
+        LOGE("mount pid=%u: open /proc/%u/ns/mnt failed errno=%d", target_pid, target_pid, r.ns_open_errno);
+        return 0;
+    }
+    if (r.setns_errno) {
+        LOGE("mount pid=%u: setns failed errno=%d", target_pid, r.setns_errno);
+        return 0;
+    }
+    if (r.fail && r.first_fail_idx >= 0 && r.first_fail_idx < (int)tt::BIND_ENTRIES_N) {
+        // errno interpretation: EPERM=SELinux/caps, EINVAL=bad flags/src, ENOENT=missing.
+        LOGE("mount pid=%u: %u bind(s) FAILED (first: %s errno=%d) [%s]",
+             target_pid, r.fail, tt::BIND_ENTRIES[r.first_fail_idx].dst,
+             r.first_fail_errno, TT_VARIANT_TAG);
+    }
+    LOGI("mount pid=%u: %u ok, %u fail, %u skip (skip_src=%u skip_dst=%u) [%s]",
+         target_pid, r.ok, r.fail, r.skip, r.skip_src, r.skip_dst, TT_VARIANT_TAG);
+    return r.ok;
 }
 
+// Detached watcher: logs when the target process disappears (SIGKILL / LMK /
+// normal exit are uncatchable in-process, so we observe from outside).
 static void watch_target_death(uint32_t pid) {
     std::thread([pid]() {
         struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
-
         for (int i = 0; i < 3600; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             if (::kill((pid_t)pid, 0) == 0) continue;
             if (errno != ESRCH) continue;
             struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-            long ms = (t1.tv_sec - t0.tv_sec) * 1000L +
-                      (t1.tv_nsec - t0.tv_nsec) / 1000000L;
-            LOGI("DEATH target pid=%u disappeared after %ldms "
-                 "(uncatchable exit: SIGKILL / LMK / normal exit) [%s]",
-                 pid, ms, TT_VARIANT_TAG);
+            long ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+            LOGI("DEATH target pid=%u disappeared after %ldms [%s]", pid, ms, TT_VARIANT_TAG);
             return;
         }
         LOGD("death watcher for pid=%u timed out after 30min", pid);
     }).detach();
 }
 
+// --------------------------------------------------------------- IPC loop ---
 extern "C" void ternak_tt_companion(int client) {
-    LOGD("companion invoked: client=%d pid=%d [%s]",
-         client, getpid(), TT_VARIANT_TAG);
+    LOGD("companion invoked: client=%d pid=%d [%s]", client, getpid(), TT_VARIANT_TAG);
     while (true) {
         uint8_t cmd = 0;
-        if (::read(client, &cmd, 1) != 1) break;
+        if (!tt::read_full(client, &cmd, 1)) break;   // clean client close -> EOF -> break
         LOGD("recv cmd=%u", cmd);
 
-        if (cmd == CMD_GET_IDENTITY) {
-
+        if (cmd == tt::CMD_GET_IDENTITY) {
             uint16_t plen = 0;
-            if (::read(client, &plen, sizeof(plen)) != (ssize_t)sizeof(plen)) break;
+            if (!tt::read_full(client, &plen, sizeof(plen))) break;
             std::string pkg;
             if (plen) {
                 pkg.resize(plen);
-                size_t got = 0;
-                while (got < plen) {
-                    ssize_t n = ::read(client, &pkg[got], plen - got);
-                    if (n <= 0) break;
-                    got += (size_t)n;
-                }
-                if (got != plen) break;
+                if (!tt::read_full(client, &pkg[0], plen)) break;
             }
             if (!is_target(pkg)) {
                 LOGD("REJECT pkg='%s' (not in target.txt)", pkg.c_str());
                 uint32_t z = 0;
-                ::write(client, &z, sizeof(z));
+                tt::write_full(client, &z, sizeof(z));
                 continue;
             }
-            LOGD("ACCEPT pkg='%s'", pkg.c_str());
-            std::string d = read_file(IDENTITY_FILE);
+
+            std::string d = read_file(tt::IDENTITY_FILE);
+            if (d.empty()) {
+                // identity.prop should already exist (post-fs-data `seed` runs
+                // before zygote). If a target has none — seed failed or the file
+                // is mid-replace — retry briefly, then surface it. An empty reply
+                // makes the client treat the app as a non-target (fails safe).
+                for (int i = 0; i < 3 && d.empty(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    d = read_file(tt::IDENTITY_FILE);
+                }
+                if (d.empty())
+                    LOGE("target '%s' but identity.prop empty/missing after retries — "
+                         "run `ternak-tt seed` or `freshen` (app gets NO spoofing)", pkg.c_str());
+            }
+            LOGD("ACCEPT pkg='%s' (%zu bytes)", pkg.c_str(), d.size());
+
             uint32_t l = (uint32_t)d.size();
-            ::write(client, &l, sizeof(l));
-            if (l) ::write(client, d.data(), l);
-        } else if (cmd == CMD_DO_MOUNTS) {
+            if (!tt::write_full(client, &l, sizeof(l))) break;
+            if (l && !tt::write_full(client, d.data(), l)) break;
+
+        } else if (cmd == tt::CMD_DO_MOUNTS) {
             uint32_t pid = 0;
-            if (::read(client, &pid, sizeof(pid)) != (ssize_t)sizeof(pid)) break;
-            if (pid == 0) { uint32_t z = 0; ::write(client, &z, sizeof(z)); break; }
+            if (!tt::read_full(client, &pid, sizeof(pid))) break;
+            if (pid == 0) {
+                uint32_t z = 0;
+                tt::write_full(client, &z, sizeof(z));
+                break;
+            }
             uint32_t ok = do_mounts_via_fork(pid);
-            ::write(client, &ok, sizeof(ok));
+            if (!tt::write_full(client, &ok, sizeof(ok))) break;
+
         } else {
+            // Unknown/unsupported (incl. CMD_CHECK_TT, reserved for future health
+            // check): don't desync — just drop the connection.
+            LOGD("unknown cmd=%u, closing", cmd);
             break;
         }
     }
