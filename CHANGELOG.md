@@ -78,6 +78,38 @@ lingkungan review ini, jadi belum diverifikasi):
    version** sebelum flag di-flip. `build.yml` sengaja TIDAK diubah (edit YAML buta
    berisiko memecah parsing CI produksi); langkah CI di atas ditambahkan saat enable.
 
+### Changed — review pass (JNI local-ref hygiene + dokumentasi watchdog)
+
+Pass review 6-gejala (mandiri, berbasis source-of-truth). 5 dari 6 gejala terbukti
+false-positive / keep / defer; hanya **1** perbaikan kode nyata (hygiene, bukan crash)
++ **1** komentar. Build rilis **tetap byte-identik dengan v1.0.27** (perubahan hanya di
+kode L3 default-OFF yang belum aktif + 1 komentar nol-efek di `main.cpp`).
+
+- **`jni/tt_lsplant.hpp` (ON-branch, default-OFF) — JNI local-ref frame.**
+  `load_callback_class()` & `hook_android_id()` kini membungkus seluruh body dengan
+  `env->PushLocalFrame(16)` / `env->PopLocalFrame(nullptr)` (tiap early-return jadi
+  return dari IIFE). Semua local transient (`bb/loaderCls/clCls/parent/loader/name` dan
+  `jval/hooker/cb/sec/target/backup` + local yang dibuat ART/liblog di dalamnya) kini
+  bebas di **setiap** jalur keluar (happy + tiap error), bukan hanya happy-path.
+  GlobalRef (`g_cb_class`/`g_cb_object`/`g_backup`) & ref yang dipegang field statik
+  (`spoof`/`original`) dibuat sebelum pop → selamat. **Nol perubahan perilaku**; ini
+  kerapian, BUKAN fix leak — fungsi dipanggil sekali per-proses dan tabel local lama pun
+  sudah auto-reclaimed saat `postAppSpecialize` return. `DeleteLocalRef(jval)` manual
+  yang lama dihapus (kini ditangani frame).
+- **`jni/main.cpp` — dokumentasi signal-set watchdog.** Tambah komentar di arm-site
+  menjelaskan kenapa set `{ABRT,FPE,ILL}` sengaja TIDAK memuat SIGSEGV/SIGBUS (ART
+  memakai SIGSEGV untuk implicit-null / stack-overflow / suspend / GC checks lalu pulih
+  via handler-nya; arm SEGV = mencatat fault benign sebagai "CRASH"). **Komentar saja —
+  biner tidak berubah.**
+
+**Belum diverifikasi (gating — sama seperti seluruh L3):** cabang `TT_ENABLE_LSPLANT=ON`
+tak dapat di-compile di lingkungan review (lsplant/dobby/lsparself + `tt_hook_dex.h`
+absent). Perubahan `tt_lsplant.hpp` di-review-by-spec (JNI PushLocalFrame/PopLocalFrame
++ LSPlant v6.4 API); **wajib** lolos compile + boot-test per-ABI saat flag di-enable.
+
+**Tidak diubah (verdict false-positive/keep/defer):** `ternak-tt.cpp`, `companion.cpp`,
+`pool_tt.hpp`, `tt_config.hpp`, `TtHook.java`, `CMakeLists.txt`, `build.sh`.
+
 ---
 
 ## v1.0.27 (2026-08-18)

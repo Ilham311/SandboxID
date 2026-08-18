@@ -144,36 +144,43 @@ inline jclass load_callback_class(JNIEnv* env) {
     TT_LSP_LOGE("L3: callback DEX (tt_hook_dex.h) tak ada di build ini — hook dilewati");
     return nullptr;
 #else
-    jobject bb = env->NewDirectByteBuffer((void*)tt_hook_dex, (jlong)tt_hook_dex_len);
-    if (!bb || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    // Semua local transient (bb/loaderCls/clCls/parent/loader/name/cls, plus local
+    // yang dibuat liblog/ART di dalam) hidup dalam SATU frame: apa pun jalur keluar
+    // IIFE (happy atau tiap error), PopLocalFrame membebaskan semuanya sekaligus.
+    // GlobalRef untuk class dibuat SETELAH IIFE tapi SEBELUM pop, jadi selamat.
+    if (env->PushLocalFrame(16) != 0) { env->ExceptionClear(); return nullptr; }
+    jobject cls = [&]() -> jobject {
+        jobject bb = env->NewDirectByteBuffer((void*)tt_hook_dex, (jlong)tt_hook_dex_len);
+        if (!bb || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
 
-    jclass loaderCls = env->FindClass("dalvik/system/InMemoryDexClassLoader");
-    if (!loaderCls || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
-    jmethodID ctor = env->GetMethodID(loaderCls, "<init>",
-        "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
-    if (!ctor || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        jclass loaderCls = env->FindClass("dalvik/system/InMemoryDexClassLoader");
+        if (!loaderCls || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        jmethodID ctor = env->GetMethodID(loaderCls, "<init>",
+            "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
+        if (!ctor || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
 
-    jclass clCls = env->FindClass("java/lang/ClassLoader");
-    if (!clCls || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
-    jmethodID getSys = env->GetStaticMethodID(clCls, "getSystemClassLoader",
-        "()Ljava/lang/ClassLoader;");
-    if (!getSys || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
-    jobject parent = env->CallStaticObjectMethod(clCls, getSys);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        jclass clCls = env->FindClass("java/lang/ClassLoader");
+        if (!clCls || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        jmethodID getSys = env->GetStaticMethodID(clCls, "getSystemClassLoader",
+            "()Ljava/lang/ClassLoader;");
+        if (!getSys || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        jobject parent = env->CallStaticObjectMethod(clCls, getSys);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
 
-    jobject loader = env->NewObject(loaderCls, ctor, bb, parent);
-    if (!loader || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        jobject loader = env->NewObject(loaderCls, ctor, bb, parent);
+        if (!loader || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
 
-    jmethodID loadClass = env->GetMethodID(clCls, "loadClass",
-        "(Ljava/lang/String;)Ljava/lang/Class;");
-    if (!loadClass || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
-    jstring name = env->NewStringUTF("androidx.core.os.EnvCompatState");
-    jobject cls = env->CallObjectMethod(loader, loadClass, name);
-    env->DeleteLocalRef(name);
-    if (!cls || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        jmethodID loadClass = env->GetMethodID(clCls, "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;");
+        if (!loadClass || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        jstring name = env->NewStringUTF("androidx.core.os.EnvCompatState");
+        jobject c = env->CallObjectMethod(loader, loadClass, name);
+        if (!c || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        return c;   // masih local; dipromosikan ke GlobalRef di bawah sebelum pop
+    }();
 
-    jclass g = (jclass)env->NewGlobalRef(cls);
-    env->DeleteLocalRef(cls);
+    jclass g = cls ? (jclass)env->NewGlobalRef(cls) : nullptr;
+    env->PopLocalFrame(nullptr);   // bebaskan semua local frame ini (g selamat)
     return g;
 #endif
 }
@@ -184,52 +191,62 @@ inline bool hook_android_id(JNIEnv* env, const std::string& value) {
     if (!env) return false;
     set_android_id(value);
 
-    // 1) Class callback dari DEX.
+    // 1) Class callback dari DEX (sudah GlobalRef).
     if (!g_cb_class) g_cb_class = load_callback_class(env);
     if (!g_cb_class) return false;                 // fail-safe (DEX absen / gagal)
 
-    // 2) Field statik `spoof` = android_id persona.
-    jfieldID fSpoof = env->GetStaticFieldID(g_cb_class, "spoof", "Ljava/lang/String;");
-    if (!fSpoof || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
-    jstring jval = env->NewStringUTF(value.c_str());
-    env->SetStaticObjectField(g_cb_class, fSpoof, jval);
-    env->DeleteLocalRef(jval);
+    // Semua local transient (jval/hooker/cb/sec/target/backup + local internal
+    // lsplant::Hook) hidup dalam satu frame → PopLocalFrame membebaskannya di
+    // SETIAP jalur keluar (happy+error). GlobalRef (g_cb_object/g_backup) & ref
+    // yang dipegang static-field dibuat di dalam IIFE dan selamat dari pop
+    // (keduanya independen dari frame local).
+    if (env->PushLocalFrame(16) != 0) { env->ExceptionClear(); return false; }
+    bool ok = [&]() -> bool {
+        // 2) Field statik `spoof` = android_id persona.
+        jfieldID fSpoof = env->GetStaticFieldID(g_cb_class, "spoof", "Ljava/lang/String;");
+        if (!fSpoof || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        jstring jval = env->NewStringUTF(value.c_str());
+        env->SetStaticObjectField(g_cb_class, fSpoof, jval);  // field pegang ref sendiri
 
-    // 3) Instance hooker + reflected method `handle` (Object handle(Object[])).
-    jmethodID hCtor = env->GetMethodID(g_cb_class, "<init>", "()V");
-    if (!hCtor || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
-    jobject hooker = env->NewObject(g_cb_class, hCtor);
-    if (!hooker || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
-    jmethodID hId = env->GetMethodID(g_cb_class, "handle",
-        "([Ljava/lang/Object;)Ljava/lang/Object;");
-    if (!hId || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
-    jobject cb = env->ToReflectedMethod(g_cb_class, hId, JNI_FALSE);
-    if (!cb || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        // 3) Instance hooker + reflected method `handle` (Object handle(Object[])).
+        jmethodID hCtor = env->GetMethodID(g_cb_class, "<init>", "()V");
+        if (!hCtor || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        jobject hooker = env->NewObject(g_cb_class, hCtor);
+        if (!hooker || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        jmethodID hId = env->GetMethodID(g_cb_class, "handle",
+            "([Ljava/lang/Object;)Ljava/lang/Object;");
+        if (!hId || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        jobject cb = env->ToReflectedMethod(g_cb_class, hId, JNI_FALSE);
+        if (!cb || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
 
-    // 4) Target: Settings$Secure.getString(ContentResolver, String) [STATIC].
-    jclass sec = env->FindClass("android/provider/Settings$Secure");
-    if (!sec || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
-    jmethodID mid = env->GetStaticMethodID(sec, "getString",
-        "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;");
-    if (!mid || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
-    jobject target = env->ToReflectedMethod(sec, mid, JNI_TRUE);
-    if (!target || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        // 4) Target: Settings$Secure.getString(ContentResolver, String) [STATIC].
+        jclass sec = env->FindClass("android/provider/Settings$Secure");
+        if (!sec || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        jmethodID mid = env->GetStaticMethodID(sec, "getString",
+            "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;");
+        if (!mid || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        jobject target = env->ToReflectedMethod(sec, mid, JNI_TRUE);
+        if (!target || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
 
-    // 5) Pasang hook. backup = Method asli untuk chaining di sisi Java.
-    jobject backup = lsplant::Hook(env, target, hooker, cb);
-    if (!backup || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        // 5) Pasang hook. backup = Method asli untuk chaining di sisi Java.
+        jobject backup = lsplant::Hook(env, target, hooker, cb);
+        if (!backup || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
 
-    // 6) Simpan backup ke field statik `original` supaya callback Java bisa
-    //    memanggil nilai asli untuk key selain android_id.
-    jfieldID fOrig = env->GetStaticFieldID(g_cb_class, "original", "Ljava/lang/reflect/Method;");
-    if (!fOrig || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
-    env->SetStaticObjectField(g_cb_class, fOrig, backup);
+        // 6) Simpan backup ke field statik `original` supaya callback Java bisa
+        //    memanggil nilai asli untuk key selain android_id.
+        jfieldID fOrig = env->GetStaticFieldID(g_cb_class, "original", "Ljava/lang/reflect/Method;");
+        if (!fOrig || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        env->SetStaticObjectField(g_cb_class, fOrig, backup);
 
-    // 7) Tahan ref global supaya tak di-GC selama proses hidup.
-    g_cb_object = env->NewGlobalRef(hooker);
-    g_backup    = env->NewGlobalRef(backup);
-    TT_LSP_LOGD("L3 Settings.Secure.getString hooked; android_id -> %s", value.c_str());
-    return true;
+        // 7) Tahan ref global supaya instance & backup tak di-GC selama proses hidup.
+        g_cb_object = env->NewGlobalRef(hooker);
+        g_backup    = env->NewGlobalRef(backup);
+        return true;
+    }();
+    env->PopLocalFrame(nullptr);   // bebaskan semua local transient frame ini
+
+    if (ok) TT_LSP_LOGD("L3 Settings.Secure.getString hooked; android_id -> %s", value.c_str());
+    return ok;
 }
 #endif // TT_ENABLE_LSPLANT
 

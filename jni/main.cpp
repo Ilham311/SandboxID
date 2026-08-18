@@ -417,6 +417,17 @@ static void install_crash_watchdog(const std::string& pkg) {
     sa.sa_sigaction = tt_signal_handler;
     sigemptyset(&sa.sa_mask);
 
+    // Armed set is deliberately {ABRT,FPE,ILL} and does NOT include SEGV/BUS —
+    // this holds for the L3/LSPlant paths too. This watchdog is diagnostic (log
+    // + chain to debuggerd), not a crash preventer; the L3 boot guard is
+    // "default-OFF + fail-safe return false", never signal-catching. ART raises
+    // SIGSEGV for its own implicit null / stack-overflow / suspend / GC checks
+    // and recovers via its chained handler, so arming SEGV/BUS here would log
+    // those benign faults as "CRASH" (misleading even under CRASH_LIMIT). The
+    // signals an L3 failure actually surfaces ARE armed: SIGABRT (ART
+    // CHECK/LOG(FATAL) / libc abort) and SIGILL (control jumping into a broken
+    // Dobby trampoline). tt_sig_name() still names SEGV/BUS/SYS for the rare case
+    // a chained-to handler re-enters us; that naming table is not the armed set.
     static const int sigs[] = { SIGABRT, SIGFPE, SIGILL };
     for (int s : sigs) {
         g_crash_count[s] = 0;
