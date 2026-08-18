@@ -8,6 +8,10 @@ cd "$ROOT"
 MIN_SDK="${MIN_SDK:-33}"
 VARIANT="${VARIANT:-both}"
 VERSION="$(grep '^version=' module.prop | cut -d= -f2)"
+
+# L3 LSPlant (opt-in). Empty by default => cmake invocation unchanged (byte-identical).
+LSP_CMAKE=""
+if [ "${TT_ENABLE_LSPLANT:-OFF}" = "ON" ]; then LSP_CMAKE="-DTT_ENABLE_LSPLANT=ON"; fi
 OUT="$ROOT/dist"
 
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
@@ -49,7 +53,7 @@ build_variant() {
       -DANDROID_ABI="$ABI" \
       -DANDROID_PLATFORM="android-$MIN_SDK" \
       -DCMAKE_BUILD_TYPE=Release \
-      $DBG_FLAG >/dev/null
+      $DBG_FLAG ${LSP_CMAKE:-} >/dev/null
     cmake --build "$BUILD" -j
   done
 
