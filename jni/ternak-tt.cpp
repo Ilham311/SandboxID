@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/xattr.h>   // getxattr/setxattr (clone SELinux context in-process)
 #include <string>
 #include <vector>
 #include <map>
@@ -106,6 +107,38 @@ static void run_bin(const char* path, std::vector<const char*> argv) {
     } else if (pid > 0) {
         waitpid(pid, nullptr, 0);
     }
+}
+
+// Clone the SELinux context of the REAL bind target onto the overlay source file,
+// so the file we bind-mount over it carries the exact label the kernel already
+// blessed for that path. This matters because a hard-coded label is often wrong:
+// e.g. /vendor/build.prop is frequently u:object_r:vendor_configs_file:s0, not
+// vendor_file -- a mismatch is both a mount/read-failure risk and a detection tell.
+// Reads/writes the security.selinux xattr directly (no libselinux dependency).
+// If the live context can't be read or applied, falls back to the previous static
+// chcon label, so behaviour never regresses versus the old hard-coded calls.
+// (In-process port of BRENE's `brene_clone_perm` chcon --reference= idea.)
+static void clone_selinux_context(const std::string& overlay,
+                                  const std::string& real_target,
+                                  const char* fallback_label) {
+    char ctx[512];
+    ssize_t n = ::getxattr(real_target.c_str(), "security.selinux", ctx, sizeof(ctx) - 1);
+    if (n > 0) {
+        if (ctx[n - 1] != '\0') ctx[n++] = '\0';   // ensure NUL-terminated
+        if (::setxattr(overlay.c_str(), "security.selinux", ctx, (size_t)n, 0) == 0)
+            return;                                 // cloned exact live context
+    }
+    run_bin("/system/bin/chcon", {"chcon", fallback_label, overlay.c_str()});
+}
+
+// First existing path among candidates, so we clone from the label the kernel
+// actually applied (partitions mount build.prop at either /<p>/etc or /<p>).
+// Returns the first candidate even if none exist -> getxattr fails cleanly into
+// the fallback label.
+static std::string first_existing(std::initializer_list<const char*> candidates) {
+    for (const char* c : candidates)
+        if (::access(c, F_OK) == 0) return c;
+    return *candidates.begin();
 }
 
 struct Identity {
@@ -509,17 +542,25 @@ static void generate_mount_files(const Identity& id) {
     ::chmod(xml_path.c_str(), 0600);
     ::chown(xml_path.c_str(), 1000, 1000);
 
-    run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_file:s0",
-            (std::string(MOUNTDIR) + "/system/build.prop").c_str()});
-    run_bin("/system/bin/chcon", {"chcon", "u:object_r:vendor_file:s0",
-            (std::string(MOUNTDIR) + "/vendor/build.prop").c_str()});
-    for (const char* sub : {"odm", "product", "system_ext"}) {
-        std::string p = std::string(MOUNTDIR) + "/" + sub + "/build.prop";
-        run_bin("/system/bin/chcon",
-                {"chcon", "u:object_r:system_file:s0", p.c_str()});
-    }
-    run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_data_file:s0",
-            xml_path.c_str()});
+    // Clone each overlay file's SELinux context from its real bind target so the
+    // bind-mounted file matches the label the kernel already applied (falls back
+    // to the previous static label if the live context can't be read/applied).
+    clone_selinux_context(std::string(MOUNTDIR) + "/system/build.prop",
+                          "/system/build.prop", "u:object_r:system_file:s0");
+    clone_selinux_context(std::string(MOUNTDIR) + "/vendor/build.prop",
+                          first_existing({"/vendor/build.prop"}),
+                          "u:object_r:vendor_file:s0");
+    clone_selinux_context(std::string(MOUNTDIR) + "/odm/build.prop",
+                          first_existing({"/odm/etc/build.prop", "/odm/build.prop"}),
+                          "u:object_r:system_file:s0");
+    clone_selinux_context(std::string(MOUNTDIR) + "/product/build.prop",
+                          first_existing({"/product/etc/build.prop", "/product/build.prop"}),
+                          "u:object_r:system_file:s0");
+    clone_selinux_context(std::string(MOUNTDIR) + "/system_ext/build.prop",
+                          first_existing({"/system_ext/etc/build.prop", "/system_ext/build.prop"}),
+                          "u:object_r:system_file:s0");
+    clone_selinux_context(xml_path, "/data/system/users/0/settings_secure.xml",
+                          "u:object_r:system_data_file:s0");
 
     printf("  Mount overlay: 5 build.prop + settings_secure.xml -> %s\n", MOUNTDIR);
 }

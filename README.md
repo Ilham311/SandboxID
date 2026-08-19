@@ -161,8 +161,18 @@ su -c 'sh /data/adb/modules/ternak_tt/rotate_ids.sh <cmd>'
 | `wlan-mac [xx:xx:...]` | Set `wlan0` MAC + wipe WifiConfigStore | No |
 | `bt-mac [xx:xx:...]` | Set Bluetooth adapter MAC + `bt_config.conf` Address | No (toggle BT) |
 | `device-name [name]` | Sync device/BT name to `identity.prop` MODEL | No |
+| `stock` | Assert stock integrity props (verified-boot green/locked, `debuggable=0`, `secure=1`, warranty-bit normalize, adb-root cleanup) + strip custom-ROM marker props. **Global, not per-app.** | No |
 | `status` | Read-only snapshot of all identifiers | — |
 | `help` | Print usage | — |
+
+> **`stock` is opt-in.** `all`/`safe` auto-run it **only** when the flag file
+> `/data/adb/modules/ternak_tt/harden_stock` exists (toggle it from the WebUI's
+> Rotate tab, or `touch`/`rm` it). Default OFF → no behaviour change. Unlike the
+> per-app identity commands, `stock` sets device-**integrity** signals globally
+> (they should read uniform across every process). It **complements** Play
+> Integrity Fix — it does not replace it — and deliberately leaves PIF props,
+> USB/adb/crypto behaviour props, and the (already-clean) persona fingerprint
+> untouched.
 
 ---
 
@@ -293,7 +303,8 @@ No manual input needed — push a commit to `main`, get a release.
 - Bluetooth adapter MAC (5 props + `bt_config.conf` Address across 3 paths)
 - Device / Bluetooth name synced to persona MODEL
 - Telephony `IMEI` / `getDeviceId` / `getSubscriberId` / `getMeid` null-ing
-- Bind-mount overlay for 5 `build.prop` files + `settings_secure.xml`
+- Bind-mount overlay for 5 `build.prop` files + `settings_secure.xml` (SELinux context cloned from the real bind target)
+- Stock-consistency hardening (opt-in `rotate_ids.sh stock`): verified-boot/lock-state, `debuggable`/`secure`, warranty-bit normalize, adb-root cleanup, custom-ROM marker-prop strip
 
 ### Out of scope
 

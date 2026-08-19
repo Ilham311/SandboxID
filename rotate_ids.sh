@@ -224,6 +224,91 @@ sync_device_name() {
     return 0
 }
 
+# --- Stock-consistency hardening -------------------------------------------
+# Ported from BRENE spoof_android_system_properties, GAP-FILL ONLY: props that
+# Ternak TT does not already set through its native/persona layer. Unlike the
+# per-app identity props, these are device-INTEGRITY signals that should read
+# uniformly "stock" across every process, so they are set globally via resetprop.
+#
+# Opt-in: only auto-runs from `all`/`safe` when the flag file $MODDIR/harden_stock
+# exists (mirrors the debug_variant flag-file idiom). Default OFF => no behaviour
+# change for existing installs. The `stock` subcommand always runs it on demand.
+#
+# Deliberately EXCLUDED (behaviour-touching / would fight coexisting modules):
+#   persist.sys.usb.config, init.svc.adbd, ro.adb.secure, ro.crypto.state
+#   (USB/adb/crypto behaviour) and PIF props (leave PIFork/Play Integrity Fix alone).
+# Fingerprints are NOT touched here: the native layer already rebuilds a clean,
+# self-consistent persona fingerprint across all variants; string-munging it would
+# risk a malformed fingerprint (a worse tell).
+harden_stock() {
+    log_step "Stock-consistency hardening (integrity signals + ROM-marker cleanup)"
+
+    # 1) Build-integrity signals. type/tags are set per-app natively; reassert the
+    #    boot-image tag + the debuggable/secure trio which the native layer omits.
+    rp_set ro.build.type            user
+    rp_set ro.build.tags            release-keys
+    rp_set ro.bootimage.build.tags  release-keys
+    rp_set ro.debuggable            0
+    rp_set ro.force.debuggable      0
+    rp_set ro.secure                1
+
+    # 2) Verified-boot / lock-state = green/locked (common Play Integrity &
+    #    bootloader-lock signals). Vendor mirrors included.
+    rp_set ro.boot.verifiedbootstate        green
+    rp_set ro.boot.veritymode               enforcing
+    rp_set ro.boot.flash.locked             1
+    rp_set ro.boot.vbmeta.device_state      locked
+    rp_set vendor.boot.verifiedbootstate    green
+    rp_set vendor.boot.vbmeta.device_state  locked
+
+    # 3) Warranty bit: NORMALIZE only if already present. Do NOT fabricate one on
+    #    devices that never had it -- that is itself a tell.
+    rp_set_if_present ro.warranty_bit             0
+    rp_set_if_present ro.boot.warranty_bit        0
+    rp_set_if_present ro.vendor.warranty_bit      0
+    rp_set_if_present ro.vendor.boot.warranty_bit 0
+
+    # 4) adb-root leftovers (present on eng/userdebug builds & after `adb root`).
+    rp_del service.adb.root     && log_info "cleared service.adb.root"
+    rp_del service.adb.tcp.port && log_info "cleared service.adb.tcp.port"
+
+    # 5) sys.oem_unlock_allowed: on SDK>=36 the prop's mere presence is the tell,
+    #    so delete it; older builds expect 0.
+    #    ref: android.googlesource frameworks/base bab174bf0883
+    sdk="$(rp_get ro.build.version.sdk 2>/dev/null)"
+    if [ -n "$sdk" ] && [ "$sdk" -ge 36 ] 2>/dev/null; then
+        rp_del sys.oem_unlock_allowed && log_info "removed sys.oem_unlock_allowed (SDK $sdk)"
+    else
+        rp_set sys.oem_unlock_allowed 0
+    fi
+
+    # 6) Close the L2 passthrough leak: strip standalone custom-ROM marker props
+    #    (NOT fingerprints). These namespaces only exist on custom ROMs, so removing
+    #    them moves toward a stock reading; a genuine Pixel never had them.
+    stock_strip_rom_markers
+
+    log_ok "Stock-consistency hardening applied"
+    return 0
+}
+
+# Remove standalone custom-ROM identity props. Explicit well-known singletons plus
+# an anchored `ro.<romname>.` prefix sweep. Curated to ROM-specific namespaces so
+# it can never touch a legitimate AOSP/OEM prop.
+stock_strip_rom_markers() {
+    for k in ro.modversion \
+             ro.lineage.build.version ro.lineage.version ro.lineage.display.version ro.lineagelegal.url \
+             ro.crdroid.version ro.crdroid.build.version \
+             ro.evolution.version ro.pa.version ro.aospa.version ro.rising.version; do
+        rp_del "$k" >/dev/null 2>&1 && log_info "stripped ROM marker: $k"
+    done
+    _rom_re='^ro\.(lineage|crdroid|evolution|aospa|pa|havoc|rising|superior|arrow|derp|derpfest|yaap|xtended|potato|bliss|calyx|graphene|matrixx|clover|lmodroid|lumine|halcyon|axion|pixelos|mistos|infinity|alphadroid|dirty|project)\.'
+    rp_names 2>/dev/null | grep -Ei "$_rom_re" 2>/dev/null | while IFS= read -r k; do
+        [ -z "$k" ] && continue
+        rp_del "$k" >/dev/null 2>&1 && log_info "stripped ROM marker: $k"
+    done
+    return 0
+}
+
 cmd_status() {
     log_step "Current identifier state"
     if [ -f "$IDENTITY_FILE" ]; then
@@ -266,17 +351,20 @@ case "$cmd" in
         randomize_wlan_mac   || :
         rotate_bluetooth_mac || FAILURES=$((FAILURES + 1))
         sync_device_name "$@" || FAILURES=$((FAILURES + 1))
+        [ -f "$MODDIR/harden_stock" ] && { harden_stock || FAILURES=$((FAILURES + 1)); }
         ;;
     safe)
         set_gaid_value "$@"    || FAILURES=$((FAILURES + 1))
         rotate_bluetooth_mac   || FAILURES=$((FAILURES + 1))
         sync_device_name "$@"  || :
+        [ -f "$MODDIR/harden_stock" ] && { harden_stock || FAILURES=$((FAILURES + 1)); }
         ;;
     ssaid)                wipe_ssaid              || FAILURES=$((FAILURES + 1)) ;;
     gaid)                 set_gaid_value "$@"     || FAILURES=$((FAILURES + 1)) ;;
     wlan-mac|mac)         randomize_wlan_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
     bt-mac|bluetooth-mac) rotate_bluetooth_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
     device-name|name)     sync_device_name "$@"   || FAILURES=$((FAILURES + 1)) ;;
+    stock|harden-stock)   harden_stock            || FAILURES=$((FAILURES + 1)) ;;
     status)               cmd_status ;;
     -h|--help|help)
         cat <<USAGE
@@ -288,7 +376,11 @@ Usage: rotate_ids.sh <cmd> [args]
   wlan-mac [xx:xx:..]        - set wlan0 MAC
   bt-mac [xx:xx:..]          - set Bluetooth adapter MAC
   device-name [name]         - sync device_name/BT to persona (identity.prop MODEL)
+  stock                      - assert stock integrity props + strip ROM markers (global)
   status                     - show current values (read-only)
+
+  Note: 'all'/'safe' run 'stock' automatically only when the flag file
+        \$MODDIR/harden_stock exists (default OFF). Toggle it in the WebUI.
 USAGE
         exit 0 ;;
     *) log_err "Unknown cmd: $cmd (try: rotate_ids.sh help)"; exit 2 ;;

@@ -1,5 +1,91 @@
 # Changelog
 
+## Unreleased — Stock-consistency hardening (port non-SUSFS dari BRENE)
+
+> **Catatan rilis:** lapisan **shell aktif tapi opt-in default-OFF** (tak ada
+> perubahan perilaku sampai flag `harden_stock` dinyalakan), lapisan **C++
+> butuh build + boot test** (fallback-guarded, nol regresi bila gagal).
+> `module.prop` **sengaja belum di-bump** — sama seperti disiplin L3 di bawah:
+> jangan klaim versi rilis sebelum lolos boot test di device. Saat sudah
+> diverifikasi di device: ubah heading ini jadi `## v1.0.31 (tanggal)` dan bump
+> `module.prop` v1.0.30→v1.0.31 / versionCode 125→126.
+>
+> Sumber port: BRENE (github.com/rrr333nnn333/BRENE), **hanya bagian non-SUSFS**.
+> Inti SUSFS (path/mount/kstat/uname hiding) **sengaja TIDAK diambil** sesuai
+> permintaan. Yang diambil: `spoof_android_system_properties` (gap-only),
+> `if_prop_value_exits_resetprop_n`, dan ide `brene_clone_perm`.
+
+### Added — `stock`: konsistensi sinyal integritas + bersih-bersih marker ROM (shell, opt-in)
+
+- **Apa:** Sub-perintah baru `rotate_ids.sh stock` (+ fungsi `harden_stock` /
+  `stock_strip_rom_markers`) dan 4 helper baru di `helpers.sh` (`rp_get`,
+  `rp_del`, `rp_set_if_present`, `rp_names`). Yang di-set (global, via resetprop):
+  - integritas build: `ro.debuggable=0`, `ro.force.debuggable=0`, `ro.secure=1`,
+    `ro.build.type=user`, `ro.build.tags`/`ro.bootimage.build.tags=release-keys`;
+  - verified-boot/lock: `ro.boot.verifiedbootstate=green`,
+    `ro.boot.veritymode=enforcing`, `ro.boot.flash.locked=1`,
+    `ro.boot.vbmeta.device_state=locked` + mirror `vendor.boot.*`;
+  - warranty-bit: **normalize-only** (`rp_set_if_present`) — hanya dibetulkan bila
+    prop-nya sudah ada; TIDAK difabrikasi di device yang memang tak punya;
+  - bersih sisa adb-root: hapus `service.adb.root`, `service.adb.tcp.port`;
+  - `sys.oem_unlock_allowed`: per-SDK (SDK≥36 dihapus, <36 di-set `0` —
+    rujuk frameworks/base `bab174bf0883`);
+  - strip marker ROM standalone (BUKAN fingerprint): `ro.modversion`,
+    `ro.lineage.*`, `ro.crdroid.*`, dst. via daftar eksplisit + sweep prefix
+    `^ro\.<romname>\.` yang ter-anchor.
+- **Kenapa:** Tiga celah nyata (hasil audit kode sendiri vs BRENE):
+  1. Prop verified-boot/debuggable/secure/warranty **sama sekali belum di-set**
+     Ternak TT → device tampak unlocked/eng ke pemeriksa integritas.
+  2. Marker ROM non-fingerprint (mis. `ro.modversion`) **bocor** lewat passthrough
+     L2 untuk key yang tak dipetakan → membocorkan identitas custom-ROM walau
+     fingerprint sudah bersih.
+  3. Ini sinyal **integritas device** (harus seragam di semua proses), beda dari
+     prop identitas yang per-app — maka sengaja di-set global, bukan per-app.
+- **Kenapa opt-in default-OFF:** ini me-*mutate* prop global; sesuai disiplin
+  boot-safety (sama seperti L3). Aktif hanya bila file flag `$MODDIR/harden_stock`
+  ada (idiom sama dgn `debug_variant`); `all`/`safe` baru auto-jalan `stock` kalau
+  flag itu ada. Toggle disediakan di WebUI tab Rotate. Sub-perintah `stock`
+  manual selalu bisa dipakai tanpa flag.
+- **Sengaja TIDAK diambil dari BRENE** (anti-tell / hindari benturan):
+  `persist.sys.usb.config`, `init.svc.adbd`, `ro.adb.secure`, `ro.crypto.state`
+  (menyentuh perilaku USB/adb/crypto); prop PIF (biar PIFork/Play Integrity Fix
+  yang urus — modul ini melengkapi, bukan menggantikan); dan **munging string
+  fingerprint** — layer native sudah membangun fingerprint persona yang bersih &
+  konsisten di 7 varian; memotong string malah berisiko fingerprint malformed
+  (tell yang lebih parah).
+- **Diverifikasi:** `sh -n` + `shellcheck` bersih pada kode baru; test fungsional
+  bermock `resetprop`/`getprop` memastikan: warranty-bit dinormalkan hanya bila
+  ada (tak difabrikasi), marker ROM ke-strip, prop legit (`ro.product.model`,
+  `ro.build.version.release`) TIDAK tersentuh, dan `sys.oem_unlock_allowed`
+  bercabang benar per-SDK.
+
+### Changed — clone konteks SELinux overlay dari target asli (`jni/ternak-tt.cpp`, butuh build+boot test)
+
+- **Apa:** `generate_mount_files()` tak lagi memakai label chcon hard-coded untuk
+  5 `build.prop` + `settings_secure.xml`. Ditambah `clone_selinux_context()` +
+  `first_existing()` yang meng-clone konteks dari target bind **asli** lewat
+  `getxattr`/`setxattr("security.selinux")` (tanpa dependensi libselinux), dengan
+  **fallback ke label lama** bila konteks live tak terbaca/terpasang.
+- **Kenapa:** label hard-coded sering salah — mis. `/vendor/build.prop` kerap
+  `u:object_r:vendor_configs_file:s0`, bukan `vendor_file`. Salah label = risiko
+  gagal-baca **dan** tell deteksi. Clone byte-per-byte dari file yang sudah
+  dibaca app dengan mulus = pilihan teraman. (Port in-process dari ide
+  `brene_clone_perm` `chcon --reference=`.)
+- ⚠️ **BOOT RISK: rendah, fallback-guarded.** Kalau `setxattr` gagal, jatuh ke
+  `chcon` label lama = perilaku persis seperti sebelumnya (nol regresi). Lolos
+  `-fsyntax-only` dengan flag build asli (C++20, `-fno-exceptions -fno-rtti`),
+  tapi **belum di-compile penuh/boot-test** (NDK tak tersedia di lingkungan ini).
+  Verifikasi: build modul, flash, cek `getprop` persona muncul di app target &
+  tak ada mount yang gagal (`ls -Z /system/build.prop` dll konteksnya wajar).
+
+### Added — WebUI + installer
+
+- **WebUI (tab Rotate):** kartu "Stock consistency" dengan tombol **Run now**
+  (`rotate_ids.sh stock`) dan toggle **Auto on Action** yang men-`touch`/`rm`
+  flag `harden_stock` dan menampilkan status ON/OFF.
+- **customize.sh:** flag `harden_stock` dipertahankan lintas reinstall (meniru
+  blok preservasi `target.txt`) + set perm `0644`.
+
 ## Unreleased — L3 LSPlant foundation (scaffold, DEFAULT-OFF)
 
 > **Catatan rilis:** perubahan di bawah **belum aktif di runtime**. Semuanya
