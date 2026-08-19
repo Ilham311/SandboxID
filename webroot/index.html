@@ -11,18 +11,20 @@
 <header>
   <div class="brand">
     <div class="logo">tt</div>
-    <div>
+    <div class="brand-txt">
       <div class="title">Ternak TT</div>
-      <div class="sub" id="version">v1.0.19</div>
+      <div class="sub">device persona manager</div>
     </div>
   </div>
+  <span class="pill" id="version">v1.0.19</span>
 </header>
 
-<nav>
+<nav id="nav">
   <button class="tab active" data-tab="persona">Persona</button>
   <button class="tab" data-tab="rotate">Rotate</button>
   <button class="tab" data-tab="targets">Targets</button>
   <button class="tab" data-tab="log">Log</button>
+  <span class="nav-ind" id="navInd"></span>
 </nav>
 
 <main>
@@ -35,16 +37,17 @@
   </section>
 
   <section id="rotate" class="page">
-    <div class="row">
+    <div class="row spread">
       <button id="rotAll" class="primary">Rotate all</button>
-      <button id="rotSafe" class="ghost">Safe (no reboot)</button>
+      <span class="chip chip-on" title="Selalu rotasi lengkap agar identitas konsisten">Stock consistency &middot; ON</span>
     </div>
+    <div class="rot-note">SSAID &middot; GAID &middot; wlan MAC &middot; BT MAC &middot; device name &mdash; selalu lengkap, tidak bisa dimatikan.</div>
     <div class="cards" id="rotCards"></div>
   </section>
 
   <section id="targets" class="page">
     <div class="row spread">
-      <div class="hint">One package per line. Blank + # ignored. Companion hot-reloads.</div>
+      <div class="hint">Satu paket per baris. Baris kosong &amp; # diabaikan. Companion hot-reload.</div>
       <button id="tgtSave" class="primary sm">Save</button>
     </div>
     <textarea id="tgtArea" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
@@ -57,19 +60,25 @@
   <section id="log" class="page">
     <div class="row spread">
       <select id="logSrc">
-        <option value="logcat">Live logcat (200 lines)</option>
+        <option value="logcat">Live logcat (200 baris)</option>
         <option value="action">Action log (freshen)</option>
         <option value="rotate">Rotate log</option>
-        <option value="session">Latest session (debug variant)</option>
+        <option value="session">Sesi terbaru (varian debug)</option>
         <option value="crashes">Crashes</option>
       </select>
       <button id="logRefresh" class="ghost sm">Reload</button>
     </div>
-    <pre id="logBody"></pre>
+    <div id="logBody" class="logbody"></div>
   </section>
 </main>
 
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite">
+  <span class="toast-icon" id="toastIcon"></span>
+  <span class="toast-title" id="toastTitle"></span>
+  <button class="toast-exp" id="toastExp" aria-label="Lihat detail" hidden>&#8964;</button>
+  <button class="toast-close" id="toastClose" aria-label="Tutup">&times;</button>
+  <div class="toast-detail" id="toastDetail" hidden></div>
+</div>
 
 <script src="app.js"></script>
 </body>
