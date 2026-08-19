@@ -89,6 +89,57 @@ rp_set() {
     setprop "$key" "$val" 2>/dev/null
 }
 
+# Read a property value (empty = unset). Same tool-preference chain as rp_set,
+# falling back to getprop which is always present on Android.
+rp_get() {
+    key="$1"
+    if command -v resetprop >/dev/null 2>&1; then
+        resetprop "$key" 2>/dev/null && return 0
+    fi
+    if [ -x "$MODDIR/bin/resetprop-rs" ]; then
+        "$MODDIR/bin/resetprop-rs" "$key" 2>/dev/null && return 0
+    fi
+    if command -v resetprop-rs >/dev/null 2>&1; then
+        resetprop-rs "$key" 2>/dev/null && return 0
+    fi
+    getprop "$key" 2>/dev/null
+}
+
+# Delete a property. resetprop -d; no setprop equivalent (returns 1 if unavailable).
+rp_del() {
+    key="$1"
+    if command -v resetprop >/dev/null 2>&1; then
+        resetprop -d "$key" 2>/dev/null && return 0
+    fi
+    if [ -x "$MODDIR/bin/resetprop-rs" ]; then
+        "$MODDIR/bin/resetprop-rs" -d "$key" 2>/dev/null && return 0
+    fi
+    if command -v resetprop-rs >/dev/null 2>&1; then
+        resetprop-rs -d "$key" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+# Set ONLY if the prop already exists AND differs from expected (normalize without
+# fabricating). Mirrors BRENE if_prop_value_exits_resetprop_n: avoids creating a
+# prop that was never present (which is itself a tell, e.g. ro.warranty_bit on a
+# device that never shipped one).
+rp_set_if_present() {
+    key="$1"; expected="$2"
+    cur="$(rp_get "$key" 2>/dev/null)"
+    [ -z "$cur" ] && return 0
+    [ "$cur" = "$expected" ] && return 0
+    rp_set "$key" "$expected"
+}
+
+# List all property NAMES (one per line). Used for curated marker sweeps.
+rp_names() {
+    if command -v resetprop >/dev/null 2>&1; then
+        resetprop 2>/dev/null | sed -n 's/^\[\([^]]*\)\]:.*/\1/p' && return 0
+    fi
+    getprop 2>/dev/null | sed -n 's/^\[\([^]]*\)\]:.*/\1/p'
+}
+
 force_stop() {
     pkg="$1"
     command -v am >/dev/null 2>&1 || return 1

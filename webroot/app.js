@@ -180,6 +180,7 @@ async function loadRotate() {
     if (c.get && kv[c.get]) slot.textContent = kv[c.get];
     else slot.textContent = '\u2014';
   }
+  refreshStockState();
 }
 
 async function rotateOne(key, btn) {
@@ -215,6 +216,47 @@ document.getElementById('rotSafe').addEventListener('click', async (ev) => {
   await safeExec(cmd, 'Safe rotate done');
   b.textContent = old; b.disabled = false;
   loadRotate();
+});
+
+/* ---------- Stock consistency (opt-in prop hardening) ---------- */
+// Flag file mirrors the debug_variant idiom: when present, rotate_ids.sh all|safe
+// auto-runs `stock`. Default absent => no behaviour change. "Run now" always works.
+const HARDEN_FLAG = `${MODDIR}/harden_stock`;
+
+async function refreshStockState() {
+  const stateEl = document.getElementById('stockState');
+  const toggleBtn = document.getElementById('stockToggle');
+  if (!stateEl || !toggleBtn) return;
+  const r = await safeExec(`[ -f ${shq(HARDEN_FLAG)} ] && echo on || echo off`);
+  const on = r.ok && r.out.trim() === 'on';
+  stateEl.textContent = on
+    ? 'Auto-apply on Rotate all/safe: ON'
+    : 'Auto-apply on Rotate all/safe: OFF (use Run now)';
+  toggleBtn.textContent = on ? 'Auto on Action: ON' : 'Auto on Action: OFF';
+  toggleBtn.dataset.on = on ? '1' : '0';
+}
+
+document.getElementById('stockRun').addEventListener('click', async (ev) => {
+  const b = ev.currentTarget; const old = b.textContent;
+  b.disabled = true; b.textContent = '\u2026';
+  const cmd = `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
+    `{ echo "--- $(date '+%F %T') stock (webui) ---"; ` +
+    `sh ${shq(ROTATE_SH)} stock 2>&1; echo "[exit $?]"; } | ` +
+    `tee -a ${shq(ROTATE_LOG)}`;
+  await safeExec(cmd, 'Stock hardening applied');
+  b.textContent = old; b.disabled = false;
+});
+
+document.getElementById('stockToggle').addEventListener('click', async (ev) => {
+  const b = ev.currentTarget;
+  const turningOn = b.dataset.on !== '1';
+  const cmd = turningOn
+    ? `touch ${shq(HARDEN_FLAG)} && chmod 0644 ${shq(HARDEN_FLAG)}`
+    : `rm -f ${shq(HARDEN_FLAG)}`;
+  const r = await safeExec(cmd, turningOn
+    ? 'Auto stock ON (runs on Rotate all/safe)'
+    : 'Auto stock OFF');
+  if (r.ok) refreshStockState();
 });
 
 /* ---------- Targets ---------- */

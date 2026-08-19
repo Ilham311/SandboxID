@@ -40,6 +40,16 @@
       <button id="rotSafe" class="ghost">Safe (no reboot)</button>
     </div>
     <div class="cards" id="rotCards"></div>
+
+    <div class="card" id="stockCard">
+      <div class="name">Stock consistency</div>
+      <div class="desc">Assert stock integrity props (verified-boot green/locked, debuggable=0, secure=1, warranty-bit normalize, adb-root cleanup) and strip custom-ROM marker props. Global (all apps), not per-app. Complements Play Integrity Fix &mdash; does not replace it.</div>
+      <div class="val" id="stockState">&mdash;</div>
+      <div class="actions">
+        <button class="sm" id="stockRun">Run now</button>
+        <button class="sm ghost" id="stockToggle">Auto on Action: &hellip;</button>
+      </div>
+    </div>
   </section>
 
   <section id="targets" class="page">

@@ -21,6 +21,13 @@ else
     ui_print "- Installing default target.txt (4 packages)"
 fi
 
+# Preserve the opt-in Stock-consistency toggle across reinstall (mirrors target.txt).
+LIVE_HARDEN="/data/adb/modules/ternak_tt/harden_stock"
+if [ -f "$LIVE_HARDEN" ]; then
+    ui_print "- Preserving Stock-consistency toggle (harden_stock = ON)"
+    touch "$MODPATH/harden_stock"
+fi
+
 if [ -f "$MODPATH/debug_variant" ]; then
     ui_print "- ! DEBUG variant detected"
     ui_print "-   Auto-log will start on next boot."
@@ -50,6 +57,7 @@ set_perm $MODPATH/service.sh                0 0 0755
 [ -f $MODPATH/helpers.sh ] && set_perm $MODPATH/helpers.sh 0 0 0644
 [ -f $MODPATH/rotate_ids.sh ] && set_perm $MODPATH/rotate_ids.sh 0 0 0755
 [ -f $MODPATH/target.txt ] && set_perm $MODPATH/target.txt 0 0 0644
+[ -f $MODPATH/harden_stock ] && set_perm $MODPATH/harden_stock 0 0 0644
 
 mkdir -p "$MODPATH/backups"
 set_perm $MODPATH/backups 0 0 0700
