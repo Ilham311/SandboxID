@@ -1,27 +1,3 @@
-
-// main.cpp — Ternak TT Zygisk module (in-process layer)
-//
-// Responsibilities in the app process:
-//   L1  Build / Build.VERSION static-field injection (SetStaticObjectField)
-//   L2  SystemProperties.native_get hook (Java prop reads) via hookJniNativeMethods
-//   L3  (opt-in, TT_ENABLE_LSPLANT) Settings.Secure.getString ART-hook via LSPlant
-//       — deterministic per-persona ANDROID_ID. DEFAULT OFF (boot-loop risk until
-//       build+boot verified); see tt_lsplant.hpp.
-//   L7  (debug only) leak sensors on native_get_int/long/boolean
-//   +   trigger the companion's per-app build.prop bind-mounts, in postAppSpecialize
-//   +   async-signal-safe crash watchdog (diagnostic)
-//
-// What this file deliberately does NOT do (see report / git history):
-//   - No /proc openat "sanitizer": PLT-hooking libc's own dev/inode cannot
-//     intercept libc-internal open()/openat() (fopen→open is intra-libc), so it
-//     was a double no-op. Mount concealment is delegated to the Zygisk provider
-//     (ReZygisk/NeoZygisk/Zygisk-Assistant) + FORCE_DENYLIST_UNMOUNT.
-//   - No WifiInfo / TelephonyManager hooks: getMacAddress() is already anonymized
-//     to 02:00:00:00:00:00 for non-privileged apps (API 23+), and getImei/
-//     getSubscriberId/getSimSerialNumber need READ_PRIVILEGED_PHONE_STATE (API
-//     29+) so third-party apps get SecurityException before the body runs — a
-//     spoofed value there is anomalous, not helpful. See tt_lsplant.hpp skip notes.
-
 #include <jni.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -42,7 +18,7 @@
 #include <thread>
 #include "zygisk.hpp"
 #include "tt_config.hpp"
-#include "tt_lsplant.hpp"   // L3 (opt-in, TT_ENABLE_LSPLANT): no-op stubs when OFF
+#include "tt_lsplant.hpp"
 
 #define LOG_TAG "TernakTT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -60,19 +36,13 @@ using zygisk::Api;
 using zygisk::AppSpecializeArgs;
 using zygisk::ServerSpecializeArgs;
 
-// Identity table for the current process. Populated once from the companion
-// blob in postAppSpecialize (each app is a separate forked process, so a global
-// is per-process and needs no locking).
 static std::map<std::string, std::string> g_id;
 
-// Resolve an identity key: prefer the parsed blob, then the auditable fallbacks
-// in tt::VAL_DEFAULTS. Returns a reference into stable storage.
 static const std::string& val(const std::string& k) {
     static const std::string empty;
     auto it = g_id.find(k);
     if (it != g_id.end() && !it->second.empty()) return it->second;
 
-    // Build the fallback map once from the header table.
     static const std::map<std::string, std::string> defaults = [] {
         std::map<std::string, std::string> m;
         for (size_t i = 0; i < tt::VAL_DEFAULTS_N; ++i)
@@ -84,9 +54,6 @@ static const std::string& val(const std::string& k) {
     return empty;
 }
 
-// ============================================================ L2: prop hook ==
-// Original SystemProperties.native_get, captured by hookJniNativeMethods so we
-// can chain unmapped keys to the real reader instead of fabricating a value.
 static jstring (*orig_native_get)(JNIEnv*, jclass, jstring, jstring) = nullptr;
 
 static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
@@ -96,8 +63,6 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
     env->ReleaseStringUTFChars(j_key, raw);
     LOGD("L2 native_get('%s')", k.c_str());
 
-    // ro.* / gsm.* key -> identity key. ro.hardware and ro.board.platform are
-    // now driven from the persona (Tensor codename), never a hard-coded SoC.
     static const std::map<std::string, std::string> map = {
         {"ro.serialno",                     "SERIAL"},
         {"ro.boot.serialno",                "SERIAL"},
@@ -156,23 +121,18 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
             return env->NewStringUTF(v.c_str());
         }
     }
-    // Identity-independent, persona-consistent static answers.
     for (size_t i = 0; i < tt::STATIC_PROP_DEFAULTS_N; ++i) {
         if (k == tt::STATIC_PROP_DEFAULTS[i].k) {
             LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), tt::STATIC_PROP_DEFAULTS[i].v);
             return env->NewStringUTF(tt::STATIC_PROP_DEFAULTS[i].v);
         }
     }
-    // Unmapped: chain to the real native_get (reads the prop store, already
-    // globally spoofed by resetprop for the ro.* identity keys).
     if (orig_native_get) return orig_native_get(env, clazz, j_key, j_def);
     char buf[PROP_VALUE_MAX] = {0};
     if (__system_property_get(k.c_str(), buf) > 0) return env->NewStringUTF(buf);
     return j_def;
 }
 
-// Install L2 via the Zygisk-coordinated API (plays nice with other modules that
-// also hook SystemProperties) and capture the original for chaining.
 static void install_prop_hook(Api* api, JNIEnv* env) {
     JNINativeMethod m = {
         const_cast<char*>("native_get"),
@@ -180,7 +140,6 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
         reinterpret_cast<void*>(hook_prop_get),
     };
     api->hookJniNativeMethods(env, "android/os/SystemProperties", &m, 1);
-    // hookJniNativeMethods writes the previous fnPtr back into m.fnPtr.
     orig_native_get = reinterpret_cast<jstring (*)(JNIEnv*, jclass, jstring, jstring)>(m.fnPtr);
     if (orig_native_get)
         LOGD("L2 native_get hooked (orig=%p)", reinterpret_cast<void*>(orig_native_get));
@@ -188,7 +147,6 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
         LOGE("L2 native_get hook did not bind (method missing?)");
 }
 
-// ==================================================== L7: leak sensors (dbg) ==
 #ifdef TT_DEBUG
 static jint     (*orig_get_int)(JNIEnv*, jclass, jstring, jint)     = nullptr;
 static jlong    (*orig_get_long)(JNIEnv*, jclass, jstring, jlong)   = nullptr;
@@ -281,9 +239,6 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass clazz, jstring j_key, jbo
     return orig_get_bool ? orig_get_bool(env, clazz, j_key, def) : def;
 }
 
-// NOTE: Build.getRadioVersion() is intentionally NOT hooked — it is a plain Java
-// wrapper over SystemProperties.get("gsm.version.baseband"), which the L2 hook
-// already covers. RegisterNatives on it fails silently (it isn't native).
 static void install_leak_sensors(Api* api, JNIEnv* env) {
     JNINativeMethod m[3] = {
         {const_cast<char*>("native_get_int"),
@@ -302,14 +257,8 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
     orig_get_bool = reinterpret_cast<jboolean (*)(JNIEnv*, jclass, jstring, jboolean)>(m[2].fnPtr);
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
-#endif // TT_DEBUG
+#endif
 
-// ================================================== crash watchdog (AS-safe) ==
-// The signal handler must be async-signal-safe: it may NOT call
-// __android_log_print / malloc / std::string ops. So it only clock_gettime()s,
-// packs a fixed POD, does ONE non-blocking write() to a self-pipe, then chains
-// to the previous handler. A normal drain thread reads the pipe and LOGE()s.
-// (signal-safety(7): write/clock_gettime/sigaction/raise/sched_yield are safe.)
 struct TtCrashRec {
     uint32_t magic;
     int32_t  sig;
@@ -320,7 +269,7 @@ struct TtCrashRec {
     int64_t  alive_ms;
     void*    addr;
 };
-static const uint32_t TT_CRASH_MAGIC = 0x54544352u; // 'TTCR'
+static const uint32_t TT_CRASH_MAGIC = 0x54544352u;
 
 static int         g_crash_pipe[2] = {-1, -1};
 static char        g_watchdog_pkg_buf[128] = {0};
@@ -345,7 +294,6 @@ static const char* tt_sig_name(int sig) {
     }
 }
 
-// Normal-context thread: safe to use liblog here.
 static void tt_crash_drain_loop() {
     TtCrashRec rec;
     while (tt::read_full(g_crash_pipe[0], &rec, sizeof(rec))) {
@@ -371,14 +319,11 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
         rec.hit      = n;
         rec.alive_ms = ((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000) - g_load_time_ms;
         rec.addr     = info ? info->si_addr : nullptr;
-        ssize_t wr = ::write(g_crash_pipe[1], &rec, sizeof(rec)); // non-blocking, best-effort
+        ssize_t wr = ::write(g_crash_pipe[1], &rec, sizeof(rec));
         (void)wr;
-        sched_yield(); // give the drain thread a chance to log before we chain
+        sched_yield();
     }
 
-    // Chain to the previous handler (sigchain shim -> debuggerd) so tombstones
-    // are still produced. Calling it directly (not restore-to-SIG_DFL) preserves
-    // the debuggerd chain, per art/sigchainlib.
     if (sig >= 0 && sig < NSIG) {
         struct sigaction* p = &g_prev_sig[sig];
         if ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction) {
@@ -393,8 +338,6 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
     }
 }
 
-// Diagnostic only. SIGSYS is intentionally NOT hooked: zygote's seccomp policy
-// raises SIGSYS on violations, and shadowing it would mask real seccomp events.
 static void install_crash_watchdog(const std::string& pkg) {
     static bool armed = false;
     if (armed) return;
@@ -404,10 +347,10 @@ static void install_crash_watchdog(const std::string& pkg) {
 
     if (pipe2(g_crash_pipe, O_CLOEXEC) == 0) {
         int fl = fcntl(g_crash_pipe[1], F_GETFL, 0);
-        if (fl >= 0) fcntl(g_crash_pipe[1], F_SETFL, fl | O_NONBLOCK); // never block in handler
+        if (fl >= 0) fcntl(g_crash_pipe[1], F_SETFL, fl | O_NONBLOCK);
         std::thread(tt_crash_drain_loop).detach();
     } else {
-        g_crash_pipe[0] = g_crash_pipe[1] = -1; // no pipe: handler just chains, no logging
+        g_crash_pipe[0] = g_crash_pipe[1] = -1;
         LOGE("crash watchdog: pipe2 failed errno=%d (logging disabled, chaining still armed)", errno);
     }
 
@@ -417,17 +360,6 @@ static void install_crash_watchdog(const std::string& pkg) {
     sa.sa_sigaction = tt_signal_handler;
     sigemptyset(&sa.sa_mask);
 
-    // Armed set is deliberately {ABRT,FPE,ILL} and does NOT include SEGV/BUS —
-    // this holds for the L3/LSPlant paths too. This watchdog is diagnostic (log
-    // + chain to debuggerd), not a crash preventer; the L3 boot guard is
-    // "default-OFF + fail-safe return false", never signal-catching. ART raises
-    // SIGSEGV for its own implicit null / stack-overflow / suspend / GC checks
-    // and recovers via its chained handler, so arming SEGV/BUS here would log
-    // those benign faults as "CRASH" (misleading even under CRASH_LIMIT). The
-    // signals an L3 failure actually surfaces ARE armed: SIGABRT (ART
-    // CHECK/LOG(FATAL) / libc abort) and SIGILL (control jumping into a broken
-    // Dobby trampoline). tt_sig_name() still names SEGV/BUS/SYS for the rare case
-    // a chained-to handler re-enters us; that naming table is not the armed set.
     static const int sigs[] = { SIGABRT, SIGFPE, SIGILL };
     for (int s : sigs) {
         g_crash_count[s] = 0;
@@ -437,8 +369,6 @@ static void install_crash_watchdog(const std::string& pkg) {
     LOGD("crash watchdog armed for %s (ABRT/FPE/ILL, limit=%d)", pkg.c_str(), CRASH_LIMIT);
 }
 
-// ============================================ L1: Build static-field inject ==
-// Every JNI call after Get*FieldID is guarded with ExceptionCheck+ExceptionClear.
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
     jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
@@ -477,11 +407,6 @@ static void install_build_hook(JNIEnv* env) {
         set_str(env, ver, "RELEASE",        val("RELEASE"));
         set_str(env, ver, "INCREMENTAL",    val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", val("SECURITY_PATCH"));
-        // SDK_INT is only injected with a persona whose SDK does NOT exceed the
-        // real device's SDK — guaranteed by ternak-tt's SDK-safe persona
-        // selection, which filters the pool to sdk <= device sdk (downgrade is
-        // safe, upgrade is not). Injecting a *higher* SDK than the OS actually
-        // is would make apps call framework APIs that don't exist -> crash.
         const std::string& s = val("SDK_INT");
         if (!s.empty()) {
             int sdk = std::atoi(s.c_str());
@@ -491,9 +416,6 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 }
 
-// ================================================ companion bind-mount call ==
-// Reuses the socket opened (and exemptFd'd) in preAppSpecialize. Called from
-// postAppSpecialize so the app has already unshared its mount namespace.
 static void request_companion_mounts(int fd) {
     uint8_t cmd  = tt::CMD_DO_MOUNTS;
     uint32_t pid = (uint32_t)::getpid();
@@ -506,7 +428,6 @@ static void request_companion_mounts(int fd) {
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
-// ================================================================== module ==
 class TernakTT : public zygisk::ModuleBase {
 public:
     void onLoad(Api* api, JNIEnv* env) override {
@@ -527,8 +448,6 @@ public:
         int fd = api_->connectCompanion();
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { unload(); return; }
-        // Keep this socket usable across the specialize boundary (fd sanitizer /
-        // denylist unmount would otherwise close it before postAppSpecialize).
         api_->exemptFd(fd);
 
         uint8_t cmd   = tt::CMD_GET_IDENTITY;
@@ -543,7 +462,7 @@ public:
         if (!tt::read_full(fd, &len, sizeof(len)) || len > tt::MAX_IDENTITY_BLOB) {
             ::close(fd); unload(); return;
         }
-        if (len == 0) { // not a target (or identity genuinely absent after retries)
+        if (len == 0) {
             LOGD("pkg='%s' not a target", pkg.c_str());
             ::close(fd); unload(); return;
         }
@@ -553,7 +472,7 @@ public:
 
         active_  = true;
         pkg_     = pkg;
-        comp_fd_ = fd; // DO NOT close: reused for CMD_DO_MOUNTS in postAppSpecialize
+        comp_fd_ = fd;
         LOGI("target: %s (%u B) [%s]", pkg.c_str(), len, TT_VARIANT_TAG);
     }
 
@@ -563,21 +482,15 @@ public:
         parse_blob();
         LOGD("parse_blob: %zu identity keys", g_id.size());
 
-        install_build_hook(env_);          // L1
-        install_prop_hook(api_, env_);     // L2
+        install_build_hook(env_);
+        install_prop_hook(api_, env_);
 #ifdef TT_DEBUG
-        install_leak_sensors(api_, env_);  // L7
+        install_leak_sensors(api_, env_);
         for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
         install_crash_watchdog(pkg_);
 
 #ifdef TT_ENABLE_LSPLANT
-        // L3 (opt-in, default OFF): ART-hook Settings.Secure.getString so the app
-        // sees a deterministic per-persona ANDROID_ID (the file-mount path is
-        // unreliable for android_id — on API 26+ it lives in the per-app ssaid
-        // table, not settings_secure.xml). Installed LAST and FULLY fail-safe:
-        // if LSPlant Init/Hook fails on this device, L1/L2/L7 still stand and the
-        // process continues normally (never abort, never half-unload).
         if (ttlsp::init(env_)) {
             if (!ttlsp::hook_android_id(env_, val("ANDROID_ID")))
                 LOGE("L3 ANDROID_ID hook not installed (continuing with L1/L2)");
@@ -586,10 +499,6 @@ public:
         }
 #endif
 
-        // Trigger the bind-mounts HERE (not in preAppSpecialize). By post-specialize
-        // the app has its OWN mount namespace (unshared in SpecializeCommon), so the
-        // companion joins the app's ns and the overlay cannot leak into zygote —
-        // which would otherwise spoof every subsequently-spawned app. See report.
         if (comp_fd_ >= 0) {
             request_companion_mounts(comp_fd_);
             ::close(comp_fd_);
@@ -608,7 +517,6 @@ private:
     std::vector<uint8_t> blob_;
 
     void unload() {
-        // Safe here: called only before any hook is installed (non-targets).
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
     void parse_blob() {

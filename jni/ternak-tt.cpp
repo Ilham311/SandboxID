@@ -1,4 +1,3 @@
-
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -18,10 +17,8 @@
 #include <cstdlib>
 #include "pool_tt.hpp"
 #include "tt_config.hpp"
-#include <sys/system_properties.h>   // __system_property_get (SDK gating)
+#include <sys/system_properties.h>
 
-// Paths come from tt_config.hpp (single source of truth). Aliased to keep the
-// short names used throughout this file.
 static const char* MODDIR         = tt::MODDIR;
 static const char* IDENTITY_FILE  = tt::IDENTITY_FILE;
 static const char* IDENTITY_BAK   = tt::IDENTITY_BAK;
@@ -141,10 +138,6 @@ static std::string uuid_v4() {
     return h;
 }
 
-// Read the device's REAL SDK so we never pick a persona whose SDK is HIGHER
-// than the OS: injecting a higher Build.VERSION.SDK_INT makes apps call
-// framework APIs that don't physically exist on this OS -> crash. Downgrade
-// (persona SDK <= device SDK) is safe: apps just take older code paths.
 static int device_sdk() {
     char b[PROP_VALUE_MAX] = {0};
     if (__system_property_get("ro.build.version.sdk", b) > 0) return atoi(b);
@@ -156,9 +149,6 @@ static Identity gen_identity() {
     std::mt19937 g(rd());
     constexpr size_t N = sizeof(TT_POOL) / sizeof(TT_POOL[0]);
 
-    // SDK-safe persona selection: only personas whose SDK <= device SDK. If the
-    // device SDK is unreadable (dev<=0), stay conservative and fall through to the
-    // lowest-SDK entry rather than risking a high-SDK (upgrade) pick.
     int dev = device_sdk();
     std::vector<size_t> cand;
     for (size_t i = 0; i < N; ++i)
@@ -167,8 +157,6 @@ static Identity gen_identity() {
     if (!cand.empty()) {
         idx = cand[g() % cand.size()];
     } else {
-        // Device SDK below every persona (Android < 13, out of spec). Pick the
-        // lowest-SDK entry and warn — least-bad option, still technically an upgrade.
         idx = 0;
         for (size_t i = 1; i < N; ++i) if (TT_POOL[i].sdk < TT_POOL[idx].sdk) idx = i;
         fprintf(stderr, "! device SDK %d below all personas; using SDK %d (upgrade, risky)\n",
@@ -180,12 +168,12 @@ static Identity gen_identity() {
     id.kv["BRAND"]           = "google";
     id.kv["MANUFACTURER"]    = "Google";
     id.kv["MODEL"]           = p.model;
-    id.kv["MARKETNAME"]      = p.model;   // Pixel market name == model ("Pixel 6")
+    id.kv["MARKETNAME"]      = p.model;
     id.kv["DEVICE"]          = p.device;
     id.kv["PRODUCT"]         = p.product;
     id.kv["BOARD"]           = p.board;
     id.kv["HARDWARE"]        = p.board;
-    id.kv["BOARD_PLATFORM"]  = p.platform;   // ro.board.platform (Tensor codename)
+    id.kv["BOARD_PLATFORM"]  = p.platform;
     id.kv["ID"]              = p.id;
     id.kv["INCREMENTAL"]     = p.incremental;
     id.kv["RELEASE"]         = p.release;
@@ -208,28 +196,22 @@ static Identity gen_identity() {
              p.product, p.release, p.id, p.incremental);
     id.kv["DESCRIPTION"] = desc;
 
-    // RADIO (gsm.version.baseband) must be STABLE per persona, never today's date
-    // (a baseband whose date == first-launch date is anomalous to fingerprinters).
-    // Real Tensor Pixel baseband ~ "<modem>-<ver>-<yymmdd>-B-<build>". The modem
-    // prefix is per-generation (best-effort — verify like `platform`); date comes
-    // from the persona's security_patch (fixed) and the build from its incremental,
-    // so re-running freshen never changes RADIO for the same persona.
     auto modem_prefix = [](const char* plat) -> const char* {
         if (!plat) return "g5123b";
-        if (!strcmp(plat, "gs101"))   return "g5123b";  // Pixel 6  (Exynos modem)
-        if (!strcmp(plat, "gs201"))   return "g5300b";  // Pixel 7
-        if (!strcmp(plat, "zuma"))    return "g5300q";  // Pixel 8
-        if (!strcmp(plat, "zumapro")) return "g5400";   // Pixel 9
-        if (!strcmp(plat, "laguna"))  return "g5500";   // Pixel 10
+        if (!strcmp(plat, "gs101"))   return "g5123b";
+        if (!strcmp(plat, "gs201"))   return "g5300b";
+        if (!strcmp(plat, "zuma"))    return "g5300q";
+        if (!strcmp(plat, "zumapro")) return "g5400";
+        if (!strcmp(plat, "laguna"))  return "g5500";
         return "g5123b";
     };
-    char pdate[8] = "000000";                            // security_patch YYYY-MM-DD -> YYMMDD
+    char pdate[8] = "000000";
     if (std::strlen(p.security_patch) >= 10) {
         pdate[0] = p.security_patch[2]; pdate[1] = p.security_patch[3];
         pdate[2] = p.security_patch[5]; pdate[3] = p.security_patch[6];
         pdate[4] = p.security_patch[8]; pdate[5] = p.security_patch[9];
     }
-    std::string incr  = p.incremental;                   // last 6 digits as "version" field
+    std::string incr  = p.incremental;
     std::string incr6 = incr.size() > 6 ? incr.substr(incr.size() - 6) : incr;
     char rad[128];
     snprintf(rad, sizeof(rad), "%s-%s-%s-B-%s",
@@ -423,8 +405,6 @@ static void generate_mount_files(const Identity& id) {
     const std::string MARKETNAME   = g("MARKETNAME");
 
     std::string base;
-    // No "synthetic"/module-name marker in the file itself — a real build.prop
-    // never announces it was generated by us; that string would be a trivial tell.
     base += "# begin build properties\n";
     auto add = [&](const char* k, const std::string& v) {
         if (!v.empty()) { base += k; base += '='; base += v; base += '\n'; }

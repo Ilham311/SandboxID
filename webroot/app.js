@@ -11,8 +11,6 @@ const ACTION_LOG = `${MODDIR}/debug/action.log`;
 
 function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
-// Env prefix: cd into MODDIR and put bin/ on PATH so the native binary
-// can find its siblings (resetprop-rs, ternak-tt-arm64, etc.)
 const ENV = `cd ${shq(MODDIR)} && export MODDIR=${shq(MODDIR)} && export PATH=${shq(MODDIR + '/bin')}:\"$PATH\"`;
 
 function exec(cmd) {
@@ -30,8 +28,6 @@ function exec(cmd) {
       if (code === 0) {
         resolve(out);
       } else {
-        // On error: prefer whichever stream has content. When callers
-        // redirect with 2>&1, stderr is empty and error text is in stdout.
         const msg = (err.trim() || out.trim() || `exit ${code}`);
         reject(Object.assign(new Error(msg), { code, stdout: out, stderr: err }));
       }
@@ -50,7 +46,6 @@ async function shell(cmd) { return exec(cmd); }
 function toast(msg, kind, sticky) {
   const el = document.getElementById('toast');
   const text = String(msg || '').trim() || '(empty)';
-  // Truncate very long errors in the pill but keep the newlines
   const lines = text.split('\n').filter(Boolean);
   const head = lines.slice(0, 3).join('\n');
   const more = lines.length > 3 ? `\n(+${lines.length - 3} more lines)` : '';
@@ -70,13 +65,11 @@ async function safeExec(cmd, okMsg) {
     if (okMsg) toast(okMsg, 'ok');
     return { ok: true, out };
   } catch (e) {
-    // Show full error content so user can see what went wrong
     toast(e.message || String(e), 'error', true);
     return { ok: false, err: e };
   }
 }
 
-/* ---------- Tabs ---------- */
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
@@ -93,7 +86,6 @@ function onTab(id) {
   else if (id === 'log') loadLog();
 }
 
-/* ---------- Persona ---------- */
 function parseProp(text) {
   const out = {};
   for (const line of text.split(/\r?\n/)) {
@@ -134,8 +126,6 @@ document.getElementById('refreshBtn').addEventListener('click', loadPersona);
 document.getElementById('freshenBtn').addEventListener('click', async () => {
   const btn = document.getElementById('freshenBtn');
   btn.disabled = true; const old = btn.textContent; btn.textContent = 'Freshening\u2026';
-  // Auto-unlock -> freshen -> auto-lock so the module always ends in a
-  // locked state. Each subsequent tap unlocks itself, no manual toggle.
   const cmd = `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
     `{ echo "--- $(date '+%F %T') freshen (webui) ---"; ` +
     `./bin/ternak-tt unlock >/dev/null 2>&1 || true; ` +
@@ -148,11 +138,7 @@ document.getElementById('freshenBtn').addEventListener('click', async () => {
   loadPersona();
 });
 
-/* ---------- Rotate ---------- */
 const ROT_CARDS = [
-  // SSAID surfaces as Settings.Secure.ANDROID_ID once system_server regens
-  // after wipe. identity.prop ANDROID_ID is the persona value returned by
-  // the L1/L2 Java hook, so show that as the current value.
   { key: 'ssaid',       name: 'SSAID',           desc: 'Per-app Settings.Secure.ANDROID_ID (wipe requires reboot to regen)', get: 'ANDROID_ID' },
   { key: 'gaid',        name: 'Google AID',      desc: 'Advertising ID (Settings.Global + GMS xml)',                get: 'GOOGLE_AID' },
   { key: 'wlan-mac',    name: 'wlan MAC',        desc: 'wlan0 MAC + WifiConfigStore reset',                          get: 'WIFI_MAC' },
@@ -217,7 +203,6 @@ document.getElementById('rotSafe').addEventListener('click', async (ev) => {
   loadRotate();
 });
 
-/* ---------- Targets ---------- */
 async function loadTargets() {
   const ta = document.getElementById('tgtArea');
   const r = await safeExec(`cat ${shq(TARGETS)} 2>/dev/null || true`);
@@ -237,7 +222,6 @@ document.getElementById('tgtSave').addEventListener('click', async () => {
   }
 });
 
-/* ---------- Log ---------- */
 async function loadLog() {
   const src = document.getElementById('logSrc').value;
   const body = document.getElementById('logBody');
@@ -255,7 +239,6 @@ async function loadLog() {
 document.getElementById('logRefresh').addEventListener('click', loadLog);
 document.getElementById('logSrc').addEventListener('change', loadLog);
 
-/* ---------- Helpers ---------- */
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',

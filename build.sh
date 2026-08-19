@@ -9,7 +9,6 @@ MIN_SDK="${MIN_SDK:-33}"
 VARIANT="${VARIANT:-both}"
 VERSION="$(grep '^version=' module.prop | cut -d= -f2)"
 
-# L3 LSPlant (opt-in). Empty by default => cmake invocation unchanged (byte-identical).
 LSP_CMAKE=""
 if [ "${TT_ENABLE_LSPLANT:-OFF}" = "ON" ]; then LSP_CMAKE="-DTT_ENABLE_LSPLANT=ON"; fi
 OUT="$ROOT/dist"

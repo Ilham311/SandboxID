@@ -1,21 +1,7 @@
-
-// companion.cpp — Ternak TT root companion (Zygisk companion daemon side)
-//
-// Runs in a long-lived root daemon in the GLOBAL (init) mount namespace. Each
-// connectCompanion() from an app spawns a new THREAD here running
-// ternak_tt_companion(client). Two jobs:
-//   CMD_GET_IDENTITY : is_target(pkg)? -> stream identity.prop bytes back
-//   CMD_DO_MOUNTS    : fork a throwaway child that joins the app's PRIVATE mount
-//                      namespace and bind-mounts the synthetic build.prop set.
-//
-// All framing goes through tt::read_full/write_full so a truncated/rogue peer
-// can never desync us. Paths/commands/bind-table come from tt_config.hpp (single
-// source of truth shared with main.cpp) — no local duplicates.
-
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <sched.h>          // setns, CLONE_NEWNS
+#include <sched.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -48,14 +34,10 @@
 
 static void watch_target_death(uint32_t pid);
 
-// ------------------------------------------------------- target.txt cache ---
 static std::vector<std::string> g_targets;
 static time_t                   g_targets_mtime = 0;
 static std::recursive_mutex     g_targets_mtx;
 
-// Reload target.txt only when its mtime changed (hot-reload). Falls back to the
-// built-in defaults when the file is absent, and KEEPS the previous list if the
-// file is present but parses to zero entries (never accidentally empty).
 static void reload_targets_if_changed() {
     std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     struct stat st{};
@@ -119,16 +101,11 @@ static std::string read_file(const char* p) {
     return ss.str();
 }
 
-// ------------------------------------------------------------ mount worker ---
-// Per-mount outcome, filled by the forked child and shipped back to the parent
-// THREAD via the pipe. The child does NO logging: the companion is multi-threaded
-// and calling __android_log_print after fork() risks a liblog mutex inherited in
-// a locked state (fork-safety). The parent (a normal thread) logs instead.
 struct MountResult {
     uint32_t ok = 0, fail = 0, skip = 0, skip_src = 0, skip_dst = 0;
-    int32_t  ns_open_errno   = 0;   // open(/proc/pid/ns/mnt) errno, 0 = ok
-    int32_t  setns_errno     = 0;   // setns errno, 0 = ok
-    int32_t  first_fail_idx  = -1;  // BIND_ENTRIES index of first failed bind
+    int32_t  ns_open_errno   = 0;
+    int32_t  setns_errno     = 0;
+    int32_t  first_fail_idx  = -1;
     int32_t  first_fail_errno= 0;
 };
 
@@ -147,13 +124,9 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     }
 
     if (child == 0) {
-        // ---- child: no liblog here (fork-safety); report via pipe only ----
         ::close(pipefd[0]);
         MountResult r;
 
-        // Open all source fds in OUR (root) namespace BEFORE setns — the module
-        // dir may be denylist-unmounted inside the app ns, so we must grab the
-        // fds while still in root, then bind them in via /proc/self/fd/N.
         std::array<int, tt::BIND_ENTRIES_N> src_fds{};
         for (size_t i = 0; i < tt::BIND_ENTRIES_N; ++i) {
             std::string src = std::string(tt::MOUNTDIR) + "/" + tt::BIND_ENTRIES[i].src_rel;
@@ -169,9 +142,6 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
             r.setns_errno = errno;
             ::close(tgt_ns);
         } else {
-            // Defensive: mark this (app-private) namespace's tree MS_SLAVE so our
-            // binds can never propagate back to zygote/root even if the app ns
-            // root is still MS_SHARED. Best-effort; failure is non-fatal.
             ::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr);
 
             for (size_t i = 0; i < tt::BIND_ENTRIES_N; ++i) {
@@ -199,7 +169,6 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
         ::_exit(0);
     }
 
-    // ---- parent thread: read the child's result, then log it here ----
     ::close(pipefd[1]);
     MountResult r;
     bool got = tt::read_full(pipefd[0], &r, sizeof(r));
@@ -222,7 +191,6 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
         return 0;
     }
     if (r.fail && r.first_fail_idx >= 0 && r.first_fail_idx < (int)tt::BIND_ENTRIES_N) {
-        // errno interpretation: EPERM=SELinux/caps, EINVAL=bad flags/src, ENOENT=missing.
         LOGE("mount pid=%u: %u bind(s) FAILED (first: %s errno=%d) [%s]",
              target_pid, r.fail, tt::BIND_ENTRIES[r.first_fail_idx].dst,
              r.first_fail_errno, TT_VARIANT_TAG);
@@ -232,8 +200,6 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid) {
     return r.ok;
 }
 
-// Detached watcher: logs when the target process disappears (SIGKILL / LMK /
-// normal exit are uncatchable in-process, so we observe from outside).
 static void watch_target_death(uint32_t pid) {
     std::thread([pid]() {
         struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -250,12 +216,11 @@ static void watch_target_death(uint32_t pid) {
     }).detach();
 }
 
-// --------------------------------------------------------------- IPC loop ---
 extern "C" void ternak_tt_companion(int client) {
     LOGD("companion invoked: client=%d pid=%d [%s]", client, getpid(), TT_VARIANT_TAG);
     while (true) {
         uint8_t cmd = 0;
-        if (!tt::read_full(client, &cmd, 1)) break;   // clean client close -> EOF -> break
+        if (!tt::read_full(client, &cmd, 1)) break;
         LOGD("recv cmd=%u", cmd);
 
         if (cmd == tt::CMD_GET_IDENTITY) {
@@ -275,10 +240,6 @@ extern "C" void ternak_tt_companion(int client) {
 
             std::string d = read_file(tt::IDENTITY_FILE);
             if (d.empty()) {
-                // identity.prop should already exist (post-fs-data `seed` runs
-                // before zygote). If a target has none — seed failed or the file
-                // is mid-replace — retry briefly, then surface it. An empty reply
-                // makes the client treat the app as a non-target (fails safe).
                 for (int i = 0; i < 3 && d.empty(); ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     d = read_file(tt::IDENTITY_FILE);
@@ -305,8 +266,6 @@ extern "C" void ternak_tt_companion(int client) {
             if (!tt::write_full(client, &ok, sizeof(ok))) break;
 
         } else {
-            // Unknown/unsupported (incl. CMD_CHECK_TT, reserved for future health
-            // check): don't desync — just drop the connection.
             LOGD("unknown cmd=%u, closing", cmd);
             break;
         }
