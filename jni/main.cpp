@@ -2,6 +2,7 @@
 // Ternak TT — Zygisk module untuk spoofing identitas device per-app
 // Target: TikTok, Grab (Android 13+, arm64/armv7/x86_64/x86)
 // Build: -fno-exceptions -fno-rtti, TT_DEBUG untuk verbose logging
+// v1.1.1: fix missing using-declarations (zygisk::Api/Args) + volatile fix
 // ============================================================================
 #include <jni.h>
 #include <unistd.h>
@@ -38,6 +39,10 @@
 #define LOGD(...) ((void)0)
 #define TT_VARIANT_TAG "release"
 #endif
+
+using zygisk::Api;
+using zygisk::AppSpecializeArgs;
+using zygisk::ServerSpecializeArgs;
 
 // ============================================================================
 // Budget IO companion: app spawn tidak boleh pernah menggantung > 2 detik
@@ -357,7 +362,13 @@ static void tt_crash_drain_loop() {
 // Chain ke handler ART dengan siginfo/ucontext ASLI supaya tombstone tetap benar.
 static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
-    if (sig >= 0 && sig < NSIG) n = ++g_crash_count[sig];
+    if (sig >= 0 && sig < NSIG) {
+        // C++20 (P1152R4) mendeprecate compound-op (++) pada volatile lvalue;
+        // read + write terpisah tetap async-signal-safe dan semantiknya identik
+        // untuk sig_atomic_t.
+        n = g_crash_count[sig] + 1;
+        g_crash_count[sig] = n;
+    }
 
     if (n <= CRASH_LIMIT && g_crash_pipe[1] >= 0) {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
