@@ -1,3 +1,8 @@
+// ============================================================================
+// Ternak TT — Zygisk module untuk spoofing identitas device per-app
+// Target: TikTok, Grab (Android 13+, arm64/armv7/x86_64/x86)
+// Build: -fno-exceptions -fno-rtti, TT_DEBUG untuk verbose logging
+// ============================================================================
 #include <jni.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -8,6 +13,8 @@
 #include <cstdlib>
 #include <cstdint>
 #include <sys/system_properties.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <android/log.h>
 #include <string>
 #include <map>
@@ -32,12 +39,18 @@
 #define TT_VARIANT_TAG "release"
 #endif
 
-using zygisk::Api;
-using zygisk::AppSpecializeArgs;
-using zygisk::ServerSpecializeArgs;
+// ============================================================================
+// Budget IO companion: app spawn tidak boleh pernah menggantung > 2 detik
+// ============================================================================
+static constexpr struct timeval TT_IO_TIMEOUT = {2, 0};
 
+// ============================================================================
+// Identity store — diisi sekali per proses app (aman: pre/post specialize
+// berjalan di child hasil fork, jadi tiap app punya salinan sendiri)
+// ============================================================================
 static std::map<std::string, std::string> g_id;
 
+// Lookup nilai identitas dengan fallback ke defaults audit-able
 static const std::string& val(const std::string& k) {
     static const std::string empty;
     auto it = g_id.find(k);
@@ -54,16 +67,15 @@ static const std::string& val(const std::string& k) {
     return empty;
 }
 
+// ============================================================================
+// L2 — SystemProperties.native_get hook (Java-side prop reads)
+// Signature: (Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+// ============================================================================
 static jstring (*orig_native_get)(JNIEnv*, jclass, jstring, jstring) = nullptr;
 
-static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
-    if (!j_key) return j_def;
-    const char* raw = env->GetStringUTFChars(j_key, nullptr);
-    std::string k(raw ? raw : "");
-    env->ReleaseStringUTFChars(j_key, raw);
-    LOGD("L2 native_get('%s')", k.c_str());
-
-    static const std::map<std::string, std::string> map = {
+// Map prop key -> identity key untuk spoofing yang harus konsisten dengan Build.*
+static const std::map<std::string, std::string>& prop_to_identity_map() {
+    static const std::map<std::string, std::string> m = {
         {"ro.serialno",                     "SERIAL"},
         {"ro.boot.serialno",                "SERIAL"},
         {"ro.build.fingerprint",            "FINGERPRINT"},
@@ -86,9 +98,7 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
         {"ro.build.version.security_patch", "SECURITY_PATCH"},
         {"ro.build.version.incremental",    "INCREMENTAL"},
         {"gsm.version.baseband",            "RADIO"},
-
         {"sys.boot_completed",              "SYS_BOOT_COMPLETED"},
-
         {"debug.force_rtl",                 "DEBUG_FORCE_RTL"},
         {"persist.radio.multisim.config",   "MULTISIM_CONFIG"},
         {"gsm.operator.numeric",            "GSM_OPERATOR_NUMERIC"},
@@ -112,7 +122,19 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
         {"ro.build.tags",                   "TAGS"},
         {"ro.build.type",                   "TYPE"},
     };
+    return m;
+}
 
+static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
+    if (!j_key) return j_def;
+    const char* raw = env->GetStringUTFChars(j_key, nullptr);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    std::string k(raw ? raw : "");
+    if (raw) env->ReleaseStringUTFChars(j_key, raw);
+    LOGD("L2 native_get('%s')", k.c_str());
+
+    // Spoof via identity map (prop key -> identity key)
+    const auto& map = prop_to_identity_map();
     auto it = map.find(k);
     if (it != map.end()) {
         const std::string& v = val(it->second);
@@ -121,18 +143,22 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
             return env->NewStringUTF(v.c_str());
         }
     }
+    // Spoof via static defaults (props yang tidak butuh per-app nilai)
     for (size_t i = 0; i < tt::STATIC_PROP_DEFAULTS_N; ++i) {
         if (k == tt::STATIC_PROP_DEFAULTS[i].k) {
             LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), tt::STATIC_PROP_DEFAULTS[i].v);
             return env->NewStringUTF(tt::STATIC_PROP_DEFAULTS[i].v);
         }
     }
+    // Pass-through ke original jika hook terpasang
     if (orig_native_get) return orig_native_get(env, clazz, j_key, j_def);
+    // Fallback: baca prop langsung (kalau original belum ter-bind)
     char buf[PROP_VALUE_MAX] = {0};
     if (__system_property_get(k.c_str(), buf) > 0) return env->NewStringUTF(buf);
     return j_def;
 }
 
+// Pasang hook untuk SystemProperties.native_get; log error JNI yang sebelumnya senyap.
 static void install_prop_hook(Api* api, JNIEnv* env) {
     JNINativeMethod m = {
         const_cast<char*>("native_get"),
@@ -140,6 +166,10 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
         reinterpret_cast<void*>(hook_prop_get),
     };
     api->hookJniNativeMethods(env, "android/os/SystemProperties", &m, 1);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGE("L2: JNI exception saat memasang native_get hook");
+    }
     orig_native_get = reinterpret_cast<jstring (*)(JNIEnv*, jclass, jstring, jstring)>(m.fnPtr);
     if (orig_native_get)
         LOGD("L2 native_get hooked (orig=%p)", reinterpret_cast<void*>(orig_native_get));
@@ -147,6 +177,9 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
         LOGE("L2 native_get hook did not bind (method missing?)");
 }
 
+// ============================================================================
+// L7 (DEBUG ONLY) — Leak sensor hooks untuk native_get_int/long/boolean
+// ============================================================================
 #ifdef TT_DEBUG
 static jint     (*orig_get_int)(JNIEnv*, jclass, jstring, jint)     = nullptr;
 static jlong    (*orig_get_long)(JNIEnv*, jclass, jstring, jlong)   = nullptr;
@@ -195,6 +228,8 @@ static const std::map<std::string, jlong>& tt_long_spoof() {
     };
     return m;
 }
+
+// Suppress logging keys yang spam (looper.slow, watson) supaya logcat debug tidak banjir.
 static bool tt_should_suppress_key(const std::string& k) {
     if (k.size() >= 11 + 5 &&
         k.compare(0, 11, "log.looper.") == 0 &&
@@ -208,8 +243,9 @@ static bool tt_should_suppress_key(const std::string& k) {
 static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def) {
     if (!j_key) return def;
     const char* r = env->GetStringUTFChars(j_key, nullptr);
+    if (env->ExceptionCheck()) env->ExceptionClear();
     std::string k(r ? r : "");
-    env->ReleaseStringUTFChars(j_key, r);
+    if (r) env->ReleaseStringUTFChars(j_key, r);
     const auto& m = tt_int_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPI '%s' -> %d", k.c_str(), it->second); return it->second; }
@@ -219,8 +255,9 @@ static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def
 static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong def) {
     if (!j_key) return def;
     const char* r = env->GetStringUTFChars(j_key, nullptr);
+    if (env->ExceptionCheck()) env->ExceptionClear();
     std::string k(r ? r : "");
-    env->ReleaseStringUTFChars(j_key, r);
+    if (r) env->ReleaseStringUTFChars(j_key, r);
     const auto& m = tt_long_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPL '%s' -> %lld", k.c_str(), (long long)it->second); return it->second; }
@@ -230,8 +267,9 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong 
 static jboolean hook_prop_get_bool(JNIEnv* env, jclass clazz, jstring j_key, jboolean def) {
     if (!j_key) return def;
     const char* r = env->GetStringUTFChars(j_key, nullptr);
+    if (env->ExceptionCheck()) env->ExceptionClear();
     std::string k(r ? r : "");
-    env->ReleaseStringUTFChars(j_key, r);
+    if (r) env->ReleaseStringUTFChars(j_key, r);
     const auto& m = tt_bool_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPB '%s' -> %d", k.c_str(), (int)it->second); return it->second; }
@@ -239,6 +277,7 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass clazz, jstring j_key, jbo
     return orig_get_bool ? orig_get_bool(env, clazz, j_key, def) : def;
 }
 
+// Pasang L7 leak sensors; log exception JNI supaya kegagalan tidak senyap.
 static void install_leak_sensors(Api* api, JNIEnv* env) {
     JNINativeMethod m[3] = {
         {const_cast<char*>("native_get_int"),
@@ -252,13 +291,20 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
          reinterpret_cast<void*>(hook_prop_get_bool)},
     };
     api->hookJniNativeMethods(env, "android/os/SystemProperties", m, 3);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGE("L7: JNI exception saat memasang leak sensors");
+    }
     orig_get_int  = reinterpret_cast<jint (*)(JNIEnv*, jclass, jstring, jint)>(m[0].fnPtr);
     orig_get_long = reinterpret_cast<jlong (*)(JNIEnv*, jclass, jstring, jlong)>(m[1].fnPtr);
     orig_get_bool = reinterpret_cast<jboolean (*)(JNIEnv*, jclass, jstring, jboolean)>(m[2].fnPtr);
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
-#endif
+#endif // TT_DEBUG
 
+// ============================================================================
+// Crash watchdog — async-signal-safe signal handler + self-pipe drain
+// ============================================================================
 struct TtCrashRec {
     uint32_t magic;
     int32_t  sig;
@@ -278,10 +324,12 @@ static struct sigaction g_prev_sig[NSIG];
 static volatile sig_atomic_t g_crash_count[NSIG] = {0};
 static const int   CRASH_LIMIT = 3;
 
+// Clock monotonic dalam ms — dipakai handler dan drain thread.
 static int64_t tt_now_ms() {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
+// Nama sinyal untuk logging (dipanggil dari drain thread, bukan handler).
 static const char* tt_sig_name(int sig) {
     switch (sig) {
         case SIGSEGV: return "SIGSEGV";
@@ -294,6 +342,7 @@ static const char* tt_sig_name(int sig) {
     }
 }
 
+// Drain thread: membaca record dari pipe dan log-kan (bukan di handler).
 static void tt_crash_drain_loop() {
     TtCrashRec rec;
     while (tt::read_full(g_crash_pipe[0], &rec, sizeof(rec))) {
@@ -304,6 +353,8 @@ static void tt_crash_drain_loop() {
     }
 }
 
+// Signal handler: HANYA async-signal-safe calls (write, clock_gettime, raise, signal).
+// Chain ke handler ART dengan siginfo/ucontext ASLI supaya tombstone tetap benar.
 static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
     if (sig >= 0 && sig < NSIG) n = ++g_crash_count[sig];
@@ -324,6 +375,7 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
         sched_yield();
     }
 
+    // Chain ke handler sebelumnya (ART/libsigchain) dengan context asli
     if (sig >= 0 && sig < NSIG) {
         struct sigaction* p = &g_prev_sig[sig];
         if ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction) {
@@ -332,12 +384,15 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
                    p->sa_handler != SIG_DFL && p->sa_handler != SIG_IGN) {
             p->sa_handler(sig);
         } else {
+            // Tidak ada handler lama: restore default dan re-raise
             signal(sig, SIG_DFL);
             raise(sig);
         }
     }
 }
 
+// Pasang crash watchdog: self-pipe + drain thread + sigaction chaining.
+// Dipanggil sekali per proses (armed guard).
 static void install_crash_watchdog(const std::string& pkg) {
     static bool armed = false;
     if (armed) return;
@@ -369,6 +424,10 @@ static void install_crash_watchdog(const std::string& pkg) {
     LOGD("crash watchdog armed for %s (ABRT/FPE/ILL, limit=%d)", pkg.c_str(), CRASH_LIMIT);
 }
 
+// ============================================================================
+// L1b — Build field patching via JNI
+// ============================================================================
+// Set static String field; guard exception supaya gagal satu field tidak merusak sisanya.
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
     jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
@@ -379,6 +438,7 @@ static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) 
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(j);
 }
+// Set static int field; guard exception.
 static void set_int(JNIEnv* env, jclass c, const char* f, int v) {
     jfieldID id = env->GetStaticFieldID(c, f, "I");
     if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
@@ -386,6 +446,7 @@ static void set_int(JNIEnv* env, jclass c, const char* f, int v) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
+// Patch semua field statis Build dan Build.VERSION untuk konsistensi dengan identity.prop.
 static void install_build_hook(JNIEnv* env) {
     jclass build = env->FindClass("android/os/Build");
     if (build && !env->ExceptionCheck()) {
@@ -405,6 +466,8 @@ static void install_build_hook(JNIEnv* env) {
     jclass ver = env->FindClass("android/os/Build$VERSION");
     if (ver && !env->ExceptionCheck()) {
         set_str(env, ver, "RELEASE",        val("RELEASE"));
+        // Semua persona adalah build user/rilis: CODENAME wajib "REL" untuk konsistensi.
+        set_str(env, ver, "CODENAME",       std::string("REL"));
         set_str(env, ver, "INCREMENTAL",    val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", val("SECURITY_PATCH"));
         const std::string& s = val("SDK_INT");
@@ -416,6 +479,10 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 }
 
+// ============================================================================
+// Companion IPC
+// ============================================================================
+// Kirim CMD_DO_MOUNTS dan terima ack; timeout sudah di-set di fd.
 static void request_companion_mounts(int fd) {
     uint8_t cmd  = tt::CMD_DO_MOUNTS;
     uint32_t pid = (uint32_t)::getpid();
@@ -428,6 +495,9 @@ static void request_companion_mounts(int fd) {
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
+// ============================================================================
+// Zygisk Module
+// ============================================================================
 class TernakTT : public zygisk::ModuleBase {
 public:
     void onLoad(Api* api, JNIEnv* env) override {
@@ -439,8 +509,9 @@ public:
         std::string pkg;
         if (args && args->nice_name) {
             const char* raw = env_->GetStringUTFChars(args->nice_name, nullptr);
+            if (env_->ExceptionCheck()) env_->ExceptionClear();
             pkg = raw ? raw : "";
-            env_->ReleaseStringUTFChars(args->nice_name, raw);
+            if (raw) env_->ReleaseStringUTFChars(args->nice_name, raw);
         }
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
         if (pkg.empty()) { unload(); return; }
@@ -448,6 +519,11 @@ public:
         int fd = api_->connectCompanion();
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { unload(); return; }
+
+        // Budget IO 2 detik: app spawn tidak boleh pernah menggantung.
+        ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &TT_IO_TIMEOUT, sizeof(TT_IO_TIMEOUT));
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &TT_IO_TIMEOUT, sizeof(TT_IO_TIMEOUT));
+
         api_->exemptFd(fd);
 
         uint8_t cmd   = tt::CMD_GET_IDENTITY;
@@ -516,9 +592,11 @@ private:
     int comp_fd_ = -1;
     std::vector<uint8_t> blob_;
 
+    // Tandai library module untuk di-dlclose setelah unload.
     void unload() {
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
+    // Parse identity blob (key=value lines) dan trim whitespace/CRLF.
     void parse_blob() {
         std::string s(blob_.begin(), blob_.end());
         std::istringstream iss(s);
@@ -527,7 +605,11 @@ private:
             if (line.empty() || line[0] == '#') continue;
             auto eq = line.find('=');
             if (eq == std::string::npos) continue;
-            g_id[line.substr(0, eq)] = line.substr(eq + 1);
+            std::string k = line.substr(0, eq);
+            std::string v = line.substr(eq + 1);
+            while (!v.empty() && (v.back()=='\r' || v.back()=='\n' || v.back()==' '))
+                v.pop_back();
+            if (!k.empty()) g_id[k] = v;
         }
     }
 };

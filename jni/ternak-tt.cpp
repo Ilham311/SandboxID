@@ -1,3 +1,7 @@
+// ============================================================================
+// Ternak TT CLI — identity rotation, seed, apply-boot
+// Fix v1.1: SDK pinning, RADIO format, run_bin exit status, atomic_write partial-io
+// ============================================================================
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -27,6 +31,11 @@ static const char* RESETPROP      = tt::RESETPROP;
 static const char* MOUNTDIR       = tt::MOUNTDIR;
 static const char* TARGET_FILE    = tt::TARGET_FILE;
 
+// ============================================================================
+// Utility functions
+// ============================================================================
+
+// Load target packages from target.txt; fallback ke built-in defaults.
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
     std::ifstream f(TARGET_FILE);
@@ -55,6 +64,7 @@ static std::vector<std::string> load_targets() {
     return out;
 }
 
+// Generate random hex string dari CSPRNG (std::random_device).
 static std::string random_hex(int bytes, bool upper) {
     std::random_device rd;
     std::mt19937_64 gen(rd() ^ (uint64_t)std::chrono::steady_clock::now()
@@ -67,17 +77,24 @@ static std::string random_hex(int bytes, bool upper) {
     return s;
 }
 
+// Write file atomically: tmp + fsync + rename, dengan loop partial-io.
 static bool atomic_write(const std::string& p, const std::string& data) {
     std::string tmp = p + ".tmp";
     int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return false;
-    ssize_t w = ::write(fd, data.data(), data.size());
+    bool ok = true;
+    for (size_t off = 0; off < data.size(); ) {
+        ssize_t w = ::write(fd, data.data() + off, data.size() - off);
+        if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
+        off += (size_t)w;
+    }
     ::fsync(fd);
     ::close(fd);
-    if (w != (ssize_t)data.size()) { ::unlink(tmp.c_str()); return false; }
+    if (!ok) { ::unlink(tmp.c_str()); return false; }
     return ::rename(tmp.c_str(), p.c_str()) == 0;
 }
 
+// Read file contents; return "" on failure.
 static std::string read_file(const std::string& p) {
     std::ifstream f(p);
     if (!f) return "";
@@ -86,6 +103,7 @@ static std::string read_file(const std::string& p) {
     return ss.str();
 }
 
+// Trim trailing newline/CR/space and leading whitespace.
 static std::string trim(std::string s) {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
         s.pop_back();
@@ -94,19 +112,26 @@ static std::string trim(std::string s) {
     return s;
 }
 
-static void run_bin(const char* path, std::vector<const char*> argv) {
+// Run binary synchronously and return exit status (supaya caller tahu gagal).
+static int run_bin(const char* path, std::vector<const char*> argv) {
     pid_t pid = fork();
+    if (pid < 0) return -1;
     if (pid == 0) {
         argv.push_back(nullptr);
         execv(path, const_cast<char* const*>(argv.data()));
         _exit(127);
-    } else if (pid > 0) {
-        waitpid(pid, nullptr, 0);
     }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid) return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
+// ============================================================================
+// Identity generation
+// ============================================================================
 struct Identity {
     std::map<std::string, std::string> kv;
+    // Serialize dengan key order yang konsisten untuk readability.
     std::string serialize() const {
         static const std::vector<std::string> order = {
             "BRAND","MANUFACTURER","MODEL","MARKETNAME","DEVICE","PRODUCT",
@@ -124,6 +149,7 @@ struct Identity {
     }
 };
 
+// Generate UUID v4 dari CSPRNG.
 static std::string uuid_v4() {
     std::string h = random_hex(16, false);
     h.insert(20, "-");
@@ -138,25 +164,57 @@ static std::string uuid_v4() {
     return h;
 }
 
+// Baca SDK level device dari system properties.
 static int device_sdk() {
     char b[PROP_VALUE_MAX] = {0};
     if (__system_property_get("ro.build.version.sdk", b) > 0) return atoi(b);
     return 0;
 }
 
+// Generate random build host suffix supaya farm tidak share satu nilai HOST
+// (clustering amplifier server-side).
+static std::string gen_host_suffix() {
+    std::random_device rd;
+    std::mt19937 g(rd());
+    static const char* prefixes[] = {
+        "abfarm", "abfarm-release", "abfarm-server", "build", "build-server",
+        "release", "release-server", "farm", "buildfarm",
+    };
+    constexpr int n_prefixes = sizeof(prefixes) / sizeof(prefixes[0]);
+    std::string host = prefixes[g() % n_prefixes];
+    // Tambahkan suffix numeric untuk uniqueness per-device
+    host += "-";
+    host += std::to_string(g() % 900 + 100);  // 3-digit 100-999
+    return host;
+}
+
+// Generate fresh identity dari pool dengan SDK pinning.
+// SDK_INT ter-inline javac → persona SDK HARUS == device SDK supaya konsisten.
 static Identity gen_identity() {
     std::random_device rd;
     std::mt19937 g(rd());
     constexpr size_t N = sizeof(TT_POOL) / sizeof(TT_POOL[0]);
 
     int dev = device_sdk();
+
+    // Prioritas 1: persona SDK persis == device SDK (wajib untuk konsistensi)
     std::vector<size_t> cand;
     for (size_t i = 0; i < N; ++i)
-        if (dev > 0 && TT_POOL[i].sdk <= dev) cand.push_back(i);
+        if (dev > 0 && TT_POOL[i].sdk == dev) cand.push_back(i);
+
+    if (cand.empty()) {
+        // Prioritas 2: fallback ke SDK lebih rendah (TERIMA RISIKO inkonsistensi SDK_INT)
+        fprintf(stderr, "! tidak ada persona SDK %d persis — fallback SDK lebih rendah, "
+                "TERIMA RISIKO inkonsistensi SDK_INT (javac inline)\n", dev);
+        for (size_t i = 0; i < N; ++i)
+            if (dev > 0 && TT_POOL[i].sdk <= dev) cand.push_back(i);
+    }
+
     size_t idx;
     if (!cand.empty()) {
         idx = cand[g() % cand.size()];
     } else {
+        // Prioritas 3: device SDK di bawah semua persona (sangat jarang, upgrade path)
         idx = 0;
         for (size_t i = 1; i < N; ++i) if (TT_POOL[i].sdk < TT_POOL[idx].sdk) idx = i;
         fprintf(stderr, "! device SDK %d below all personas; using SDK %d (upgrade, risky)\n",
@@ -180,11 +238,12 @@ static Identity gen_identity() {
     id.kv["SDK_INT"]         = std::to_string(p.sdk);
     id.kv["SECURITY_PATCH"]  = p.security_patch;
     id.kv["BOOTLOADER"]      = "unknown";
-    id.kv["HOST"]            = "abfarm-release";
+    id.kv["HOST"]            = gen_host_suffix();
     id.kv["USER"]            = "android-build";
     id.kv["TYPE"]            = "user";
     id.kv["TAGS"]            = "release-keys";
 
+    // FINGERPRINT: google/<product>/<device>:<release>/<id>/<incremental>:user/release-keys
     char fp[512];
     snprintf(fp, sizeof(fp), "google/%s/%s:%s/%s/%s:user/release-keys",
              p.product, p.device, p.release, p.id, p.incremental);
@@ -196,6 +255,8 @@ static Identity gen_identity() {
              p.product, p.release, p.id, p.incremental);
     id.kv["DESCRIPTION"] = desc;
 
+    // RADIO: format baseband Pixel nyata <modem>-<YYMMDD>-B-<incremental>
+    // (tanpa segmen incr6 ekstra yang adalah anomali bagi pembanding)
     auto modem_prefix = [](const char* plat) -> const char* {
         if (!plat) return "g5123b";
         if (!strcmp(plat, "gs101"))   return "g5123b";
@@ -211,13 +272,12 @@ static Identity gen_identity() {
         pdate[2] = p.security_patch[5]; pdate[3] = p.security_patch[6];
         pdate[4] = p.security_patch[8]; pdate[5] = p.security_patch[9];
     }
-    std::string incr  = p.incremental;
-    std::string incr6 = incr.size() > 6 ? incr.substr(incr.size() - 6) : incr;
     char rad[128];
-    snprintf(rad, sizeof(rad), "%s-%s-%s-B-%s",
-             modem_prefix(p.platform), incr6.c_str(), pdate, p.incremental);
+    snprintf(rad, sizeof(rad), "%s-%s-B-%s",
+             modem_prefix(p.platform), pdate, p.incremental);
     id.kv["RADIO"] = rad;
 
+    // Serial: 8 hex uppercase (format Pixel)
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
@@ -232,6 +292,9 @@ static Identity gen_identity() {
 #define DBG(...) ((void)0)
 #endif
 
+// ============================================================================
+// L0 — Native prop application via resetprop-rs (global, boot persistent)
+// ============================================================================
 static void apply_native(const Identity& id) {
     DBG("apply_native: enter (identity has %zu kv pairs)", id.kv.size());
     auto get = [&](const char* k) -> std::string {
@@ -253,7 +316,6 @@ static void apply_native(const Identity& id) {
     const std::string DISPLAY      = get("DISPLAY");
     const std::string DESC         = get("DESCRIPTION");
     const std::string RELEASE      = get("RELEASE");
-    const std::string SDK_INT      = get("SDK_INT");
     const std::string SECPATCH     = get("SECURITY_PATCH");
     const std::string INCREMENTAL  = get("INCREMENTAL");
     const std::string RADIO        = get("RADIO");
@@ -265,8 +327,11 @@ static void apply_native(const Identity& id) {
     const std::string PLATFORM     = get("BOARD_PLATFORM");
     const std::string MARKETNAME   = get("MARKETNAME");
 
+    // NOTE: ro.build.version.sdk TIDAK di-resetprop global.
+    // Build.VERSION.SDK_INT ter-inline javac; meresetprop nilai global-nya membuat
+    // seluruh sistem melihat SDK yang salah (GMS, update engine, kompat layanan).
+    // Per-app spoof SDK_INT sudah ditangani oleh Build field patch di main.cpp.
     std::vector<Rp> rp = {
-
         {"ro.serialno",                        SERIAL},
         {"ro.boot.serialno",                   SERIAL},
 
@@ -330,9 +395,6 @@ static void apply_native(const Identity& id) {
 
         {"ro.build.version.release",           RELEASE},
         {"ro.build.version.release_or_codename", RELEASE},
-        {"ro.build.version.sdk",               SDK_INT},
-        {"ro.system.build.version.sdk",        SDK_INT},
-        {"ro.vendor.build.version.sdk",        SDK_INT},
         {"ro.build.version.security_patch",    SECPATCH},
         {"ro.vendor.build.security_patch",     SECPATCH},
         {"ro.build.version.incremental",       INCREMENTAL},
@@ -345,17 +407,26 @@ static void apply_native(const Identity& id) {
     };
 
     if (::access(RESETPROP, X_OK) == 0) {
-        int applied = 0;
+        int applied = 0, failed = 0;
         for (const auto& r : rp) {
             if (r.val.empty()) continue;
-            run_bin(RESETPROP, {"resetprop-rs", "-n", r.key, r.val.c_str()});
-            applied++;
+            if (run_bin(RESETPROP, {"resetprop-rs", "-n", r.key, r.val.c_str()}) == 0) {
+                applied++;
+            } else {
+                failed++;
+                fprintf(stderr, "! resetprop gagal (exit!=0): %s\n", r.key);
+            }
         }
-        printf("  Native prop: %d set via resetprop-rs\n", applied);
+        printf("  Native prop: %d ok, %d gagal\n", applied, failed);
+        if (applied == 0 && failed > 0)
+            fprintf(stderr, "! SEMUA resetprop gagal — verifikasi flag '-n': %s --help\n",
+                    RESETPROP);
     } else {
         fprintf(stderr, "! resetprop-rs missing at %s (native prop skipped)\n", RESETPROP);
     }
 
+    // Settings: ANDROID_ID hanya untuk Settings.Global, bukan SSAID per-app
+    // (yang tidak bisa di-set via settings put — lihat wipe_ssaid di rotate_ids.sh)
     std::string aid = get("ANDROID_ID");
     if (!aid.empty()) {
         run_bin("/system/bin/settings",
@@ -367,6 +438,9 @@ static void apply_native(const Identity& id) {
     }
 }
 
+// ============================================================================
+// L4 — Mount overlay file generation (bind-mount sources)
+// ============================================================================
 static void generate_mount_files(const Identity& id) {
     DBG("generate_mount_files: MOUNTDIR=%s", MOUNTDIR);
     auto g = [&](const char* k) -> std::string {
@@ -404,6 +478,7 @@ static void generate_mount_files(const Identity& id) {
     const std::string PLATFORM     = g("BOARD_PLATFORM");
     const std::string MARKETNAME   = g("MARKETNAME");
 
+    // build.prop base — semua prop identitas untuk file-reader
     std::string base;
     base += "# begin build properties\n";
     auto add = [&](const char* k, const std::string& v) {
@@ -445,6 +520,7 @@ static void generate_mount_files(const Identity& id) {
     add("gsm.version.baseband",               RADIO);
     add("ro.build.expect.baseband",           RADIO);
 
+    // Per-partition build.prop (system, vendor, odm, product, system_ext)
     struct { const char* dir; const char* pfx; } parts[] = {
         {"system",     "ro.product.system."},
         {"vendor",     "ro.product.vendor."},
@@ -465,6 +541,10 @@ static void generate_mount_files(const Identity& id) {
         ::chmod(path.c_str(), 0644);
     }
 
+    // settings_secure.xml untuk bind-mount ke /data/system/users/0/
+    // (dibaca oleh SettingsProvider saat system_server belum warm —
+    //  untuk SSAID per-app ini tidak efektif, tapi berguna untuk
+    //  file-reader yang membaca settings_secure.xml langsung)
     std::string aid  = g("ANDROID_ID");
     std::string gaid = g("GOOGLE_AID");
     if (aid.empty()) aid = "0000000000000000";
@@ -489,6 +569,7 @@ static void generate_mount_files(const Identity& id) {
     ::chmod(xml_path.c_str(), 0600);
     ::chown(xml_path.c_str(), 1000, 1000);
 
+    // SELinux context labels supaya file overlay bisa dibaca oleh target process
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_file:s0",
             (std::string(MOUNTDIR) + "/system/build.prop").c_str()});
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:vendor_file:s0",
@@ -504,6 +585,10 @@ static void generate_mount_files(const Identity& id) {
     printf("  Mount overlay: 5 build.prop + settings_secure.xml -> %s\n", MOUNTDIR);
 }
 
+// ============================================================================
+// App data wipe
+// ============================================================================
+// Clear app data untuk semua target packages (fresh device identity).
 static void wipe_tt_data() {
     auto pkgs = load_targets();
     for (const auto& pkg : pkgs) {
@@ -512,6 +597,9 @@ static void wipe_tt_data() {
     }
 }
 
+// ============================================================================
+// CLI Commands
+// ============================================================================
 static int cmd_targets() {
     auto pkgs = load_targets();
     struct stat st{};
@@ -524,6 +612,7 @@ static int cmd_targets() {
     return 0;
 }
 
+// Load identity.prop dan trim whitespace/CRLF per value.
 static Identity load_identity() {
     Identity id;
     std::istringstream iss(read_file(IDENTITY_FILE));
@@ -532,11 +621,16 @@ static Identity load_identity() {
         if (line.empty() || line[0] == '#') continue;
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
-        id.kv[line.substr(0, eq)] = line.substr(eq + 1);
+        std::string k = trim(line.substr(0, eq));
+        std::string v = line.substr(eq + 1);
+        while (!v.empty() && (v.back()=='\r' || v.back()=='\n' || v.back()==' '))
+            v.pop_back();
+        if (!k.empty()) id.kv[k] = v;
     }
     return id;
 }
 
+// Pastikan berjalan sebagai root.
 static bool ensure_root() {
     if (geteuid() != 0) {
         fprintf(stderr, "! ternak-tt must run as root. Use: su -c ternak-tt <cmd>\n");
@@ -545,6 +639,7 @@ static bool ensure_root() {
     return true;
 }
 
+// Rotate identity: generate fresh persona + apply native + mount overlay + wipe.
 static int cmd_freshen() {
     DBG("cmd_freshen: build=%s", TT_VARIANT_TAG);
     if (!ensure_root()) return 1;
@@ -578,6 +673,8 @@ static int cmd_freshen() {
     printf("  ANDROID_ID  : %s\n", id.kv["ANDROID_ID"].c_str());
     printf("  GAID        : %s\n", id.kv["GOOGLE_AID"].c_str());
     printf("  SEC PATCH   : %s\n", id.kv["SECURITY_PATCH"].c_str());
+    printf("  HOST        : %s\n", id.kv["HOST"].c_str());
+    printf("  RADIO       : %s\n", id.kv["RADIO"].c_str());
 
     auto pkgs = load_targets();
     printf("  Wiped: %zu pkg(s) from target.txt\n", pkgs.size());
@@ -585,6 +682,7 @@ static int cmd_freshen() {
     return 0;
 }
 
+// Print current identity.prop.
 static int cmd_status() {
     std::string d = read_file(IDENTITY_FILE);
     if (d.empty()) {
@@ -595,9 +693,8 @@ static int cmd_status() {
     return 0;
 }
 
-static int cmd_apply_boot_impl();
-static int cmd_apply_boot() { return cmd_apply_boot_impl(); }
-static int cmd_apply_boot_impl() {
+// Re-apply native props + regenerate mount overlay (used by service.sh).
+static int cmd_apply_boot() {
     if (!ensure_root()) return 1;
     Identity id = load_identity();
     if (id.kv.empty()) {
@@ -610,6 +707,7 @@ static int cmd_apply_boot_impl() {
     return 0;
 }
 
+// Fast bootstrap: identity + mount overlay only (used by post-fs-data.sh).
 static int cmd_seed() {
     if (!ensure_root()) return 1;
     Identity id;
@@ -630,6 +728,7 @@ static int cmd_seed() {
     return 0;
 }
 
+// Lock freshen (safety: prevent accidental rotation).
 static int cmd_lock() {
     if (!ensure_root()) return 1;
     atomic_write(MODE_FILE, "locked\n");
@@ -637,6 +736,7 @@ static int cmd_lock() {
     return 0;
 }
 
+// Unlock freshen.
 static int cmd_unlock() {
     if (!ensure_root()) return 1;
     atomic_write(MODE_FILE, "fresh\n");
@@ -644,6 +744,7 @@ static int cmd_unlock() {
     return 0;
 }
 
+// Restore previous identity from backup + re-apply + wipe.
 static int cmd_rollback() {
     if (!ensure_root()) return 1;
     std::string d = read_file(IDENTITY_BAK);
@@ -660,9 +761,10 @@ static int cmd_rollback() {
     return 0;
 }
 
+// Print usage help.
 static void usage(const char* p) {
     fprintf(stderr,
-        "Ternak TT v1.0.1 - TikTok Zygisk fresh persona (standalone)\n\n"
+        "Ternak TT v1.1.0 - TikTok Zygisk fresh persona (standalone)\n\n"
         "Usage: %s <command>\n\n"
         "  freshen      Rotate identity + wipe TT app data (main action)\n"
         "  status       Print current identity.prop\n"
