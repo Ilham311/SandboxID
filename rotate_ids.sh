@@ -45,7 +45,7 @@ set_gaid_value() {
         identity_persist GOOGLE_AID "$newgaid"
         log_info "GAID generated + persisted to identity.prop"
     fi
-    log_step "Set GAID: $newgaid"
+    log_step "Set GAID: $(mask_id "$newgaid")"
 
     settings_put global advertising_id "$newgaid" || log_warn "settings put advertising_id failed"
     settings_put global limit_ad_tracking 0       || :
@@ -87,7 +87,7 @@ XMLEOF
     fi
     se_restore
     backup_rotate "adid_settings." 10
-    log_ok "GAID written: $newgaid"
+    log_ok "GAID written: $(mask_id "$newgaid")"
     return 0
 }
 
@@ -99,7 +99,7 @@ randomize_wlan_mac() {
         identity_persist WIFI_MAC "$newmac"
         log_info "wlan MAC generated + persisted to identity.prop"
     fi
-    log_step "Randomize wlan0 MAC: $newmac"
+    log_step "Randomize wlan0 MAC: $(mask_id "$newmac")"
 
     if ! command -v ip >/dev/null 2>&1; then
         log_warn "ip(8) not available; MAC only recorded in identity.prop"
@@ -109,7 +109,7 @@ randomize_wlan_mac() {
     ip link set wlan0 down 2>/dev/null
     sleep 1
     if ip link set dev wlan0 address "$newmac" 2>/dev/null; then
-        log_ok "MAC: $newmac"
+        log_ok "MAC: $(mask_id "$newmac")"
     else
         log_warn "MAC rejected by driver (Android 10+ uses per-SSID MAC)"
     fi
@@ -134,7 +134,7 @@ rotate_bluetooth_mac() {
         identity_persist BLUETOOTH_ADDR "$newbt"
         log_info "BT MAC generated + persisted to identity.prop"
     fi
-    log_step "Rotate Bluetooth adapter MAC: $newbt"
+    log_step "Rotate Bluetooth adapter MAC: $(mask_id "$newbt")"
 
     rp_set persist.service.bdroid.bdaddr "$newbt"
     rp_set persist.sys.bt.bdaddr         "$newbt"
@@ -173,7 +173,7 @@ rotate_bluetooth_mac() {
     force_stop com.android.bluetooth
     pkill -f 'com\.(android|google\.android)\.bluetooth' 2>/dev/null
     sleep 1
-    log_ok "BT MAC applied: $newbt (toggle BT off/on to activate)"
+    log_ok "BT MAC applied: $(mask_id "$newbt") (toggle BT off/on to activate)"
     return 0
 }
 
@@ -230,20 +230,24 @@ cmd_status() {
         log_info "identity.prop  : $IDENTITY_FILE"
         for k in MODEL DEVICE BRAND SERIAL ANDROID_ID GOOGLE_AID WIFI_MAC BLUETOOTH_ADDR BLUETOOTH_NAME; do
             v="$(identity_get "$k" 2>/dev/null || true)"
-            [ -n "$v" ] && log_info "  $k = $v"
+            [ -z "$v" ] && continue
+            case "$k" in
+                SERIAL|ANDROID_ID|GOOGLE_AID|WIFI_MAC|BLUETOOTH_ADDR) v="$(mask_id "$v")" ;;
+            esac
+            log_info "  $k = $v"
         done
     else
         log_info "identity.prop  : missing (run 'ternak-tt freshen')"
     fi
     if command -v settings >/dev/null 2>&1; then
-        log_info "Settings.Global.advertising_id  = $(settings get global advertising_id 2>/dev/null)"
+        log_info "Settings.Global.advertising_id  = $(mask_id "$(settings get global advertising_id 2>/dev/null)")"
         log_info "Settings.Global.device_name     = $(settings get global device_name 2>/dev/null)"
         log_info "Settings.Global.bluetooth_name  = $(settings get global bluetooth_name 2>/dev/null)"
     fi
     log_info "getprop ro.product.model              = $(getprop ro.product.model 2>/dev/null)"
     log_info "getprop persist.bluetooth.adaptername = $(getprop persist.bluetooth.adaptername 2>/dev/null)"
-    log_info "getprop persist.service.bdroid.bdaddr = $(getprop persist.service.bdroid.bdaddr 2>/dev/null)"
-    log_info "getprop ro.serialno                   = $(getprop ro.serialno 2>/dev/null)"
+    log_info "getprop persist.service.bdroid.bdaddr = $(mask_id "$(getprop persist.service.bdroid.bdaddr 2>/dev/null)")"
+    log_info "getprop ro.serialno                   = $(mask_id "$(getprop ro.serialno 2>/dev/null)")"
     for u in $(get_users); do
         f="/data/system/users/$u/settings_ssaid.xml"
         if [ -f "$f" ]; then

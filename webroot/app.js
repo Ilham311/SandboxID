@@ -285,12 +285,16 @@ const ROT_CARDS = [
 async function loadRotate() {
   const wrap = document.getElementById('rotCards');
   wrap.innerHTML = ROT_CARDS.map((c, i) => `
-    <div class="card" data-key="${c.key}" style="--i:${i}">
+    <div class="card" data-key="${c.key}">
       <div class="name">${c.name}</div>
       <div class="desc">${c.desc}</div>
       <div class="val sk sk-line" data-slot="val"></div>
       <div class="actions"><button class="sm" data-rot="${c.key}">Rotate</button></div>
     </div>`).join('');
+  // M9/CSP: index stagger di-set lewat CSSOM (.style.setProperty), bukan atribut
+  // inline style="--i:.." — atribut inline diblok oleh style-src 'self' tanpa
+  // 'unsafe-inline'. CSSOM write tidak tunduk CSP, jadi animasi tetap jalan.
+  wrap.querySelectorAll('.card').forEach((el, i) => el.style.setProperty('--i', i));
   wrap.querySelectorAll('button[data-rot]').forEach(b => {
     b.addEventListener('click', () => rotateOne(b.dataset.rot, b));
   });

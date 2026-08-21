@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # H1: keep SHA-pinned GitHub Actions current (Dependabot bumps both the pinned
+  # SHA and the trailing "# vX.Y.Z" comment when a new release lands).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"

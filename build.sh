@@ -19,11 +19,30 @@ echo "==> Ternak TT $VERSION"
 echo "==> NDK: $ANDROID_NDK_HOME"
 echo "==> Variant(s): $VARIANT"
 
+# H2: pin zygisk.hpp ke commit tetap (bukan 'master' yang bisa berubah) DAN
+# verifikasi sha256 — mencegah supply-chain injection lewat header pihak ketiga.
+ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
+ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
 if [ ! -f jni/zygisk.hpp ]; then
-  echo "==> Fetching zygisk.hpp"
+  echo "==> Fetching zygisk.hpp @ ${ZYGISK_HPP_COMMIT}"
   curl -fsSL -o jni/zygisk.hpp \
-    https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
+    "https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/${ZYGISK_HPP_COMMIT}/module/jni/zygisk.hpp"
 fi
+if command -v sha256sum >/dev/null 2>&1; then
+  GOT_HPP="$(sha256sum jni/zygisk.hpp | cut -d' ' -f1)"
+elif command -v shasum >/dev/null 2>&1; then
+  GOT_HPP="$(shasum -a 256 jni/zygisk.hpp | cut -d' ' -f1)"
+else
+  echo "ERROR: no sha256 tool (sha256sum/shasum) to verify zygisk.hpp" >&2; exit 1
+fi
+if [ "$GOT_HPP" != "$ZYGISK_HPP_SHA256" ]; then
+  echo "ERROR: zygisk.hpp checksum mismatch — refusing to build" >&2
+  echo "  expected $ZYGISK_HPP_SHA256" >&2
+  echo "  got      $GOT_HPP" >&2
+  echo "  delete jni/zygisk.hpp to re-fetch from pinned commit ${ZYGISK_HPP_COMMIT}" >&2
+  exit 1
+fi
+echo "==> zygisk.hpp verified"
 
 mkdir -p "$OUT"
 
@@ -86,9 +105,21 @@ build_variant() {
   cp "build/$V/x86/ternak-tt"          "$PKG/bin/ternak-tt-x86"
 
   if [ -f prebuilt/resetprop-rs ]; then
+    # C1: verifikasi binary vendored terhadap checksum ter-pin sebelum dikemas.
+    if [ -f prebuilt/resetprop-rs.sha256 ] && command -v sha256sum >/dev/null 2>&1; then
+      ( cd prebuilt && sha256sum -c resetprop-rs.sha256 >/dev/null ) || {
+        echo "  ERROR: prebuilt/resetprop-rs checksum mismatch — refusing to package" >&2
+        exit 1
+      }
+      echo "  ==> resetprop-rs verified"
+    else
+      echo "  WARN: cannot verify resetprop-rs checksum (missing .sha256 or sha256sum)" >&2
+    fi
     cp prebuilt/resetprop-rs "$PKG/bin/resetprop-rs"
+    # M6: sertakan checksum agar customize.sh dapat re-verify + gating ABI di device.
+    [ -f prebuilt/resetprop-rs.sha256 ] && cp prebuilt/resetprop-rs.sha256 "$PKG/bin/resetprop-rs.sha256"
   else
-    echo "  WARN: prebuilt/resetprop-rs missing; native prop apply will be skipped at runtime"
+    echo "  WARN: prebuilt/resetprop-rs missing; native prop apply will rely on Magisk resetprop"
   fi
 
   local ZIP="$OUT/ternak-tt-$VERSION-$V.zip"
