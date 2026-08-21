@@ -55,7 +55,7 @@ inline bool init(JNIEnv* env) {
 
     static lsparself::Elf art("/libart.so");
 
-    static const std::string kCls = "androidx.core.os.SandboxIDHook";
+    static const std::string kCls = "androidx.core.os.EnvCompatState";
     static const std::string kSrc = "Hc";
     static const std::string kFld = "h";
 
@@ -111,7 +111,7 @@ inline jclass load_callback_class(JNIEnv* env) {
         jmethodID loadClass = env->GetMethodID(clCls, "loadClass",
             "(Ljava/lang/String;)Ljava/lang/Class;");
         if (!loadClass || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
-        jstring name = env->NewStringUTF("androidx.core.os.SandboxIDHook");
+        jstring name = env->NewStringUTF("androidx.core.os.EnvCompatState");
         jobject c = env->CallObjectMethod(loader, loadClass, name);
         if (!c || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
         return c;

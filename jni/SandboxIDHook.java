@@ -1,6 +1,6 @@
 package androidx.core.os;
 
-public final class SandboxIDHook {
+public final class EnvCompatState {
 
     public static volatile String spoof;
 
@@ -21,5 +21,5 @@ public final class SandboxIDHook {
         return null;
     }
 
-    public SandboxIDHook() {}
+    public EnvCompatState() {}
 }
