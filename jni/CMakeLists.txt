@@ -24,9 +24,10 @@ else()
         "-flto -Wl,--gc-sections -Wl,--strip-all")
 endif()
 
-add_library(sandboxid SHARED main.cpp companion.cpp)
-target_include_directories(sandboxid PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(sandboxid PRIVATE log)
+add_library(sandboxid_module SHARED main.cpp companion.cpp)
+set_target_properties(sandboxid_module PROPERTIES OUTPUT_NAME sandboxid)
+target_include_directories(sandboxid_module PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(sandboxid_module PRIVATE log)
 
 add_executable(sandboxid sandboxid.cpp)
 target_include_directories(sandboxid PRIVATE ${CMAKE_SOURCE_DIR})
@@ -37,8 +38,8 @@ if(SBX_ENABLE_LSPLANT)
     set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
     add_subdirectory(external/lsplant/lsplant/src/main/jni lsplant_build)
     add_subdirectory(external/dobby dobby_build)
-    target_link_libraries(sandboxid PRIVATE lsplant_static dobby)
-    target_include_directories(sandboxid PRIVATE
+    target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby)
+    target_include_directories(sandboxid_module PRIVATE
         external/lsplant/lsplant/src/main/jni/include
         external/lsparself
         external/dobby/include)
@@ -47,5 +48,5 @@ if(SBX_ENABLE_LSPLANT)
             target_compile_options(${t} PRIVATE -fexceptions -frtti)
         endif()
     endforeach()
-    target_compile_definitions(sandboxid PRIVATE SBX_ENABLE_LSPLANT=1)
+    target_compile_definitions(sandboxid_module PRIVATE SBX_ENABLE_LSPLANT=1)
 endif()

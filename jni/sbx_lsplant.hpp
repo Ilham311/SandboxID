@@ -55,7 +55,7 @@ inline bool init(JNIEnv* env) {
 
     static lsparself::Elf art("/libart.so");
 
-    static const std::string kCls = "androidx.core.os.EnvCompatState";
+    static const std::string kCls = "androidx.core.os.HandlerCompatRef";
     static const std::string kSrc = "Hc";
     static const std::string kFld = "h";
 
