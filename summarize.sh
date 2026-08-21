@@ -21,7 +21,7 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     echo ""
 
     echo "--- Session header ---"
-    head -15 "$IN" | grep -vE '^\s*$'
+    head -15 "$IN" | grep -vE '^[[:space:]]*$'
     echo ""
 
     echo "--- Event counts ---"
