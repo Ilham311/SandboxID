@@ -36,6 +36,13 @@ inline constexpr BindEntry BIND_ENTRIES[] = {
     {"product/build.prop",    "/product/build.prop"},
     {"system_ext/build.prop", "/system_ext/etc/build.prop"},
     {"system_ext/build.prop", "/system_ext/build.prop"},
+    // NOTE (#5): this bind is largely INEFFECTIVE for a normal app's ANDROID_ID.
+    // SSAID is served over Binder by SettingsProvider (running in system_server,
+    // which reads the file once at boot into its own cache) -- an app calling
+    // Settings.Secure.getString(ANDROID_ID) never touches this file, so replacing
+    // it in the app's mount namespace does not change the value it sees. Genuine
+    // per-app ANDROID_ID spoofing needs the L3 getString/native hook. Kept only
+    // for the rare code path that reads the XML directly.
     {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
 };
 inline constexpr size_t BIND_ENTRIES_N = sizeof(BIND_ENTRIES) / sizeof(BIND_ENTRIES[0]);

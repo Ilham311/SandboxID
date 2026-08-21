@@ -398,6 +398,14 @@ static void apply_native(const Identity& id) {
         {"ro.board.platform",                  PLATFORM},
         {"ro.product.marketname",              MARKETNAME},
 
+        // Attestation-ID fallbacks that software Build/keystore consistency checks
+        // read. (Hardware-backed Key Attestation is NOT affected by ro.* edits.)
+        {"ro.product.brand_for_attestation",        BRAND},
+        {"ro.product.name_for_attestation",         PRODUCT},
+        {"ro.product.device_for_attestation",       DEVICE},
+        {"ro.product.model_for_attestation",        MODEL},
+        {"ro.product.manufacturer_for_attestation", MANUFACTURER},
+
         {"ro.build.id",                        ID_},
         {"ro.build.display.id",                DISPLAY},
         {"ro.build.description",               DESC},
@@ -526,6 +534,11 @@ static void generate_mount_files(const Identity& id) {
     add("ro.hardware",                        HARDWARE);
     add("ro.board.platform",                  PLATFORM);
     add("ro.product.marketname",              MARKETNAME);
+    add("ro.product.brand_for_attestation",        BRAND);
+    add("ro.product.name_for_attestation",         PRODUCT);
+    add("ro.product.device_for_attestation",       DEVICE);
+    add("ro.product.model_for_attestation",        MODEL);
+    add("ro.product.manufacturer_for_attestation", MANUFACTURER);
     add("ro.build.id",                        ID_);
     add("ro.build.display.id",                DISPLAY);
     add("ro.build.description",               DESC);

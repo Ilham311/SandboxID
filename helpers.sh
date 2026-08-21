@@ -25,7 +25,7 @@ log_err()  { _log "[ERR] $*"; }
 mask_id() {
     _v="$1"
     [ -z "$_v" ] && { printf '(empty)'; return; }
-    _len=${
+    _len=${#_v}
     if [ "$_len" -le 6 ]; then
         printf '******'
     else
@@ -95,14 +95,22 @@ settings_put() {
 
 rp_set() {
     key="$1"; val="$2"
+    # persist.* props must be written to storage to survive reboot. The -n fast
+    # path (set in shared memory, skip property_service) never touches
+    # /data/property, so persist keys need -p instead. setprop (final fallback)
+    # persists them via property_service anyway. #7g
+    case "$key" in
+        persist.*) _rpflag="-p" ;;
+        *)         _rpflag="-n" ;;
+    esac
     if command -v resetprop >/dev/null 2>&1; then
-        resetprop -n "$key" "$val" 2>/dev/null && return 0
+        resetprop "$_rpflag" "$key" "$val" 2>/dev/null && return 0
     fi
     if [ -x "$MODDIR/bin/resetprop-rs" ]; then
-        "$MODDIR/bin/resetprop-rs" -n "$key" "$val" 2>/dev/null && return 0
+        "$MODDIR/bin/resetprop-rs" "$_rpflag" "$key" "$val" 2>/dev/null && return 0
     fi
     if command -v resetprop-rs >/dev/null 2>&1; then
-        resetprop-rs -n "$key" "$val" 2>/dev/null && return 0
+        resetprop-rs "$_rpflag" "$key" "$val" 2>/dev/null && return 0
     fi
     setprop "$key" "$val" 2>/dev/null
 }
