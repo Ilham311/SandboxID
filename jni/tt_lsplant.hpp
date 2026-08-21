@@ -3,32 +3,32 @@
 #include <android/log.h>
 #include <string>
 
-#ifndef TT_LSP_TAG
-#define TT_LSP_TAG "TernakTT-L3"
+#ifndef SBX_LSP_TAG
+#define SBX_LSP_TAG "SandboxID-L3"
 #endif
-#define TT_LSP_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TT_LSP_TAG, __VA_ARGS__)
-#ifdef TT_DEBUG
-#define TT_LSP_LOGD(...) __android_log_print(ANDROID_LOG_INFO, TT_LSP_TAG, "[D] " __VA_ARGS__)
+#define SBX_LSP_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, SBX_LSP_TAG, __VA_ARGS__)
+#ifdef SBX_DEBUG
+#define SBX_LSP_LOGD(...) __android_log_print(ANDROID_LOG_INFO, SBX_LSP_TAG, "[D] " __VA_ARGS__)
 #else
-#define TT_LSP_LOGD(...) ((void)0)
+#define SBX_LSP_LOGD(...) ((void)0)
 #endif
 
-#ifdef TT_ENABLE_LSPLANT
+#ifdef SBX_ENABLE_LSPLANT
 #include <dobby.h>
 #include <lsplant.hpp>
 #include <lsparself.hpp>
 #if __has_include("tt_hook_dex.h")
 #include "tt_hook_dex.h"
-#define TT_HAVE_HOOK_DEX 1
+#define SBX_HAVE_HOOK_DEX 1
 #endif
 #endif
 
-namespace ttlsp {
+namespace sbxlsp {
 
 inline std::string g_android_id;
 inline void set_android_id(const std::string& v) { g_android_id = v; }
 
-#ifndef TT_ENABLE_LSPLANT
+#ifndef SBX_ENABLE_LSPLANT
 inline bool available()                               { return false; }
 inline bool init(JNIEnv*  )                     { return false; }
 inline bool hook_android_id(JNIEnv*  ,
@@ -38,12 +38,12 @@ inline bool hook_android_id(JNIEnv*  ,
 
 inline bool available() { return true; }
 
-inline void* tt_inline_hooker(void* target, void* hooker) {
+inline void* sbx_inline_hooker(void* target, void* hooker) {
     void* origin = nullptr;
     if (DobbyHook(target, hooker, &origin) == 0) return origin;
     return nullptr;
 }
-inline bool tt_inline_unhooker(void* func) {
+inline bool sbx_inline_unhooker(void* func) {
     return DobbyDestroy(func) == 0;
 }
 
@@ -55,13 +55,13 @@ inline bool init(JNIEnv* env) {
 
     static lsparself::Elf art("/libart.so");
 
-    static const std::string kCls = "androidx.core.os.HandlerCompatRef";
+    static const std::string kCls = "androidx.core.os.SandboxIDHook";
     static const std::string kSrc = "Hc";
     static const std::string kFld = "h";
 
     lsplant::InitInfo info{
-        .inline_hooker   = tt_inline_hooker,
-        .inline_unhooker = tt_inline_unhooker,
+        .inline_hooker   = sbx_inline_hooker,
+        .inline_unhooker = sbx_inline_unhooker,
         .art_symbol_resolver =
             [](std::string_view s) -> void* { return reinterpret_cast<void*>(art.getSymbAddress(s)); },
         .art_symbol_prefix_resolver =
@@ -72,8 +72,8 @@ inline bool init(JNIEnv* env) {
     info.generated_field_name  = kFld;
 
     ok = lsplant::Init(env, info);
-    if (!ok) TT_LSP_LOGE("lsplant::Init failed — L3 disabled this process (L1/L2 tetap)");
-    else     TT_LSP_LOGD("lsplant::Init ok");
+    if (!ok) SBX_LSP_LOGE("lsplant::Init failed — L3 disabled this process (L1/L2 tetap)");
+    else     SBX_LSP_LOGD("lsplant::Init ok");
     return ok;
 }
 
@@ -82,8 +82,8 @@ inline jobject g_cb_object = nullptr;
 inline jobject g_backup    = nullptr;
 
 inline jclass load_callback_class(JNIEnv* env) {
-#ifndef TT_HAVE_HOOK_DEX
-    TT_LSP_LOGE("L3: callback DEX (tt_hook_dex.h) tak ada di build ini — hook dilewati");
+#ifndef SBX_HAVE_HOOK_DEX
+    SBX_LSP_LOGE("L3: callback DEX (tt_hook_dex.h) tak ada di build ini — hook dilewati");
     return nullptr;
 #else
     if (env->PushLocalFrame(16) != 0) { env->ExceptionClear(); return nullptr; }
@@ -111,7 +111,7 @@ inline jclass load_callback_class(JNIEnv* env) {
         jmethodID loadClass = env->GetMethodID(clCls, "loadClass",
             "(Ljava/lang/String;)Ljava/lang/Class;");
         if (!loadClass || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
-        jstring name = env->NewStringUTF("androidx.core.os.EnvCompatState");
+        jstring name = env->NewStringUTF("androidx.core.os.SandboxIDHook");
         jobject c = env->CallObjectMethod(loader, loadClass, name);
         if (!c || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
         return c;
@@ -168,7 +168,7 @@ inline bool hook_android_id(JNIEnv* env, const std::string& value) {
     }();
     env->PopLocalFrame(nullptr);
 
-    if (ok) TT_LSP_LOGD("L3 Settings.Secure.getString hooked; android_id -> %s", value.c_str());
+    if (ok) SBX_LSP_LOGD("L3 Settings.Secure.getString hooked; android_id -> %s", value.c_str());
     return ok;
 }
 #endif

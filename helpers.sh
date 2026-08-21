@@ -1,15 +1,15 @@
 #!/system/bin/sh
 
-MODDIR="${MODDIR:-/data/adb/modules/ternak_tt}"
-LOGFILE="${LOGFILE:-/cache/ternak-tt-boot.log}"
+MODDIR="${MODDIR:-/data/adb/modules/sandboxid}"
+LOGFILE="${LOGFILE:-/cache/sandboxid-boot.log}"
 IDENTITY_FILE="${IDENTITY_FILE:-$MODDIR/identity.prop}"
 BACKUP_DIR_ROOT="${BACKUP_DIR_ROOT:-$MODDIR/backups}"
 
 mkdir -p "$BACKUP_DIR_ROOT" 2>/dev/null
 chmod 0700 "$BACKUP_DIR_ROOT" 2>/dev/null
-# H4: fallback ke MODDIR (root-only 0700 di /data/adb) bukan /data/local/tmp
-# yang dapat dibaca shell/ADB. Log ini memuat identifier sensitif.
-[ -w "$(dirname "$LOGFILE")" ] || LOGFILE="$MODDIR/ternak-tt-boot.log"
+
+
+[ -w "$(dirname "$LOGFILE")" ] || LOGFILE="$MODDIR/sandboxid-boot.log"
 touch "$LOGFILE" 2>/dev/null
 
 _now() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -20,12 +20,12 @@ log_ok()   { _log "[OK] $*"; }
 log_warn() { _log "[WARN] $*"; }
 log_err()  { _log "[ERR] $*"; }
 
-# H4: redaksi identifier (GAID/MAC/BT/serial) sebelum masuk log.
-# Tampilkan 4 char awal + 2 char akhir; sisanya di-mask. Nilai pendek disembunyikan penuh.
+
+
 mask_id() {
     _v="$1"
     [ -z "$_v" ] && { printf '(empty)'; return; }
-    _len=${#_v}
+    _len=${
     if [ "$_len" -le 6 ]; then
         printf '******'
     else
@@ -39,8 +39,8 @@ se_permissive() {
     if [ "$_SE_REF" -eq 0 ]; then
         _SE_PRIOR="$(getenforce 2>/dev/null || echo Unknown)"
         setenforce 0 2>/dev/null || true
-        # C2: pastikan SELinux dipulihkan walau skrip mati abnormal (kill/error/HUP).
-        # Tanpa ini, exit tak terduga meninggalkan perangkat permissive selamanya.
+        
+        
         trap 'se_restore' EXIT INT TERM HUP
     fi
     _SE_REF=$((_SE_REF + 1))

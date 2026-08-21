@@ -1,8 +1,8 @@
 #!/system/bin/sh
 
 set -u
-MODDIR="${MODDIR:-/data/adb/modules/ternak_tt}"
-LOGFILE="${LOGFILE:-/cache/ternak-tt-boot.log}"
+MODDIR="${MODDIR:-/data/adb/modules/sandboxid}"
+LOGFILE="${LOGFILE:-/cache/sandboxid-boot.log}"
 
 if [ -r "$MODDIR/helpers.sh" ]; then
     . "$MODDIR/helpers.sh"
@@ -183,7 +183,7 @@ sync_device_name() {
     [ -z "$NEW_NAME" ] && NEW_NAME="$(identity_get MODEL 2>/dev/null || true)"
     if [ -z "$NEW_NAME" ]; then
         log_err "device-name: identity.prop missing MODEL/BLUETOOTH_NAME."
-        log_info "Hint: 'bin/ternak-tt freshen' runs first via action.sh."
+        log_info "Hint: 'bin/sandboxid freshen' runs first via action.sh."
         return 1
     fi
     log_step "Sync device/BT name -> $NEW_NAME (from identity.prop, persona-consistent)"
@@ -237,7 +237,7 @@ cmd_status() {
             log_info "  $k = $v"
         done
     else
-        log_info "identity.prop  : missing (run 'ternak-tt freshen')"
+        log_info "identity.prop  : missing (run 'sandboxid freshen')"
     fi
     if command -v settings >/dev/null 2>&1; then
         log_info "Settings.Global.advertising_id  = $(mask_id "$(settings get global advertising_id 2>/dev/null)")"

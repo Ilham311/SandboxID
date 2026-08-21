@@ -2,21 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<!-- M9: CSP — WebUI hanya memuat aset lokalnya sendiri; blokir remote/inline script,
-     kurangi permukaan XSS bila konten identitas ditampilkan di halaman. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a0a">
-<title>Ternak TT</title>
+<title>SandboxID</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
   <div class="brand">
-    <div class="logo">tt</div>
+    <div class="logo">sb</div>
     <div class="brand-txt">
-      <div class="title">Ternak TT</div>
-      <div class="sub">device persona manager</div>
+      <div class="title">SandboxID</div>
+      <div class="sub">device identifier privacy lab</div>
     </div>
   </div>
   <span class="pill" id="version">…</span>
@@ -42,15 +40,15 @@
   <section id="rotate" class="page">
     <div class="row spread">
       <button id="rotAll" class="primary">Rotate all</button>
-      <span class="chip chip-on" title="Selalu rotasi lengkap agar identitas konsisten">Stock consistency &middot; ON</span>
+      <span class="chip chip-on" title="Always rotate fully so identifiers stay consistent">Consistency &middot; ON</span>
     </div>
-    <div class="rot-note">SSAID &middot; GAID &middot; wlan MAC &middot; BT MAC &middot; device name &mdash; selalu lengkap, tidak bisa dimatikan.</div>
+    <div class="rot-note">SSAID &middot; GAID &middot; wlan MAC &middot; BT MAC &middot; device name &mdash; always full, cannot be disabled.</div>
     <div class="cards" id="rotCards"></div>
   </section>
 
   <section id="targets" class="page">
     <div class="row spread">
-      <div class="hint">Satu paket per baris. Baris kosong &amp; # diabaikan. Companion hot-reload.</div>
+      <div class="hint">One package per line. Blank lines &amp; # ignored. Companion hot-reloads.</div>
       <button id="tgtSave" class="primary sm">Save</button>
     </div>
     <textarea id="tgtArea" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
@@ -63,10 +61,10 @@
   <section id="log" class="page">
     <div class="row spread">
       <select id="logSrc">
-        <option value="logcat">Live logcat (200 baris)</option>
+        <option value="logcat">Live logcat (200 lines)</option>
         <option value="action">Action log (freshen)</option>
         <option value="rotate">Rotate log</option>
-        <option value="session">Sesi terbaru (varian debug)</option>
+        <option value="session">Latest session (debug variant)</option>
         <option value="crashes">Crashes</option>
       </select>
       <button id="logRefresh" class="ghost sm">Reload</button>
@@ -78,8 +76,8 @@
 <div id="toast" class="toast" role="status" aria-live="polite">
   <span class="toast-icon" id="toastIcon"></span>
   <span class="toast-title" id="toastTitle"></span>
-  <button class="toast-exp" id="toastExp" aria-label="Lihat detail" hidden>&#8964;</button>
-  <button class="toast-close" id="toastClose" aria-label="Tutup">&times;</button>
+  <button class="toast-exp" id="toastExp" aria-label="View detail" hidden>&#8964;</button>
+  <button class="toast-close" id="toastClose" aria-label="Close">&times;</button>
   <div class="toast-detail" id="toastDetail" hidden></div>
 </div>
 

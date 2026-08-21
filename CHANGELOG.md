@@ -1,9 +1,39 @@
 # Changelog
 
+## v2.0.0 (2026-08-21)
+
+Rebrand to SandboxID — a generic, privacy-research / education framing with no
+built-in application targets and no product-specific defaults. Runtime behavior
+(hook layers, companion IPC, crash watchdog, atomic writes, hot-reload) is
+unchanged; this release is naming, cleanup, and default-emptying only.
+
+### Renamed
+
+- Module id `ternak_tt` → `sandboxid`; module path `/data/adb/modules/sandboxid`.
+- Display name `Ternak TT` → `SandboxID`; log tags `TernakTT`/`TernakTTCompanion`/`TernakTT-L3` → `SandboxID`/`SandboxIDCompanion`/`SandboxID-L3`.
+- CLI binary `ternak-tt` → `sandboxid`; native library `libternak_tt.so` → `libsandboxid.so`.
+- `jni/pool_tt.hpp` → `jni/pool.hpp`; `jni/tt_config.hpp` → `jni/config.hpp`.
+- `jni/TtHook.java` → `jni/SandboxIDHook.java` (class `EnvCompatState` → `SandboxIDHook`).
+- `jni/ternak-tt.cpp` → `jni/sandboxid.cpp`.
+- C++ namespace `tt::` → `sandboxid::`; `ttlsp::` → `sbxlsp::`; macro prefix `TT_` → `SBX_`.
+
+### Changed
+
+- `jni/companion.cpp` `reload_targets_if_changed()`: removed the built-in default target list; an absent `target.txt` now yields an empty list (no-op path).
+- `jni/sandboxid.cpp` `load_targets()`: removed the default fallback; an empty `target.txt` returns an empty list.
+- `jni/sandboxid.cpp` `usage()`: rewritten to a neutral description.
+- `jni/sandboxid.cpp`: removed the unused `MODDIR` alias (fixes `-Wunused-const-variable` under `-Wall -Wextra`).
+- `target.txt` now ships empty (0 lines) — the module is idle until the user adds packages.
+- All comments stripped from source (`.cpp`, `.hpp`, `.java`, `.sh`, `.js`, `CMakeLists.txt`, workflow `.yml`); data literals (`SBX_POOL`, `VAL_DEFAULTS`, `STATIC_PROP_DEFAULTS`, `modem_prefix`) untouched.
+
+### Unchanged
+
+- Hook layers, companion bind-mount, crash watchdog, atomic write, hot-reload, and CLI commands are identical to v1.0.36.
+
 ## Unreleased — L3 LSPlant foundation (scaffold, DEFAULT-OFF)
 
 > **Catatan rilis:** perubahan di bawah **belum aktif di runtime**. Semuanya
-> dikurung compile-flag `TT_ENABLE_LSPLANT` (default OFF), jadi build release
+> dikurung compile-flag `SBX_ENABLE_LSPLANT` (default OFF), jadi build release
 > saat ini **byte-identik dengan v1.0.27**. `module.prop` **sengaja belum
 > di-bump** — mem-bump ke v1.0.28 sebagai versi rilis berarti mengklaim
 > kemampuan yang belum lolos verifikasi boot. Saat flag di-flip + lolos
@@ -13,9 +43,9 @@
 ### Added — L3: fondasi hook method Java non-native via LSPlant (`jni/tt_lsplant.hpp`)
 
 - **Apa:** File wrapper baru `tt_lsplant.hpp` + call-site fail-safe di
-  `postAppSpecialize` (`main.cpp`) + `option(TT_ENABLE_LSPLANT)` di
+  `postAppSpecialize` (`main.cpp`) + `option(SBX_ENABLE_LSPLANT)` di
   `CMakeLists.txt`. Default OFF → stub no-op, nol perubahan runtime. Saat ON:
-  `ttlsp::init()` menjalankan `lsplant::Init` (backend **Dobby** + resolver
+  `sbxlsp::init()` menjalankan `lsplant::Init` (backend **Dobby** + resolver
   simbol libart), lalu `hook_android_id()` meng-ART-hook
   `Settings.Secure.getString(...)` agar app melihat `ANDROID_ID` persona yang
   deterministik.
@@ -57,12 +87,12 @@ Kedua SEAM kini **sudah diimplementasikan sebagai kode** (bukan lagi placeholder
   (`lsparself::Elf("/libart.so")`), persis test resmi LSPlant v6.4. lsparself
   menangani `.gnu_debugdata` (mini-symtab LZMA) — sebabnya kita TIDAK hand-roll
   parser ELF naif yang akan diam-diam gagal menemukan simbol ART internal.
-- **SEAM #2 — callback:** kelas Java `androidx.core.os.EnvCompatState`
-  (`jni/TtHook.java`) dengan `Object handle(Object[])` **pure-Java** (tanpa method
+- **SEAM #2 — callback:** kelas Java `androidx.core.os.SandboxIDHook`
+  (`jni/SandboxIDHook.java`) dengan `Object handle(Object[])` **pure-Java** (tanpa method
   `native`/RegisterNatives). Nilai spoof + `Method` asli disuntik dari native ke
   field statik; app dapat android_id persona untuk key `"android_id"`, dan nilai
   asli untuk key lain (chaining via backup). DEX-nya di-embed sebagai byte array
-  (`jni/tt_hook_dex.h`) hasil `d8` atas `TtHook.java`; kalau header itu belum ada,
+  (`jni/tt_hook_dex.h`) hasil `d8` atas `SandboxIDHook.java`; kalau header itu belum ada,
   `hook_android_id()` fail-safe (LOGE + lanjut).
 
 Yang MASIH perlu dilakukan (semua butuh compiler + device — TIDAK tersedia di
@@ -71,9 +101,9 @@ lingkungan review ini, jadi belum diverifikasi):
 1. Vendor `jni/external/{lsplant@v6.4 (--recurse-submodules), dobby, lsparself}`.
    (Submodule `lsparself`/`lsprism` LSPlant memakai URL SSH → di CI fetch lsparself
    via HTTPS terpisah.)
-2. Bangun `jni/tt_hook_dex.h` dari `jni/TtHook.java`: `javac` → `d8` → `xxd -i`
+2. Bangun `jni/tt_hook_dex.h` dari `jni/SandboxIDHook.java`: `javac` → `d8` → `xxd -i`
    (simbol `tt_hook_dex` / `tt_hook_dex_len`).
-3. `TT_ENABLE_LSPLANT=ON ./build.sh` (build.sh sudah mengalirkan flag ke CMake;
+3. `SBX_ENABLE_LSPLANT=ON ./build.sh` (build.sh sudah mengalirkan flag ke CMake;
    pertimbangkan `-DANDROID_STL=c++_static`), lalu **boot test per ABI/Android
    version** sebelum flag di-flip. `build.yml` sengaja TIDAK diubah (edit YAML buta
    berisiko memecah parsing CI produksi); langkah CI di atas ditambahkan saat enable.
@@ -102,13 +132,13 @@ kode L3 default-OFF yang belum aktif + 1 komentar nol-efek di `main.cpp`).
   via handler-nya; arm SEGV = mencatat fault benign sebagai "CRASH"). **Komentar saja —
   biner tidak berubah.**
 
-**Belum diverifikasi (gating — sama seperti seluruh L3):** cabang `TT_ENABLE_LSPLANT=ON`
+**Belum diverifikasi (gating — sama seperti seluruh L3):** cabang `SBX_ENABLE_LSPLANT=ON`
 tak dapat di-compile di lingkungan review (lsplant/dobby/lsparself + `tt_hook_dex.h`
 absent). Perubahan `tt_lsplant.hpp` di-review-by-spec (JNI PushLocalFrame/PopLocalFrame
 + LSPlant v6.4 API); **wajib** lolos compile + boot-test per-ABI saat flag di-enable.
 
-**Tidak diubah (verdict false-positive/keep/defer):** `ternak-tt.cpp`, `companion.cpp`,
-`pool_tt.hpp`, `tt_config.hpp`, `TtHook.java`, `CMakeLists.txt`, `build.sh`.
+**Tidak diubah (verdict false-positive/keep/defer):** `sandboxid.cpp`, `companion.cpp`,
+`pool.hpp`, `config.hpp`, `SandboxIDHook.java`, `CMakeLists.txt`, `build.sh`.
 
 ---
 
@@ -123,7 +153,7 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 
 - **Apa:** `ro.hardware` dan `ro.board.platform` kini di-drive dari persona (Tensor
   codename `gs101`/`gs201`/`zuma`/`zumapro`/`laguna`) secara end-to-end — field
-  `platform` baru di `pool_tt.hpp`, di-set oleh `gen_identity`, diserialisasi ke
+  `platform` baru di `pool.hpp`, di-set oleh `gen_identity`, diserialisasi ke
   `identity.prop`, dipetakan di `hook_prop_get` (L2), lalu ditulis oleh `apply_native`
   (resetprop) **dan** `generate_mount_files` (build.prop sintetis).
 - **Kenapa:** Versi sebelumnya sudah membuang hard-code `"qcom"`/`"sm8250"` dari tabel
@@ -136,7 +166,7 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 - **Mitigasi / catatan:** `gs101`/`gs201` sudah diverifikasi ke perangkat nyata.
   `zuma`/`zumapro`/`laguna` masih *widely-reported* dan **harus diverifikasi** ke unit
   asli / AOSP sebelum rilis luas — codename yang salah adalah tell baru (ditandai di
-  komentar `pool_tt.hpp`).
+  komentar `pool.hpp`).
 
 ### ⚠️ LEAK — nama pasar asli bocor lewat `ro.product.marketname`
 
@@ -189,10 +219,10 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 
 ### Changed — hapus "detection tell" di build.prop sintetis
 
-- **Apa:** Komentar header `# Ternak TT synthetic build.prop (v1.0.3)` dan
+- **Apa:** Komentar header `# SandboxID synthetic build.prop (v1.0.3)` dan
   `# Partition alias` dihapus dari file mount, diganti header standar
   `# begin build properties`.
-- **Kenapa:** App yang membaca `/system/build.prop` bisa `grep` string "Ternak TT" /
+- **Kenapa:** App yang membaca `/system/build.prop` bisa `grep` string "SandboxID" /
   "synthetic" → fingerprint modul yang trivial. build.prop asli tak pernah memuat nama
   modul.
 
@@ -210,10 +240,10 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 - **Bonus:** errno per-mount (`EPERM`=SELinux/caps, `EINVAL`=flags, `ENOENT`=target
   tak ada) kini di-log parent untuk memudahkan diagnosa bind gagal.
 
-### Changed — single source of truth (`tt_config.hpp`)
+### Changed — single source of truth (`config.hpp`)
 
 - **Apa:** Enum `Cmd`, path, tabel `BindEntry`, dan fallback properti dipindah ke
-  `tt_config.hpp`; duplikatnya di `main.cpp`/`companion.cpp` dihapus. Ditambah path
+  `config.hpp`; duplikatnya di `main.cpp`/`companion.cpp` dihapus. Ditambah path
   `IDENTITY_BAK`/`MODE_FILE`/`RESETPROP` dan array `MOUNT_PARTS[]` yang dipakai CLI.
 - **Kenapa:** Sebelumnya `main.cpp` mendaftar 6 bind entry sementara `companion.cpp`
   9 — **drift** yang membuat overlay tidak konsisten. Satu sumber menghapus kelas bug
@@ -223,7 +253,7 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 
 - **Apa:** `CMD_GET_IDENTITY` di companion kini me-retry baca `identity.prop` 3×100ms
   bila kosong (file sedang mid-replace / seed telat), lalu `LOGE` pesan actionable
-  ("run `ternak-tt seed`/`freshen`"). Balasan kosong tetap fail-safe (app dianggap
+  ("run `sandboxid seed`/`freshen`"). Balasan kosong tetap fail-safe (app dianggap
   non-target, tidak crash).
 - **Kenapa:** `identity.prop` seharusnya sudah ada sebelum zygote (post-fs-data
   `seed`), tapi jika seed gagal/telat app menerima blob kosong tanpa jejak. Retry +
@@ -234,7 +264,7 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 ## v1.0.19 (2026-07-27)
 
 ### Action button is now 1-tap ready
-- `action.sh` now runs **`bin/ternak-tt freshen` → `rotate_ids.sh all`** in sequence.
+- `action.sh` now runs **`bin/sandboxid freshen` → `rotate_ids.sh all`** in sequence.
 - Before v1.0.19 you had to `sh rotate_ids.sh all` manually after tapping Action. That step is gone — one tap in KernelSU/Magisk = fresh persona applied end-to-end.
 
 ### New: `rotate_ids.sh` + `helpers.sh`
@@ -264,7 +294,7 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 - Optional `chcon` re-labels `adid_settings.xml` from parent directory context if `chcon` is available.
 
 ### Full flow (1-tap)
-1. `bin/ternak-tt freshen` — rolls `MODEL`, `DEVICE`, `BRAND`, `SERIAL`, `ANDROID_ID`, `GOOGLE_AID`, etc.
+1. `bin/sandboxid freshen` — rolls `MODEL`, `DEVICE`, `BRAND`, `SERIAL`, `ANDROID_ID`, `GOOGLE_AID`, etc.
 2. `wipe_ssaid` — deletes `settings_ssaid.xml` per user (needs reboot to regenerate).
 3. `set_gaid_value` — syncs `GOOGLE_AID` to `Settings.Global.advertising_id` + GMS `adid_settings.xml`.
 4. `randomize_wlan_mac` — wlan0 MAC + wipes `WifiConfigStore.xml`.
@@ -275,7 +305,7 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 
 # Changelog
 
-All notable changes to Ternak TT are recorded here. The GitHub Actions workflow
+All notable changes to SandboxID are recorded here. The GitHub Actions workflow
 reads the matching `## vX.Y.Z` section to build `release_notes.md` automatically
 on every release.
 
@@ -311,7 +341,7 @@ and [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Migrated repository from `diru768/ternak-tt` to `Ilham311/Tt`. All README badges, install links, `git clone` URL, `module.prop` `updateJson`, and `update.json` seed now point to the new repo.
+- Migrated repository from `diru768/sandboxid` to `Ilham311/sandboxid`. All README badges, install links, `git clone` URL, `module.prop` `updateJson`, and `update.json` seed now point to the new repo.
 - `LICENSE` copyright reassigned to `Ilham311` (MIT).
 
 ### Fixed
@@ -345,9 +375,9 @@ and [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Runtime whitelist `target.txt`** at `/data/adb/modules/ternak_tt/target.txt`. Add / remove target packages without rebuilding.
+- **Runtime whitelist `target.txt`** at `/data/adb/modules/sandboxid/target.txt`. Add / remove target packages without rebuilding.
 - Companion loads and **hot-reloads** `target.txt` on mtime change (next app spawn picks up edits).
-- New CLI subcommand `ternak-tt targets` to dump the active whitelist.
+- New CLI subcommand `sandboxid targets` to dump the active whitelist.
 - L7 `SUPPRESS` label for known log-noise keys (`log.looper.*.slow`, `debug.watson.*`) to keep summaries readable.
 - `summarize.sh` now breaks SPOOF hits out by hook layer (`L1` / `L2` / `L7-SPB` / `L7-SPI` / `L7-SPL`) and counts `SUPPRESS`, `REJECT`, `ACCEPT` separately.
 - `customize.sh` **preserves** existing `target.txt` across reinstalls.
@@ -356,11 +386,11 @@ and [Semantic Versioning](https://semver.org/).
 
 - Zygisk companion IPC protocol for `CMD_GET_IDENTITY` now includes the pkg name; companion responds with `len=0` for non-targets (single source of truth for whitelist).
 - Zygisk `.so` no longer contains a hardcoded target list.
-- `ternak-tt.cpp` `wipe_tt_data()` reads targets from `target.txt` for symmetry with the Zygisk side.
+- `sandboxid.cpp` `wipe_target_data()` reads targets from `target.txt` for symmetry with the Zygisk side.
 
 ### Fixed
 
-- Whitelist drift between the CLI (`ternak-tt`) and Zygisk companion — both now share one file.
+- Whitelist drift between the CLI (`sandboxid`) and Zygisk companion — both now share one file.
 
 ---
 
@@ -368,7 +398,7 @@ and [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `post-fs-data.sh` + new `ternak-tt seed` subcommand that generates identity + mount overlay files **before** Zygisk loads, fixing the first-boot race where the first TT/Grab pid got 0/6 bind mounts.
+- `post-fs-data.sh` + new `sandboxid seed` subcommand that generates identity + mount overlay files **before** Zygisk loads, fixing the first-boot race where the first TT/Grab pid got 0/6 bind mounts.
 - Android 11+ canonical partition paths in `BIND_ENTRIES` (`/odm/etc/build.prop`, `/product/etc/build.prop`, `/system_ext/etc/build.prop`) alongside the legacy paths.
 - Skip counter is split into `skip_src` (module bug) vs `skip_dst` (device doesn't have that partition — expected).
 
@@ -382,7 +412,7 @@ and [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Per-type L7 spoof maps** (`tt_bool_spoof`, `tt_int_spoof`, `tt_long_spoof`) consulted by the typed `native_get_*` hooks before falling back to `def`.
+- **Per-type L7 spoof maps** (`sbx_bool_spoof`, `sbx_int_spoof`, `sbx_long_spoof`) consulted by the typed `native_get_*` hooks before falling back to `def`.
 - Critical spoof: `sys.boot_completed = true` (previously returned `false`, breaking app boot-detection retry loops).
 - L2 `debug.force_rtl` → `false`.
 
@@ -411,7 +441,7 @@ and [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Standalone `summarize.sh` that condenses a 7 MB session log into a ~10 KB chat-shareable summary.
-- Action tap on debug variant now auto-produces `summary-YYYYMMDD-HHMMSS.txt`, copies `crashes.log`, and gzips the raw log to `/sdcard/Download/ternak-tt-logs/`.
+- Action tap on debug variant now auto-produces `summary-YYYYMMDD-HHMMSS.txt`, copies `crashes.log`, and gzips the raw log to `/sdcard/Download/sandboxid-logs/`.
 - Automatic pruning: keeps newest 10 summaries / crashes / raw.gz per install.
 
 ---
@@ -420,7 +450,7 @@ and [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Zero-setup auto-log capture** on debug variant. `service.sh` starts a background logcat on boot into `/data/adb/modules/ternak_tt/debug/session-YYYYMMDD-HHMMSS.log`, keeping the 5 newest sessions.
+- **Zero-setup auto-log capture** on debug variant. `service.sh` starts a background logcat on boot into `/data/adb/modules/sandboxid/debug/session-YYYYMMDD-HHMMSS.log`, keeping the 5 newest sessions.
 - Session header written to each log (module version, boot time, uptime, Android SDK, device, ABI, installed root modules).
 
 ---
@@ -440,7 +470,7 @@ and [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Debug variant build alongside release. Both variants are produced by `build.sh` per invocation.
-- `TT_DEBUG` compile-time flag: release strips `LOGD` calls entirely (zero cost), debug keeps them.
+- `SBX_DEBUG` compile-time flag: release strips `LOGD` calls entirely (zero cost), debug keeps them.
 
 ---
 
@@ -481,7 +511,7 @@ and [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Bind-mount overlay tree at `$MODPATH/mount/{system,vendor,odm,product,system_ext}/build.prop` + `settings_secure.xml`.
-- `ternak-tt freshen` regenerates all overlay files.
+- `sandboxid freshen` regenerates all overlay files.
 
 ---
 
@@ -497,7 +527,7 @@ and [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Standalone CLI (`ternak-tt`) with `freshen`, `status`, `rollback`, `lock`, `unlock`, `apply-boot` subcommands.
+- Standalone CLI (`sandboxid`) with `freshen`, `status`, `rollback`, `lock`, `unlock`, `apply-boot` subcommands.
 
 ---
 

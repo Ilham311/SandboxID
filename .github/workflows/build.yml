@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -40,8 +40,8 @@ jobs:
       - name: Resolve version (loop-safe auto-bump)
         id: version
         env:
-          # M4: lewatkan input via env (bukan interpolasi ${{ }} inline ke shell)
-          # untuk mencegah script injection dari workflow_dispatch input.
+          
+          
           FORCE_VERSION: ${{ github.event.inputs.force_version }}
         run: |
           set -eu
@@ -49,7 +49,7 @@ jobs:
           PROP_CODE=$(grep '^versionCode=' module.prop | cut -d= -f2)
           FORCE="$FORCE_VERSION"
 
-          # M4: validasi format sebelum dipakai sebagai tag/versi.
+          
           if [ -n "$FORCE" ] && ! printf '%s' "$FORCE" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::force_version '$FORCE' invalid; expected vMAJOR.MINOR.PATCH (mis. v1.0.30)"
             exit 1
@@ -126,7 +126,7 @@ jobs:
 
       - name: Setup NDK
         id: ndk
-        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.5.0
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 
         with:
           ndk-version: r26d
 
@@ -159,7 +159,7 @@ jobs:
           {
             "version": "${NV}",
             "versionCode": ${NC},
-            "zipUrl": "https://github.com/${REPO}/releases/download/${NV}/ternak-tt-${NV}-release.zip",
+            "zipUrl": "https://github.com/${REPO}/releases/download/${NV}/sandboxid-${NV}-release.zip",
             "changelog": "https://raw.githubusercontent.com/${REPO}/main/CHANGELOG.md"
           }
           EOF
@@ -175,8 +175,8 @@ jobs:
 
           CL_SECTION=""
           if [ -f CHANGELOG.md ]; then
-            # M11: heading changelog memakai '## vX.Y.Z (tanggal)'. Cocokkan sebagai
-            # prefix (ada suffix tanggal) dan berhenti di heading versi '## v' berikutnya.
+            
+            
             CL_SECTION=$(awk -v ver="${NV}" '
               $0 ~ ("^## " ver "( |$)") { flag = 1; next }
               /^## v/ && flag { exit }
@@ -191,7 +191,7 @@ jobs:
           fi
 
           {
-            echo "# Ternak TT ${NV}"
+            echo "# SandboxID ${NV}"
             echo
             echo "**Build:** \`$(date -u '+%Y-%m-%d %H:%M:%S UTC')\`  "
             echo "**Commit:** [\`${GITHUB_SHA:0:7}\`](https://github.com/${REPO}/commit/${GITHUB_SHA})"
@@ -206,8 +206,8 @@ jobs:
             echo
             echo "| Variant | Purpose |"
             echo "|---------|---------|"
-            echo "| \`ternak-tt-${NV}-release.zip\` | Production install (stripped, no LOGD) |"
-            echo "| \`ternak-tt-${NV}-debug.zip\` | Verbose LOGD + on-device auto-log capture |"
+            echo "| \`sandboxid-${NV}-release.zip\` | Production install (stripped, no LOGD) |"
+            echo "| \`sandboxid-${NV}-debug.zip\` | Verbose LOGD + on-device auto-log capture |"
             echo
             echo "## Install"
             echo
@@ -267,37 +267,37 @@ jobs:
           if git rev-parse -q --verify "refs/tags/${NV}" >/dev/null; then
             echo "tag ${NV} already exists (race?), reusing"
           else
-            git tag -a "${NV}" -m "Ternak TT ${NV}"
+            git tag -a "${NV}" -m "SandboxID ${NV}"
             git push origin "refs/tags/${NV}"
             echo "tag ${NV} created and pushed"
           fi
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 
         with:
-          name: ternak-tt-release
+          name: sandboxid-release
           path: dist/*-release.zip
           if-no-files-found: warn
 
       - name: Upload debug artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 
         with:
-          name: ternak-tt-debug
+          name: sandboxid-debug
           path: dist/*-debug.zip
           if-no-files-found: warn
 
       - name: Upload release notes artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 
         with:
           name: release-notes
           path: release_notes.md
           if-no-files-found: warn
 
       - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.0.9
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 
         with:
           tag_name: ${{ steps.version.outputs.new_version }}
-          name: Ternak TT ${{ steps.version.outputs.new_version }}
+          name: SandboxID ${{ steps.version.outputs.new_version }}
           body_path: release_notes.md
           draft: false
           prerelease: false
