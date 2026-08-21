@@ -17,8 +17,8 @@
 #include <dobby.h>
 #include <lsplant.hpp>
 #include <lsparself.hpp>
-#if __has_include("tt_hook_dex.h")
-#include "tt_hook_dex.h"
+#if __has_include("hook_dex.h")
+#include "hook_dex.h"
 #define SBX_HAVE_HOOK_DEX 1
 #endif
 #endif
@@ -83,12 +83,12 @@ inline jobject g_backup    = nullptr;
 
 inline jclass load_callback_class(JNIEnv* env) {
 #ifndef SBX_HAVE_HOOK_DEX
-    SBX_LSP_LOGE("L3: callback DEX (tt_hook_dex.h) tak ada di build ini — hook dilewati");
+    SBX_LSP_LOGE("L3: callback DEX (hook_dex.h) tak ada di build ini — hook dilewati");
     return nullptr;
 #else
     if (env->PushLocalFrame(16) != 0) { env->ExceptionClear(); return nullptr; }
     jobject cls = [&]() -> jobject {
-        jobject bb = env->NewDirectByteBuffer((void*)tt_hook_dex, (jlong)tt_hook_dex_len);
+        jobject bb = env->NewDirectByteBuffer((void*)hook_dex, (jlong)hook_dex_len);
         if (!bb || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
 
         jclass loaderCls = env->FindClass("dalvik/system/InMemoryDexClassLoader");

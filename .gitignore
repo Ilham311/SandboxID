@@ -20,4 +20,4 @@ jni/zygisk.hpp
 
 # L3 LSPlant (opt-in): vendored libs + generated callback DEX header
 jni/external/
-jni/tt_hook_dex.h
+jni/hook_dex.h

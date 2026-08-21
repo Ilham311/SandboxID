@@ -26,7 +26,7 @@
 #include <thread>
 #include "zygisk.hpp"
 #include "config.hpp"
-#include "tt_lsplant.hpp"
+#include "lsplant.hpp"
 
 #define LOG_TAG "SandboxID"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
