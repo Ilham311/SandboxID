@@ -13,7 +13,11 @@ unchanged; this release is naming, cleanup, and default-emptying only.
 - Display name `Ternak TT` → `SandboxID`; log tags `TernakTT`/`TernakTTCompanion`/`TernakTT-L3` → `SandboxID`/`SandboxIDCompanion`/`SandboxID-L3`.
 - CLI binary `ternak-tt` → `sandboxid`; native library `libternak_tt.so` → `libsandboxid.so`.
 - `jni/pool_tt.hpp` → `jni/pool.hpp`; `jni/tt_config.hpp` → `jni/config.hpp`.
-- `jni/TtHook.java` → `jni/SandboxIDHook.java` (class `EnvCompatState` → `SandboxIDHook`).
+- `jni/TtHook.java` → `jni/SandboxIDHook.java` (file layout only). The Java class
+  inside is kept as the camouflaged `androidx.core.os.EnvCompatState` so a target
+  app dumping loaded classes does not see an obvious anomaly.
+- `jni/tt_lsplant.hpp` → `jni/lsplant.hpp`; generated DEX header `tt_hook_dex.h` →
+  `hook_dex.h` (symbols `tt_hook_dex` / `tt_hook_dex_len` → `hook_dex` / `hook_dex_len`).
 - `jni/ternak-tt.cpp` → `jni/sandboxid.cpp`.
 - C++ namespace `tt::` → `sandboxid::`; `ttlsp::` → `sbxlsp::`; macro prefix `TT_` → `SBX_`.
 
@@ -25,6 +29,19 @@ unchanged; this release is naming, cleanup, and default-emptying only.
 - `jni/sandboxid.cpp`: removed the unused `MODDIR` alias (fixes `-Wunused-const-variable` under `-Wall -Wextra`).
 - `target.txt` now ships empty (0 lines) — the module is idle until the user adds packages.
 - All comments stripped from source (`.cpp`, `.hpp`, `.java`, `.sh`, `.js`, `CMakeLists.txt`, workflow `.yml`); data literals (`SBX_POOL`, `VAL_DEFAULTS`, `STATIC_PROP_DEFAULTS`, `modem_prefix`) untouched.
+- `jni/lsplant.hpp`: `kCls` and the `loadClass` string reference `androidx.core.os.EnvCompatState` (class name reverted to the camouflaged androidx-flavored name; `SandboxIDHook.java` keeps the new filename only).
+
+### L3 — DEX header regeneration required before release
+
+- The LSPlant L3 path is **default-OFF** (`SBX_ENABLE_LSPLANT`), so the release build
+  is unaffected and an absent DEX header only produces the existing fail-safe
+  (`LOGE` + continue; L1/L2 still apply).
+- `jni/hook_dex.h` (the DEX bytecode for `androidx.core.os.EnvCompatState`) was not
+  regenerated in this environment. **It must be regenerated before enabling L3**:
+  `javac SandboxIDHook.java` → `d8` → `xxd -i` into `jni/hook_dex.h` so the embedded
+  bytecode matches the current class name. Until then, L3 is **non-functional** and must
+  not be enabled.
+- No behavior change for the default (L3 off) runtime.
 
 ### Unchanged
 
