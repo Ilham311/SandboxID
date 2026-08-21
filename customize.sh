@@ -1,8 +1,8 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-TT_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
-ui_print "- Ternak TT ${TT_VER:-(version unknown)}"
+SBX_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
+ui_print "- SandboxID ${SBX_VER:-(version unknown)}"
 ui_print "- Spoofs device identity apps see:"
 ui_print "-   model, brand, manufacturer, fingerprint, serial"
 ui_print "-   per-app Android ID / SSAID"
@@ -10,22 +10,22 @@ ui_print "- Property spoof runs pre-zygote (before apps launch)"
 ui_print "- Only safe identity strings - no risky HW/framework changes"
 ui_print "- 1-tap Action: freshen -> rotate_ids all"
 ui_print "-   SSAID wipe, GAID, wlan MAC, BT MAC, device/BT name"
-ui_print "- Targets: TikTok + Grab Passenger (target.txt editable)"
+ui_print "- Targets: user-configured via target.txt (empty = module idle)"
 ui_print "- WebUI: open module in KernelSU/APatch manager"
 ui_print ""
 
-LIVE_TARGET="/data/adb/modules/ternak_tt/target.txt"
+LIVE_TARGET="/data/adb/modules/sandboxid/target.txt"
 if [ -s "$LIVE_TARGET" ]; then
     ui_print "- Preserving existing target.txt from previous install"
     cp -f "$LIVE_TARGET" "$MODPATH/target.txt"
 else
-    ui_print "- Installing default target.txt (4 packages)"
+    ui_print "- Installing target.txt (empty by default; add packages to activate)"
 fi
 
 if [ -f "$MODPATH/debug_variant" ]; then
     ui_print "- ! DEBUG variant detected"
     ui_print "-   Auto-log will start on next boot."
-    ui_print "-   Location: /data/adb/modules/ternak_tt/debug/"
+    ui_print "-   Location: /data/adb/modules/sandboxid/debug/"
     ui_print "-   File name pattern: session-YYYYMMDD-HHMMSS.log"
     ui_print "-   Tap Action button to snapshot latest log"
     ui_print "-   to $MODPATH/debug/report/ (root-only)"
@@ -61,13 +61,13 @@ if [ -f "$MODPATH/debug_variant" ]; then
     set_perm $MODPATH/debug_variant 0 0 0644
 fi
 [ -d $MODPATH/webroot ] && set_perm_recursive $MODPATH/webroot 0 0 0755 0644
-set_perm $MODPATH/bin/ternak-tt-arm64       0 0 0755
-set_perm $MODPATH/bin/ternak-tt-arm         0 0 0755
-set_perm $MODPATH/bin/ternak-tt-x86_64      0 0 0755
-set_perm $MODPATH/bin/ternak-tt-x86         0 0 0755
+set_perm $MODPATH/bin/sandboxid-arm64       0 0 0755
+set_perm $MODPATH/bin/sandboxid-arm         0 0 0755
+set_perm $MODPATH/bin/sandboxid-x86_64      0 0 0755
+set_perm $MODPATH/bin/sandboxid-x86         0 0 0755
 if [ -f $MODPATH/bin/resetprop-rs ]; then
     set_perm $MODPATH/bin/resetprop-rs 0 0 0755
-    # C1: verifikasi binary vendored terhadap checksum yang ikut dikemas; buang bila diubah.
+    
     if [ -f "$MODPATH/bin/resetprop-rs.sha256" ] && command -v sha256sum >/dev/null 2>&1; then
         if ( cd "$MODPATH/bin" && sha256sum -c resetprop-rs.sha256 >/dev/null 2>&1 ); then
             ui_print "- resetprop-rs checksum OK"
@@ -76,8 +76,8 @@ if [ -f $MODPATH/bin/resetprop-rs ]; then
             rm -f "$MODPATH/bin/resetprop-rs"
         fi
     fi
-    # M6: resetprop-rs prebuilt = arm64-only. Di ABI lain tak bisa dieksekusi -
-    #     buang, andalkan Magisk 'resetprop' (helpers.sh rp_set auto-deteksi).
+    
+    
     if [ -f "$MODPATH/bin/resetprop-rs" ] && [ "$ABI" != "arm64-v8a" ]; then
         rm -f "$MODPATH/bin/resetprop-rs" "$MODPATH/bin/resetprop-rs.sha256"
         ui_print "- Note: resetprop-rs is arm64-only; removed on $ABI (Magisk resetprop used)."
@@ -85,10 +85,10 @@ if [ -f $MODPATH/bin/resetprop-rs ]; then
 fi
 
 case "$ABI" in
-    arm64-v8a)   ln -sf ternak-tt-arm64  $MODPATH/bin/ternak-tt ;;
-    armeabi-v7a) ln -sf ternak-tt-arm    $MODPATH/bin/ternak-tt ;;
-    x86_64)      ln -sf ternak-tt-x86_64 $MODPATH/bin/ternak-tt ;;
-    x86)         ln -sf ternak-tt-x86    $MODPATH/bin/ternak-tt ;;
+    arm64-v8a)   ln -sf sandboxid-arm64  $MODPATH/bin/sandboxid ;;
+    armeabi-v7a) ln -sf sandboxid-arm    $MODPATH/bin/sandboxid ;;
+    x86_64)      ln -sf sandboxid-x86_64 $MODPATH/bin/sandboxid ;;
+    x86)         ln -sf sandboxid-x86    $MODPATH/bin/sandboxid ;;
     *)           ui_print "! Unknown ABI: $ABI" ;;
 esac
 

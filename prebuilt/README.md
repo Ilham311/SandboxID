@@ -5,7 +5,7 @@ Vendored third-party binaries bundled into the module ZIP.
 ## resetprop-rs
 
 - **What:** Rust reimplementation of Magisk's `resetprop`, used by the native
-  `ternak-tt` CLI (`jni/tt_config.hpp` → `RESETPROP`) to set system properties
+  `sandboxid` CLI (`jni/config.hpp` → `RESETPROP`) to set system properties
   when the Magisk `resetprop` applet is not on `PATH`.
 - **Architecture:** `arm64-v8a` (aarch64) **only**. ELF PIE, built with NDK
   r26d for Android API 26, stripped. It will **not** run on `armeabi-v7a`,

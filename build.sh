@@ -10,17 +10,17 @@ VARIANT="${VARIANT:-both}"
 VERSION="$(grep '^version=' module.prop | cut -d= -f2)"
 
 LSP_CMAKE=""
-if [ "${TT_ENABLE_LSPLANT:-OFF}" = "ON" ]; then LSP_CMAKE="-DTT_ENABLE_LSPLANT=ON"; fi
+if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"; fi
 OUT="$ROOT/dist"
 
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
 
-echo "==> Ternak TT $VERSION"
+echo "==> SandboxID $VERSION"
 echo "==> NDK: $ANDROID_NDK_HOME"
 echo "==> Variant(s): $VARIANT"
 
-# H2: pin zygisk.hpp ke commit tetap (bukan 'master' yang bisa berubah) DAN
-# verifikasi sha256 — mencegah supply-chain injection lewat header pihak ketiga.
+
+
 ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
 ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
 if [ ! -f jni/zygisk.hpp ]; then
@@ -50,8 +50,8 @@ build_variant() {
   local V="$1"
   local DBG_FLAG
   case "$V" in
-    debug)   DBG_FLAG="-DTERNAK_TT_DEBUG=ON"  ;;
-    release) DBG_FLAG="-DTERNAK_TT_DEBUG=OFF" ;;
+    debug)   DBG_FLAG="-DSBX_DEBUG=ON"  ;;
+    release) DBG_FLAG="-DSBX_DEBUG=OFF" ;;
     *) echo "unknown variant: $V" >&2; return 1 ;;
   esac
 
@@ -96,16 +96,16 @@ build_variant() {
   fi
 
   for ABI in "${ABIS[@]}"; do
-    cp "build/$V/$ABI/libternak_tt.so" "$PKG/zygisk/$ABI.so"
+    cp "build/$V/$ABI/libsandboxid.so" "$PKG/zygisk/$ABI.so"
   done
 
-  cp "build/$V/arm64-v8a/ternak-tt"    "$PKG/bin/ternak-tt-arm64"
-  cp "build/$V/armeabi-v7a/ternak-tt"  "$PKG/bin/ternak-tt-arm"
-  cp "build/$V/x86_64/ternak-tt"       "$PKG/bin/ternak-tt-x86_64"
-  cp "build/$V/x86/ternak-tt"          "$PKG/bin/ternak-tt-x86"
+  cp "build/$V/arm64-v8a/sandboxid"    "$PKG/bin/sandboxid-arm64"
+  cp "build/$V/armeabi-v7a/sandboxid"  "$PKG/bin/sandboxid-arm"
+  cp "build/$V/x86_64/sandboxid"       "$PKG/bin/sandboxid-x86_64"
+  cp "build/$V/x86/sandboxid"          "$PKG/bin/sandboxid-x86"
 
   if [ -f prebuilt/resetprop-rs ]; then
-    # C1: verifikasi binary vendored terhadap checksum ter-pin sebelum dikemas.
+    
     if [ -f prebuilt/resetprop-rs.sha256 ] && command -v sha256sum >/dev/null 2>&1; then
       ( cd prebuilt && sha256sum -c resetprop-rs.sha256 >/dev/null ) || {
         echo "  ERROR: prebuilt/resetprop-rs checksum mismatch — refusing to package" >&2
@@ -116,13 +116,13 @@ build_variant() {
       echo "  WARN: cannot verify resetprop-rs checksum (missing .sha256 or sha256sum)" >&2
     fi
     cp prebuilt/resetprop-rs "$PKG/bin/resetprop-rs"
-    # M6: sertakan checksum agar customize.sh dapat re-verify + gating ABI di device.
+    
     [ -f prebuilt/resetprop-rs.sha256 ] && cp prebuilt/resetprop-rs.sha256 "$PKG/bin/resetprop-rs.sha256"
   else
     echo "  WARN: prebuilt/resetprop-rs missing; native prop apply will rely on Magisk resetprop"
   fi
 
-  local ZIP="$OUT/ternak-tt-$VERSION-$V.zip"
+  local ZIP="$OUT/sandboxid-$VERSION-$V.zip"
   (cd "$PKG" && zip -r9 "$ZIP" . -x "*.DS_Store" >/dev/null)
   echo "  ==> Built: $ZIP ($(du -h "$ZIP" | cut -f1))"
 }

@@ -1,7 +1,7 @@
 'use strict';
 
-const MODDIR = '/data/adb/modules/ternak_tt';
-const BIN = `${MODDIR}/bin/ternak-tt`;
+const MODDIR = '/data/adb/modules/sandboxid';
+const BIN = `${MODDIR}/bin/sandboxid`;
 const ROTATE_SH = `${MODDIR}/rotate_ids.sh`;
 const IDENTITY = `${MODDIR}/identity.prop`;
 const TARGETS = `${MODDIR}/target.txt`;
@@ -262,9 +262,9 @@ document.getElementById('refreshBtn').addEventListener('click', loadPersona);
 document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
   const cmd = `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
     `{ printf '[%s] ==> freshen (webui)\\n' "$(date '+%F %T')"; ` +
-    `./bin/ternak-tt unlock >/dev/null 2>&1 || true; ` +
-    `./bin/ternak-tt freshen 2>&1; RC=$?; ` +
-    `./bin/ternak-tt lock >/dev/null 2>&1 || true; ` +
+    `./bin/sandboxid unlock >/dev/null 2>&1 || true; ` +
+    `./bin/sandboxid freshen 2>&1; RC=$?; ` +
+    `./bin/sandboxid lock >/dev/null 2>&1 || true; ` +
     `if [ $RC -eq 0 ]; then printf '[%s] [OK] freshen selesai \u00b7 locked\\n' "$(date '+%F %T')"; ` +
     `else printf '[%s] [ERR] freshen exit %s\\n' "$(date '+%F %T')" "$RC"; fi; } | ` +
     `tee -a ${shq(ACTION_LOG)}`;
@@ -361,7 +361,7 @@ async function loadLog() {
   else if (src === 'rotate') cmd = `tail -n 400 ${shq(ROTATE_LOG)} 2>/dev/null || echo '(belum ada rotate.log \u2014 tap tombol Rotate)'`;
   else if (src === 'session') cmd = `ls -t ${shq(MODDIR)}/debug/session-*.log 2>/dev/null | head -n 1 | xargs -r tail -n 400 || echo '(tidak ada session log \u2014 flash varian debug)'`;
   else if (src === 'crashes') cmd = `tail -n 400 ${shq(MODDIR)}/debug/crashes.log 2>/dev/null || echo '(belum ada crashes.log)'`;
-  else if (src === 'logcat') cmd = `logcat -d -t 200 -v time -s TernakTT:V TernakTTCompanion:V 2>&1 | tail -n 200`;
+  else if (src === 'logcat') cmd = `logcat -d -t 200 -v time -s SandboxID:V SandboxIDCompanion:V 2>&1 | tail -n 200`;
   const r = await safeExec(cmd);
   const text = (r.ok ? r.out : (r.err && r.err.message) || 'error') || '(kosong)';
   body.innerHTML = renderLogHtml(text);

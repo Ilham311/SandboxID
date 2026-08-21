@@ -2,8 +2,8 @@
 MODDIR="${0%/*}"
 until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 2; done
 sleep 5
-[ -f "$MODDIR/identity.prop" ] && [ -x "$MODDIR/bin/ternak-tt" ] && \
-    "$MODDIR/bin/ternak-tt" apply-boot >> /cache/ternak-tt-boot.log 2>&1
+[ -f "$MODDIR/identity.prop" ] && [ -x "$MODDIR/bin/sandboxid" ] && \
+    "$MODDIR/bin/sandboxid" apply-boot >> /cache/sandboxid-boot.log 2>&1
 
 if [ -f "$MODDIR/debug_variant" ]; then
     mkdir -p "$MODDIR/debug"
@@ -19,7 +19,7 @@ if [ -f "$MODDIR/debug_variant" ]; then
 
     {
         echo "==================================================="
-        echo "Ternak TT debug session"
+        echo "SandboxID debug session"
         echo "Boot time : $(date '+%Y-%m-%d %H:%M:%S %Z')"
         echo "Uptime    : $(cat /proc/uptime 2>/dev/null | awk '{print $1"s"}')"
         echo "Module    : $(grep '^version=' $MODDIR/module.prop | cut -d= -f2)"
@@ -35,7 +35,7 @@ if [ -f "$MODDIR/debug_variant" ]; then
         sleep 8
         logcat -b main -b crash -b system -c 2>/dev/null
         logcat -b main -b crash -b system -v threadtime \
-            -s TernakTT:V TernakTTCompanion:V AndroidRuntime:E DEBUG:V libc:F \
+            -s SandboxID:V SandboxIDCompanion:V AndroidRuntime:E DEBUG:V libc:F \
             >> "$LOGFILE" 2>&1
     ) &
     echo "$!" > "$MODDIR/debug/logcat.pid"

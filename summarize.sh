@@ -13,7 +13,7 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
 
 {
     echo "==============================================================="
-    echo "Ternak TT — session log summary"
+    echo "SandboxID — session log summary"
     echo "Source  : $(basename $IN)"
     echo "Size    : $TOTAL_SIZE ($TOTAL_LINES lines)"
     echo "Digest  : $(date '+%Y-%m-%d %H:%M:%S %Z')"
@@ -41,11 +41,11 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     echo "--- Target whitelist (from companion 'target.txt loaded') ---"
     TL=$(grep 'target.txt loaded' "$IN" | tail -1)
     if [ -n "$TL" ]; then
-        echo "  $(echo "$TL" | sed -E 's/^.*I TernakTTCompanion: //')"
+        echo "  $(echo "$TL" | sed -E 's/^.*I SandboxIDCompanion: //')"
     fi
     TM=$(grep 'target.txt missing' "$IN" | tail -1)
     if [ -n "$TM" ]; then
-        echo "  $(echo "$TM" | sed -E 's/^.*I TernakTTCompanion: //')"
+        echo "  $(echo "$TM" | sed -E 's/^.*I SandboxIDCompanion: //')"
     fi
     echo ""
 
@@ -92,7 +92,7 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     echo "--- CRASH events ---"
     CN=$(grep -c 'CRASH \[' "$IN")
     if [ "$CN" -gt 0 ]; then
-        grep 'CRASH \[' "$IN" | awk '{sub(/^.*E TernakTT: /, ""); print "  " $0}'
+        grep 'CRASH \[' "$IN" | awk '{sub(/^.*E SandboxID: /, ""); print "  " $0}'
     else
         echo "  (none)"
     fi
@@ -101,7 +101,7 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     echo "--- DEATH events ---"
     DN=$(grep -c 'DEATH target' "$IN")
     if [ "$DN" -gt 0 ]; then
-        grep 'DEATH target' "$IN" | awk '{sub(/^.*I TernakTTCompanion: /, ""); print "  " $0}'
+        grep 'DEATH target' "$IN" | awk '{sub(/^.*I SandboxIDCompanion: /, ""); print "  " $0}'
     else
         echo "  (none)"
     fi
@@ -128,7 +128,7 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
 
     echo "--- Companion mount events ---"
     grep -E 'child mount for pid=|bind-mount via companion|bind OK:|bind fail|setns->target|child: setns OK|child: open /proc/' "$IN" \
-        | head -25 | awk '{sub(/^.*(TernakTTCompanion|TernakTT): /, ""); print "  " $0}'
+        | head -25 | awk '{sub(/^.*(SandboxIDCompanion|SandboxID): /, ""); print "  " $0}'
     echo ""
 
     echo "--- Last 30 lines of session ---"

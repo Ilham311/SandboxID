@@ -1,9 +1,9 @@
-// ============================================================================
-// Ternak TT — Zygisk module untuk spoofing identitas device per-app
-// Target: TikTok, Grab (Android 13+, arm64/armv7/x86_64/x86)
-// Build: -fno-exceptions -fno-rtti, TT_DEBUG untuk verbose logging
-// v1.1.1: fix missing using-declarations (zygisk::Api/Args) + volatile fix
-// ============================================================================
+
+
+
+
+
+
 #include <jni.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -25,37 +25,37 @@
 #include <ctime>
 #include <thread>
 #include "zygisk.hpp"
-#include "tt_config.hpp"
-#include "tt_lsplant.hpp"
+#include "config.hpp"
+#include "sbx_lsplant.hpp"
 
-#define LOG_TAG "TernakTT"
+#define LOG_TAG "SandboxID"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-#ifdef TT_DEBUG
+#ifdef SBX_DEBUG
 #define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
-#define TT_VARIANT_TAG "debug"
+#define SBX_VARIANT_TAG "debug"
 #else
 #define LOGD(...) ((void)0)
-#define TT_VARIANT_TAG "release"
+#define SBX_VARIANT_TAG "release"
 #endif
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
 using zygisk::ServerSpecializeArgs;
 
-// ============================================================================
-// Budget IO companion: app spawn tidak boleh pernah menggantung > 2 detik
-// ============================================================================
-static constexpr struct timeval TT_IO_TIMEOUT = {2, 0};
 
-// ============================================================================
-// Identity store — diisi sekali per proses app (aman: pre/post specialize
-// berjalan di child hasil fork, jadi tiap app punya salinan sendiri)
-// ============================================================================
+
+
+static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
+
+
+
+
+
 static std::map<std::string, std::string> g_id;
 
-// Lookup nilai identitas dengan fallback ke defaults audit-able
+
 static const std::string& val(const std::string& k) {
     static const std::string empty;
     auto it = g_id.find(k);
@@ -63,8 +63,8 @@ static const std::string& val(const std::string& k) {
 
     static const std::map<std::string, std::string> defaults = [] {
         std::map<std::string, std::string> m;
-        for (size_t i = 0; i < tt::VAL_DEFAULTS_N; ++i)
-            m.emplace(tt::VAL_DEFAULTS[i].k, tt::VAL_DEFAULTS[i].v);
+        for (size_t i = 0; i < sandboxid::VAL_DEFAULTS_N; ++i)
+            m.emplace(sandboxid::VAL_DEFAULTS[i].k, sandboxid::VAL_DEFAULTS[i].v);
         return m;
     }();
     auto d = defaults.find(k);
@@ -72,13 +72,13 @@ static const std::string& val(const std::string& k) {
     return empty;
 }
 
-// ============================================================================
-// L2 — SystemProperties.native_get hook (Java-side prop reads)
-// Signature: (Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
-// ============================================================================
+
+
+
+
 static jstring (*orig_native_get)(JNIEnv*, jclass, jstring, jstring) = nullptr;
 
-// Map prop key -> identity key untuk spoofing yang harus konsisten dengan Build.*
+
 static const std::map<std::string, std::string>& prop_to_identity_map() {
     static const std::map<std::string, std::string> m = {
         {"ro.serialno",                     "SERIAL"},
@@ -138,7 +138,7 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
     if (raw) env->ReleaseStringUTFChars(j_key, raw);
     LOGD("L2 native_get('%s')", k.c_str());
 
-    // Spoof via identity map (prop key -> identity key)
+    
     const auto& map = prop_to_identity_map();
     auto it = map.find(k);
     if (it != map.end()) {
@@ -148,22 +148,22 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
             return env->NewStringUTF(v.c_str());
         }
     }
-    // Spoof via static defaults (props yang tidak butuh per-app nilai)
-    for (size_t i = 0; i < tt::STATIC_PROP_DEFAULTS_N; ++i) {
-        if (k == tt::STATIC_PROP_DEFAULTS[i].k) {
-            LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), tt::STATIC_PROP_DEFAULTS[i].v);
-            return env->NewStringUTF(tt::STATIC_PROP_DEFAULTS[i].v);
+    
+    for (size_t i = 0; i < sandboxid::STATIC_PROP_DEFAULTS_N; ++i) {
+        if (k == sandboxid::STATIC_PROP_DEFAULTS[i].k) {
+            LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), sandboxid::STATIC_PROP_DEFAULTS[i].v);
+            return env->NewStringUTF(sandboxid::STATIC_PROP_DEFAULTS[i].v);
         }
     }
-    // Pass-through ke original jika hook terpasang
+    
     if (orig_native_get) return orig_native_get(env, clazz, j_key, j_def);
-    // Fallback: baca prop langsung (kalau original belum ter-bind)
+    
     char buf[PROP_VALUE_MAX] = {0};
     if (__system_property_get(k.c_str(), buf) > 0) return env->NewStringUTF(buf);
     return j_def;
 }
 
-// Pasang hook untuk SystemProperties.native_get; log error JNI yang sebelumnya senyap.
+
 static void install_prop_hook(Api* api, JNIEnv* env) {
     JNINativeMethod m = {
         const_cast<char*>("native_get"),
@@ -182,15 +182,15 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
         LOGE("L2 native_get hook did not bind (method missing?)");
 }
 
-// ============================================================================
-// L7 (DEBUG ONLY) — Leak sensor hooks untuk native_get_int/long/boolean
-// ============================================================================
-#ifdef TT_DEBUG
+
+
+
+#ifdef SBX_DEBUG
 static jint     (*orig_get_int)(JNIEnv*, jclass, jstring, jint)     = nullptr;
 static jlong    (*orig_get_long)(JNIEnv*, jclass, jstring, jlong)   = nullptr;
 static jboolean (*orig_get_bool)(JNIEnv*, jclass, jstring, jboolean)= nullptr;
 
-static const std::map<std::string, jboolean>& tt_bool_spoof() {
+static const std::map<std::string, jboolean>& sbx_bool_spoof() {
     static const std::map<std::string, jboolean> m = {
         {"sys.boot_completed",                       JNI_TRUE},
         {"debug.force_rtl",                          JNI_FALSE},
@@ -204,7 +204,7 @@ static const std::map<std::string, jboolean>& tt_bool_spoof() {
     };
     return m;
 }
-static const std::map<std::string, jint>& tt_int_spoof() {
+static const std::map<std::string, jint>& sbx_int_spoof() {
     static const std::map<std::string, jint> m = {
         {"ro.mediacodec.min_sample_rate",         8000},
         {"ro.mediacodec.max_sample_rate",         192000},
@@ -227,15 +227,15 @@ static const std::map<std::string, jint>& tt_int_spoof() {
     };
     return m;
 }
-static const std::map<std::string, jlong>& tt_long_spoof() {
+static const std::map<std::string, jlong>& sbx_long_spoof() {
     static const std::map<std::string, jlong> m = {
         {"ro.gfx.driver_build_time",              1704067200LL},
     };
     return m;
 }
 
-// Suppress logging keys yang spam (looper.slow, watson) supaya logcat debug tidak banjir.
-static bool tt_should_suppress_key(const std::string& k) {
+
+static bool sbx_should_suppress_key(const std::string& k) {
     if (k.size() >= 11 + 5 &&
         k.compare(0, 11, "log.looper.") == 0 &&
         k.compare(k.size() - 5, 5, ".slow") == 0)
@@ -251,10 +251,10 @@ static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def
     if (env->ExceptionCheck()) env->ExceptionClear();
     std::string k(r ? r : "");
     if (r) env->ReleaseStringUTFChars(j_key, r);
-    const auto& m = tt_int_spoof();
+    const auto& m = sbx_int_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPI '%s' -> %d", k.c_str(), it->second); return it->second; }
-    if (tt_should_suppress_key(k)) { LOGD("L7 SPI SUPPRESS '%s'", k.c_str()); return def; }
+    if (sbx_should_suppress_key(k)) { LOGD("L7 SPI SUPPRESS '%s'", k.c_str()); return def; }
     return orig_get_int ? orig_get_int(env, clazz, j_key, def) : def;
 }
 static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong def) {
@@ -263,10 +263,10 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong 
     if (env->ExceptionCheck()) env->ExceptionClear();
     std::string k(r ? r : "");
     if (r) env->ReleaseStringUTFChars(j_key, r);
-    const auto& m = tt_long_spoof();
+    const auto& m = sbx_long_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPL '%s' -> %lld", k.c_str(), (long long)it->second); return it->second; }
-    if (tt_should_suppress_key(k)) { LOGD("L7 SPL SUPPRESS '%s'", k.c_str()); return def; }
+    if (sbx_should_suppress_key(k)) { LOGD("L7 SPL SUPPRESS '%s'", k.c_str()); return def; }
     return orig_get_long ? orig_get_long(env, clazz, j_key, def) : def;
 }
 static jboolean hook_prop_get_bool(JNIEnv* env, jclass clazz, jstring j_key, jboolean def) {
@@ -275,14 +275,14 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass clazz, jstring j_key, jbo
     if (env->ExceptionCheck()) env->ExceptionClear();
     std::string k(r ? r : "");
     if (r) env->ReleaseStringUTFChars(j_key, r);
-    const auto& m = tt_bool_spoof();
+    const auto& m = sbx_bool_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPB '%s' -> %d", k.c_str(), (int)it->second); return it->second; }
-    if (tt_should_suppress_key(k)) { LOGD("L7 SPB SUPPRESS '%s'", k.c_str()); return def; }
+    if (sbx_should_suppress_key(k)) { LOGD("L7 SPB SUPPRESS '%s'", k.c_str()); return def; }
     return orig_get_bool ? orig_get_bool(env, clazz, j_key, def) : def;
 }
 
-// Pasang L7 leak sensors; log exception JNI supaya kegagalan tidak senyap.
+
 static void install_leak_sensors(Api* api, JNIEnv* env) {
     JNINativeMethod m[3] = {
         {const_cast<char*>("native_get_int"),
@@ -305,12 +305,12 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
     orig_get_bool = reinterpret_cast<jboolean (*)(JNIEnv*, jclass, jstring, jboolean)>(m[2].fnPtr);
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
-#endif // TT_DEBUG
+#endif 
 
-// ============================================================================
-// Crash watchdog — async-signal-safe signal handler + self-pipe drain
-// ============================================================================
-struct TtCrashRec {
+
+
+
+struct SbxCrashRec {
     uint32_t magic;
     int32_t  sig;
     int32_t  code;
@@ -320,7 +320,7 @@ struct TtCrashRec {
     int64_t  alive_ms;
     void*    addr;
 };
-static const uint32_t TT_CRASH_MAGIC = 0x54544352u;
+static const uint32_t SBX_CRASH_MAGIC = 0x54544352u;
 
 static int         g_crash_pipe[2] = {-1, -1};
 static char        g_watchdog_pkg_buf[128] = {0};
@@ -329,13 +329,13 @@ static struct sigaction g_prev_sig[NSIG];
 static volatile sig_atomic_t g_crash_count[NSIG] = {0};
 static const int   CRASH_LIMIT = 3;
 
-// Clock monotonic dalam ms — dipakai handler dan drain thread.
-static int64_t tt_now_ms() {
+
+static int64_t sbx_now_ms() {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
-// Nama sinyal untuk logging (dipanggil dari drain thread, bukan handler).
-static const char* tt_sig_name(int sig) {
+
+static const char* sbx_sig_name(int sig) {
     switch (sig) {
         case SIGSEGV: return "SIGSEGV";
         case SIGABRT: return "SIGABRT";
@@ -347,33 +347,33 @@ static const char* tt_sig_name(int sig) {
     }
 }
 
-// Drain thread: membaca record dari pipe dan log-kan (bukan di handler).
-static void tt_crash_drain_loop() {
-    TtCrashRec rec;
-    while (tt::read_full(g_crash_pipe[0], &rec, sizeof(rec))) {
-        if (rec.magic != TT_CRASH_MAGIC) continue;
+
+static void sbx_crash_drain_loop() {
+    SbxCrashRec rec;
+    while (sandboxid::read_full(g_crash_pipe[0], &rec, sizeof(rec))) {
+        if (rec.magic != SBX_CRASH_MAGIC) continue;
         LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%lldms hit=%d/%d",
-             TT_VARIANT_TAG, g_watchdog_pkg_buf, rec.pid, rec.sig, tt_sig_name(rec.sig),
+             SBX_VARIANT_TAG, g_watchdog_pkg_buf, rec.pid, rec.sig, sbx_sig_name(rec.sig),
              rec.code, rec.addr, rec.sender, (long long)rec.alive_ms, rec.hit, CRASH_LIMIT);
     }
 }
 
-// Signal handler: HANYA async-signal-safe calls (write, clock_gettime, raise, signal).
-// Chain ke handler ART dengan siginfo/ucontext ASLI supaya tombstone tetap benar.
-static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
+
+
+static void sbx_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
     if (sig >= 0 && sig < NSIG) {
-        // C++20 (P1152R4) mendeprecate compound-op (++) pada volatile lvalue;
-        // read + write terpisah tetap async-signal-safe dan semantiknya identik
-        // untuk sig_atomic_t.
+        
+        
+        
         n = g_crash_count[sig] + 1;
         g_crash_count[sig] = n;
     }
 
     if (n <= CRASH_LIMIT && g_crash_pipe[1] >= 0) {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-        TtCrashRec rec;
-        rec.magic    = TT_CRASH_MAGIC;
+        SbxCrashRec rec;
+        rec.magic    = SBX_CRASH_MAGIC;
         rec.sig      = sig;
         rec.code     = info ? info->si_code : 0;
         rec.sender   = info ? info->si_pid  : 0;
@@ -386,7 +386,7 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
         sched_yield();
     }
 
-    // Chain ke handler sebelumnya (ART/libsigchain) dengan context asli
+    
     if (sig >= 0 && sig < NSIG) {
         struct sigaction* p = &g_prev_sig[sig];
         if ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction) {
@@ -395,26 +395,26 @@ static void tt_signal_handler(int sig, siginfo_t* info, void* ctx) {
                    p->sa_handler != SIG_DFL && p->sa_handler != SIG_IGN) {
             p->sa_handler(sig);
         } else {
-            // Tidak ada handler lama: restore default dan re-raise
+            
             signal(sig, SIG_DFL);
             raise(sig);
         }
     }
 }
 
-// Pasang crash watchdog: self-pipe + drain thread + sigaction chaining.
-// Dipanggil sekali per proses (armed guard).
+
+
 static void install_crash_watchdog(const std::string& pkg) {
     static bool armed = false;
     if (armed) return;
 
     strncpy(g_watchdog_pkg_buf, pkg.c_str(), sizeof(g_watchdog_pkg_buf) - 1);
-    g_load_time_ms = tt_now_ms();
+    g_load_time_ms = sbx_now_ms();
 
     if (pipe2(g_crash_pipe, O_CLOEXEC) == 0) {
         int fl = fcntl(g_crash_pipe[1], F_GETFL, 0);
         if (fl >= 0) fcntl(g_crash_pipe[1], F_SETFL, fl | O_NONBLOCK);
-        std::thread(tt_crash_drain_loop).detach();
+        std::thread(sbx_crash_drain_loop).detach();
     } else {
         g_crash_pipe[0] = g_crash_pipe[1] = -1;
         LOGE("crash watchdog: pipe2 failed errno=%d (logging disabled, chaining still armed)", errno);
@@ -423,7 +423,7 @@ static void install_crash_watchdog(const std::string& pkg) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
-    sa.sa_sigaction = tt_signal_handler;
+    sa.sa_sigaction = sbx_signal_handler;
     sigemptyset(&sa.sa_mask);
 
     static const int sigs[] = { SIGABRT, SIGFPE, SIGILL };
@@ -435,10 +435,10 @@ static void install_crash_watchdog(const std::string& pkg) {
     LOGD("crash watchdog armed for %s (ABRT/FPE/ILL, limit=%d)", pkg.c_str(), CRASH_LIMIT);
 }
 
-// ============================================================================
-// L1b — Build field patching via JNI
-// ============================================================================
-// Set static String field; guard exception supaya gagal satu field tidak merusak sisanya.
+
+
+
+
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
     jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
@@ -449,7 +449,7 @@ static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) 
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(j);
 }
-// Set static int field; guard exception.
+
 static void set_int(JNIEnv* env, jclass c, const char* f, int v) {
     jfieldID id = env->GetStaticFieldID(c, f, "I");
     if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
@@ -457,7 +457,7 @@ static void set_int(JNIEnv* env, jclass c, const char* f, int v) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
-// Patch semua field statis Build dan Build.VERSION untuk konsistensi dengan identity.prop.
+
 static void install_build_hook(JNIEnv* env) {
     jclass build = env->FindClass("android/os/Build");
     if (build && !env->ExceptionCheck()) {
@@ -477,7 +477,7 @@ static void install_build_hook(JNIEnv* env) {
     jclass ver = env->FindClass("android/os/Build$VERSION");
     if (ver && !env->ExceptionCheck()) {
         set_str(env, ver, "RELEASE",        val("RELEASE"));
-        // Semua persona adalah build user/rilis: CODENAME wajib "REL" untuk konsistensi.
+        
         set_str(env, ver, "CODENAME",       std::string("REL"));
         set_str(env, ver, "INCREMENTAL",    val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", val("SECURITY_PATCH"));
@@ -490,30 +490,30 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 }
 
-// ============================================================================
-// Companion IPC
-// ============================================================================
-// Kirim CMD_DO_MOUNTS dan terima ack; timeout sudah di-set di fd.
+
+
+
+
 static void request_companion_mounts(int fd) {
-    uint8_t cmd  = tt::CMD_DO_MOUNTS;
+    uint8_t cmd  = sandboxid::CMD_DO_MOUNTS;
     uint32_t pid = (uint32_t)::getpid();
-    if (!tt::write_full(fd, &cmd, 1) || !tt::write_full(fd, &pid, sizeof(pid))) {
+    if (!sandboxid::write_full(fd, &cmd, 1) || !sandboxid::write_full(fd, &pid, sizeof(pid))) {
         LOGE("companion DO_MOUNTS write failed (socket unusable post-specialize?)");
         return;
     }
     uint32_t ok = 0;
-    if (!tt::read_full(fd, &ok, sizeof(ok))) { LOGE("companion mount ack failed"); return; }
+    if (!sandboxid::read_full(fd, &ok, sizeof(ok))) { LOGE("companion mount ack failed"); return; }
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
-// ============================================================================
-// Zygisk Module
-// ============================================================================
-class TernakTT : public zygisk::ModuleBase {
+
+
+
+class SandboxID : public zygisk::ModuleBase {
 public:
     void onLoad(Api* api, JNIEnv* env) override {
         api_ = api; env_ = env;
-        LOGD("onLoad build=%s pid=%d uid=%d", TT_VARIANT_TAG, getpid(), getuid());
+        LOGD("onLoad build=%s pid=%d uid=%d", SBX_VARIANT_TAG, getpid(), getuid());
     }
 
     void preAppSpecialize(AppSpecializeArgs* args) override {
@@ -531,22 +531,22 @@ public:
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { unload(); return; }
 
-        // Budget IO 2 detik: app spawn tidak boleh pernah menggantung.
-        ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &TT_IO_TIMEOUT, sizeof(TT_IO_TIMEOUT));
-        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &TT_IO_TIMEOUT, sizeof(TT_IO_TIMEOUT));
+        
+        ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
 
         api_->exemptFd(fd);
 
-        uint8_t cmd   = tt::CMD_GET_IDENTITY;
+        uint8_t cmd   = sandboxid::CMD_GET_IDENTITY;
         uint16_t plen = (uint16_t)pkg.size();
-        if (!tt::write_full(fd, &cmd, 1) ||
-            !tt::write_full(fd, &plen, sizeof(plen)) ||
-            (plen && !tt::write_full(fd, pkg.data(), plen))) {
+        if (!sandboxid::write_full(fd, &cmd, 1) ||
+            !sandboxid::write_full(fd, &plen, sizeof(plen)) ||
+            (plen && !sandboxid::write_full(fd, pkg.data(), plen))) {
             ::close(fd); unload(); return;
         }
 
         uint32_t len = 0;
-        if (!tt::read_full(fd, &len, sizeof(len)) || len > tt::MAX_IDENTITY_BLOB) {
+        if (!sandboxid::read_full(fd, &len, sizeof(len)) || len > sandboxid::MAX_IDENTITY_BLOB) {
             ::close(fd); unload(); return;
         }
         if (len == 0) {
@@ -555,12 +555,12 @@ public:
         }
 
         blob_.resize(len);
-        if (!tt::read_full(fd, blob_.data(), len)) { ::close(fd); unload(); return; }
+        if (!sandboxid::read_full(fd, blob_.data(), len)) { ::close(fd); unload(); return; }
 
         active_  = true;
         pkg_     = pkg;
         comp_fd_ = fd;
-        LOGI("target: %s (%u B) [%s]", pkg.c_str(), len, TT_VARIANT_TAG);
+        LOGI("target: %s (%u B) [%s]", pkg.c_str(), len, SBX_VARIANT_TAG);
     }
 
     void postAppSpecialize(const AppSpecializeArgs*) override {
@@ -571,15 +571,15 @@ public:
 
         install_build_hook(env_);
         install_prop_hook(api_, env_);
-#ifdef TT_DEBUG
+#ifdef SBX_DEBUG
         install_leak_sensors(api_, env_);
         for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
         install_crash_watchdog(pkg_);
 
-#ifdef TT_ENABLE_LSPLANT
-        if (ttlsp::init(env_)) {
-            if (!ttlsp::hook_android_id(env_, val("ANDROID_ID")))
+#ifdef SBX_ENABLE_LSPLANT
+        if (sbxlsp::init(env_)) {
+            if (!sbxlsp::hook_android_id(env_, val("ANDROID_ID")))
                 LOGE("L3 ANDROID_ID hook not installed (continuing with L1/L2)");
         } else {
             LOGE("L3 LSPlant init failed (continuing with L1/L2)");
@@ -603,11 +603,11 @@ private:
     int comp_fd_ = -1;
     std::vector<uint8_t> blob_;
 
-    // Tandai library module untuk di-dlclose setelah unload.
+    
     void unload() {
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
-    // Parse identity blob (key=value lines) dan trim whitespace/CRLF.
+    
     void parse_blob() {
         std::string s(blob_.begin(), blob_.end());
         std::istringstream iss(s);
@@ -625,7 +625,7 @@ private:
     }
 };
 
-REGISTER_ZYGISK_MODULE(TernakTT)
+REGISTER_ZYGISK_MODULE(SandboxID)
 
-extern "C" void ternak_tt_companion(int client);
-REGISTER_ZYGISK_COMPANION(ternak_tt_companion)
+extern "C" void sandboxid_companion(int client);
+REGISTER_ZYGISK_COMPANION(sandboxid_companion)

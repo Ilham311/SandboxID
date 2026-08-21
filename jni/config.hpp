@@ -5,19 +5,19 @@
 #include <unistd.h>
 #include <cerrno>
 
-namespace tt {
+namespace sandboxid {
 
-inline constexpr char MODDIR[]        = "/data/adb/modules/ternak_tt";
-inline constexpr char IDENTITY_FILE[] = "/data/adb/modules/ternak_tt/identity.prop";
-inline constexpr char MOUNTDIR[]      = "/data/adb/modules/ternak_tt/mount";
-inline constexpr char TARGET_FILE[]   = "/data/adb/modules/ternak_tt/target.txt";
+inline constexpr char MODDIR[]        = "/data/adb/modules/sandboxid";
+inline constexpr char IDENTITY_FILE[] = "/data/adb/modules/sandboxid/identity.prop";
+inline constexpr char MOUNTDIR[]      = "/data/adb/modules/sandboxid/mount";
+inline constexpr char TARGET_FILE[]   = "/data/adb/modules/sandboxid/target.txt";
 
-inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/ternak_tt/identity.prop.bak";
-inline constexpr char MODE_FILE[]     = "/data/adb/modules/ternak_tt/identity.mode";
-inline constexpr char RESETPROP[]     = "/data/adb/modules/ternak_tt/bin/resetprop-rs";
+inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/sandboxid/identity.prop.bak";
+inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mode";
+inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetprop-rs";
 
-// L4: CMD_CHECK_TT (dulu = 1) dihapus — tak pernah dikirim client. Nilai eksplisit
-// dipertahankan agar protokol wire (2, 3) tak bergeser.
+
+
 enum Cmd : uint8_t {
     CMD_GET_IDENTITY = 2,
     CMD_DO_MOUNTS    = 3,

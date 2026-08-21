@@ -13,7 +13,7 @@ struct PixelEntry {
     const char* security_patch;
 };
 
-static constexpr PixelEntry TT_POOL[] = {
+static constexpr PixelEntry SBX_POOL[] = {
     {"Pixel 6",        "oriole",  "oriole",  "oriole",  "gs101",   33, "13", "TQ3A.230901.001", "10750268", "2026-06-05"},
     {"Pixel 6a",       "bluejay", "bluejay", "bluejay", "gs101",   34, "14", "UP1A.231105.001", "11010452", "2026-06-05"},
     {"Pixel 7",        "panther", "panther", "panther", "gs201",   34, "14", "UP1A.231105.003", "11015216", "2026-06-05"},
