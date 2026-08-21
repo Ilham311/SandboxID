@@ -1,7 +1,8 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
-ui_print "- Ternak TT v1.0.19"
+TT_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
+ui_print "- Ternak TT ${TT_VER:-(version unknown)}"
 ui_print "- Spoofs device identity apps see:"
 ui_print "-   model, brand, manufacturer, fingerprint, serial"
 ui_print "-   per-app Android ID / SSAID"
@@ -27,7 +28,7 @@ if [ -f "$MODPATH/debug_variant" ]; then
     ui_print "-   Location: /data/adb/modules/ternak_tt/debug/"
     ui_print "-   File name pattern: session-YYYYMMDD-HHMMSS.log"
     ui_print "-   Tap Action button to snapshot latest log"
-    ui_print "-   to /sdcard/Download/ternak-tt-logs/"
+    ui_print "-   to $MODPATH/debug/report/ (root-only)"
     ui_print ""
 fi
 
@@ -64,7 +65,24 @@ set_perm $MODPATH/bin/ternak-tt-arm64       0 0 0755
 set_perm $MODPATH/bin/ternak-tt-arm         0 0 0755
 set_perm $MODPATH/bin/ternak-tt-x86_64      0 0 0755
 set_perm $MODPATH/bin/ternak-tt-x86         0 0 0755
-[ -f $MODPATH/bin/resetprop-rs ] && set_perm $MODPATH/bin/resetprop-rs 0 0 0755
+if [ -f $MODPATH/bin/resetprop-rs ]; then
+    set_perm $MODPATH/bin/resetprop-rs 0 0 0755
+    # C1: verifikasi binary vendored terhadap checksum yang ikut dikemas; buang bila diubah.
+    if [ -f "$MODPATH/bin/resetprop-rs.sha256" ] && command -v sha256sum >/dev/null 2>&1; then
+        if ( cd "$MODPATH/bin" && sha256sum -c resetprop-rs.sha256 >/dev/null 2>&1 ); then
+            ui_print "- resetprop-rs checksum OK"
+        else
+            ui_print "! resetprop-rs checksum MISMATCH - removing bundled binary"
+            rm -f "$MODPATH/bin/resetprop-rs"
+        fi
+    fi
+    # M6: resetprop-rs prebuilt = arm64-only. Di ABI lain tak bisa dieksekusi -
+    #     buang, andalkan Magisk 'resetprop' (helpers.sh rp_set auto-deteksi).
+    if [ -f "$MODPATH/bin/resetprop-rs" ] && [ "$ABI" != "arm64-v8a" ]; then
+        rm -f "$MODPATH/bin/resetprop-rs" "$MODPATH/bin/resetprop-rs.sha256"
+        ui_print "- Note: resetprop-rs is arm64-only; removed on $ABI (Magisk resetprop used)."
+    fi
+fi
 
 case "$ABI" in
     arm64-v8a)   ln -sf ternak-tt-arm64  $MODPATH/bin/ternak-tt ;;

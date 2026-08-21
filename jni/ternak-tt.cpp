@@ -77,10 +77,13 @@ static std::string random_hex(int bytes, bool upper) {
     return s;
 }
 
-// Write file atomically: tmp + fsync + rename, dengan loop partial-io.
+// Write file atomically: tmp unik + fsync + rename + fsync direktori induk.
+// M2: suffix unik (pid) + O_EXCL mencegah tabrakan / pre-seed symlink antar writer
+//     bersamaan; fsync direktori induk membuat entri rename durable terhadap crash.
 static bool atomic_write(const std::string& p, const std::string& data) {
-    std::string tmp = p + ".tmp";
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    std::string tmp = p + ".tmp." + std::to_string((long)::getpid());
+    ::unlink(tmp.c_str());  // buang sisa dari writer sebelumnya dengan pid sama
+    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) return false;
     bool ok = true;
     for (size_t off = 0; off < data.size(); ) {
@@ -91,7 +94,13 @@ static bool atomic_write(const std::string& p, const std::string& data) {
     ::fsync(fd);
     ::close(fd);
     if (!ok) { ::unlink(tmp.c_str()); return false; }
-    return ::rename(tmp.c_str(), p.c_str()) == 0;
+    if (::rename(tmp.c_str(), p.c_str()) != 0) { ::unlink(tmp.c_str()); return false; }
+    size_t slash = p.find_last_of('/');
+    std::string dir = (slash == std::string::npos) ? std::string(".")
+                      : (slash == 0 ? std::string("/") : p.substr(0, slash));
+    int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
+    if (dfd >= 0) { ::fsync(dfd); ::close(dfd); }
+    return true;
 }
 
 // Read file contents; return "" on failure.
@@ -119,6 +128,20 @@ static int run_bin(const char* path, std::vector<const char*> argv) {
     if (pid == 0) {
         argv.push_back(nullptr);
         execv(path, const_cast<char* const*>(argv.data()));
+        _exit(127);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid) return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+// Seperti run_bin tapi cari di PATH (execvp) — untuk applet 'resetprop' sistem.
+static int run_bin_path(const char* file, std::vector<const char*> argv) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        argv.push_back(nullptr);
+        execvp(file, const_cast<char* const*>(argv.data()));
         _exit(127);
     }
     int st = 0;
@@ -406,23 +429,34 @@ static void apply_native(const Identity& id) {
         {"ro.boot.bootloader",                 std::string("unknown")},
     };
 
-    if (::access(RESETPROP, X_OK) == 0) {
+    // M6: resetprop-rs bundled = arm64-only. Bila absen (ABI lain / dibuang saat
+    // install), fallback ke applet 'resetprop' (Magisk) lalu 'resetprop-rs' di PATH
+    // supaya prop native tetap ter-apply. Jalur arm64 (bundled ada) tak berubah.
+    bool have_bundled = (::access(RESETPROP, X_OK) == 0);
+    {
         int applied = 0, failed = 0;
         for (const auto& r : rp) {
             if (r.val.empty()) continue;
-            if (run_bin(RESETPROP, {"resetprop-rs", "-n", r.key, r.val.c_str()}) == 0) {
+            int rc;
+            if (have_bundled) {
+                rc = run_bin(RESETPROP, {"resetprop-rs", "-n", r.key, r.val.c_str()});
+            } else {
+                rc = run_bin_path("resetprop", {"resetprop", "-n", r.key, r.val.c_str()});
+                if (rc != 0)
+                    rc = run_bin_path("resetprop-rs", {"resetprop-rs", "-n", r.key, r.val.c_str()});
+            }
+            if (rc == 0) {
                 applied++;
             } else {
                 failed++;
                 fprintf(stderr, "! resetprop gagal (exit!=0): %s\n", r.key);
             }
         }
-        printf("  Native prop: %d ok, %d gagal\n", applied, failed);
+        printf("  Native prop: %d ok, %d gagal%s\n", applied, failed,
+               have_bundled ? "" : " [fallback PATH]");
         if (applied == 0 && failed > 0)
-            fprintf(stderr, "! SEMUA resetprop gagal — verifikasi flag '-n': %s --help\n",
-                    RESETPROP);
-    } else {
-        fprintf(stderr, "! resetprop-rs missing at %s (native prop skipped)\n", RESETPROP);
+            fprintf(stderr, "! SEMUA resetprop gagal%s — cek ketersediaan resetprop / resetprop-rs\n",
+                    have_bundled ? "" : " (bundled absent + PATH fallback gagal)");
     }
 
     // Settings: ANDROID_ID hanya untuk Settings.Global, bukan SSAID per-app

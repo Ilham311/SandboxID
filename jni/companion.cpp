@@ -2,6 +2,9 @@
 // Ternak TT — Root-side companion: identity reader + bind-mount via setns
 // Fix v1.1: seed on-demand, death watcher double-fork, errno hygiene
 // ============================================================================
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1   // struct ucred / SO_PEERCRED (bionic mem-guard di balik __USE_GNU)
+#endif
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -302,6 +305,17 @@ extern "C" void ternak_tt_companion(int client) {
     ::setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &TT_IO_TIMEOUT, sizeof(TT_IO_TIMEOUT));
     ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &TT_IO_TIMEOUT, sizeof(TT_IO_TIMEOUT));
 
+    // H3: kredensial peer untuk otorisasi mount (defense-in-depth). Di broker
+    // Zygisk (zygiskd) peer = root (uid 0); di transport direct peer = app.
+    struct ucred peer{};
+    socklen_t peer_len = sizeof(peer);
+    bool have_peer = (::getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) == 0
+                      && peer_len == sizeof(peer));
+    if (!have_peer)
+        LOGE("SO_PEERCRED gagal errno=%d — otorisasi DO_MOUNTS fail-open", errno);
+    else
+        LOGD("peer creds pid=%d uid=%d gid=%d", peer.pid, peer.uid, peer.gid);
+
     while (true) {
         uint8_t cmd = 0;
         if (!tt::read_full(client, &cmd, 1)) break;
@@ -346,6 +360,16 @@ extern "C" void ternak_tt_companion(int client) {
             uint32_t pid = 0;
             if (!tt::read_full(client, &pid, sizeof(pid))) break;
             if (pid == 0) {
+                uint32_t z = 0;
+                tt::write_full(client, &z, sizeof(z));
+                break;
+            }
+            // H3: cegah proses non-root menyuruh companion-root mem-bind overlay
+            // ke mount-ns pid korban. Sah bila koneksi di-broker root (peer uid==0,
+            // mis. zygiskd) ATAU pemanggil meminta ns-nya sendiri (pid==peer.pid).
+            if (have_peer && peer.uid != 0 && (pid_t)pid != peer.pid) {
+                LOGE("DO_MOUNTS DITOLAK: target pid=%u != peer pid=%d (uid=%d) [SO_PEERCRED]",
+                     pid, peer.pid, peer.uid);
                 uint32_t z = 0;
                 tt::write_full(client, &z, sizeof(z));
                 break;

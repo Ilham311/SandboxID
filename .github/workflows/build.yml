@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -39,11 +39,21 @@ jobs:
 
       - name: Resolve version (loop-safe auto-bump)
         id: version
+        env:
+          # M4: lewatkan input via env (bukan interpolasi ${{ }} inline ke shell)
+          # untuk mencegah script injection dari workflow_dispatch input.
+          FORCE_VERSION: ${{ github.event.inputs.force_version }}
         run: |
           set -eu
           PROP_VERSION=$(grep '^version=' module.prop | cut -d= -f2)
           PROP_CODE=$(grep '^versionCode=' module.prop | cut -d= -f2)
-          FORCE="${{ github.event.inputs.force_version }}"
+          FORCE="$FORCE_VERSION"
+
+          # M4: validasi format sebelum dipakai sebagai tag/versi.
+          if [ -n "$FORCE" ] && ! printf '%s' "$FORCE" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::force_version '$FORCE' invalid; expected vMAJOR.MINOR.PATCH (mis. v1.0.30)"
+            exit 1
+          fi
 
           HIGHEST=$(git tag --sort=-v:refname \
                     | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -116,21 +126,9 @@ jobs:
 
       - name: Setup NDK
         id: ndk
-        uses: nttld/setup-ndk@v1
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.5.0
         with:
           ndk-version: r26d
-
-      - name: Fetch Zygisk header
-        run: |
-          set -eu
-          mkdir -p jni
-          curl -fsSL -o jni/zygisk.hpp \
-            https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
-
-      - name: Placeholder resetprop-rs
-        run: |
-          mkdir -p prebuilt
-          echo "placeholder" > prebuilt/resetprop-rs.README
 
       - name: Build (release + debug)
         env:
@@ -177,9 +175,11 @@ jobs:
 
           CL_SECTION=""
           if [ -f CHANGELOG.md ]; then
-            CL_SECTION=$(awk -v ver="### ${NV}" '
-              $0 == ver { flag = 1; next }
-              /^### v/ && flag { exit }
+            # M11: heading changelog memakai '## vX.Y.Z (tanggal)'. Cocokkan sebagai
+            # prefix (ada suffix tanggal) dan berhenti di heading versi '## v' berikutnya.
+            CL_SECTION=$(awk -v ver="${NV}" '
+              $0 ~ ("^## " ver "( |$)") { flag = 1; next }
+              /^## v/ && flag { exit }
               flag { print }
             ' CHANGELOG.md)
           fi
@@ -273,28 +273,28 @@ jobs:
           fi
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ternak-tt-release
           path: dist/*-release.zip
           if-no-files-found: warn
 
       - name: Upload debug artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ternak-tt-debug
           path: dist/*-debug.zip
           if-no-files-found: warn
 
       - name: Upload release notes artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-notes
           path: release_notes.md
           if-no-files-found: warn
 
       - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.0.9
         with:
           tag_name: ${{ steps.version.outputs.new_version }}
           name: Ternak TT ${{ steps.version.outputs.new_version }}

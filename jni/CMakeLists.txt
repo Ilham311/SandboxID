@@ -8,18 +8,20 @@ option(TERNAK_TT_DEBUG "Enable verbose debug logging (LOGD)" OFF)
 if(TERNAK_TT_DEBUG)
     message(STATUS "[ternak_tt] BUILD VARIANT: DEBUG (verbose LOGD, no strip)")
     add_compile_definitions(TT_DEBUG=1)
-    set(COMMON "-Os -g -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
+    # M8: -Wall -Wextra untuk menangkap bug diam (unused/shadow/sign) saat dev.
+    set(COMMON "-Os -g -Wall -Wextra -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-Wl,--gc-sections -Wl,--exclude-libs,ALL")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "-Wl,--gc-sections")
 else()
-    message(STATUS "[ternak_tt] BUILD VARIANT: RELEASE (LOGD compiled out, stripped)")
-    set(COMMON "-Os -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
+    message(STATUS "[ternak_tt] BUILD VARIANT: RELEASE (LOGD compiled out, stripped, LTO)")
+    # M8: -Wall -Wextra + LTO (-flto) untuk kode lebih kecil & inlining lintas-TU.
+    set(COMMON "-Os -Wall -Wextra -flto -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE
-        "-Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL")
+        "-flto -Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE
-        "-Wl,--gc-sections -Wl,--strip-all")
+        "-flto -Wl,--gc-sections -Wl,--strip-all")
 endif()
 
 add_library(ternak_tt SHARED main.cpp companion.cpp)
