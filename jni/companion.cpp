@@ -239,6 +239,62 @@ static void watch_target_death(uint32_t pid, int client_fd) {
     ::_exit(0);
 }
 
+// Fallback mount path for Zygisk providers whose exemptFd() returns false (the
+// companion socket does not survive into postAppSpecialize, so CMD_DO_MOUNTS can
+// never be sent). The module sends CMD_DEFER_MOUNTS from preAppSpecialize with
+// the target pid and the inode of its mount namespace BEFORE unshare. Here we
+// wait until /proc/<pid>/ns/mnt moves off that baseline -- i.e. AOSP's
+// SpecializeCommon ran unshare(CLONE_NEWNS) and the app now has a private
+// namespace -- and only then bind-mount. Mounting earlier would leak into
+// zygote's shared namespace, so a valid, distinct baseline is mandatory. Runs
+// fully detached (double-fork) so it outlives this companion client handler.
+static void defer_mounts_watcher(uint32_t pid, uint64_t baseline_ns, int client) {
+    pid_t f1 = ::fork();
+    if (f1 < 0) { LOGE("defer watcher fork failed errno=%d", errno); return; }
+    if (f1 > 0) { ::waitpid(f1, nullptr, 0); return; }
+
+    if (::fork() > 0) ::_exit(0);
+
+    // Detached grandchild: it inherited a dup of the client socket across fork()
+    // but never uses it. Close it so the lingering watcher does not keep the
+    // peer socket half-open (the main handler still holds its own copy for the
+    // ACK). do_mounts_via_fork is therefore called with client=-1 below.
+    if (client >= 0) ::close(client);
+
+    if (baseline_ns == 0) {
+        LOGW("defer mount pid=%u: no ns baseline; skipping (would risk shared-ns leak)", pid);
+        ::_exit(0);
+    }
+
+    char path[64];
+    ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", pid);
+
+    const long POLL_NS   = 5L * 1000L * 1000L;   // 5ms
+    const int  MAX_TRIES = 1600;                 // ~8s ceiling
+    bool ready = false;
+    for (int i = 0; i < MAX_TRIES; ++i) {
+        struct stat st{};
+        if (::stat(path, &st) == 0) {
+            if ((uint64_t)st.st_ino != baseline_ns) { ready = true; break; }
+        } else if (errno == ENOENT || errno == ESRCH) {
+            LOGD("defer mount pid=%u: process gone before unshare", pid);
+            ::_exit(0);
+        }
+        struct timespec ts{0, POLL_NS};
+        ::nanosleep(&ts, nullptr);
+    }
+
+    if (!ready) {
+        LOGW("defer mount pid=%u: mnt ns unchanged after ~%ldms; skipping bind-mount",
+             pid, (POLL_NS / 1000000L) * MAX_TRIES);
+        ::_exit(0);
+    }
+
+    LOGD("defer mount pid=%u: unshare detected, mounting now", pid);
+    do_mounts_via_fork(pid, -1);
+    ::_exit(0);
+}
+
 static bool try_seed_ondemand() {
     std::string bin = std::string(sandboxid::MODDIR) + "/bin/sandboxid";
     if (::access(bin.c_str(), X_OK) != 0) {
@@ -336,6 +392,28 @@ extern "C" void sandboxid_companion(int client) {
             }
             uint32_t ok = do_mounts_via_fork(pid, client);
             if (!sandboxid::write_full(client, &ok, sizeof(ok))) break;
+
+        } else if (cmd == sandboxid::CMD_DEFER_MOUNTS) {
+            uint32_t pid = 0;
+            uint64_t baseline = 0;
+            if (!sandboxid::read_full(client, &pid, sizeof(pid))) break;
+            if (!sandboxid::read_full(client, &baseline, sizeof(baseline))) break;
+
+            bool authorized = have_peer && peer.uid == 0 && (pid_t)pid == peer.pid;
+            uint32_t ack = 0;
+            if (!authorized) {
+                LOGE("DEFER_MOUNTS DITOLAK: have_peer=%d peer.uid=%d peer.pid=%d target pid=%u "
+                     "[SO_PEERCRED fail-closed]",
+                     (int)have_peer, have_peer ? peer.uid : -1,
+                     have_peer ? peer.pid : -1, pid);
+                sandboxid::write_full(client, &ack, sizeof(ack));
+                break;
+            }
+            // Schedules a detached watcher and returns promptly; the actual mount
+            // happens later, once the target unshares its mount namespace.
+            defer_mounts_watcher(pid, baseline, client);
+            ack = 1;
+            if (!sandboxid::write_full(client, &ack, sizeof(ack))) break;
 
         } else {
             LOGD("unknown cmd=%u, closing", cmd);

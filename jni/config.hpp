@@ -19,6 +19,13 @@ inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetpr
 enum Cmd : uint8_t {
     CMD_GET_IDENTITY = 2,
     CMD_DO_MOUNTS    = 3,
+    // Fallback for Zygisk providers whose exemptFd() returns false on the
+    // USAP/nativeSpecializeAppProcess path (e.g. ReZygisk/ZygiskNext on
+    // KernelSU): the socket carried into postAppSpecialize gets closed by
+    // zygote, so CMD_DO_MOUNTS can never fire. Instead the module sends this
+    // from preAppSpecialize with {pid, pre-unshare mnt-ns inode}; the companion
+    // watches /proc/<pid>/ns/mnt until unshare(CLONE_NEWNS) happens, then mounts.
+    CMD_DEFER_MOUNTS = 4,
 };
 
 inline constexpr uint32_t MAX_IDENTITY_BLOB = 64u * 1024u;

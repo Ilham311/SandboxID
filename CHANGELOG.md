@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased — Fix: per-app bind-mounts on non-Magisk Zygisk providers
+
+### Fixed
+
+- **Per-app `build.prop` bind-mounts silently skipped on KernelSU/strict Zygisk
+  providers** (ReZygisk / Zygisk Next / NeoZygisk). Root cause: the companion
+  socket opened in `preAppSpecialize` was carried into `postAppSpecialize` only
+  by `Api::exemptFd()`. On the USAP / `nativeSpecializeAppProcess` path those
+  providers return `false` from `exemptFd` (they require the
+  `APP_FORK_AND_SPECIALIZE` flag; Magisk instead short-circuits to `true` on the
+  specialize path, which is why Magisk users never saw this). With the fd not
+  exempted, zygote closed the socket before `postAppSpecialize`, so
+  `CMD_DO_MOUNTS` failed (`companion DO_MOUNTS write failed (socket unusable
+  post-specialize?)`) and the native-reader defense layer (bind-mounted fake
+  `build.prop` / `settings_secure.xml`) never applied. The in-process Java
+  `Build.*` / `SystemProperties` hooks were unaffected and still applied.
+- **~70 `exemptFd returned false` warnings per boot on an idle module.**
+  `exemptFd` was called for *every* app process before the target check, so
+  non-target system apps each logged a warning even with an empty `target.txt`.
+
+### Changed
+
+- `jni/main.cpp` `preAppSpecialize`: reordered so the `CMD_GET_IDENTITY` target
+  check runs first and `exemptFd()` is called **only for confirmed targets**.
+  Non-target apps no longer touch `exemptFd` and no longer log about it.
+- `jni/main.cpp` / `jni/companion.cpp` / `jni/config.hpp`: added an
+  `exemptFd`-free fallback. When `exemptFd()` returns `false` for a target, the
+  module reads its pre-unshare mount-namespace inode (`/proc/self/ns/mnt`) and
+  sends the new **`CMD_DEFER_MOUNTS {pid, ns_ino}`** over the still-open
+  pre-specialize socket. The companion spawns a detached watcher that polls
+  `/proc/<pid>/ns/mnt` until it moves off that baseline — i.e. AOSP's
+  `SpecializeCommon` ran `unshare(CLONE_NEWNS)` and the app has a private
+  namespace — and only then performs the bind-mounts (reusing `do_mounts_via_fork`).
+  Mounting before unshare (which would leak into zygote's shared namespace) is
+  explicitly guarded against. When `exemptFd()` returns `true` (e.g. Magisk), the
+  original `postAppSpecialize` `CMD_DO_MOUNTS` path is used **unchanged** — zero
+  behavior change for providers that already worked.
+
+### Known limitations
+
+- The deferred mount completes shortly after the app unshares its namespace
+  (~milliseconds, tightly polled). A target that reads a raw `build.prop` file in
+  the very first moment of process start could in principle read it before the
+  mount lands; the Java-layer `Build.*` / `SystemProperties` hooks are not subject
+  to this race. If a provider never unshares for a process, the watcher times out
+  (~8 s) and skips the mount rather than risk a shared-namespace leak.
+
 ## v2.0.0 (2026-08-21)
 
 Rebrand to SandboxID — a generic, privacy-research / education framing with no
