@@ -140,6 +140,40 @@ static int run_bin_path(const char* file, std::vector<const char*> argv) {
 }
 
 
+// Bounded wait until the framework is up. settings/pm/am talk to
+// system_server over binder; calling them before sys.boot_completed races the
+// service publish and returns FAILED_TRANSACTION. Returns immediately once
+// booted, so it is a no-op on the action.sh (user-triggered) path.
+static void wait_boot_completed(int max_ms) {
+    char b[PROP_VALUE_MAX];
+    for (int waited = 0; waited < max_ms; waited += 200) {
+        b[0] = 0;
+        if (__system_property_get("sys.boot_completed", b) > 0 && b[0] == '1')
+            return;
+        ::usleep(200 * 1000);
+    }
+}
+
+// Run a framework CLI (settings/pm/am) with retry+backoff and an rc check.
+// A transient binder FAILED_TRANSACTION (service not yet published, momentary
+// system_server busy) is retried; a persistent failure is logged (captured to
+// the boot log via stderr) instead of being silently discarded. Returns 0 on
+// success, else the last non-zero rc.
+static int run_framework(const char* path, std::vector<const char*> argv,
+                         const std::string& label) {
+    const int attempts = 4;
+    int rc = -1;
+    for (int i = 0; i < attempts; ++i) {
+        rc = run_bin(path, argv);
+        if (rc == 0) return 0;
+        if (i + 1 < attempts) ::usleep((150 << i) * 1000);  // 150/300/600 ms
+    }
+    fprintf(stderr, "! %s gagal setelah %d percobaan (exit=%d) — binder/framework belum siap?\n",
+            label.c_str(), attempts, rc);
+    return rc;
+}
+
+
 
 
 struct Identity {
@@ -451,14 +485,32 @@ static void apply_native(const Identity& id) {
 
     
     
+    // Per-user secure/global settings via the framework CLI. These go over
+    // binder to system_server. Hardening vs the reported failures:
+    //  - gate on sys.boot_completed so an early-boot apply doesn't race the
+    //    service publish and hit FAILED_TRANSACTION;
+    //  - target --user 0 (owner) explicitly instead of relying on
+    //    getCurrentUser() resolution — freshen/apply-boot run under
+    //    ensure_root(), and uid 0 is privileged for the user query this takes;
+    //  - retry transient failures with backoff;
+    //  - check the rc and report it instead of discarding it silently.
     std::string aid = get("ANDROID_ID");
-    if (!aid.empty()) {
-        run_bin("/system/bin/settings",
-                {"settings", "put", "secure", "android_id", aid.c_str()});
-    }
-    if (!MODEL.empty()) {
-        run_bin("/system/bin/settings",
-                {"settings", "put", "global", "device_name", MODEL.c_str()});
+    if (!aid.empty() || !MODEL.empty()) {
+        wait_boot_completed(5000);
+        int sok = 0, sfail = 0;
+        if (!aid.empty()) {
+            int rc = run_framework("/system/bin/settings",
+                    {"settings", "put", "--user", "0", "secure", "android_id", aid.c_str()},
+                    "settings put secure android_id");
+            if (rc == 0) sok++; else sfail++;
+        }
+        if (!MODEL.empty()) {
+            int rc = run_framework("/system/bin/settings",
+                    {"settings", "put", "--user", "0", "global", "device_name", MODEL.c_str()},
+                    "settings put global device_name");
+            if (rc == 0) sok++; else sfail++;
+        }
+        printf("  Settings put: %d ok, %d gagal\n", sok, sfail);
     }
 }
 
@@ -613,12 +665,20 @@ static void generate_mount_files(const Identity& id) {
 
 
 
-static void wipe_target_data() {
+static int wipe_target_data() {
     auto pkgs = load_targets();
+    if (pkgs.empty()) return 0;
+    wait_boot_completed(5000);
+    int fail = 0;
     for (const auto& pkg : pkgs) {
-        run_bin("/system/bin/pm", {"pm", "clear", pkg.c_str()});
-        run_bin("/system/bin/am", {"am", "force-stop", pkg.c_str()});
+        if (run_framework("/system/bin/pm",
+                {"pm", "clear", "--user", "0", pkg.c_str()},
+                "pm clear " + pkg) != 0) fail++;
+        if (run_framework("/system/bin/am",
+                {"am", "force-stop", "--user", "0", pkg.c_str()},
+                "am force-stop " + pkg) != 0) fail++;
     }
+    return fail;
 }
 
 
@@ -685,7 +745,7 @@ static int cmd_freshen() {
 
     apply_native(id);
     generate_mount_files(id);
-    wipe_target_data();
+    int wipe_fail = wipe_target_data();
 
     printf("OK - fresh persona ready\n");
     printf("  MODEL       : %s\n", id.kv["MODEL"].c_str());
@@ -703,6 +763,9 @@ static int cmd_freshen() {
     auto pkgs = load_targets();
     printf("  Wiped: %zu pkg(s) from target.txt\n", pkgs.size());
     for (const auto& p : pkgs) printf("    - %s\n", p.c_str());
+    if (wipe_fail > 0)
+        fprintf(stderr, "! WARN: %d wipe step(s) gagal (pm clear/am force-stop) — lihat log di atas\n",
+                wipe_fail);
     return 0;
 }
 

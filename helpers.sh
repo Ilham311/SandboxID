@@ -25,7 +25,7 @@ log_err()  { _log "[ERR] $*"; }
 mask_id() {
     _v="$1"
     [ -z "$_v" ] && { printf '(empty)'; return; }
-    _len=${
+    _len=${#_v}
     if [ "$_len" -le 6 ]; then
         printf '******'
     else
@@ -87,10 +87,23 @@ generate_mac() {
         "$(echo "$b" | cut -c9-10)"
 }
 
+# Framework CLI (settings/am/pm) runner. A transient binder FAILED_TRANSACTION
+# (system_server momentarily busy / service just published) is retried a few
+# times instead of being silently dropped. Returns 0 on first success.
+_fw_run() {
+    _n=0
+    while [ "$_n" -lt 3 ]; do
+        "$@" 2>/dev/null && return 0
+        _n=$((_n + 1))
+        [ "$_n" -lt 3 ] && sleep 1
+    done
+    return 1
+}
+
 settings_put() {
     scope="$1"; key="$2"; val="$3"
     command -v settings >/dev/null 2>&1 || return 1
-    settings put "$scope" "$key" "$val" 2>/dev/null
+    _fw_run settings put --user 0 "$scope" "$key" "$val"
 }
 
 rp_set() {
@@ -110,7 +123,7 @@ rp_set() {
 force_stop() {
     pkg="$1"
     command -v am >/dev/null 2>&1 || return 1
-    am force-stop "$pkg" 2>/dev/null
+    _fw_run am force-stop --user 0 "$pkg"
 }
 
 identity_get() {
