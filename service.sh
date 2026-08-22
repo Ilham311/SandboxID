@@ -2,8 +2,13 @@
 MODDIR="${0%/*}"
 until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 2; done
 sleep 5
-[ -f "$MODDIR/identity.prop" ] && [ -x "$MODDIR/bin/sandboxid" ] && \
-    "$MODDIR/bin/sandboxid" apply-boot >> /cache/sandboxid-boot.log 2>&1
+# Ship idle: the device-wide apply-boot layer runs only when the user has
+# activated the module (at least one active entry in target.txt). With an empty
+# target.txt the module stays inert -- no ~70 resetprop/settings writes happen.
+if grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
+    [ -f "$MODDIR/identity.prop" ] && [ -x "$MODDIR/bin/sandboxid" ] && \
+        "$MODDIR/bin/sandboxid" apply-boot >> /cache/sandboxid-boot.log 2>&1
+fi
 
 if [ -f "$MODDIR/debug_variant" ]; then
     mkdir -p "$MODDIR/debug"

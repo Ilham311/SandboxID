@@ -1,4 +1,7 @@
 #!/system/bin/sh
+# SKIPUNZIP is read by the Magisk installer framework (external), not this
+# script -- 0 means let the framework auto-extract the module zip.
+# shellcheck disable=SC2034
 SKIPUNZIP=0
 
 SBX_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)

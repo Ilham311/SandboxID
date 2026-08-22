@@ -112,10 +112,30 @@ static std::string trim(std::string s) {
 }
 
 
-static int run_bin(const char* path, std::vector<const char*> argv) {
+// When null_io is set, the child's stdin/stdout/stderr are redirected to
+// /dev/null before exec. This matters for framework CLIs (settings/am/pm):
+// cmd(1) forwards the caller's std FDs to system_server inside the
+// SHELL_COMMAND binder transaction. Invoked from action.sh those FDs point at
+// a pty/pipe or a file under /data/adb (adb_data_file) that SELinux forbids
+// system_server from accessing, so the transaction is rejected with
+// FAILED_TRANSACTION (-2147483646, printed by cmd as 2147483646). /dev/null is
+// null_device, readable/writable by every domain, so passing it lets the call
+// through. Success/failure is read from the exit code, not the (discarded)
+// output. Retrying without this does not help: the denial is deterministic.
+static int run_bin(const char* path, std::vector<const char*> argv,
+                   bool null_io = false) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        if (null_io) {
+            int nul = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+            if (nul >= 0) {
+                dup2(nul, STDIN_FILENO);
+                dup2(nul, STDOUT_FILENO);
+                dup2(nul, STDERR_FILENO);
+                if (nul > STDERR_FILENO) ::close(nul);
+            }
+        }
         argv.push_back(nullptr);
         execv(path, const_cast<char* const*>(argv.data()));
         _exit(127);
@@ -140,6 +160,51 @@ static int run_bin_path(const char* file, std::vector<const char*> argv) {
 }
 
 
+// Bounded wait until the framework is up. settings/pm/am talk to
+// system_server over binder; calling them before sys.boot_completed races the
+// service publish and returns FAILED_TRANSACTION. Returns immediately once
+// booted, so it is a no-op on the action.sh (user-triggered) path.
+static void wait_boot_completed(int max_ms) {
+    char b[PROP_VALUE_MAX];
+    for (int waited = 0; waited < max_ms; waited += 200) {
+        b[0] = 0;
+        if (__system_property_get("sys.boot_completed", b) > 0 && b[0] == '1')
+            return;
+        ::usleep(200 * 1000);
+    }
+}
+
+// Run a framework CLI (settings/pm/am) with a light retry and an rc check.
+// null_io=true is passed so the child's std FDs are /dev/null (see run_bin):
+// this is what actually fixes the FAILED_TRANSACTION seen from action.sh. The
+// small retry only covers a genuinely transient system_server busy; a
+// persistent failure is logged (via our own stderr) instead of silently
+// dropped. Returns 0 on success, else the last non-zero rc.
+static int run_framework(const char* path, std::vector<const char*> argv,
+                         const std::string& label) {
+    const int attempts = 2;
+    int rc = -1;
+    for (int i = 0; i < attempts; ++i) {
+        rc = run_bin(path, argv, /*null_io=*/true);
+        if (rc == 0) return 0;
+        if (i + 1 < attempts) ::usleep(200 * 1000);
+    }
+    fprintf(stderr, "! %s gagal (exit=%d) setelah %d percobaan — binder transaction ditolak (SELinux/FD)\n",
+            label.c_str(), rc, attempts);
+    return rc;
+}
+
+
+// ---------------------------------------------------------------------------
+// App stop + data wipe use the documented platform primitives only:
+//   `am force-stop <pkg>`  — "force-stop everything associated with <package>"
+//   `pm clear <pkg>`       — "delete all data associated with a package"
+// (Android Platform Tools / `adb shell` command reference; see CREDITS.md).
+// Both are driven through run_framework() for a light transient-failure retry
+// and rc reporting. No SELinux toggling and no manual /proc kill or rm -rf of
+// data dirs — those primitives already do the right thing under root, and the
+// extra machinery only obscured real failures. See CREDITS.md for sources.
+// ---------------------------------------------------------------------------
 
 
 struct Identity {
@@ -398,6 +463,14 @@ static void apply_native(const Identity& id) {
         {"ro.board.platform",                  PLATFORM},
         {"ro.product.marketname",              MARKETNAME},
 
+        // Attestation-ID fallbacks that software Build/keystore consistency checks
+        // read. (Hardware-backed Key Attestation is NOT affected by ro.* edits.)
+        {"ro.product.brand_for_attestation",        BRAND},
+        {"ro.product.name_for_attestation",         PRODUCT},
+        {"ro.product.device_for_attestation",       DEVICE},
+        {"ro.product.model_for_attestation",        MODEL},
+        {"ro.product.manufacturer_for_attestation", MANUFACTURER},
+
         {"ro.build.id",                        ID_},
         {"ro.build.display.id",                DISPLAY},
         {"ro.build.description",               DESC},
@@ -451,14 +524,32 @@ static void apply_native(const Identity& id) {
 
     
     
+    // Per-user secure/global settings via the framework CLI. These go over
+    // binder to system_server. Hardening vs the reported failures:
+    //  - gate on sys.boot_completed so an early-boot apply doesn't race the
+    //    service publish and hit FAILED_TRANSACTION;
+    //  - target --user 0 (owner) explicitly instead of relying on
+    //    getCurrentUser() resolution — freshen/apply-boot run under
+    //    ensure_root(), and uid 0 is privileged for the user query this takes;
+    //  - retry transient failures with backoff;
+    //  - check the rc and report it instead of discarding it silently.
     std::string aid = get("ANDROID_ID");
-    if (!aid.empty()) {
-        run_bin("/system/bin/settings",
-                {"settings", "put", "secure", "android_id", aid.c_str()});
-    }
-    if (!MODEL.empty()) {
-        run_bin("/system/bin/settings",
-                {"settings", "put", "global", "device_name", MODEL.c_str()});
+    if (!aid.empty() || !MODEL.empty()) {
+        wait_boot_completed(5000);
+        int sok = 0, sfail = 0;
+        if (!aid.empty()) {
+            int rc = run_framework("/system/bin/settings",
+                    {"settings", "put", "--user", "0", "secure", "android_id", aid.c_str()},
+                    "settings put secure android_id");
+            if (rc == 0) sok++; else sfail++;
+        }
+        if (!MODEL.empty()) {
+            int rc = run_framework("/system/bin/settings",
+                    {"settings", "put", "--user", "0", "global", "device_name", MODEL.c_str()},
+                    "settings put global device_name");
+            if (rc == 0) sok++; else sfail++;
+        }
+        printf("  Settings put: %d ok, %d gagal\n", sok, sfail);
     }
 }
 
@@ -526,6 +617,11 @@ static void generate_mount_files(const Identity& id) {
     add("ro.hardware",                        HARDWARE);
     add("ro.board.platform",                  PLATFORM);
     add("ro.product.marketname",              MARKETNAME);
+    add("ro.product.brand_for_attestation",        BRAND);
+    add("ro.product.name_for_attestation",         PRODUCT);
+    add("ro.product.device_for_attestation",       DEVICE);
+    add("ro.product.model_for_attestation",        MODEL);
+    add("ro.product.manufacturer_for_attestation", MANUFACTURER);
     add("ro.build.id",                        ID_);
     add("ro.build.display.id",                DISPLAY);
     add("ro.build.description",               DESC);
@@ -613,12 +709,29 @@ static void generate_mount_files(const Identity& id) {
 
 
 
-static void wipe_target_data() {
+static int wipe_target_data() {
     auto pkgs = load_targets();
+    if (pkgs.empty()) return 0;
+    wait_boot_completed(5000);
+
+    int fail = 0;
     for (const auto& pkg : pkgs) {
-        run_bin("/system/bin/pm", {"pm", "clear", pkg.c_str()});
-        run_bin("/system/bin/am", {"am", "force-stop", pkg.c_str()});
+        // Documented platform primitives (see CREDITS.md):
+        //   1) am force-stop — force-stop everything associated with the package
+        //   2) pm clear      — delete all data associated with the package
+        //      (installd recreates the data dir with the correct SELinux label).
+        run_framework("/system/bin/am",
+                {"am", "force-stop", "--user", "0", pkg.c_str()},
+                "am force-stop " + pkg);
+        int rc_clear = run_framework("/system/bin/pm",
+                {"pm", "clear", "--user", "0", pkg.c_str()},
+                "pm clear " + pkg);
+        if (rc_clear != 0) {
+            fail++;
+            fprintf(stderr, "! %s: pm clear gagal (rc=%d)\n", pkg.c_str(), rc_clear);
+        }
     }
+    return fail;
 }
 
 
@@ -685,7 +798,7 @@ static int cmd_freshen() {
 
     apply_native(id);
     generate_mount_files(id);
-    wipe_target_data();
+    int wipe_fail = wipe_target_data();
 
     printf("OK - fresh persona ready\n");
     printf("  MODEL       : %s\n", id.kv["MODEL"].c_str());
@@ -703,6 +816,9 @@ static int cmd_freshen() {
     auto pkgs = load_targets();
     printf("  Wiped: %zu pkg(s) from target.txt\n", pkgs.size());
     for (const auto& p : pkgs) printf("    - %s\n", p.c_str());
+    if (wipe_fail > 0)
+        fprintf(stderr, "! WARN: %d wipe step(s) gagal (pm clear/am force-stop) — lihat log di atas\n",
+                wipe_fail);
     return 0;
 }
 

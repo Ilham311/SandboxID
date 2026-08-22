@@ -185,7 +185,10 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
 
 
 
-#ifdef SBX_DEBUG
+// L7 numeric-prop hooks (int/long/bool). Compiled in ALL variants: the
+// getInt/getLong/getBoolean natives are separate from native_get(String,String),
+// so without these the numeric SystemProperties getters would leak real device
+// values in release builds. (Only the per-key LOGD tracing is debug-only.)
 static jint     (*orig_get_int)(JNIEnv*, jclass, jstring, jint)     = nullptr;
 static jlong    (*orig_get_long)(JNIEnv*, jclass, jstring, jlong)   = nullptr;
 static jboolean (*orig_get_bool)(JNIEnv*, jclass, jstring, jboolean)= nullptr;
@@ -305,7 +308,7 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
     orig_get_bool = reinterpret_cast<jboolean (*)(JNIEnv*, jclass, jstring, jboolean)>(m[2].fnPtr);
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
-#endif 
+
 
 
 
@@ -571,8 +574,8 @@ public:
 
         install_build_hook(env_);
         install_prop_hook(api_, env_);
-#ifdef SBX_DEBUG
         install_leak_sensors(api_, env_);
+#ifdef SBX_DEBUG
         for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
         install_crash_watchdog(pkg_);

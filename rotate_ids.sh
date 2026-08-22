@@ -51,7 +51,7 @@ set_gaid_value() {
     settings_put global limit_ad_tracking 0       || :
 
     force_stop com.google.android.gms
-    command -v am >/dev/null 2>&1 && am kill com.google.android.gms >/dev/null 2>&1
+    command -v am >/dev/null 2>&1 && am kill --user 0 com.google.android.gms </dev/null >/dev/null 2>&1
     sleep 1
 
     se_permissive
@@ -240,9 +240,9 @@ cmd_status() {
         log_info "identity.prop  : missing (run 'sandboxid freshen')"
     fi
     if command -v settings >/dev/null 2>&1; then
-        log_info "Settings.Global.advertising_id  = $(mask_id "$(settings get global advertising_id 2>/dev/null)")"
-        log_info "Settings.Global.device_name     = $(settings get global device_name 2>/dev/null)"
-        log_info "Settings.Global.bluetooth_name  = $(settings get global bluetooth_name 2>/dev/null)"
+        log_info "Settings.Global.advertising_id  = $(mask_id "$(settings get --user 0 global advertising_id </dev/null 2>/dev/null)")"
+        log_info "Settings.Global.device_name     = $(settings get --user 0 global device_name </dev/null 2>/dev/null)"
+        log_info "Settings.Global.bluetooth_name  = $(settings get --user 0 global bluetooth_name </dev/null 2>/dev/null)"
     fi
     log_info "getprop ro.product.model              = $(getprop ro.product.model 2>/dev/null)"
     log_info "getprop persist.bluetooth.adaptername = $(getprop persist.bluetooth.adaptername 2>/dev/null)"
