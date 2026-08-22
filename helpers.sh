@@ -87,15 +87,18 @@ generate_mac() {
         "$(echo "$b" | cut -c9-10)"
 }
 
-# Framework CLI (settings/am/pm) runner. A transient binder FAILED_TRANSACTION
-# (system_server momentarily busy / service just published) is retried a few
-# times instead of being silently dropped. Returns 0 on first success.
+# Framework CLI (settings/am/pm) runner. cmd(1) forwards this shell's std FDs
+# to system_server over binder; from action.sh those FDs are a pty/pipe or a
+# /data/adb file that SELinux forbids system_server from accessing, so the call
+# is rejected with FAILED_TRANSACTION. Pointing all three at /dev/null
+# (world-accessible null_device) lets the transaction through. Success is taken
+# from the exit code; a short retry covers a genuinely transient busy only.
 _fw_run() {
     _n=0
-    while [ "$_n" -lt 3 ]; do
-        "$@" 2>/dev/null && return 0
+    while [ "$_n" -lt 2 ]; do
+        "$@" </dev/null >/dev/null 2>&1 && return 0
         _n=$((_n + 1))
-        [ "$_n" -lt 3 ] && sleep 1
+        [ "$_n" -lt 2 ] && sleep 1
     done
     return 1
 }

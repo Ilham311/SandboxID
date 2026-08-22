@@ -112,10 +112,30 @@ static std::string trim(std::string s) {
 }
 
 
-static int run_bin(const char* path, std::vector<const char*> argv) {
+// When null_io is set, the child's stdin/stdout/stderr are redirected to
+// /dev/null before exec. This matters for framework CLIs (settings/am/pm):
+// cmd(1) forwards the caller's std FDs to system_server inside the
+// SHELL_COMMAND binder transaction. Invoked from action.sh those FDs point at
+// a pty/pipe or a file under /data/adb (adb_data_file) that SELinux forbids
+// system_server from accessing, so the transaction is rejected with
+// FAILED_TRANSACTION (-2147483646, printed by cmd as 2147483646). /dev/null is
+// null_device, readable/writable by every domain, so passing it lets the call
+// through. Success/failure is read from the exit code, not the (discarded)
+// output. Retrying without this does not help: the denial is deterministic.
+static int run_bin(const char* path, std::vector<const char*> argv,
+                   bool null_io = false) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        if (null_io) {
+            int nul = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+            if (nul >= 0) {
+                dup2(nul, STDIN_FILENO);
+                dup2(nul, STDOUT_FILENO);
+                dup2(nul, STDERR_FILENO);
+                if (nul > STDERR_FILENO) ::close(nul);
+            }
+        }
         argv.push_back(nullptr);
         execv(path, const_cast<char* const*>(argv.data()));
         _exit(127);
@@ -154,22 +174,23 @@ static void wait_boot_completed(int max_ms) {
     }
 }
 
-// Run a framework CLI (settings/pm/am) with retry+backoff and an rc check.
-// A transient binder FAILED_TRANSACTION (service not yet published, momentary
-// system_server busy) is retried; a persistent failure is logged (captured to
-// the boot log via stderr) instead of being silently discarded. Returns 0 on
-// success, else the last non-zero rc.
+// Run a framework CLI (settings/pm/am) with a light retry and an rc check.
+// null_io=true is passed so the child's std FDs are /dev/null (see run_bin):
+// this is what actually fixes the FAILED_TRANSACTION seen from action.sh. The
+// small retry only covers a genuinely transient system_server busy; a
+// persistent failure is logged (via our own stderr) instead of silently
+// dropped. Returns 0 on success, else the last non-zero rc.
 static int run_framework(const char* path, std::vector<const char*> argv,
                          const std::string& label) {
-    const int attempts = 4;
+    const int attempts = 2;
     int rc = -1;
     for (int i = 0; i < attempts; ++i) {
-        rc = run_bin(path, argv);
+        rc = run_bin(path, argv, /*null_io=*/true);
         if (rc == 0) return 0;
-        if (i + 1 < attempts) ::usleep((150 << i) * 1000);  // 150/300/600 ms
+        if (i + 1 < attempts) ::usleep(200 * 1000);
     }
-    fprintf(stderr, "! %s gagal setelah %d percobaan (exit=%d) — binder/framework belum siap?\n",
-            label.c_str(), attempts, rc);
+    fprintf(stderr, "! %s gagal (exit=%d) setelah %d percobaan — binder transaction ditolak (SELinux/FD)\n",
+            label.c_str(), rc, attempts);
     return rc;
 }
 
