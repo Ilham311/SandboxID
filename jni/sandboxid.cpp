@@ -1,7 +1,4 @@
 
-
-
-
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -29,11 +26,6 @@ static const char* MODE_FILE      = sandboxid::MODE_FILE;
 static const char* RESETPROP      = sandboxid::RESETPROP;
 static const char* MOUNTDIR       = sandboxid::MOUNTDIR;
 static const char* TARGET_FILE    = sandboxid::TARGET_FILE;
-
-
-
-
-
 
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
@@ -67,16 +59,10 @@ static std::string random_hex(int bytes, bool upper) {
     return s;
 }
 
-
-
-
 static bool atomic_write(const std::string& p, const std::string& data) {
     std::string tmp = p + ".tmp." + std::to_string((long)::getpid());
-    ::unlink(tmp.c_str());  
-    // WHY (O_CLOEXEC): sandboxid forks framework CLIs (settings/pm/am via run_bin);
-    // without O_CLOEXEC these fds would leak into those children and, worse, could be
-    // forwarded to system_server by cmd(1) — the same class of forbidden-fd hazard the
-    // null_io fix addresses. Close-on-exec keeps writer fds out of every exec'd child.
+    ::unlink(tmp.c_str());
+
     int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
     if (fd < 0) return false;
     bool ok = true;
@@ -97,7 +83,6 @@ static bool atomic_write(const std::string& p, const std::string& data) {
     return true;
 }
 
-
 static std::string read_file(const std::string& p) {
     std::ifstream f(p);
     if (!f) return "";
@@ -105,7 +90,6 @@ static std::string read_file(const std::string& p) {
     ss << f.rdbuf();
     return ss.str();
 }
-
 
 static std::string trim(std::string s) {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
@@ -115,31 +99,7 @@ static std::string trim(std::string s) {
     return s;
 }
 
-
-#<<<<<<< worktree-modernize-jni-core
-// WHY (null_io): framework CLIs (settings/pm/am) are `cmd(1)` front-ends that
-// forward THIS process's std FDs to system_server inside the SHELL_COMMAND binder
-// transaction. When those FDs are a pty/pipe or a /data/adb file (SELinux forbids
-// system_server touching them), the transaction fails deterministically with
-// FAILED_TRANSACTION (2147483646) — "prints OK but nothing happens". Handing the
-// child /dev/null std FDs avoids forwarding a forbidden descriptor. Plain binaries
-// (resetprop, chcon) don't use binder and pass null_io=false. (Regression fix; see
-// the module's binder-fd history.)
 static int run_bin(const char* path, std::vector<const char*> argv, bool null_io = false) {
-#=======
-// When null_io is set, the child's stdin/stdout/stderr are redirected to
-// /dev/null before exec. This matters for framework CLIs (settings/am/pm):
-// cmd(1) forwards the caller's std FDs to system_server inside the
-// SHELL_COMMAND binder transaction. Invoked from action.sh those FDs point at
-// a pty/pipe or a file under /data/adb (adb_data_file) that SELinux forbids
-// system_server from accessing, so the transaction is rejected with
-// FAILED_TRANSACTION (-2147483646, printed by cmd as 2147483646). /dev/null is
-// null_device, readable/writable by every domain, so passing it lets the call
-// through. Success/failure is read from the exit code, not the (discarded)
-// output. Retrying without this does not help: the denial is deterministic.
-static int run_bin(const char* path, std::vector<const char*> argv,
-                   bool null_io = false) {
-#>>>>>>> main
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
@@ -161,7 +121,6 @@ static int run_bin(const char* path, std::vector<const char*> argv,
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
-
 static int run_bin_path(const char* file, std::vector<const char*> argv) {
     pid_t pid = fork();
     if (pid < 0) return -1;
@@ -175,11 +134,6 @@ static int run_bin_path(const char* file, std::vector<const char*> argv) {
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
-
-// Bounded wait until the framework is up. settings/pm/am talk to
-// system_server over binder; calling them before sys.boot_completed races the
-// service publish and returns FAILED_TRANSACTION. Returns immediately once
-// booted, so it is a no-op on the action.sh (user-triggered) path.
 static void wait_boot_completed(int max_ms) {
     char b[PROP_VALUE_MAX];
     for (int waited = 0; waited < max_ms; waited += 200) {
@@ -190,18 +144,12 @@ static void wait_boot_completed(int max_ms) {
     }
 }
 
-// Run a framework CLI (settings/pm/am) with a light retry and an rc check.
-// null_io=true is passed so the child's std FDs are /dev/null (see run_bin):
-// this is what actually fixes the FAILED_TRANSACTION seen from action.sh. The
-// small retry only covers a genuinely transient system_server busy; a
-// persistent failure is logged (via our own stderr) instead of silently
-// dropped. Returns 0 on success, else the last non-zero rc.
 static int run_framework(const char* path, std::vector<const char*> argv,
                          const std::string& label) {
     const int attempts = 2;
     int rc = -1;
     for (int i = 0; i < attempts; ++i) {
-        rc = run_bin(path, argv, /*null_io=*/true);
+        rc = run_bin(path, argv, true);
         if (rc == 0) return 0;
         if (i + 1 < attempts) ::usleep(200 * 1000);
     }
@@ -210,22 +158,9 @@ static int run_framework(const char* path, std::vector<const char*> argv,
     return rc;
 }
 
-
-// ---------------------------------------------------------------------------
-// App stop + data wipe use the documented platform primitives only:
-//   `am force-stop <pkg>`  — "force-stop everything associated with <package>"
-//   `pm clear <pkg>`       — "delete all data associated with a package"
-// (Android Platform Tools / `adb shell` command reference; see CREDITS.md).
-// Both are driven through run_framework() for a light transient-failure retry
-// and rc reporting. No SELinux toggling and no manual /proc kill or rm -rf of
-// data dirs — those primitives already do the right thing under root, and the
-// extra machinery only obscured real failures. See CREDITS.md for sources.
-// ---------------------------------------------------------------------------
-
-
 struct Identity {
     std::map<std::string, std::string> kv;
-    
+
     std::string serialize() const {
         static const std::vector<std::string> order = {
             "BRAND","MANUFACTURER","MODEL","MARKETNAME","DEVICE","PRODUCT",
@@ -243,7 +178,6 @@ struct Identity {
     }
 };
 
-
 static std::string uuid_v4() {
     std::string h = random_hex(16, false);
     h.insert(20, "-");
@@ -258,14 +192,11 @@ static std::string uuid_v4() {
     return h;
 }
 
-
 static int device_sdk() {
     char b[PROP_VALUE_MAX] = {0};
     if (__system_property_get("ro.build.version.sdk", b) > 0) return atoi(b);
     return 0;
 }
-
-
 
 static std::string gen_host_suffix() {
     std::random_device rd;
@@ -276,13 +207,11 @@ static std::string gen_host_suffix() {
     };
     constexpr int n_prefixes = sizeof(prefixes) / sizeof(prefixes[0]);
     std::string host = prefixes[g() % n_prefixes];
-    
+
     host += "-";
-    host += std::to_string(g() % 900 + 100);  
+    host += std::to_string(g() % 900 + 100);
     return host;
 }
-
-
 
 static Identity gen_identity() {
     std::random_device rd;
@@ -291,17 +220,12 @@ static Identity gen_identity() {
 
     int dev = device_sdk();
 
-    
     std::vector<size_t> cand;
     for (size_t i = 0; i < N; ++i)
         if (dev > 0 && SBX_POOL[i].sdk == dev) cand.push_back(i);
 
     if (cand.empty()) {
-        // WHY: Build.VERSION.SDK_INT is `SystemProperties.getInt("ro.build.version.sdk", 0)`
-        // — a method-call initializer, so it is NOT a compile-time constant and is NEVER
-        // javac-inlined into callers; a runtime field-set (L1) IS honored. The genuine
-        // risk of an SDK fallback is cross-surface INCONSISTENCY (SDK_INT vs RELEASE vs
-        // the fingerprint's build id / security_patch), which detection code cross-checks.
+
         fprintf(stderr, "! tidak ada persona SDK %d persis — fallback SDK lebih rendah, "
                 "TERIMA RISIKO inkonsistensi lintas-permukaan "
                 "(SDK_INT vs RELEASE vs FINGERPRINT)\n", dev);
@@ -313,7 +237,7 @@ static Identity gen_identity() {
     if (!cand.empty()) {
         idx = cand[g() % cand.size()];
     } else {
-        
+
         idx = 0;
         for (size_t i = 1; i < N; ++i) if (SBX_POOL[i].sdk < SBX_POOL[idx].sdk) idx = i;
         fprintf(stderr, "! device SDK %d below all personas; using SDK %d (upgrade, risky)\n",
@@ -342,7 +266,6 @@ static Identity gen_identity() {
     id.kv["TYPE"]            = "user";
     id.kv["TAGS"]            = "release-keys";
 
-    
     char fp[512];
     snprintf(fp, sizeof(fp), "google/%s/%s:%s/%s/%s:user/release-keys",
              p.product, p.device, p.release, p.id, p.incremental);
@@ -354,8 +277,6 @@ static Identity gen_identity() {
              p.product, p.release, p.id, p.incremental);
     id.kv["DESCRIPTION"] = desc;
 
-    
-    
     auto modem_prefix = [](const char* plat) -> const char* {
         if (!plat) return "g5123b";
         if (!strcmp(plat, "gs101"))   return "g5123b";
@@ -376,7 +297,6 @@ static Identity gen_identity() {
              modem_prefix(p.platform), pdate, p.incremental);
     id.kv["RADIO"] = rad;
 
-    
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
@@ -390,9 +310,6 @@ static Identity gen_identity() {
 #define SBX_VARIANT_TAG "release"
 #define DBG(...) ((void)0)
 #endif
-
-
-
 
 static void apply_native(const Identity& id) {
     DBG("apply_native: enter (identity has %zu kv pairs)", id.kv.size());
@@ -426,10 +343,6 @@ static void apply_native(const Identity& id) {
     const std::string PLATFORM     = get("BOARD_PLATFORM");
     const std::string MARKETNAME   = get("MARKETNAME");
 
-    
-    
-    
-    
     std::vector<Rp> rp = {
         {"ro.serialno",                        SERIAL},
         {"ro.boot.serialno",                   SERIAL},
@@ -484,8 +397,6 @@ static void apply_native(const Identity& id) {
         {"ro.board.platform",                  PLATFORM},
         {"ro.product.marketname",              MARKETNAME},
 
-        // Attestation-ID fallbacks that software Build/keystore consistency checks
-        // read. (Hardware-backed Key Attestation is NOT affected by ro.* edits.)
         {"ro.product.brand_for_attestation",        BRAND},
         {"ro.product.name_for_attestation",         PRODUCT},
         {"ro.product.device_for_attestation",       DEVICE},
@@ -513,9 +424,6 @@ static void apply_native(const Identity& id) {
         {"ro.boot.bootloader",                 std::string("unknown")},
     };
 
-    
-    
-    
     bool have_bundled = (::access(RESETPROP, X_OK) == 0);
     {
         int applied = 0, failed = 0;
@@ -543,27 +451,7 @@ static void apply_native(const Identity& id) {
                     have_bundled ? "" : " (bundled absent + PATH fallback gagal)");
     }
 
-    
-    
-    // Per-user secure/global settings via the framework CLI. These go over
-    // binder to system_server. Hardening vs the reported failures:
-    //  - gate on sys.boot_completed so an early-boot apply doesn't race the
-    //    service publish and hit FAILED_TRANSACTION;
-    //  - target --user 0 (owner) explicitly instead of relying on
-    //    getCurrentUser() resolution — freshen/apply-boot run under
-    //    ensure_root(), and uid 0 is privileged for the user query this takes;
-    //  - retry transient failures with backoff;
-    //  - check the rc and report it instead of discarding it silently.
     std::string aid = get("ANDROID_ID");
-#<<<<<<< worktree-modernize-jni-core
-    if (!aid.empty()) {
-        run_bin("/system/bin/settings",
-                {"settings", "put", "secure", "android_id", aid.c_str()}, /*null_io=*/true);
-    }
-    if (!MODEL.empty()) {
-        run_bin("/system/bin/settings",
-                {"settings", "put", "global", "device_name", MODEL.c_str()}, /*null_io=*/true);
-#=======
     if (!aid.empty() || !MODEL.empty()) {
         wait_boot_completed(5000);
         int sok = 0, sfail = 0;
@@ -580,12 +468,8 @@ static void apply_native(const Identity& id) {
             if (rc == 0) sok++; else sfail++;
         }
         printf("  Settings put: %d ok, %d gagal\n", sok, sfail);
-#>>>>>>> main
     }
 }
-
-
-
 
 static void generate_mount_files(const Identity& id) {
     DBG("generate_mount_files: MOUNTDIR=%s", MOUNTDIR);
@@ -624,7 +508,6 @@ static void generate_mount_files(const Identity& id) {
     const std::string PLATFORM     = g("BOARD_PLATFORM");
     const std::string MARKETNAME   = g("MARKETNAME");
 
-    
     std::string base;
     base += "# begin build properties\n";
     auto add = [&](const char* k, const std::string& v) {
@@ -671,7 +554,6 @@ static void generate_mount_files(const Identity& id) {
     add("gsm.version.baseband",               RADIO);
     add("ro.build.expect.baseband",           RADIO);
 
-    
     struct { const char* dir; const char* pfx; } parts[] = {
         {"system",     "ro.product.system."},
         {"vendor",     "ro.product.vendor."},
@@ -692,10 +574,6 @@ static void generate_mount_files(const Identity& id) {
         ::chmod(path.c_str(), 0644);
     }
 
-    
-    
-    
-    
     std::string aid  = g("ANDROID_ID");
     std::string gaid = g("GOOGLE_AID");
     if (aid.empty()) aid = "0000000000000000";
@@ -720,17 +598,6 @@ static void generate_mount_files(const Identity& id) {
     ::chmod(xml_path.c_str(), 0600);
     ::chown(xml_path.c_str(), 1000, 1000);
 
-    
-    // WHY: bind-mounting an overlay build.prop makes the target path resolve to the
-    // SOURCE file, which KEEPS ITS OWN SELinux label — so each overlay file must carry
-    // the context that apps expect to read at that partition path. odm lives in the
-    // vendor SELinux world (vendor_file on the overwhelming majority of devices), NOT
-    // system_file as the old code labeled it. system/product/system_ext build.prop are
-    // system_file on stock AOSP.
-    // NOTE: partition contexts are device-specific. The robust approach is
-    //   chcon --reference=<real /<part>/build.prop> <overlay>
-    // to copy the exact live label where toybox's chcon supports --reference; the
-    // hardcoded contexts below are the portable fallback. (TODO: prefer --reference)
     struct { const char* sub; const char* ctx; } part_ctx[] = {
         {"system",     "u:object_r:system_file:s0"},
         {"vendor",     "u:object_r:vendor_file:s0"},
@@ -748,10 +615,6 @@ static void generate_mount_files(const Identity& id) {
     printf("  Mount overlay: 5 build.prop + settings_secure.xml -> %s\n", MOUNTDIR);
 }
 
-
-
-
-
 static int wipe_target_data() {
     auto pkgs = load_targets();
     if (pkgs.empty()) return 0;
@@ -759,14 +622,7 @@ static int wipe_target_data() {
 
     int fail = 0;
     for (const auto& pkg : pkgs) {
-#<<<<<<< worktree-modernize-jni-core
-        run_bin("/system/bin/pm", {"pm", "clear", pkg.c_str()}, /*null_io=*/true);
-        run_bin("/system/bin/am", {"am", "force-stop", pkg.c_str()}, /*null_io=*/true);
-#=======
-        // Documented platform primitives (see CREDITS.md):
-        //   1) am force-stop — force-stop everything associated with the package
-        //   2) pm clear      — delete all data associated with the package
-        //      (installd recreates the data dir with the correct SELinux label).
+
         run_framework("/system/bin/am",
                 {"am", "force-stop", "--user", "0", pkg.c_str()},
                 "am force-stop " + pkg);
@@ -777,33 +633,22 @@ static int wipe_target_data() {
             fail++;
             fprintf(stderr, "! %s: pm clear gagal (rc=%d)\n", pkg.c_str(), rc_clear);
         }
-#>>>>>>> main
     }
     return fail;
 }
-
-
-
 
 static int cmd_targets() {
     auto pkgs = load_targets();
     struct stat st{};
     bool have_file = (::stat(TARGET_FILE, &st) == 0);
-    // WHY: the module ships idle with an EMPTY target.txt and has no built-in target
-    // list — a missing file simply means "no targets configured", not a silent default.
-    // The old "(using built-in defaults)" text implied phantom defaults that don't exist.
+
     printf("target.txt : %s%s\n",
            TARGET_FILE,
-#<<<<<<< worktree-modernize-jni-core
            have_file ? "" : "  (missing — no targets configured; module idle)");
-#=======
-           have_file ? "" : "  (missing — no apps targeted)");
-#>>>>>>> main
     printf("count      : %zu\n\n", pkgs.size());
     for (const auto& p : pkgs) printf("  %s\n", p.c_str());
     return 0;
 }
-
 
 static Identity load_identity() {
     Identity id;
@@ -822,7 +667,6 @@ static Identity load_identity() {
     return id;
 }
 
-
 static bool ensure_root() {
     if (geteuid() != 0) {
         fprintf(stderr, "! sandboxid must run as root. Use: su -c sandboxid <cmd>\n");
@@ -830,7 +674,6 @@ static bool ensure_root() {
     }
     return true;
 }
-
 
 static int cmd_freshen() {
     DBG("cmd_freshen: build=%s", SBX_VARIANT_TAG);
@@ -877,7 +720,6 @@ static int cmd_freshen() {
     return 0;
 }
 
-
 static int cmd_status() {
     std::string d = read_file(IDENTITY_FILE);
     if (d.empty()) {
@@ -887,7 +729,6 @@ static int cmd_status() {
     fputs(d.c_str(), stdout);
     return 0;
 }
-
 
 static int cmd_apply_boot() {
     if (!ensure_root()) return 1;
@@ -901,7 +742,6 @@ static int cmd_apply_boot() {
     printf("OK: native prop re-applied + mount overlay refreshed\n");
     return 0;
 }
-
 
 static int cmd_seed() {
     if (!ensure_root()) return 1;
@@ -923,7 +763,6 @@ static int cmd_seed() {
     return 0;
 }
 
-
 static int cmd_lock() {
     if (!ensure_root()) return 1;
     atomic_write(MODE_FILE, "locked\n");
@@ -931,14 +770,12 @@ static int cmd_lock() {
     return 0;
 }
 
-
 static int cmd_unlock() {
     if (!ensure_root()) return 1;
     atomic_write(MODE_FILE, "fresh\n");
     printf("OK: unlocked\n");
     return 0;
 }
-
 
 static int cmd_rollback() {
     if (!ensure_root()) return 1;
@@ -955,7 +792,6 @@ static int cmd_rollback() {
     printf("OK: rolled back + wiped\n");
     return 0;
 }
-
 
 static void usage(const char* p) {
     fprintf(stderr,

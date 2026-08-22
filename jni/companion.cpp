@@ -1,9 +1,6 @@
 
-
-
-
 #ifndef _GNU_SOURCE
-#define _GNU_SOURCE 1   
+#define _GNU_SOURCE 1
 #endif
 #include <unistd.h>
 #include <fcntl.h>
@@ -34,8 +31,7 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-// WHY: LOGD now maps to the real ANDROID_LOG_DEBUG priority (was ANDROID_LOG_INFO), so
-// debug traces are filterable as DEBUG and don't inflate the INFO stream in logcat.
+
 #ifdef SBX_DEBUG
 #define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
 #define SBX_VARIANT_TAG "debug"
@@ -44,18 +40,13 @@
 #define SBX_VARIANT_TAG "release"
 #endif
 
-
 static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
-
-
-
 
 static void watch_target_death(uint32_t pid, int client_fd);
 
 static std::vector<std::string> g_targets;
 static time_t                   g_targets_mtime = 0;
 static std::recursive_mutex     g_targets_mtx;
-
 
 static void reload_targets_if_changed() {
     std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
@@ -81,8 +72,7 @@ static void reload_targets_if_changed() {
         next.push_back(line);
     }
     if (next.empty()) {
-        // WHY WARN not ERROR: an empty target.txt is the module's NORMAL shipped-idle
-        // state, not a fault. Keep any previously loaded list and carry on.
+
         LOGW("target.txt has 0 valid entries; keeping previous list (%zu pkgs)", g_targets.size());
         g_targets_mtime = st.st_mtime;
         return;
@@ -95,7 +85,6 @@ static void reload_targets_if_changed() {
 #endif
 }
 
-
 static bool is_target(const std::string& pkg) {
     if (pkg.empty()) return false;
     std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
@@ -103,7 +92,6 @@ static bool is_target(const std::string& pkg) {
     for (const auto& t : g_targets) if (t == pkg) return true;
     return false;
 }
-
 
 static std::string read_file(const char* p) {
     std::ifstream f(p);
@@ -113,9 +101,6 @@ static std::string read_file(const char* p) {
     return ss.str();
 }
 
-
-
-
 struct MountResult {
     uint32_t ok = 0, fail = 0, skip = 0, skip_src = 0, skip_dst = 0;
     int32_t  ns_open_errno   = 0;
@@ -124,8 +109,6 @@ struct MountResult {
     int32_t  first_fail_idx  = -1;
     int32_t  first_fail_errno= 0;
 };
-
-
 
 static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
     int pipefd[2];
@@ -142,18 +125,16 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
     }
 
     if (child == 0) {
-        
+
         ::close(pipefd[0]);
         MountResult r;
 
-        
         std::array<int, sandboxid::BIND_ENTRIES_N> src_fds{};
         for (size_t i = 0; i < sandboxid::BIND_ENTRIES_N; ++i) {
             std::string src = std::string(sandboxid::MOUNTDIR) + "/" + sandboxid::BIND_ENTRIES[i].src_rel;
             src_fds[i] = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
         }
 
-        
         char path[64];
         ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
         int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
@@ -163,20 +144,16 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
             r.setns_errno = errno;
             ::close(tgt_ns);
         } else {
-            
+
             bool propagation_isolated =
                 (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) == 0);
             if (!propagation_isolated) r.slave_errno = errno;
 
-            // #7a fail-closed: only bind when the target root is MS_SLAVE. If MS_SLAVE
-            // failed the namespace still has shared propagation, so a per-app bind
-            // could leak back out device-wide -- skip every bind rather than risk it.
             for (size_t i = 0; propagation_isolated && i < sandboxid::BIND_ENTRIES_N; ++i) {
                 const auto& e = sandboxid::BIND_ENTRIES[i];
                 if (src_fds[i] < 0) { r.skip_src++; r.skip++; continue; }
                 if (::access(e.dst, F_OK) != 0) { r.skip_dst++; r.skip++; continue; }
 
-                
                 char proc_fd_path[32];
                 ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
                 if (::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr) == 0) {
@@ -189,17 +166,14 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
             ::close(tgt_ns);
         }
 
-        
         for (size_t i = 0; i < sandboxid::BIND_ENTRIES_N; ++i)
             if (src_fds[i] >= 0) ::close(src_fds[i]);
 
-        
         sandboxid::write_full(pipefd[1], &r, sizeof(r));
         ::close(pipefd[1]);
         ::_exit(0);
     }
 
-    
     ::close(pipefd[1]);
     MountResult r;
     bool got = sandboxid::read_full(pipefd[0], &r, sizeof(r));
@@ -221,8 +195,7 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
         return 0;
     }
     if (r.slave_errno) {
-        // WHY WARN: non-fatal — the bind mounts still proceed. But flag loudly, because
-        // without MS_SLAVE the mounts could propagate back through shared subtrees (leak).
+
         LOGW("mount pid=%u: MS_SLAVE gagal errno=%d — bind mount bisa bocor via propagasi!",
              target_pid, r.slave_errno);
     }
@@ -234,36 +207,26 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
     LOGI("mount pid=%u: %u ok, %u fail, %u skip (skip_src=%u skip_dst=%u) [%s]",
          target_pid, r.ok, r.fail, r.skip, r.skip_src, r.skip_dst, SBX_VARIANT_TAG);
 
-    
     watch_target_death(target_pid, client);
 
     return r.ok;
 }
 
-
-
-
-
-
 static void watch_target_death(uint32_t pid, int client_fd) {
     pid_t f1 = ::fork();
     if (f1 < 0) return;
     if (f1 > 0) {
-        // Double-fork: reap the intermediate child so it does not linger as a
-        // zombie. The companion is a single long-lived root daemon; without this
-        // one zombie would accumulate per target-app launch until reboot.
+
         ::waitpid(f1, nullptr, 0);
         return;
     }
 
-
     if (::fork() > 0) ::_exit(0);
 
-    
     ::close(client_fd);
 
     struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (int i = 0; i < 3600; ++i) {  
+    for (int i = 0; i < 3600; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (::kill((pid_t)pid, 0) == 0) continue;
         if (errno != ESRCH) continue;
@@ -275,10 +238,6 @@ static void watch_target_death(uint32_t pid, int client_fd) {
     LOGD("death watcher for pid=%u timed out after 30min", pid);
     ::_exit(0);
 }
-
-
-
-
 
 static bool try_seed_ondemand() {
     std::string bin = std::string(sandboxid::MODDIR) + "/bin/sandboxid";
@@ -301,18 +260,12 @@ static bool try_seed_ondemand() {
     return (WIFEXITED(st) && WEXITSTATUS(st) == 0);
 }
 
-
-
-
 extern "C" void sandboxid_companion(int client) {
     LOGD("companion invoked: client=%d pid=%d [%s]", client, getpid(), SBX_VARIANT_TAG);
 
-    
     ::setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
     ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
 
-    
-    
     struct ucred peer{};
     socklen_t peer_len = sizeof(peer);
     bool have_peer = (::getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) == 0
@@ -345,7 +298,7 @@ extern "C" void sandboxid_companion(int client) {
 
             std::string d = read_file(sandboxid::IDENTITY_FILE);
             if (d.empty()) {
-                
+
                 for (int attempt = 0; attempt < 3 && d.empty(); ++attempt) {
                     if (attempt > 0)
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -370,34 +323,13 @@ extern "C" void sandboxid_companion(int client) {
                 sandboxid::write_full(client, &z, sizeof(z));
                 break;
             }
-            
-            
-            
-#<<<<<<< worktree-modernize-jni-core
-            // NOTE — SO_PEERCRED authorization here is BOUNDED, not a strong guard:
-            // peer creds are captured once at connect time (during the client's
-            // preAppSpecialize), when it still runs as zygote => uid 0. This guard thus
-            // short-circuits on peer.uid==0, so the pid-binding below effectively never
-            // fires for real app clients. The true boundary is the Magisk companion
-            // socket's SELinux domain (untrusted_app cannot reach it); pid-based auth
-            // would also be race/reuse-prone. Kept as belt-and-braces for a hypothetical
-            // non-root client.
-            if (have_peer && peer.uid != 0 && (pid_t)pid != peer.pid) {
-                LOGW("DO_MOUNTS DITOLAK: target pid=%u != peer pid=%d (uid=%d) [SO_PEERCRED]",
-                     pid, peer.pid, peer.uid);
-#=======
-            // DO_MOUNTS authorization (defense-in-depth). SO_PEERCRED freezes the
-            // caller's credentials at connect(); legitimate Zygisk clients connect in
-            // preAppSpecialize while still uid 0, so the peer MUST be root and MUST be
-            // requesting mounts for its own pid. Fail closed: if SO_PEERCRED was
-            // unavailable we cannot authorize, so we reject rather than fall open.
+
             bool authorized = have_peer && peer.uid == 0 && (pid_t)pid == peer.pid;
             if (!authorized) {
                 LOGE("DO_MOUNTS DITOLAK: have_peer=%d peer.uid=%d peer.pid=%d target pid=%u "
                      "[SO_PEERCRED fail-closed]",
                      (int)have_peer, have_peer ? peer.uid : -1,
                      have_peer ? peer.pid : -1, pid);
-#>>>>>>> main
                 uint32_t z = 0;
                 sandboxid::write_full(client, &z, sizeof(z));
                 break;

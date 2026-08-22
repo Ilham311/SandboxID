@@ -1,9 +1,4 @@
 
-
-
-
-
-
 #include <jni.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -33,8 +28,6 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// WHY: LOGD now maps to the real ANDROID_LOG_DEBUG priority (was ANDROID_LOG_INFO),
-// so debug traces are filterable as DEBUG and don't masquerade as INFO in logcat.
 #ifdef SBX_DEBUG
 #define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
 #define SBX_VARIANT_TAG "debug"
@@ -47,17 +40,9 @@ using zygisk::Api;
 using zygisk::AppSpecializeArgs;
 using zygisk::ServerSpecializeArgs;
 
-
-
-
 static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 
-
-
-
-
 static std::map<std::string, std::string> g_id;
-
 
 static const std::string& val(const std::string& k) {
     static const std::string empty;
@@ -75,12 +60,7 @@ static const std::string& val(const std::string& k) {
     return empty;
 }
 
-
-
-
-
 static jstring (*orig_native_get)(JNIEnv*, jclass, jstring, jstring) = nullptr;
-
 
 static const std::map<std::string, std::string>& prop_to_identity_map() {
     static const std::map<std::string, std::string> m = {
@@ -130,11 +110,6 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.build.tags",                   "TAGS"},
         {"ro.build.type",                   "TYPE"},
 
-        // WHY (L2 parity / defense-in-depth): mirror what the resetprop layer (L1) and
-        // the build.prop bind-mount write, so an app reading these in-process via
-        // SystemProperties.get() sees the same persona. Modern Build.* read the BARE
-        // ro.product.* (mapped above); the per-partition variants + extra fingerprints
-        // below are what fingerprint/attestation-style checks read directly.
         {"ro.build.product",                     "DEVICE"},
         {"ro.build.version.release_or_codename", "RELEASE"},
         {"ro.vendor.build.security_patch",       "SECURITY_PATCH"},
@@ -180,17 +155,13 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
 
 static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
-    // WHY: GetStringUTFChars returns non-null on success and can only fail (return null)
-    // by throwing OOM. Check/clear ONLY on the null path — the old unconditional
-    // ExceptionCheck ran on every hot-path call for no benefit. On failure, clear the
-    // pending exception (so subsequent JNI calls stay valid) and fall back to default.
+
     const char* raw = env->GetStringUTFChars(j_key, nullptr);
     if (!raw) { if (env->ExceptionCheck()) env->ExceptionClear(); return j_def; }
     std::string k(raw);
     env->ReleaseStringUTFChars(j_key, raw);
     LOGD("L2 native_get('%s')", k.c_str());
 
-    
     const auto& map = prop_to_identity_map();
     auto it = map.find(k);
     if (it != map.end()) {
@@ -200,21 +171,20 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
             return env->NewStringUTF(v.c_str());
         }
     }
-    
+
     for (size_t i = 0; i < sandboxid::STATIC_PROP_DEFAULTS_N; ++i) {
         if (k == sandboxid::STATIC_PROP_DEFAULTS[i].k) {
             LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), sandboxid::STATIC_PROP_DEFAULTS[i].v);
             return env->NewStringUTF(sandboxid::STATIC_PROP_DEFAULTS[i].v);
         }
     }
-    
+
     if (orig_native_get) return orig_native_get(env, clazz, j_key, j_def);
-    
+
     char buf[PROP_VALUE_MAX] = {0};
     if (__system_property_get(k.c_str(), buf) > 0) return env->NewStringUTF(buf);
     return j_def;
 }
-
 
 static void install_prop_hook(Api* api, JNIEnv* env) {
     JNINativeMethod m = {
@@ -234,13 +204,6 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
         LOGE("L2 native_get hook did not bind (method missing?)");
 }
 
-
-
-
-// L7 numeric-prop hooks (int/long/bool). Compiled in ALL variants: the
-// getInt/getLong/getBoolean natives are separate from native_get(String,String),
-// so without these the numeric SystemProperties getters would leak real device
-// values in release builds. (Only the per-key LOGD tracing is debug-only.)
 static jint     (*orig_get_int)(JNIEnv*, jclass, jstring, jint)     = nullptr;
 static jlong    (*orig_get_long)(JNIEnv*, jclass, jstring, jlong)   = nullptr;
 static jboolean (*orig_get_bool)(JNIEnv*, jclass, jstring, jboolean)= nullptr;
@@ -289,7 +252,6 @@ static const std::map<std::string, jlong>& sbx_long_spoof() {
     return m;
 }
 
-
 static bool sbx_should_suppress_key(const std::string& k) {
     if (k.size() >= 11 + 5 &&
         k.compare(0, 11, "log.looper.") == 0 &&
@@ -337,7 +299,6 @@ static jboolean hook_prop_get_bool(JNIEnv* env, jclass clazz, jstring j_key, jbo
     return orig_get_bool ? orig_get_bool(env, clazz, j_key, def) : def;
 }
 
-
 static void install_leak_sensors(Api* api, JNIEnv* env) {
     JNINativeMethod m[3] = {
         {const_cast<char*>("native_get_int"),
@@ -361,10 +322,6 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
 
-
-
-
-
 struct SbxCrashRec {
     uint32_t magic;
     int32_t  sig;
@@ -384,7 +341,6 @@ static struct sigaction g_prev_sig[NSIG];
 static volatile sig_atomic_t g_crash_count[NSIG] = {0};
 static const int   CRASH_LIMIT = 3;
 
-
 static int64_t sbx_now_ms() {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
@@ -402,7 +358,6 @@ static const char* sbx_sig_name(int sig) {
     }
 }
 
-
 static void sbx_crash_drain_loop() {
     SbxCrashRec rec;
     while (sandboxid::read_full(g_crash_pipe[0], &rec, sizeof(rec))) {
@@ -413,24 +368,16 @@ static void sbx_crash_drain_loop() {
     }
 }
 
-
-
 static void sbx_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
     if (sig >= 0 && sig < NSIG) {
-        
-        
-        
+
         n = g_crash_count[sig] + 1;
         g_crash_count[sig] = n;
     }
 
     if (n <= CRASH_LIMIT && g_crash_pipe[1] >= 0) {
-        // WHY: save/restore errno — a signal can interrupt code mid-syscall, and our
-        // ::write here would otherwise clobber the interrupted frame's errno on return.
-        // clock_gettime and write are async-signal-safe (signal-safety(7)); the old
-        // sched_yield() was NOT on that safe list AND did nothing useful here (the drain
-        // thread reads the pipe asynchronously), so it is removed.
+
         int saved_errno = errno;
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
         SbxCrashRec rec;
@@ -447,7 +394,6 @@ static void sbx_signal_handler(int sig, siginfo_t* info, void* ctx) {
         errno = saved_errno;
     }
 
-    
     if (sig >= 0 && sig < NSIG) {
         struct sigaction* p = &g_prev_sig[sig];
         if ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction) {
@@ -456,14 +402,12 @@ static void sbx_signal_handler(int sig, siginfo_t* info, void* ctx) {
                    p->sa_handler != SIG_DFL && p->sa_handler != SIG_IGN) {
             p->sa_handler(sig);
         } else {
-            
+
             signal(sig, SIG_DFL);
             raise(sig);
         }
     }
 }
-
-
 
 static void install_crash_watchdog(const std::string& pkg) {
     static bool armed = false;
@@ -483,10 +427,7 @@ static void install_crash_watchdog(const std::string& pkg) {
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
-    // WHY: no sigaltstack() is installed here (we don't own the app's alternate stack),
-    // so SA_ONSTACK was a misleading no-op — dropped. We chain ABRT/FPE/ILL (not the
-    // stack-overflow-prone SEGV/BUS), so running the tiny handler on the normal stack is
-    // fine; installing a bespoke alt stack would add setup cost for no real benefit.
+
     sa.sa_flags     = SA_SIGINFO;
     sa.sa_sigaction = sbx_signal_handler;
     sigemptyset(&sa.sa_mask);
@@ -499,10 +440,6 @@ static void install_crash_watchdog(const std::string& pkg) {
     armed = true;
     LOGD("crash watchdog armed for %s (ABRT/FPE/ILL, limit=%d)", pkg.c_str(), CRASH_LIMIT);
 }
-
-
-
-
 
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
@@ -522,15 +459,10 @@ static void set_int(JNIEnv* env, jclass c, const char* f, int v) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
-
 static void install_build_hook(JNIEnv* env) {
     jclass build = env->FindClass("android/os/Build");
     if (build && !env->ExceptionCheck()) {
-        // WHY: Build.SERIAL is intentionally OMITTED here. On modern AOSP (API 26+) an
-        // app without READ_PHONE_STATE reads Build.SERIAL as the literal "unknown" — it
-        // does NOT reflect ro.serialno. Spoofing it to random hex is therefore LESS
-        // realistic than leaving it "unknown"; ro.serialno/ro.boot.serialno are still set
-        // natively (L1) for the (privileged) paths that actually read them.
+
         static const std::pair<const char*, const char*> f[] = {
             {"BRAND","BRAND"}, {"MANUFACTURER","MANUFACTURER"},
             {"MODEL","MODEL"}, {"DEVICE","DEVICE"}, {"PRODUCT","PRODUCT"},
@@ -547,7 +479,7 @@ static void install_build_hook(JNIEnv* env) {
     jclass ver = env->FindClass("android/os/Build$VERSION");
     if (ver && !env->ExceptionCheck()) {
         set_str(env, ver, "RELEASE",        val("RELEASE"));
-        
+
         set_str(env, ver, "CODENAME",       std::string("REL"));
         set_str(env, ver, "INCREMENTAL",    val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", val("SECURITY_PATCH"));
@@ -560,16 +492,11 @@ static void install_build_hook(JNIEnv* env) {
     } else env->ExceptionClear();
 }
 
-
-
-
-
 static void request_companion_mounts(int fd) {
     uint8_t cmd  = sandboxid::CMD_DO_MOUNTS;
     uint32_t pid = (uint32_t)::getpid();
     if (!sandboxid::write_full(fd, &cmd, 1) || !sandboxid::write_full(fd, &pid, sizeof(pid))) {
-        // WHY WARN not ERROR: recoverable — the app still runs with L1/L2 spoofing, only
-        // the build.prop bind-mount overlay is lost (often the exemptFd-false case above).
+
         LOGW("companion DO_MOUNTS write failed (socket unusable post-specialize?)");
         return;
     }
@@ -577,9 +504,6 @@ static void request_companion_mounts(int fd) {
     if (!sandboxid::read_full(fd, &ok, sizeof(ok))) { LOGW("companion mount ack failed"); return; }
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
-
-
-
 
 class SandboxID : public zygisk::ModuleBase {
 public:
@@ -603,14 +527,9 @@ public:
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { unload(); return; }
 
-        
         ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
 
-        // WHY: exemptFd tells zygote NOT to close this socket during the specialize fd
-        // sweep — it is exactly what lets us reuse comp_fd_ in postAppSpecialize. A false
-        // return means zygote WILL close it, so the later DO_MOUNTS would silently fail;
-        // surface that here as a distinct, actionable warning rather than a generic EBADF.
         if (!api_->exemptFd(fd))
             LOGW("exemptFd(fd=%d) returned false — companion socket may be closed by "
                  "zygote; bind-mount step will be skipped for this process", fd);
@@ -638,9 +557,7 @@ public:
         active_  = true;
         pkg_     = pkg;
         comp_fd_ = fd;
-        // WHY: do NOT emit the target package name at INFO in release — logcat is readable
-        // by other on-device tooling and the name reveals which apps the user configured
-        // (privacy). Keep a neutral INFO breadcrumb; the package name stays DEBUG-only.
+
         LOGI("target active (%u B) [%s]", len, SBX_VARIANT_TAG);
         LOGD("target pkg='%s'", pkg.c_str());
     }
@@ -668,12 +585,6 @@ public:
         }
 #endif
 
-        // WHY (do NOT move to preAppSpecialize): the app's PRIVATE mount namespace only
-        // exists AFTER zygote's unshare(CLONE_NEWNS) during specialization. Requesting the
-        // bind-mounts here (post) makes the companion setns() into THIS app's namespace;
-        // issued from pre it would land in the still-shared zygote ns and either leak to
-        // every process or be undone. The socket was opened in pre (connectCompanion is
-        // pre-only under SELinux) and kept alive across specialize via exemptFd.
         if (comp_fd_ >= 0) {
             request_companion_mounts(comp_fd_);
             ::close(comp_fd_);
@@ -691,11 +602,10 @@ private:
     int comp_fd_ = -1;
     std::vector<uint8_t> blob_;
 
-    
     void unload() {
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
-    
+
     void parse_blob() {
         std::string s(blob_.begin(), blob_.end());
         std::istringstream iss(s);
