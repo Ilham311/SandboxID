@@ -212,6 +212,32 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
     return r.ok;
 }
 
+// Reads the process starttime token (field 22) from /proc/<pid>/stat. Used to
+// detect PID reuse: if the kernel recycles a pid while we are polling for its
+// mount-namespace change, the starttime will differ from the one observed
+// when we first learned about the pid, so we can bail out instead of mounting
+// into an unrelated process. Returns empty string on failure.
+static std::string read_pid_starttime(uint32_t pid) {
+    char path[64];
+    ::snprintf(path, sizeof(path), "/proc/%u/stat", pid);
+    std::ifstream f(path);
+    if (!f) return std::string();
+    std::string line;
+    if (!std::getline(f, line)) return std::string();
+    size_t close_paren = line.rfind(')');
+    if (close_paren == std::string::npos) return std::string();
+    std::istringstream iss(line.substr(close_paren + 1));
+    std::string state;
+    iss >> state; // field 3
+    for (int field = 4; field < 22; ++field) {
+        std::string tmp;
+        if (!(iss >> tmp)) return std::string();
+    }
+    std::string starttime;
+    iss >> starttime; // field 22
+    return starttime;
+}
+
 static void watch_target_death(uint32_t pid, int client_fd) {
     pid_t f1 = ::fork();
     if (f1 < 0) return;
@@ -253,7 +279,11 @@ static void defer_mounts_watcher(uint32_t pid, uint64_t baseline_ns, int client)
     if (f1 < 0) { LOGE("defer watcher fork failed errno=%d", errno); return; }
     if (f1 > 0) { ::waitpid(f1, nullptr, 0); return; }
 
-    if (::fork() > 0) ::_exit(0);
+    // Intermediate child: always exit so it never blocks the handler, whether
+    // the second fork succeeds, fails, or produces the parent. Only the
+    // grandchild (f2 == 0) falls through to run the watcher detached.
+    pid_t f2 = ::fork();
+    if (f2 != 0) ::_exit(0);  // parent (or fork-fail) exits; only grandchild continues
 
     // Detached grandchild: it inherited a dup of the client socket across fork()
     // but never uses it. Close it so the lingering watcher does not keep the
@@ -265,6 +295,13 @@ static void defer_mounts_watcher(uint32_t pid, uint64_t baseline_ns, int client)
         LOGW("defer mount pid=%u: no ns baseline; skipping (would risk shared-ns leak)", pid);
         ::_exit(0);
     }
+
+    // Capture the target's starttime now, before polling begins, so we can
+    // detect PID reuse below: over the ~8s poll ceiling the original process
+    // may die and the kernel may recycle its pid for an unrelated process,
+    // which could otherwise pass the ns-inode check spuriously and cause us
+    // to bind-mount into the wrong process.
+    std::string starttime0 = read_pid_starttime(pid);
 
     char path[64];
     ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", pid);
@@ -287,6 +324,16 @@ static void defer_mounts_watcher(uint32_t pid, uint64_t baseline_ns, int client)
     if (!ready) {
         LOGW("defer mount pid=%u: mnt ns unchanged after ~%ldms; skipping bind-mount",
              pid, (POLL_NS / 1000000L) * MAX_TRIES);
+        ::_exit(0);
+    }
+
+    // Re-verify identity right before mounting: if the pid was reused by a
+    // different process while we polled, its starttime will no longer match
+    // (or will be unreadable because it already exited too). Bail out rather
+    // than risk mounting into the wrong process's namespace.
+    std::string starttime1 = read_pid_starttime(pid);
+    if (starttime0.empty() || starttime1.empty() || starttime0 != starttime1) {
+        LOGW("defer mount pid=%u: pid reuse detected (starttime mismatch); skipping bind-mount", pid);
         ::_exit(0);
     }
 
