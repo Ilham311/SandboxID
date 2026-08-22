@@ -103,6 +103,8 @@ _fw_run() {
 settings_put() {
     scope="$1"; key="$2"; val="$3"
     command -v settings >/dev/null 2>&1 || return 1
+    # `settings put <namespace> <key> <value>` — documented platform command
+    # (Android `adb shell settings`). --user goes after the verb. See CREDITS.md.
     _fw_run settings put --user 0 "$scope" "$key" "$val"
 }
 
@@ -128,10 +130,17 @@ rp_set() {
     setprop "$key" "$val" 2>/dev/null
 }
 
+# Force-stop a package. `am force-stop <pkg>` is the documented primitive that
+# stops every process associated with the package; `killall <pkg>` is a
+# best-effort sweep for the main process, a technique referenced from
+# PlayIntegrityFork's killpi.sh (osm0sis, GPL-3.0). See CREDITS.md.
 force_stop() {
     pkg="$1"
     command -v am >/dev/null 2>&1 || return 1
     _fw_run am force-stop --user 0 "$pkg"
+    _rc=$?
+    command -v killall >/dev/null 2>&1 && killall "$pkg" 2>/dev/null
+    return "$_rc"
 }
 
 identity_get() {

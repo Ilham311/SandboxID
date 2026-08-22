@@ -174,6 +174,16 @@ static int run_framework(const char* path, std::vector<const char*> argv,
 }
 
 
+// ---------------------------------------------------------------------------
+// App stop + data wipe use the documented platform primitives only:
+//   `am force-stop <pkg>`  — "force-stop everything associated with <package>"
+//   `pm clear <pkg>`       — "delete all data associated with a package"
+// (Android Platform Tools / `adb shell` command reference; see CREDITS.md).
+// Both are driven through run_framework() for a light transient-failure retry
+// and rc reporting. No SELinux toggling and no manual /proc kill or rm -rf of
+// data dirs — those primitives already do the right thing under root, and the
+// extra machinery only obscured real failures. See CREDITS.md for sources.
+// ---------------------------------------------------------------------------
 
 
 struct Identity {
@@ -682,14 +692,23 @@ static int wipe_target_data() {
     auto pkgs = load_targets();
     if (pkgs.empty()) return 0;
     wait_boot_completed(5000);
+
     int fail = 0;
     for (const auto& pkg : pkgs) {
-        if (run_framework("/system/bin/pm",
-                {"pm", "clear", "--user", "0", pkg.c_str()},
-                "pm clear " + pkg) != 0) fail++;
-        if (run_framework("/system/bin/am",
+        // Documented platform primitives (see CREDITS.md):
+        //   1) am force-stop — force-stop everything associated with the package
+        //   2) pm clear      — delete all data associated with the package
+        //      (installd recreates the data dir with the correct SELinux label).
+        run_framework("/system/bin/am",
                 {"am", "force-stop", "--user", "0", pkg.c_str()},
-                "am force-stop " + pkg) != 0) fail++;
+                "am force-stop " + pkg);
+        int rc_clear = run_framework("/system/bin/pm",
+                {"pm", "clear", "--user", "0", pkg.c_str()},
+                "pm clear " + pkg);
+        if (rc_clear != 0) {
+            fail++;
+            fprintf(stderr, "! %s: pm clear gagal (rc=%d)\n", pkg.c_str(), rc_clear);
+        }
     }
     return fail;
 }
