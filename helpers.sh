@@ -103,7 +103,14 @@ _fw_run() {
 settings_put() {
     scope="$1"; key="$2"; val="$3"
     command -v settings >/dev/null 2>&1 || return 1
+    # Permissive for the binder_call to system_server (mirrors the native path):
+    # a persistent FAILED_TRANSACTION is usually an SELinux binder_call denial,
+    # which retrying alone cannot clear.
+    se_permissive
     _fw_run settings put --user 0 "$scope" "$key" "$val"
+    _rc=$?
+    se_restore
+    return "$_rc"
 }
 
 rp_set() {
@@ -120,10 +127,30 @@ rp_set() {
     setprop "$key" "$val" 2>/dev/null
 }
 
+# Non-binder force-stop: SIGKILL every process whose cmdline names $pkg (either
+# "pkg" or a "pkg:subproc" child). Fallback for when `am` cannot reach binder.
+kill_pkg() {
+    _kp="$1"
+    for _pp in /proc/[0-9]*; do
+        [ -r "$_pp/cmdline" ] || continue
+        _proc=$(tr '\0' '\n' < "$_pp/cmdline" 2>/dev/null | head -n1)
+        case "$_proc" in
+            "$_kp"|"$_kp":*) kill -9 "${_pp#/proc/}" 2>/dev/null || true ;;
+        esac
+    done
+    return 0
+}
+
 force_stop() {
     pkg="$1"
-    command -v am >/dev/null 2>&1 || return 1
-    _fw_run am force-stop --user 0 "$pkg"
+    se_permissive
+    if command -v am >/dev/null 2>&1; then
+        _fw_run am force-stop --user 0 "$pkg"
+        am kill --user 0 "$pkg" 2>/dev/null || true
+    fi
+    kill_pkg "$pkg"          # sweep survivors / cover binder being unreachable
+    se_restore
+    return 0
 }
 
 identity_get() {
