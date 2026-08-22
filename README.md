@@ -312,6 +312,18 @@ detector still sees:
   with no bind-mount overlay — so its `Build.*` and file-based props can disagree.
   Only listed target apps get a fully consistent persona.
 
+- **Bind-mount delivery differs by Zygisk provider.** The socket that triggers the
+  per-app bind-mount is opened in `preAppSpecialize` and must reach the app's
+  post-specialize mount namespace. On Magisk, `Api::exemptFd()` keeps it alive and
+  the mount is applied inline. On providers whose `exemptFd()` returns `false` on
+  the USAP / `nativeSpecializeAppProcess` path (some KernelSU stacks — ReZygisk,
+  Zygisk Next, NeoZygisk), the module falls back to a companion-side watcher that
+  applies the mount right after the app unshares its namespace. That fallback lands
+  a few milliseconds into process start rather than strictly before it, and the
+  in-process `Build.*` / `SystemProperties` hooks cover that brief window; if a
+  provider never unshares a given process, the bind-mount is safely skipped (never
+  applied to zygote's shared namespace).
+
 SandboxID changes only identity strings. It does not modify hardware, the
 framework boot path, or kernel state in ways that risk boot failure.
 

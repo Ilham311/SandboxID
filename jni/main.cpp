@@ -11,6 +11,7 @@
 #include <sys/system_properties.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <android/log.h>
 #include <string>
 #include <map>
@@ -505,6 +506,43 @@ static void request_companion_mounts(int fd) {
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
+// Inode of our current mount namespace. Read in preAppSpecialize, i.e. BEFORE
+// zygote's SpecializeCommon runs unshare(CLONE_NEWNS), so it is the shared
+// zygote namespace. The companion later waits for /proc/<pid>/ns/mnt to move
+// off this value to know the app has its own (private) namespace. Returns 0 on
+// failure (caller must then NOT request a deferred mount).
+static uint64_t sbx_mnt_ns_id() {
+    struct stat st;
+    if (::stat("/proc/self/ns/mnt", &st) != 0) return 0;
+    return (uint64_t)st.st_ino;
+}
+
+// Fallback used when exemptFd() is unavailable: the post-specialize socket
+// would be closed by zygote, so instead of CMD_DO_MOUNTS in postAppSpecialize
+// we ask the companion (over the still-open pre-specialize socket) to defer the
+// bind-mount until the app has unshared its mount namespace. This carries no fd
+// across the pre->post boundary, so it does not depend on exemptFd at all.
+static bool request_deferred_mounts(int fd, uint32_t pid, uint64_t ns_id) {
+    uint8_t  cmd = sandboxid::CMD_DEFER_MOUNTS;
+    if (!sandboxid::write_full(fd, &cmd, 1) ||
+        !sandboxid::write_full(fd, &pid, sizeof(pid)) ||
+        !sandboxid::write_full(fd, &ns_id, sizeof(ns_id))) {
+        LOGW("companion DEFER_MOUNTS write failed");
+        return false;
+    }
+    uint32_t ack = 0;
+    if (!sandboxid::read_full(fd, &ack, sizeof(ack))) {
+        LOGW("companion DEFER_MOUNTS ack failed");
+        return false;
+    }
+    if (ack == 1)
+        LOGI("deferred bind-mount scheduled via companion (pid=%u ns=%llu)",
+             pid, (unsigned long long)ns_id);
+    else
+        LOGW("companion refused deferred bind-mount (pid=%u)", pid);
+    return ack == 1;
+}
+
 class SandboxID : public zygisk::ModuleBase {
 public:
     void onLoad(Api* api, JNIEnv* env) override {
@@ -530,10 +568,6 @@ public:
         ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
 
-        if (!api_->exemptFd(fd))
-            LOGW("exemptFd(fd=%d) returned false — companion socket may be closed by "
-                 "zygote; bind-mount step will be skipped for this process", fd);
-
         uint8_t cmd   = sandboxid::CMD_GET_IDENTITY;
         uint16_t plen = (uint16_t)pkg.size();
         if (!sandboxid::write_full(fd, &cmd, 1) ||
@@ -554,9 +588,37 @@ public:
         blob_.resize(len);
         if (!sandboxid::read_full(fd, blob_.data(), len)) { ::close(fd); unload(); return; }
 
-        active_  = true;
-        pkg_     = pkg;
-        comp_fd_ = fd;
+        // Confirmed target. The Java-layer hooks (Build.*/SystemProperties) are
+        // installed in postAppSpecialize regardless of how the bind-mount is
+        // delivered, so mark active before choosing the mount transport.
+        active_ = true;
+        pkg_    = pkg;
+
+        // exemptFd() is now called ONLY for real targets, so idle/non-target
+        // apps never trigger it (that was the source of the log spam). Its result
+        // selects how the build.prop bind-mount is delivered:
+        if (api_->exemptFd(fd)) {
+            // Provider keeps the companion socket alive across specialization
+            // (e.g. Magisk). Use the proven path: postAppSpecialize sends
+            // CMD_DO_MOUNTS over this fd once the app has its private namespace.
+            comp_fd_ = fd;
+        } else {
+            // Provider closes the socket at the pre->specialize fd sweep (e.g.
+            // exemptFd unsupported on the USAP/nativeSpecializeAppProcess path).
+            // Ask the companion NOW, while the socket is still open, to defer the
+            // mount until the app unshares its mount namespace. Nothing is
+            // carried into postAppSpecialize, so this does not need exemptFd.
+            uint64_t ns_id = sbx_mnt_ns_id();
+            if (ns_id != 0) {
+                LOGI("exemptFd unavailable; using deferred companion mount [%s]", SBX_VARIANT_TAG);
+                request_deferred_mounts(fd, (uint32_t)::getpid(), ns_id);
+            } else {
+                LOGW("exemptFd unavailable and mnt-ns id unreadable; bind-mount "
+                     "skipped (Java-layer spoofing still active) for '%s'", pkg.c_str());
+            }
+            ::close(fd);
+            comp_fd_ = -1;
+        }
 
         LOGI("target active (%u B) [%s]", len, SBX_VARIANT_TAG);
         LOGD("target pkg='%s'", pkg.c_str());

@@ -212,6 +212,32 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
     return r.ok;
 }
 
+// Reads the process starttime token (field 22) from /proc/<pid>/stat. Used to
+// detect PID reuse: if the kernel recycles a pid while we are polling for its
+// mount-namespace change, the starttime will differ from the one observed
+// when we first learned about the pid, so we can bail out instead of mounting
+// into an unrelated process. Returns empty string on failure.
+static std::string read_pid_starttime(uint32_t pid) {
+    char path[64];
+    ::snprintf(path, sizeof(path), "/proc/%u/stat", pid);
+    std::ifstream f(path);
+    if (!f) return std::string();
+    std::string line;
+    if (!std::getline(f, line)) return std::string();
+    size_t close_paren = line.rfind(')');
+    if (close_paren == std::string::npos) return std::string();
+    std::istringstream iss(line.substr(close_paren + 1));
+    std::string state;
+    iss >> state; // field 3
+    for (int field = 4; field < 22; ++field) {
+        std::string tmp;
+        if (!(iss >> tmp)) return std::string();
+    }
+    std::string starttime;
+    iss >> starttime; // field 22
+    return starttime;
+}
+
 static void watch_target_death(uint32_t pid, int client_fd) {
     pid_t f1 = ::fork();
     if (f1 < 0) return;
@@ -236,6 +262,83 @@ static void watch_target_death(uint32_t pid, int client_fd) {
         ::_exit(0);
     }
     LOGD("death watcher for pid=%u timed out after 30min", pid);
+    ::_exit(0);
+}
+
+// Fallback mount path for Zygisk providers whose exemptFd() returns false (the
+// companion socket does not survive into postAppSpecialize, so CMD_DO_MOUNTS can
+// never be sent). The module sends CMD_DEFER_MOUNTS from preAppSpecialize with
+// the target pid and the inode of its mount namespace BEFORE unshare. Here we
+// wait until /proc/<pid>/ns/mnt moves off that baseline -- i.e. AOSP's
+// SpecializeCommon ran unshare(CLONE_NEWNS) and the app now has a private
+// namespace -- and only then bind-mount. Mounting earlier would leak into
+// zygote's shared namespace, so a valid, distinct baseline is mandatory. Runs
+// fully detached (double-fork) so it outlives this companion client handler.
+static void defer_mounts_watcher(uint32_t pid, uint64_t baseline_ns, int client) {
+    pid_t f1 = ::fork();
+    if (f1 < 0) { LOGE("defer watcher fork failed errno=%d", errno); return; }
+    if (f1 > 0) { ::waitpid(f1, nullptr, 0); return; }
+
+    // Intermediate child: always exit so it never blocks the handler, whether
+    // the second fork succeeds, fails, or produces the parent. Only the
+    // grandchild (f2 == 0) falls through to run the watcher detached.
+    pid_t f2 = ::fork();
+    if (f2 != 0) ::_exit(0);  // parent (or fork-fail) exits; only grandchild continues
+
+    // Detached grandchild: it inherited a dup of the client socket across fork()
+    // but never uses it. Close it so the lingering watcher does not keep the
+    // peer socket half-open (the main handler still holds its own copy for the
+    // ACK). do_mounts_via_fork is therefore called with client=-1 below.
+    if (client >= 0) ::close(client);
+
+    if (baseline_ns == 0) {
+        LOGW("defer mount pid=%u: no ns baseline; skipping (would risk shared-ns leak)", pid);
+        ::_exit(0);
+    }
+
+    // Capture the target's starttime now, before polling begins, so we can
+    // detect PID reuse below: over the ~8s poll ceiling the original process
+    // may die and the kernel may recycle its pid for an unrelated process,
+    // which could otherwise pass the ns-inode check spuriously and cause us
+    // to bind-mount into the wrong process.
+    std::string starttime0 = read_pid_starttime(pid);
+
+    char path[64];
+    ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", pid);
+
+    const long POLL_NS   = 5L * 1000L * 1000L;   // 5ms
+    const int  MAX_TRIES = 1600;                 // ~8s ceiling
+    bool ready = false;
+    for (int i = 0; i < MAX_TRIES; ++i) {
+        struct stat st{};
+        if (::stat(path, &st) == 0) {
+            if ((uint64_t)st.st_ino != baseline_ns) { ready = true; break; }
+        } else if (errno == ENOENT || errno == ESRCH) {
+            LOGD("defer mount pid=%u: process gone before unshare", pid);
+            ::_exit(0);
+        }
+        struct timespec ts{0, POLL_NS};
+        ::nanosleep(&ts, nullptr);
+    }
+
+    if (!ready) {
+        LOGW("defer mount pid=%u: mnt ns unchanged after ~%ldms; skipping bind-mount",
+             pid, (POLL_NS / 1000000L) * MAX_TRIES);
+        ::_exit(0);
+    }
+
+    // Re-verify identity right before mounting: if the pid was reused by a
+    // different process while we polled, its starttime will no longer match
+    // (or will be unreadable because it already exited too). Bail out rather
+    // than risk mounting into the wrong process's namespace.
+    std::string starttime1 = read_pid_starttime(pid);
+    if (starttime0.empty() || starttime1.empty() || starttime0 != starttime1) {
+        LOGW("defer mount pid=%u: pid reuse detected (starttime mismatch); skipping bind-mount", pid);
+        ::_exit(0);
+    }
+
+    LOGD("defer mount pid=%u: unshare detected, mounting now", pid);
+    do_mounts_via_fork(pid, -1);
     ::_exit(0);
 }
 
@@ -336,6 +439,28 @@ extern "C" void sandboxid_companion(int client) {
             }
             uint32_t ok = do_mounts_via_fork(pid, client);
             if (!sandboxid::write_full(client, &ok, sizeof(ok))) break;
+
+        } else if (cmd == sandboxid::CMD_DEFER_MOUNTS) {
+            uint32_t pid = 0;
+            uint64_t baseline = 0;
+            if (!sandboxid::read_full(client, &pid, sizeof(pid))) break;
+            if (!sandboxid::read_full(client, &baseline, sizeof(baseline))) break;
+
+            bool authorized = have_peer && peer.uid == 0 && (pid_t)pid == peer.pid;
+            uint32_t ack = 0;
+            if (!authorized) {
+                LOGE("DEFER_MOUNTS DITOLAK: have_peer=%d peer.uid=%d peer.pid=%d target pid=%u "
+                     "[SO_PEERCRED fail-closed]",
+                     (int)have_peer, have_peer ? peer.uid : -1,
+                     have_peer ? peer.pid : -1, pid);
+                sandboxid::write_full(client, &ack, sizeof(ack));
+                break;
+            }
+            // Schedules a detached watcher and returns promptly; the actual mount
+            // happens later, once the target unshares its mount namespace.
+            defer_mounts_watcher(pid, baseline, client);
+            ack = 1;
+            if (!sandboxid::write_full(client, &ack, sizeof(ack))) break;
 
         } else {
             LOGD("unknown cmd=%u, closing", cmd);
