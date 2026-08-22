@@ -73,7 +73,11 @@ static std::string random_hex(int bytes, bool upper) {
 static bool atomic_write(const std::string& p, const std::string& data) {
     std::string tmp = p + ".tmp." + std::to_string((long)::getpid());
     ::unlink(tmp.c_str());  
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    // WHY (O_CLOEXEC): sandboxid forks framework CLIs (settings/pm/am via run_bin);
+    // without O_CLOEXEC these fds would leak into those children and, worse, could be
+    // forwarded to system_server by cmd(1) — the same class of forbidden-fd hazard the
+    // null_io fix addresses. Close-on-exec keeps writer fds out of every exec'd child.
+    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
     if (fd < 0) return false;
     bool ok = true;
     for (size_t off = 0; off < data.size(); ) {
@@ -88,7 +92,7 @@ static bool atomic_write(const std::string& p, const std::string& data) {
     size_t slash = p.find_last_of('/');
     std::string dir = (slash == std::string::npos) ? std::string(".")
                       : (slash == 0 ? std::string("/") : p.substr(0, slash));
-    int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
+    int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dfd >= 0) { ::fsync(dfd); ::close(dfd); }
     return true;
 }
@@ -112,10 +116,27 @@ static std::string trim(std::string s) {
 }
 
 
-static int run_bin(const char* path, std::vector<const char*> argv) {
+// WHY (null_io): framework CLIs (settings/pm/am) are `cmd(1)` front-ends that
+// forward THIS process's std FDs to system_server inside the SHELL_COMMAND binder
+// transaction. When those FDs are a pty/pipe or a /data/adb file (SELinux forbids
+// system_server touching them), the transaction fails deterministically with
+// FAILED_TRANSACTION (2147483646) — "prints OK but nothing happens". Handing the
+// child /dev/null std FDs avoids forwarding a forbidden descriptor. Plain binaries
+// (resetprop, chcon) don't use binder and pass null_io=false. (Regression fix; see
+// the module's binder-fd history.)
+static int run_bin(const char* path, std::vector<const char*> argv, bool null_io = false) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        if (null_io) {
+            int nul = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+            if (nul >= 0) {
+                dup2(nul, STDIN_FILENO);
+                dup2(nul, STDOUT_FILENO);
+                dup2(nul, STDERR_FILENO);
+                if (nul > STDERR_FILENO) ::close(nul);
+            }
+        }
         argv.push_back(nullptr);
         execv(path, const_cast<char* const*>(argv.data()));
         _exit(127);
@@ -216,9 +237,14 @@ static Identity gen_identity() {
         if (dev > 0 && SBX_POOL[i].sdk == dev) cand.push_back(i);
 
     if (cand.empty()) {
-        
+        // WHY: Build.VERSION.SDK_INT is `SystemProperties.getInt("ro.build.version.sdk", 0)`
+        // — a method-call initializer, so it is NOT a compile-time constant and is NEVER
+        // javac-inlined into callers; a runtime field-set (L1) IS honored. The genuine
+        // risk of an SDK fallback is cross-surface INCONSISTENCY (SDK_INT vs RELEASE vs
+        // the fingerprint's build id / security_patch), which detection code cross-checks.
         fprintf(stderr, "! tidak ada persona SDK %d persis — fallback SDK lebih rendah, "
-                "TERIMA RISIKO inkonsistensi SDK_INT (javac inline)\n", dev);
+                "TERIMA RISIKO inkonsistensi lintas-permukaan "
+                "(SDK_INT vs RELEASE vs FINGERPRINT)\n", dev);
         for (size_t i = 0; i < N; ++i)
             if (dev > 0 && SBX_POOL[i].sdk <= dev) cand.push_back(i);
     }
@@ -454,11 +480,11 @@ static void apply_native(const Identity& id) {
     std::string aid = get("ANDROID_ID");
     if (!aid.empty()) {
         run_bin("/system/bin/settings",
-                {"settings", "put", "secure", "android_id", aid.c_str()});
+                {"settings", "put", "secure", "android_id", aid.c_str()}, /*null_io=*/true);
     }
     if (!MODEL.empty()) {
         run_bin("/system/bin/settings",
-                {"settings", "put", "global", "device_name", MODEL.c_str()});
+                {"settings", "put", "global", "device_name", MODEL.c_str()}, /*null_io=*/true);
     }
 }
 
@@ -594,14 +620,26 @@ static void generate_mount_files(const Identity& id) {
     ::chown(xml_path.c_str(), 1000, 1000);
 
     
-    run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_file:s0",
-            (std::string(MOUNTDIR) + "/system/build.prop").c_str()});
-    run_bin("/system/bin/chcon", {"chcon", "u:object_r:vendor_file:s0",
-            (std::string(MOUNTDIR) + "/vendor/build.prop").c_str()});
-    for (const char* sub : {"odm", "product", "system_ext"}) {
-        std::string p = std::string(MOUNTDIR) + "/" + sub + "/build.prop";
-        run_bin("/system/bin/chcon",
-                {"chcon", "u:object_r:system_file:s0", p.c_str()});
+    // WHY: bind-mounting an overlay build.prop makes the target path resolve to the
+    // SOURCE file, which KEEPS ITS OWN SELinux label — so each overlay file must carry
+    // the context that apps expect to read at that partition path. odm lives in the
+    // vendor SELinux world (vendor_file on the overwhelming majority of devices), NOT
+    // system_file as the old code labeled it. system/product/system_ext build.prop are
+    // system_file on stock AOSP.
+    // NOTE: partition contexts are device-specific. The robust approach is
+    //   chcon --reference=<real /<part>/build.prop> <overlay>
+    // to copy the exact live label where toybox's chcon supports --reference; the
+    // hardcoded contexts below are the portable fallback. (TODO: prefer --reference)
+    struct { const char* sub; const char* ctx; } part_ctx[] = {
+        {"system",     "u:object_r:system_file:s0"},
+        {"vendor",     "u:object_r:vendor_file:s0"},
+        {"odm",        "u:object_r:vendor_file:s0"},
+        {"product",    "u:object_r:system_file:s0"},
+        {"system_ext", "u:object_r:system_file:s0"},
+    };
+    for (const auto& pc : part_ctx) {
+        std::string p = std::string(MOUNTDIR) + "/" + pc.sub + "/build.prop";
+        run_bin("/system/bin/chcon", {"chcon", pc.ctx, p.c_str()});
     }
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_data_file:s0",
             xml_path.c_str()});
@@ -616,8 +654,8 @@ static void generate_mount_files(const Identity& id) {
 static void wipe_target_data() {
     auto pkgs = load_targets();
     for (const auto& pkg : pkgs) {
-        run_bin("/system/bin/pm", {"pm", "clear", pkg.c_str()});
-        run_bin("/system/bin/am", {"am", "force-stop", pkg.c_str()});
+        run_bin("/system/bin/pm", {"pm", "clear", pkg.c_str()}, /*null_io=*/true);
+        run_bin("/system/bin/am", {"am", "force-stop", pkg.c_str()}, /*null_io=*/true);
     }
 }
 
@@ -628,9 +666,12 @@ static int cmd_targets() {
     auto pkgs = load_targets();
     struct stat st{};
     bool have_file = (::stat(TARGET_FILE, &st) == 0);
+    // WHY: the module ships idle with an EMPTY target.txt and has no built-in target
+    // list — a missing file simply means "no targets configured", not a silent default.
+    // The old "(using built-in defaults)" text implied phantom defaults that don't exist.
     printf("target.txt : %s%s\n",
            TARGET_FILE,
-           have_file ? "" : "  (missing — using built-in defaults)");
+           have_file ? "" : "  (missing — no targets configured; module idle)");
     printf("count      : %zu\n\n", pkgs.size());
     for (const auto& p : pkgs) printf("  %s\n", p.c_str());
     return 0;

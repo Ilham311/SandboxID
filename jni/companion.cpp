@@ -32,9 +32,12 @@
 
 #define LOG_TAG "SandboxIDCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+// WHY: LOGD now maps to the real ANDROID_LOG_DEBUG priority (was ANDROID_LOG_INFO), so
+// debug traces are filterable as DEBUG and don't inflate the INFO stream in logcat.
 #ifdef SBX_DEBUG
-#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
+#define LOGD(fmt, ...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, "[D] " fmt, ##__VA_ARGS__)
 #define SBX_VARIANT_TAG "debug"
 #else
 #define LOGD(...) ((void)0)
@@ -78,7 +81,9 @@ static void reload_targets_if_changed() {
         next.push_back(line);
     }
     if (next.empty()) {
-        LOGE("target.txt has 0 valid entries; keeping previous list (%zu pkgs)", g_targets.size());
+        // WHY WARN not ERROR: an empty target.txt is the module's NORMAL shipped-idle
+        // state, not a fault. Keep any previously loaded list and carry on.
+        LOGW("target.txt has 0 valid entries; keeping previous list (%zu pkgs)", g_targets.size());
         g_targets_mtime = st.st_mtime;
         return;
     }
@@ -212,7 +217,9 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
         return 0;
     }
     if (r.slave_errno) {
-        LOGE("mount pid=%u: MS_SLAVE gagal errno=%d — bind mount bisa bocor via propagasi!",
+        // WHY WARN: non-fatal — the bind mounts still proceed. But flag loudly, because
+        // without MS_SLAVE the mounts could propagate back through shared subtrees (leak).
+        LOGW("mount pid=%u: MS_SLAVE gagal errno=%d — bind mount bisa bocor via propagasi!",
              target_pid, r.slave_errno);
     }
     if (r.fail && r.first_fail_idx >= 0 && r.first_fail_idx < (int)sandboxid::BIND_ENTRIES_N) {
@@ -301,7 +308,7 @@ extern "C" void sandboxid_companion(int client) {
     bool have_peer = (::getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) == 0
                       && peer_len == sizeof(peer));
     if (!have_peer)
-        LOGE("SO_PEERCRED gagal errno=%d — otorisasi DO_MOUNTS fail-open", errno);
+        LOGW("SO_PEERCRED gagal errno=%d — otorisasi DO_MOUNTS fail-open", errno);
     else
         LOGD("peer creds pid=%d uid=%d gid=%d", peer.pid, peer.uid, peer.gid);
 
@@ -356,8 +363,16 @@ extern "C" void sandboxid_companion(int client) {
             
             
             
+            // NOTE — SO_PEERCRED authorization here is BOUNDED, not a strong guard:
+            // peer creds are captured once at connect time (during the client's
+            // preAppSpecialize), when it still runs as zygote => uid 0. This guard thus
+            // short-circuits on peer.uid==0, so the pid-binding below effectively never
+            // fires for real app clients. The true boundary is the Magisk companion
+            // socket's SELinux domain (untrusted_app cannot reach it); pid-based auth
+            // would also be race/reuse-prone. Kept as belt-and-braces for a hypothetical
+            // non-root client.
             if (have_peer && peer.uid != 0 && (pid_t)pid != peer.pid) {
-                LOGE("DO_MOUNTS DITOLAK: target pid=%u != peer pid=%d (uid=%d) [SO_PEERCRED]",
+                LOGW("DO_MOUNTS DITOLAK: target pid=%u != peer pid=%d (uid=%d) [SO_PEERCRED]",
                      pid, peer.pid, peer.uid);
                 uint32_t z = 0;
                 sandboxid::write_full(client, &z, sizeof(z));
