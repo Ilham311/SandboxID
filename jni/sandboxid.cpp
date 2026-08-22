@@ -19,10 +19,6 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <dirent.h>
-#include <climits>
-#include <csignal>
-#include <set>
 #include "pool.hpp"
 #include "config.hpp"
 #include <sys/system_properties.h>
@@ -179,113 +175,15 @@ static int run_framework(const char* path, std::vector<const char*> argv,
 
 
 // ---------------------------------------------------------------------------
-// Robust stop + wipe primitives.
-//
-// The reported failure — every settings/pm/am call returning
-// "Failure calling service <svc>: Failed transaction (2147483646)" — is a
-// binder-level FAILED_TRANSACTION (status_t = INT32_MIN + 2 = -2147483646,
-// printed unsigned as 2147483646), NOT a Java permission exception. A uniform
-// FAILED_TRANSACTION across *all* system_server services from a root shell is
-// the classic signature of SELinux denying `binder_call` from the caller's
-// domain (the binder driver turns the denial into BR_FAILED_REPLY). Retrying
-// cannot fix a persistent policy denial — dropping to permissive can.
-//
-// The module already performs its file surgery under `setenforce 0`
-// (helpers.sh se_permissive); the native framework calls did not. These
-// primitives (a) force SELinux permissive for the duration of the framework
-// calls and (b) provide non-binder fallbacks (kill by /proc scan, manual data
-// dir wipe) so a persona still comes out clean even if binder stays broken.
+// App stop + data wipe use the documented platform primitives only:
+//   `am force-stop <pkg>`  — "force-stop everything associated with <package>"
+//   `pm clear <pkg>`       — "delete all data associated with a package"
+// (Android Platform Tools / `adb shell` command reference; see CREDITS.md).
+// Both are driven through run_framework() for a light transient-failure retry
+// and rc reporting. No SELinux toggling and no manual /proc kill or rm -rf of
+// data dirs — those primitives already do the right thing under root, and the
+// extra machinery only obscured real failures. See CREDITS.md for sources.
 // ---------------------------------------------------------------------------
-
-// RAII: force SELinux permissive for the current scope, restore the prior mode
-// on exit. No-op if SELinux is already permissive/disabled or the toggle fails.
-struct SePermissive {
-    bool toggled = false;
-    SePermissive() {
-        if (trim(read_file("/sys/fs/selinux/enforce")) != "1") return;  // not enforcing
-        if (run_bin_path("setenforce", {"setenforce", "0"}) != 0) {
-            int fd = ::open("/sys/fs/selinux/enforce", O_WRONLY);
-            if (fd >= 0) { ssize_t w = ::write(fd, "0", 1); (void)w; ::close(fd); }
-        }
-        toggled = (trim(read_file("/sys/fs/selinux/enforce")) == "0");
-    }
-    ~SePermissive() {
-        if (!toggled) return;
-        if (run_bin_path("setenforce", {"setenforce", "1"}) != 0) {
-            int fd = ::open("/sys/fs/selinux/enforce", O_WRONLY);
-            if (fd >= 0) { ssize_t w = ::write(fd, "1", 1); (void)w; ::close(fd); }
-        }
-    }
-    SePermissive(const SePermissive&) = delete;
-    SePermissive& operator=(const SePermissive&) = delete;
-};
-
-// Non-binder force-stop: SIGKILL every process whose /proc/<pid>/cmdline names
-// this package (either "pkg" or a "pkg:subproc" child). Fallback for when
-// `am force-stop` can't reach system_server. Returns the number killed.
-static int kill_pkg_processes(const std::string& pkg) {
-    DIR* d = ::opendir("/proc");
-    if (!d) return 0;
-    int killed = 0;
-    struct dirent* e;
-    while ((e = ::readdir(d)) != nullptr) {
-        if (e->d_name[0] < '1' || e->d_name[0] > '9') continue;  // pid dirs only
-        std::string cl = read_file(std::string("/proc/") + e->d_name + "/cmdline");
-        if (cl.empty()) continue;
-        std::string proc = cl.substr(0, cl.find('\0'));  // argv[0] = process name
-        if (proc == pkg || proc.rfind(pkg + ":", 0) == 0) {
-            long pid = ::atol(e->d_name);
-            if (pid > 0 && ::kill((pid_t)pid, SIGKILL) == 0) killed++;
-        }
-    }
-    ::closedir(d);
-    return killed;
-}
-
-// Delete the *children* of a directory, keeping the directory itself so its
-// inode, owner and SELinux label survive (the app recreates its files on next
-// launch). Uses toybox `rm -rf` per child.
-static void wipe_dir_children(const std::string& dir) {
-    DIR* d = ::opendir(dir.c_str());
-    if (!d) return;
-    std::vector<std::string> children;
-    struct dirent* e;
-    while ((e = ::readdir(d)) != nullptr) {
-        std::string n = e->d_name;
-        if (n == "." || n == "..") continue;
-        children.push_back(dir + "/" + n);
-    }
-    ::closedir(d);
-    for (const auto& c : children)
-        run_bin_path("rm", {"rm", "-rf", c.c_str()});
-}
-
-// Fallback data wipe when `pm clear` fails: empty every CE/DE/external data dir
-// for the package. realpath-dedupes so a /data/user/0 → /data/data symlink is
-// not processed twice. Returns the number of dirs emptied.
-static int manual_wipe(const std::string& pkg) {
-    const std::vector<std::string> cand = {
-        "/data/data/" + pkg,
-        "/data/user/0/" + pkg,
-        "/data/user_de/0/" + pkg,
-        "/sdcard/Android/data/" + pkg,
-    };
-    std::set<std::string> done;
-    int n = 0;
-    for (const auto& dir : cand) {
-        char rp[PATH_MAX];
-        if (::realpath(dir.c_str(), rp) == nullptr) continue;  // doesn't exist
-        std::string real = rp;
-        if (!done.insert(real).second) continue;               // already handled
-        struct stat st{};
-        if (::stat(real.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        wipe_dir_children(real);
-        n++;
-    }
-    return n;
-}
-
-
 
 
 struct Identity {
@@ -609,7 +507,6 @@ static void apply_native(const Identity& id) {
     std::string aid = get("ANDROID_ID");
     if (!aid.empty() || !MODEL.empty()) {
         wait_boot_completed(5000);
-        SePermissive se;  // permit binder_call to system_server (see run_framework)
         int sok = 0, sfail = 0;
         if (!aid.empty()) {
             int rc = run_framework("/system/bin/settings",
@@ -783,37 +680,21 @@ static int wipe_target_data() {
     if (pkgs.empty()) return 0;
     wait_boot_completed(5000);
 
-    // The whole wipe runs permissive: the framework calls need binder_call to
-    // system_server, and the manual fallback needs to traverse app data dirs.
-    SePermissive se;
     int fail = 0;
     for (const auto& pkg : pkgs) {
-        // 1) Stop the app. am force-stop first (clean), then always sweep any
-        //    surviving processes via /proc so the wipe never races a live app.
-        //    The /proc sweep also covers the case where binder is unreachable.
+        // Documented platform primitives (see CREDITS.md):
+        //   1) am force-stop — force-stop everything associated with the package
+        //   2) pm clear      — delete all data associated with the package
+        //      (installd recreates the data dir with the correct SELinux label).
         run_framework("/system/bin/am",
                 {"am", "force-stop", "--user", "0", pkg.c_str()},
                 "am force-stop " + pkg);
-        run_bin("/system/bin/am", {"am", "kill", "--user", "0", pkg.c_str()});
-        int killed = kill_pkg_processes(pkg);
-        if (killed > 0)
-            printf("  %s: %d sisa proses di-SIGKILL\n", pkg.c_str(), killed);
-
-        // 2) Wipe data. pm clear is preferred (installd recreates the dir with
-        //    the correct label). If it fails, empty the data dirs by hand.
         int rc_clear = run_framework("/system/bin/pm",
                 {"pm", "clear", "--user", "0", pkg.c_str()},
                 "pm clear " + pkg);
         if (rc_clear != 0) {
-            int wiped = manual_wipe(pkg);
-            if (wiped > 0) {
-                printf("  %s: pm clear gagal → %d data dir dikosongkan manual (setenforce 0)\n",
-                       pkg.c_str(), wiped);
-            } else {
-                fail++;
-                fprintf(stderr, "! %s: pm clear gagal & tak ada data dir untuk dihapus manual\n",
-                        pkg.c_str());
-            }
+            fail++;
+            fprintf(stderr, "! %s: pm clear gagal (rc=%d)\n", pkg.c_str(), rc_clear);
         }
     }
     return fail;

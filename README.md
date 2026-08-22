@@ -243,6 +243,18 @@ Build with `-Wall -Wextra` per ABI. The `debug` variant enables verbose
 
 ---
 
+## Credits & References
+
+SandboxID uses documented Android platform commands (`pm clear`,
+`am force-stop`, `settings put`) and Magisk runtime APIs (`resetprop`, the
+boot-stage contract), and adopts the `killall` process-stop technique from
+PlayIntegrityFork (osm0sis, GPL-3.0). Full attribution, source links, and the
+licensing note are in **[CREDITS.md](./CREDITS.md)**. No third-party source
+code is bundled — only documented commands and techniques — so SandboxID
+remains MIT.
+
+---
+
 ## Scope & Limitations
 
 ### Covered
