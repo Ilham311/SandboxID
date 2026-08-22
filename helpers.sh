@@ -25,7 +25,7 @@ log_err()  { _log "[ERR] $*"; }
 mask_id() {
     _v="$1"
     [ -z "$_v" ] && { printf '(empty)'; return; }
-    _len=${
+    _len=${#_v}
     if [ "$_len" -le 6 ]; then
         printf '******'
     else

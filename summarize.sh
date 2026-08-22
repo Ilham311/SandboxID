@@ -43,10 +43,6 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     if [ -n "$TL" ]; then
         echo "  $(echo "$TL" | sed -E 's/^.*I SandboxIDCompanion: //')"
     fi
-    TM=$(grep 'target.txt missing' "$IN" | tail -1)
-    if [ -n "$TM" ]; then
-        echo "  $(echo "$TM" | sed -E 's/^.*I SandboxIDCompanion: //')"
-    fi
     echo ""
 
     echo "--- Target packages seen (ACCEPTED by companion) ---"

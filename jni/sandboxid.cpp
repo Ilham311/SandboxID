@@ -630,7 +630,7 @@ static int cmd_targets() {
     bool have_file = (::stat(TARGET_FILE, &st) == 0);
     printf("target.txt : %s%s\n",
            TARGET_FILE,
-           have_file ? "" : "  (missing — using built-in defaults)");
+           have_file ? "" : "  (missing — no apps targeted)");
     printf("count      : %zu\n\n", pkgs.size());
     for (const auto& p : pkgs) printf("  %s\n", p.c_str());
     return 0;
