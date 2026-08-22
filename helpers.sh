@@ -25,7 +25,7 @@ log_err()  { _log "[ERR] $*"; }
 mask_id() {
     _v="$1"
     [ -z "$_v" ] && { printf '(empty)'; return; }
-    _len=${
+    _len=${#_v}
     if [ "$_len" -le 6 ]; then
         printf '******'
     else
@@ -87,30 +87,63 @@ generate_mac() {
         "$(echo "$b" | cut -c9-10)"
 }
 
+# Framework CLI (settings/am/pm) runner. cmd(1) forwards this shell's std FDs
+# to system_server over binder; from action.sh those FDs are a pty/pipe or a
+# /data/adb file that SELinux forbids system_server from accessing, so the call
+# is rejected with FAILED_TRANSACTION. Pointing all three at /dev/null
+# (world-accessible null_device) lets the transaction through. Success is taken
+# from the exit code; a short retry covers a genuinely transient busy only.
+_fw_run() {
+    _n=0
+    while [ "$_n" -lt 2 ]; do
+        "$@" </dev/null >/dev/null 2>&1 && return 0
+        _n=$((_n + 1))
+        [ "$_n" -lt 2 ] && sleep 1
+    done
+    return 1
+}
+
 settings_put() {
     scope="$1"; key="$2"; val="$3"
     command -v settings >/dev/null 2>&1 || return 1
-    settings put "$scope" "$key" "$val" 2>/dev/null
+    # `settings put <namespace> <key> <value>` — documented platform command
+    # (Android `adb shell settings`). --user goes after the verb. See CREDITS.md.
+    _fw_run settings put --user 0 "$scope" "$key" "$val"
 }
 
 rp_set() {
     key="$1"; val="$2"
+    # persist.* props must be written to storage to survive reboot. The -n fast
+    # path (set in shared memory, skip property_service) never touches
+    # /data/property, so persist keys need -p instead. setprop (final fallback)
+    # persists them via property_service anyway. #7g
+    case "$key" in
+        persist.*) _rpflag="-p" ;;
+        *)         _rpflag="-n" ;;
+    esac
     if command -v resetprop >/dev/null 2>&1; then
-        resetprop -n "$key" "$val" 2>/dev/null && return 0
+        resetprop "$_rpflag" "$key" "$val" 2>/dev/null && return 0
     fi
     if [ -x "$MODDIR/bin/resetprop-rs" ]; then
-        "$MODDIR/bin/resetprop-rs" -n "$key" "$val" 2>/dev/null && return 0
+        "$MODDIR/bin/resetprop-rs" "$_rpflag" "$key" "$val" 2>/dev/null && return 0
     fi
     if command -v resetprop-rs >/dev/null 2>&1; then
-        resetprop-rs -n "$key" "$val" 2>/dev/null && return 0
+        resetprop-rs "$_rpflag" "$key" "$val" 2>/dev/null && return 0
     fi
     setprop "$key" "$val" 2>/dev/null
 }
 
+# Force-stop a package. `am force-stop <pkg>` is the documented primitive that
+# stops every process associated with the package; `killall <pkg>` is a
+# best-effort sweep for the main process, a technique referenced from
+# PlayIntegrityFork's killpi.sh (osm0sis, GPL-3.0). See CREDITS.md.
 force_stop() {
     pkg="$1"
     command -v am >/dev/null 2>&1 || return 1
-    am force-stop "$pkg" 2>/dev/null
+    _fw_run am force-stop --user 0 "$pkg"
+    _rc=$?
+    command -v killall >/dev/null 2>&1 && killall "$pkg" 2>/dev/null
+    return "$_rc"
 }
 
 identity_get() {

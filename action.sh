@@ -23,7 +23,7 @@ if [ -x "$BIN" ]; then
     
     
     FRESHEN_OUT="$MODDIR/debug/.freshen.$$"
-    "$BIN" freshen > "$FRESHEN_OUT" 2>&1; RC_FRESHEN=$?
+    "$BIN" freshen < /dev/null > "$FRESHEN_OUT" 2>&1; RC_FRESHEN=$?
     tee -a "$LOGFILE" "$ACTION_LOG" < "$FRESHEN_OUT"
     rm -f "$FRESHEN_OUT" 2>/dev/null
     "$BIN" lock >/dev/null 2>&1 || true
@@ -36,7 +36,7 @@ fi
 if [ -r "$ROTATE" ]; then
     echo "[SandboxID] rotate_ids all (step 2/2)..."
     ROTATE_OUT="$MODDIR/debug/.rotate.$$"
-    MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all > "$ROTATE_OUT" 2>&1; RC_ROTATE=$?
+    MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all < /dev/null > "$ROTATE_OUT" 2>&1; RC_ROTATE=$?
     tee -a "$LOGFILE" "$ACTION_LOG" < "$ROTATE_OUT"
     rm -f "$ROTATE_OUT" 2>/dev/null
 else

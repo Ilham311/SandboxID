@@ -243,12 +243,25 @@ Build with `-Wall -Wextra` per ABI. The `debug` variant enables verbose
 
 ---
 
+## Credits & References
+
+SandboxID uses documented Android platform commands (`pm clear`,
+`am force-stop`, `settings put`) and Magisk runtime APIs (`resetprop`, the
+boot-stage contract), and adopts the `killall` process-stop technique from
+PlayIntegrityFork (osm0sis, GPL-3.0). Full attribution, source links, and the
+licensing note are in **[CREDITS.md](./CREDITS.md)**. No third-party source
+code is bundled — only documented commands and techniques — so SandboxID
+remains MIT.
+
+---
+
 ## Scope & Limitations
 
 ### Covered
 
 - Device fingerprint (`Build.*`, `SystemProperties.native_get*` typed variants)
-- Per-app `ANDROID_ID` / SSAID override (Java hook + system XML wipe)
+- Per-app `ANDROID_ID` / SSAID override — **requires the experimental L3 hook**
+  (disabled by default; see [Known limitations](#known-limitations))
 - Google Advertising ID (`Settings.Global.advertising_id` + GMS `adid_settings.xml`)
 - Wi-Fi MAC + `WifiConfigStore.xml` reset (with backup)
 - Bluetooth adapter MAC (properties + `bt_config.conf` Address)
@@ -263,6 +276,41 @@ Build with `-Wall -Wextra` per ABI. The `debug` variant enables verbose
 - Play Integrity / SafetyNet bypass — use dedicated modules alongside if needed
 - Sensor fingerprinting (planned)
 - MediaDrm ID / GSF ID rotation (planned; need on-device tooling)
+
+### Known limitations
+
+Honest gaps in the current design — documented so you can reason about what a
+detector still sees:
+
+- **Per-app `ANDROID_ID` needs the L3 hook, which ships disabled.** `ANDROID_ID`
+  (SSAID) is served over Binder by `SettingsProvider` in `system_server`, which
+  caches the value at boot. A normal app calling `Settings.Secure.getString()`
+  never reads the `settings_secure.xml` we bind-mount, so the overlay does not
+  change the value it sees. Genuine per-app spoofing needs the L3 `getString`
+  native hook (LSPlant + Dobby), which is **doubly disabled** in released builds:
+  gated behind the `SBX_ENABLE_LSPLANT` compile flag (OFF by default) *and* its
+  generated `hook_dex.h` is not checked in. Treat per-app `ANDROID_ID` spoofing
+  as experimental / not active out of the box.
+
+- **Two layers, two scopes.** The module has a *device-wide* layer (boot-time
+  `resetprop` via `apply-boot`, active only when `target.txt` is non-empty) and a
+  *per-app* layer (Zygisk hooks + `build.prop` bind-mounted into the target app's
+  mount namespace). The device-wide layer affects *every* process; the per-app
+  layer affects only the listed targets. Enabling one does not imply the other,
+  and with an empty `target.txt` the module is fully idle by design.
+
+- **`SystemProperties` `Handle` / `find()` fast path is not hooked.** We hook the
+  typed `native_get*` entry points. Code that resolves a property `Handle` once
+  (via `SystemProperties.find`) and reads through it, or reads
+  `/dev/__properties__` directly, bypasses the JNI hook and sees the real value.
+  The bind-mounted `build.prop` still covers file readers, but not the
+  shared-memory fast path.
+
+- **Non-target apps see a mixed identity.** The device-wide `resetprop` layer and
+  the per-app bind-mount are independent. An app *not* in `target.txt` that reads
+  props gets whatever the device-wide layer set (or the real values when idle)
+  with no bind-mount overlay — so its `Build.*` and file-based props can disagree.
+  Only listed target apps get a fully consistent persona.
 
 SandboxID changes only identity strings. It does not modify hardware, the
 framework boot path, or kernel state in ways that risk boot failure.

@@ -164,10 +164,14 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
             ::close(tgt_ns);
         } else {
             
-            if (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) != 0)
-                r.slave_errno = errno;
+            bool propagation_isolated =
+                (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) == 0);
+            if (!propagation_isolated) r.slave_errno = errno;
 
-            for (size_t i = 0; i < sandboxid::BIND_ENTRIES_N; ++i) {
+            // #7a fail-closed: only bind when the target root is MS_SLAVE. If MS_SLAVE
+            // failed the namespace still has shared propagation, so a per-app bind
+            // could leak back out device-wide -- skip every bind rather than risk it.
+            for (size_t i = 0; propagation_isolated && i < sandboxid::BIND_ENTRIES_N; ++i) {
                 const auto& e = sandboxid::BIND_ENTRIES[i];
                 if (src_fds[i] < 0) { r.skip_src++; r.skip++; continue; }
                 if (::access(e.dst, F_OK) != 0) { r.skip_dst++; r.skip++; continue; }
@@ -244,9 +248,15 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
 static void watch_target_death(uint32_t pid, int client_fd) {
     pid_t f1 = ::fork();
     if (f1 < 0) return;
-    if (f1 > 0) return;  
+    if (f1 > 0) {
+        // Double-fork: reap the intermediate child so it does not linger as a
+        // zombie. The companion is a single long-lived root daemon; without this
+        // one zombie would accumulate per target-app launch until reboot.
+        ::waitpid(f1, nullptr, 0);
+        return;
+    }
 
-    
+
     if (::fork() > 0) ::_exit(0);
 
     
@@ -363,6 +373,7 @@ extern "C" void sandboxid_companion(int client) {
             
             
             
+#<<<<<<< worktree-modernize-jni-core
             // NOTE — SO_PEERCRED authorization here is BOUNDED, not a strong guard:
             // peer creds are captured once at connect time (during the client's
             // preAppSpecialize), when it still runs as zygote => uid 0. This guard thus
@@ -374,6 +385,19 @@ extern "C" void sandboxid_companion(int client) {
             if (have_peer && peer.uid != 0 && (pid_t)pid != peer.pid) {
                 LOGW("DO_MOUNTS DITOLAK: target pid=%u != peer pid=%d (uid=%d) [SO_PEERCRED]",
                      pid, peer.pid, peer.uid);
+#=======
+            // DO_MOUNTS authorization (defense-in-depth). SO_PEERCRED freezes the
+            // caller's credentials at connect(); legitimate Zygisk clients connect in
+            // preAppSpecialize while still uid 0, so the peer MUST be root and MUST be
+            // requesting mounts for its own pid. Fail closed: if SO_PEERCRED was
+            // unavailable we cannot authorize, so we reject rather than fall open.
+            bool authorized = have_peer && peer.uid == 0 && (pid_t)pid == peer.pid;
+            if (!authorized) {
+                LOGE("DO_MOUNTS DITOLAK: have_peer=%d peer.uid=%d peer.pid=%d target pid=%u "
+                     "[SO_PEERCRED fail-closed]",
+                     (int)have_peer, have_peer ? peer.uid : -1,
+                     have_peer ? peer.pid : -1, pid);
+#>>>>>>> main
                 uint32_t z = 0;
                 sandboxid::write_full(client, &z, sizeof(z));
                 break;

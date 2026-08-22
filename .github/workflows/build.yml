@@ -26,10 +26,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
           persist-credentials: true
+
+      - name: Shell lint (syntax + shellcheck)
+        run: |
+          set -eu
+          echo '----- syntax check (bash -n for bash scripts, sh -n for the rest) -----'
+          for f in $(git ls-files '*.sh'); do
+            if head -1 "$f" | grep -q bash; then
+              bash -n "$f" && echo "bash -n OK : $f"
+            else
+              sh   -n "$f" && echo "sh -n   OK : $f"
+            fi
+          done
+          echo '----- shellcheck (severity>=warning, honouring each shebang) -----'
+          shellcheck --version | head -2
+          shellcheck -S warning $(git ls-files '*.sh')
+          echo 'shell lint: clean'
 
       - name: Fetch all tags
         run: |
