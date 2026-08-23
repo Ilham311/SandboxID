@@ -481,8 +481,9 @@ static Identity derive_identity(const PixelEntry& p) {
         id.kv["RADIO"] = rad;
     }
     // else: non-Tensor with no baseband string — leave RADIO unset. apply_native
-    // skips empty values, so gsm.version.baseband / ro.build.expect.baseband keep
-    // the device's REAL baseband rather than a fabricated (more detectable) one.
+    // deletes any stale gsm.version.baseband / ro.build.expect.baseband override
+    // left by a previous persona in this case, so the device's REAL baseband
+    // shows through rather than a fabricated (more detectable) one persisting.
 
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
@@ -528,7 +529,7 @@ static void apply_native(const Identity& id) {
         return it != id.kv.end() ? it->second : std::string();
     };
 
-    struct Rp { const char* key; std::string val; };
+    struct Rp { const char* key; std::string val; bool del_if_empty = false; };
 
     const std::string SERIAL       = get("SERIAL");
     const std::string MODEL        = get("MODEL");
@@ -631,8 +632,8 @@ static void apply_native(const Identity& id) {
         {"ro.vendor.build.security_patch",     SECPATCH},
         {"ro.build.version.incremental",       INCREMENTAL},
 
-        {"gsm.version.baseband",               RADIO},
-        {"ro.build.expect.baseband",           RADIO},
+        {"gsm.version.baseband",               RADIO, true},
+        {"ro.build.expect.baseband",           RADIO, true},
 
         {"ro.bootloader",                      std::string("unknown")},
         {"ro.boot.bootloader",                 std::string("unknown")},
@@ -642,9 +643,20 @@ static void apply_native(const Identity& id) {
     {
         int applied = 0, failed = 0;
         for (const auto& r : rp) {
-            if (r.val.empty()) continue;
+            if (r.val.empty() && !r.del_if_empty) continue;
             int rc;
-            if (have_bundled) {
+            if (r.val.empty()) {
+                // No value for this run (e.g. non-Tensor persona with no known
+                // baseband) — delete any stale override left by a previous
+                // persona so the device's real prop value shows through again.
+                if (have_bundled) {
+                    rc = run_bin(RESETPROP, {"resetprop-rs", "--delete", r.key});
+                } else {
+                    rc = run_bin_path("resetprop", {"resetprop", "--delete", r.key});
+                    if (rc != 0)
+                        rc = run_bin_path("resetprop-rs", {"resetprop-rs", "--delete", r.key});
+                }
+            } else if (have_bundled) {
                 rc = run_bin(RESETPROP, {"resetprop-rs", "-n", r.key, r.val.c_str()});
             } else {
                 rc = run_bin_path("resetprop", {"resetprop", "-n", r.key, r.val.c_str()});
