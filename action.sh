@@ -54,6 +54,7 @@ say "   Tiap brand peluangnya sama rata, nggak ada yang jadi favorit."
 say ""
 
 # ── ① undi 1 device multibrand -> device.identity ───────────────────────────
+rm -f "$DEVICE_ID" 2>/dev/null   # never re-apply a stale draw / let fallback work
 if [ -f "$AUTOPIF" ] && [ -f "$MODDIR/devices.tsv" ]; then
     say "① Ngundi device…"
     MODDIR="$MODDIR" sh "$AUTOPIF" device 2>&1 | tee2
