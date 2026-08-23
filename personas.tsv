@@ -2,9 +2,11 @@
 #
 # This file REPLACES the old compiled-in jni/pool.hpp. The `sandboxid` CLI
 # parses it at `freshen`/`seed` time and picks one persona matched to the
-# device's real SDK level (same selection logic as before). Shipping it as
-# data (instead of a C++ header) means personas can be refreshed WITHOUT a
-# native rebuild -- autopif.sh upserts fresh Google builds into it.
+# device's real SDK level. It is the OFFLINE FALLBACK pool: when autopif.sh can
+# fetch (curl/wget + network), it writes ONE fresh random persona to
+# persona.override which `freshen` applies directly instead of picking here.
+# Shipping personas as data (not a C++ header) also lets this list be edited
+# WITHOUT a native rebuild.
 #
 # Format: 10 TAB-separated columns, one persona per line. Lines starting
 # with '#' and blank lines are ignored. `platform` MUST stay within
