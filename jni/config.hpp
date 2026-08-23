@@ -12,8 +12,16 @@ inline constexpr char IDENTITY_FILE[] = "/data/adb/modules/sandboxid/identity.pr
 inline constexpr char MOUNTDIR[]      = "/data/adb/modules/sandboxid/mount";
 inline constexpr char TARGET_FILE[]   = "/data/adb/modules/sandboxid/target.txt";
 // Persona pool source (replaces the old compiled-in pool.hpp). Tab-separated,
-// one Pixel persona per line; refreshed on-device by autopif.sh. See personas.tsv.
+// one Pixel persona per line; used as the offline fallback pool. See personas.tsv.
 inline constexpr char PERSONAS_FILE[] = "/data/adb/modules/sandboxid/personas.tsv";
+
+// One-shot persona override written by autopif.sh: a SINGLE tab-separated
+// persona line (same 10-column format as personas.tsv). When present, `freshen`
+// derives the identity from THIS persona directly -- bypassing the SDK-matched
+// random pool pick -- then deletes the file, so every `action`/autopif run
+// applies a fresh, randomly-fetched Pixel identity. Absent/invalid => normal
+// pool pick. This is why autopif no longer needs to persist into personas.tsv.
+inline constexpr char PERSONA_OVERRIDE[] = "/data/adb/modules/sandboxid/persona.override";
 
 inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/sandboxid/identity.prop.bak";
 inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mode";

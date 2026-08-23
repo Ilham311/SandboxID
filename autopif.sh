@@ -1,39 +1,51 @@
 #!/system/bin/sh
 #
-# autopif.sh — refresh SandboxID's persona pool from Google's live Pixel build
-# data. Based on dannycreations' autopif.sh (canary fingerprint fetcher),
-# adapted for on-device Android sh and to feed SandboxID's persona pool
-# (personas.tsv) instead of writing a PlayIntegrityFix pif.json.
+# autopif.sh — fetch ONE fresh, RANDOM Pixel persona from Google's live build
+# data and hand it to `sandboxid freshen` as a one-shot override. Based on
+# dannycreations' autopif.sh (canary fingerprint fetcher), adapted for on-device
+# Android sh.
 #
 # What it does:
 #   * Best-effort: if neither curl nor wget exists (stock Android usually ships
-#     NEITHER), it exits 0 without touching anything — the bundled personas.tsv
-#     (curated stable Pixels) stays in force, so behaviour is unchanged offline.
-#   * When network + a downloader ARE present, it scrapes the latest Pixel
-#     CANARY build for each Pixel model, derives the 10 persona columns, and
-#     UPSERTS them into personas.tsv (replacing any row for the same codename).
+#     NEITHER), it exits 0 without touching anything — freshen then falls back to
+#     the bundled personas.tsv pool, so behaviour is unchanged offline.
+#   * When network + a downloader ARE present, it scrapes the latest Pixel CANARY
+#     build for ONE RANDOMLY-CHOSEN Pixel model, derives the 10 persona columns,
+#     and writes them to PERSONA_OVERRIDE (a single TSV line).
+#   * `sandboxid freshen` (run right after, by action.sh) consumes that override:
+#     it derives the identity straight from this persona — bypassing the
+#     SDK-matched pool pick — and deletes the file. So EVERY run applies a NEW
+#     random Pixel identity directly to identity.prop (no personas.tsv pool
+#     accumulation, and never "locked" to one model).
 #   * Devices whose SoC/platform we can't map are SKIPPED (never guessed) so a
 #     spoofed RADIO / ro.board.platform can't go inconsistent.
 #
-# "Both channels" = the bundled personas.tsv provides STABLE release personas;
-# this fetcher layers fresh CANARY personas on top. gen_identity() then picks
-# (SDK-matched, random) across the combined pool.
+# Why one model instead of the whole list: writing the override is a single
+# random pick, so there is no reason to query every device. Fetching one (with a
+# small retry) is dramatically faster than the old 15-model pool refresh.
 #
-# Exit status is ALWAYS 0 for a no-op / partial failure: refreshing the pool
-# must never block `sandboxid freshen` in action.sh.
+# Exit status is ALWAYS 0 for a no-op / partial failure: refreshing the persona
+# must never block `sandboxid freshen` in action.sh. On any failure we leave NO
+# override behind, so freshen cleanly falls back to the bundled pool.
 
 MODDIR="${MODDIR:-/data/adb/modules/sandboxid}"
-PERSONAS_FILE="${PERSONAS_FILE:-$MODDIR/personas.tsv}"
+OVERRIDE_FILE="${PERSONA_OVERRIDE:-$MODDIR/persona.override}"
 
 # Current Pixel dev cycle. Canary always tracks the newest release, so these are
 # constant per cycle; override via env when a new Android version ships.
 CANARY_RELEASE="${CANARY_RELEASE:-16}"
 CANARY_SDK="${CANARY_SDK:-36}"
 
-# Cap how many models we query so a huge list can't stall boot/Action.
-MAX_MODELS="${AUTOPIF_MAX_MODELS:-15}"
+# How many random models to try before giving up (each try = one extra HTTP
+# request). Small: the first pick almost always resolves; this only covers a
+# model whose canary block is momentarily missing.
+MAX_TRY="${AUTOPIF_MAX_TRY:-4}"
 
 log() { echo "[autopif] $*"; }
+
+# Clean-slate: drop any stale override up front so that if THIS run fails we fall
+# back to the bundled pool rather than silently reusing a previous fetch.
+rm -f "$OVERRIDE_FILE" 2>/dev/null
 
 # --- 0. Downloader guard -----------------------------------------------------
 DL=""
@@ -42,7 +54,7 @@ if command -v curl >/dev/null 2>&1; then
 elif command -v wget >/dev/null 2>&1; then
   DL="wget"
 else
-  log "no curl/wget on device — keeping bundled personas.tsv (offline no-op)"
+  log "no curl/wget on device — freshen will use bundled personas.tsv (offline no-op)"
   exit 0
 fi
 
@@ -62,6 +74,18 @@ download() {
       wget -T 10 -qO "$_out" "$_url" 2>/dev/null
     fi
   fi
+}
+
+# Random integer in [0, $1). Reads 3 bytes from /dev/urandom via toybox `od`
+# (same -tx1 pattern helpers.sh already relies on); 3 bytes stay positive even in
+# a 32-bit shell. Falls back to the PID if urandom is unreadable so a pick is
+# always made.
+rand_below() {
+  _n="$1"
+  [ "$_n" -gt 0 ] 2>/dev/null || { echo 0; return; }
+  _h=$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  if [ -n "$_h" ]; then _r=$(( 0x$_h )); else _r=$$; fi
+  echo $(( _r % _n ))
 }
 
 # --- Temp workspace ----------------------------------------------------------
@@ -112,35 +136,48 @@ if [ "$count_model" -eq 0 ] || [ "$count_model" -ne "$count_prod" ]; then
   exit 0
 fi
 
-# --- 3. Flash-tool API key + security bulletin (fetched once) ----------------
+# --- 3. Which rows have a SoC we can map? ------------------------------------
+# Collect the 1-based indices of models with a known platform; SKIP the rest so
+# a spoofed RADIO / ro.board.platform can never go inconsistent.
+known=""
+i=1
+while [ "$i" -le "$count_model" ]; do
+  device=$(printf '%s\n' "$PRODUCT_LIST" | sed -n "${i}p")
+  [ -n "$device" ] && [ -n "$(map_platform "$device")" ] && known="$known $i"
+  i=$((i + 1))
+done
+
+set -- $known            # positional params $1..$# = the known-platform indices
+kn=$#
+if [ "$kn" -eq 0 ]; then
+  log "no known-SoC models in Google's list — keeping bundled pool"
+  exit 0
+fi
+
+# --- 4. Flash-tool API key + security bulletin (fetched once) ----------------
 download "https://flash.android.com" "flash.html"
 FLASH_KEY=$(grep -o '<body data-client-config=.*' "flash.html" 2>/dev/null | cut -d\; -f2 | cut -d\& -f1)
 [ -z "$FLASH_KEY" ] && { log "could not obtain flash API key — keeping bundled pool"; exit 0; }
 
 download "https://source.android.com/docs/security/bulletin/pixel" "secbull.html"
 
-# --- 4. Per-device: fetch canary build, derive persona row -------------------
-: > "newrows.tsv"
-added=0
-i=1
-while [ "$i" -le "$count_model" ] && [ "$i" -le "$MAX_MODELS" ]; do
-  model=$(printf '%s\n'   "$MODEL_LIST"   | sed -n "${i}p")
-  device=$(printf '%s\n'  "$PRODUCT_LIST" | sed -n "${i}p")
-  i=$((i + 1))
-
-  [ -z "$model" ] && continue
-  [ -z "$device" ] && continue
-
-  platform=$(map_platform "$device")
-  if [ -z "$platform" ]; then
-    log "skip $model ($device): unknown SoC — leaving to bundled stable pool"
-    continue
-  fi
+# --- 5. Resolve ONE random model's canary build into a persona line ----------
+# Given a 1-based row index, fetch its canary build and print the 10-column
+# persona TSV line on success (return 0), or return 1 to let the caller try
+# another random model.
+resolve_persona() {
+  _idx="$1"
+  _model=$(printf '%s\n'  "$MODEL_LIST"   | sed -n "${_idx}p")
+  _device=$(printf '%s\n' "$PRODUCT_LIST" | sed -n "${_idx}p")
+  [ -z "$_model" ] && return 1
+  [ -z "$_device" ] && return 1
+  _platform=$(map_platform "$_device")
+  [ -z "$_platform" ] && return 1
 
   # flashstation lists canary/beta builds under the "<codename>_beta" product.
-  station_url="https://content-flashstation-pa.googleapis.com/v1/builds?product=${device}_beta&key=$FLASH_KEY"
-  download "$station_url" "station.json" "https://flash.android.com"
-  [ -s "station.json" ] || { log "skip $model: no build data"; continue; }
+  _station_url="https://content-flashstation-pa.googleapis.com/v1/builds?product=${_device}_beta&key=$FLASH_KEY"
+  download "$_station_url" "station.json" "https://flash.android.com"
+  [ -s "station.json" ] || { log "skip $_model: no build data"; return 1; }
 
   # newest canary build block
   if command -v tac >/dev/null 2>&1; then
@@ -148,62 +185,60 @@ while [ "$i" -le "$count_model" ] && [ "$i" -le "$MAX_MODELS" ]; do
   else
     grep -A20 '"canary": true' "station.json" 2>/dev/null | head -n 20 > "canary.json"
   fi
-  [ -s "canary.json" ] || { log "skip $model: no canary build"; continue; }
+  [ -s "canary.json" ] || { log "skip $_model: no canary build"; return 1; }
 
-  bid=$(grep 'releaseCandidateName' "canary.json" | cut -d\" -f4 | head -n1)
-  incr=$(grep 'buildId' "canary.json" | cut -d\" -f4 | head -n1)
-  [ -z "$bid" ] && { log "skip $model: no build id"; continue; }
-  [ -z "$incr" ] && { log "skip $model: no incremental"; continue; }
+  _bid=$(grep 'releaseCandidateName' "canary.json" | cut -d\" -f4 | head -n1)
+  _incr=$(grep 'buildId' "canary.json" | cut -d\" -f4 | head -n1)
+  [ -z "$_bid" ] && { log "skip $_model: no build id"; return 1; }
+  [ -z "$_incr" ] && { log "skip $_model: no incremental"; return 1; }
 
   # security patch: match canary id (YYYY-MM) against the bulletin, else fall
   # back to that month + "-05" like the reference script.
-  canary_id=$(grep '"id"' "canary.json" | sed -e 's;.*canary-\(.*\)";\1;' -e 's;^\(.\{4\}\);\1-;' | head -n1)
-  spatch=""
-  if [ -n "$canary_id" ] && [ -s "secbull.html" ]; then
-    spatch=$(grep "<td>$canary_id" "secbull.html" 2>/dev/null | sed 's;.*<td>\(.*\)</td>;\1;' | head -n1)
+  _canary_id=$(grep '"id"' "canary.json" | sed -e 's;.*canary-\(.*\)";\1;' -e 's;^\(.\{4\}\);\1-;' | head -n1)
+  _spatch=""
+  if [ -n "$_canary_id" ] && [ -s "secbull.html" ]; then
+    _spatch=$(grep "<td>$_canary_id" "secbull.html" 2>/dev/null | sed 's;.*<td>\(.*\)</td>;\1;' | head -n1)
   fi
-  [ -z "$spatch" ] && [ -n "$canary_id" ] && spatch="${canary_id}-05"
-  [ -z "$spatch" ] && { log "skip $model: no security patch"; continue; }
+  [ -z "$_spatch" ] && [ -n "$_canary_id" ] && _spatch="${_canary_id}-05"
+  [ -z "$_spatch" ] && { log "skip $_model: no security patch"; return 1; }
 
   # persona columns: product/board == codename (matches curated pool style).
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$model" "$device" "$device" "$device" "$platform" \
-    "$CANARY_SDK" "$CANARY_RELEASE" "$bid" "$incr" "$spatch" >> "newrows.tsv"
-  added=$((added + 1))
-  log "canary $model ($device/$platform): $bid / $incr / $spatch"
+    "$_model" "$_device" "$_device" "$_device" "$_platform" \
+    "$CANARY_SDK" "$CANARY_RELEASE" "$_bid" "$_incr" "$_spatch"
+  return 0
+}
+
+# Random starting offset, then walk the known list (wrapping) so retries hit
+# DIFFERENT models. Cap the walk at MAX_TRY so a bad run still ends quickly.
+start=$(rand_below "$kn")
+persona_line=""
+try=0
+while [ "$try" -lt "$kn" ] && [ "$try" -lt "$MAX_TRY" ]; do
+  off=$(( (start + try) % kn ))
+  try=$((try + 1))
+  eval "row=\${$((off + 1))}"        # off-th known index (positional params)
+  persona_line=$(resolve_persona "$row")
+  [ -n "$persona_line" ] && break
 done
 
-if [ "$added" -eq 0 ]; then
-  log "no canary personas resolved — keeping bundled pool unchanged"
+if [ -z "$persona_line" ]; then
+  log "no canary persona resolved in $try tr(y|ies) — keeping bundled pool"
   exit 0
 fi
 
-# --- 5. Upsert into personas.tsv (replace rows with same codename) -----------
-[ -f "$PERSONAS_FILE" ] || : > "$PERSONAS_FILE"
-merged="$TMP_DIR/personas.merged"
-
-awk -F'\t' -v newf="$TMP_DIR/newrows.tsv" '
-  BEGIN {
-    while ((getline l < newf) > 0) {
-      if (l ~ /^#/ || l == "") continue
-      n = split(l, a, "\t"); if (n >= 2) skip[a[2]] = 1
-    }
-    close(newf)
-  }
-  /^#/ || NF == 0 { print; next }     # preserve comments / blank lines
-  !($2 in skip)  { print }            # keep existing rows we are NOT replacing
-' "$PERSONAS_FILE" > "$merged" 2>/dev/null || { log "merge failed — keeping bundled pool"; exit 0; }
-
-cat "newrows.tsv" >> "$merged"
-
-# atomic replace
-if cp -f "$merged" "$PERSONAS_FILE.tmp.$$" 2>/dev/null && mv -f "$PERSONAS_FILE.tmp.$$" "$PERSONAS_FILE" 2>/dev/null; then
-  chmod 0644 "$PERSONAS_FILE" 2>/dev/null
-  total=$(grep -cv '^#' "$PERSONAS_FILE" 2>/dev/null)
-  log "upserted $added canary persona(s); pool now has $total entries"
+# --- 6. Write the one-shot override (atomic) ---------------------------------
+if printf '%s\n' "$persona_line" > "$OVERRIDE_FILE.tmp.$$" 2>/dev/null \
+   && mv -f "$OVERRIDE_FILE.tmp.$$" "$OVERRIDE_FILE" 2>/dev/null; then
+  chmod 0644 "$OVERRIDE_FILE" 2>/dev/null
+  # model \t device \t ... — log just the human bits.
+  _m=$(printf '%s' "$persona_line" | cut -f1)
+  _d=$(printf '%s' "$persona_line" | cut -f2)
+  _b=$(printf '%s' "$persona_line" | cut -f8)
+  log "fetched random canary persona: $_m ($_d) build $_b — freshen will apply it directly"
 else
-  rm -f "$PERSONAS_FILE.tmp.$$" 2>/dev/null
-  log "could not write personas.tsv — keeping bundled pool"
+  rm -f "$OVERRIDE_FILE.tmp.$$" 2>/dev/null
+  log "could not write persona override — keeping bundled pool"
 fi
 
 exit 0

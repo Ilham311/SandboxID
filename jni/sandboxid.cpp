@@ -26,6 +26,7 @@ static const char* RESETPROP      = sandboxid::RESETPROP;
 static const char* MOUNTDIR       = sandboxid::MOUNTDIR;
 static const char* TARGET_FILE    = sandboxid::TARGET_FILE;
 static const char* PERSONAS_FILE  = sandboxid::PERSONAS_FILE;
+static const char* PERSONA_OVERRIDE = sandboxid::PERSONA_OVERRIDE;
 
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
@@ -302,7 +303,9 @@ static std::vector<PixelEntry> load_personas() {
     return pool;
 }
 
-static Identity gen_identity() {
+// Pick a persona from the pool, matched to the device's real SDK level. This is
+// the DEFAULT selection used by seed/freshen when no autopif override is present.
+static PixelEntry pick_persona() {
     std::random_device rd;
     std::mt19937 g(rd());
 
@@ -334,8 +337,15 @@ static Identity gen_identity() {
         fprintf(stderr, "! device SDK %d below all personas; using SDK %d (upgrade, risky)\n",
                 dev, pool[idx].sdk);
     }
-    const PixelEntry& p = pool[idx];
+    return pool[idx];
+}
 
+// Derive a full Identity (fingerprint, RADIO, SoC model, host suffix, random
+// SERIAL/ANDROID_ID/AAID, ...) from ONE persona. Shared by the SDK-matched pool
+// pick (gen_identity) AND the autopif one-shot override, so both paths produce
+// byte-identical field derivation -- there is no second source of truth for the
+// fingerprint format.
+static Identity derive_identity(const PixelEntry& p) {
     Identity id;
     id.kv["BRAND"]           = "google";
     id.kv["MANUFACTURER"]    = "Google";
@@ -412,6 +422,29 @@ static Identity gen_identity() {
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
     return id;
+}
+
+// Default identity generation: SDK-matched random pick from the pool. Used by
+// `seed` (boot) and by `freshen` when autopif left no override.
+static Identity gen_identity() {
+    return derive_identity(pick_persona());
+}
+
+// Consume a one-shot persona override left by autopif.sh. Parses the first valid
+// persona line (same validation as the pool) and ALWAYS unlinks the file, so a
+// fetched persona applies exactly once and a malformed file can never wedge
+// freshen. Returns true and fills `out` only when a valid persona was read.
+static bool take_persona_override(PixelEntry& out) {
+    std::string raw = read_file(PERSONA_OVERRIDE);
+    if (raw.empty()) return false;
+    bool ok = false;
+    std::istringstream ss(raw);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (parse_persona_line(line, out)) { ok = true; break; }
+    }
+    ::unlink(PERSONA_OVERRIDE);
+    return ok;
 }
 
 #ifdef SBX_DEBUG
@@ -807,7 +840,20 @@ static int cmd_freshen() {
     std::string old = read_file(IDENTITY_FILE);
     if (!old.empty()) atomic_write(IDENTITY_BAK, old);
 
-    Identity id = gen_identity();
+    // autopif.sh may have fetched a fresh random Pixel and left it as a one-shot
+    // override. When present, derive the identity straight from it (bypassing the
+    // SDK-matched pool pick) so each `action`/autopif run gets a NEW model. Its
+    // SDK is spoofed across all surfaces, so it stays internally consistent even
+    // when it differs from the device's real SDK.
+    PixelEntry ov;
+    Identity id;
+    if (take_persona_override(ov)) {
+        fprintf(stderr, "* autopif persona: %s (%s/%s, SDK %d) — applied directly, no pool pick\n",
+                ov.model.c_str(), ov.device.c_str(), ov.platform.c_str(), ov.sdk);
+        id = derive_identity(ov);
+    } else {
+        id = gen_identity();
+    }
     if (!atomic_write(IDENTITY_FILE, id.serialize())) {
         fprintf(stderr, "! failed to write identity.prop\n");
         return 1;
