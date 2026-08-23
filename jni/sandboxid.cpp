@@ -164,7 +164,8 @@ struct Identity {
     std::string serialize() const {
         static const std::vector<std::string> order = {
             "BRAND","MANUFACTURER","MODEL","MARKETNAME","DEVICE","PRODUCT",
-            "BOARD","HARDWARE","BOARD_PLATFORM","FINGERPRINT","ID","DISPLAY","DESCRIPTION",
+            "BOARD","HARDWARE","BOARD_PLATFORM","SOC_MANUFACTURER","SOC_MODEL",
+            "FINGERPRINT","ID","DISPLAY","DESCRIPTION",
             "BOOTLOADER","HOST","USER","TYPE","TAGS",
             "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
             "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
@@ -255,6 +256,8 @@ static Identity gen_identity() {
     id.kv["BOARD"]           = p.board;
     id.kv["HARDWARE"]        = p.board;
     id.kv["BOARD_PLATFORM"]  = p.platform;
+    id.kv["SOC_MANUFACTURER"] = "Google";
+    id.kv["SOC_MODEL"]       = p.soc_model;
     id.kv["ID"]              = p.id;
     id.kv["INCREMENTAL"]     = p.incremental;
     id.kv["RELEASE"]         = p.release;
@@ -341,6 +344,8 @@ static void apply_native(const Identity& id) {
     const std::string HOST         = get("HOST");
     const std::string HARDWARE     = get("HARDWARE");
     const std::string PLATFORM     = get("BOARD_PLATFORM");
+    const std::string SOC_MANUF    = get("SOC_MANUFACTURER");
+    const std::string SOC_MODEL    = get("SOC_MODEL");
     const std::string MARKETNAME   = get("MARKETNAME");
 
     std::vector<Rp> rp = {
@@ -395,6 +400,8 @@ static void apply_native(const Identity& id) {
 
         {"ro.hardware",                        HARDWARE},
         {"ro.board.platform",                  PLATFORM},
+        {"ro.soc.manufacturer",                SOC_MANUF},
+        {"ro.soc.model",                       SOC_MODEL},
         {"ro.product.marketname",              MARKETNAME},
 
         {"ro.product.brand_for_attestation",        BRAND},
@@ -506,6 +513,8 @@ static void generate_mount_files(const Identity& id) {
     const std::string HOST         = g("HOST");
     const std::string HARDWARE     = g("HARDWARE");
     const std::string PLATFORM     = g("BOARD_PLATFORM");
+    const std::string SOC_MANUF    = g("SOC_MANUFACTURER");
+    const std::string SOC_MODEL    = g("SOC_MODEL");
     const std::string MARKETNAME   = g("MARKETNAME");
 
     std::string base;
@@ -530,6 +539,8 @@ static void generate_mount_files(const Identity& id) {
     add("ro.product.board",                   BOARD);
     add("ro.hardware",                        HARDWARE);
     add("ro.board.platform",                  PLATFORM);
+    add("ro.soc.manufacturer",                SOC_MANUF);
+    add("ro.soc.model",                       SOC_MODEL);
     add("ro.product.marketname",              MARKETNAME);
     add("ro.product.brand_for_attestation",        BRAND);
     add("ro.product.name_for_attestation",         PRODUCT);
