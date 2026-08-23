@@ -21,3 +21,6 @@ jni/zygisk.hpp
 # L3 LSPlant (opt-in): vendored libs + generated callback DEX header
 jni/external/
 jni/hook_dex.h
+
+# Claude Code worktrees (ephemeral; never commit as embedded repos)
+.claude/worktrees/
