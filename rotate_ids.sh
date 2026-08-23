@@ -177,6 +177,27 @@ rotate_bluetooth_mac() {
     return 0
 }
 
+sync_boot_count() {
+    # Terapkan BOOT_COUNT dari identity.prop ke Settings.Global.boot_count. Apps
+    # yang baca Settings.Global.BOOT_COUNT (indikator "device sering reboot?")
+    # jadi lihat angka persona kita, bukan angka device asli. Ini yang bikin
+    # "boot count" beneran kepakai (dulu cuma metadata yang nggak pernah ditulis).
+    bc="$(identity_get BOOT_COUNT 2>/dev/null || true)"
+    case "$bc" in
+        ''|*[!0-9]*)
+            log_info "boot_count: identity.prop belum punya angka valid — dilewat"
+            return 0 ;;
+    esac
+    log_step "Set Settings.Global.boot_count = $bc (dari identity.prop)"
+    if settings_put global boot_count "$bc"; then
+        log_ok "boot_count ke $bc"
+    else
+        log_warn "settings put boot_count gagal (mungkin device tak izinkan)"
+        return 1
+    fi
+    return 0
+}
+
 sync_device_name() {
     NEW_NAME="${1:-}"
     [ -z "$NEW_NAME" ] && NEW_NAME="$(identity_get BLUETOOTH_NAME 2>/dev/null || true)"
@@ -270,28 +291,32 @@ case "$cmd" in
         randomize_wlan_mac   || :
         rotate_bluetooth_mac || FAILURES=$((FAILURES + 1))
         sync_device_name "$@" || FAILURES=$((FAILURES + 1))
+        sync_boot_count      || :
         ;;
     safe)
         set_gaid_value "$@"    || FAILURES=$((FAILURES + 1))
         rotate_bluetooth_mac   || FAILURES=$((FAILURES + 1))
         sync_device_name "$@"  || :
+        sync_boot_count        || :
         ;;
     ssaid)                wipe_ssaid              || FAILURES=$((FAILURES + 1)) ;;
     gaid)                 set_gaid_value "$@"     || FAILURES=$((FAILURES + 1)) ;;
     wlan-mac|mac)         randomize_wlan_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
     bt-mac|bluetooth-mac) rotate_bluetooth_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
     device-name|name)     sync_device_name "$@"   || FAILURES=$((FAILURES + 1)) ;;
+    boot-count|bootcount) sync_boot_count         || FAILURES=$((FAILURES + 1)) ;;
     status)               cmd_status ;;
     -h|--help|help)
         cat <<USAGE
 Usage: rotate_ids.sh <cmd> [args]
-  all                        - SSAID + GAID + wlan-MAC + BT-MAC + device-name (default)
-  safe                       - GAID + BT-MAC + device-name (no reboot, no wifi reset)
+  all                        - SSAID + GAID + wlan-MAC + BT-MAC + device-name + boot-count (default)
+  safe                       - GAID + BT-MAC + device-name + boot-count (no reboot, no wifi reset)
   ssaid                      - wipe settings_ssaid.xml (needs reboot)
   gaid [uuid]                - set Google Advertising ID
   wlan-mac [xx:xx:..]        - set wlan0 MAC
   bt-mac [xx:xx:..]          - set Bluetooth adapter MAC
   device-name [name]         - sync device_name/BT to persona (identity.prop MODEL)
+  boot-count                 - write Settings.Global.boot_count from identity.prop BOOT_COUNT
   status                     - show current values (read-only)
 USAGE
         exit 0 ;;

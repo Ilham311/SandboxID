@@ -13,8 +13,8 @@
   <div class="brand">
     <div class="logo">sb</div>
     <div class="brand-txt">
-      <div class="title">SandboxID</div>
-      <div class="sub">device identifier privacy lab</div>
+      <div class="title">SandboxID<span class="live" id="live" title="root bridge"></span></div>
+      <div class="sub">lab identitas device &middot; multi-brand</div>
     </div>
   </div>
   <span class="pill" id="version">…</span>
@@ -31,29 +31,31 @@
 <main>
   <section id="persona" class="page active">
     <div class="row">
-      <button id="freshenBtn" class="primary">Freshen persona</button>
-      <button id="refreshBtn" class="ghost">Refresh</button>
+      <button id="freshenBtn" class="primary">🎲 Undi device baru</button>
+      <button id="refreshBtn" class="ghost">Muat ulang</button>
     </div>
+    <div id="hero" class="hero"></div>
+    <div id="tiles" class="tiles"></div>
     <div id="identity" class="kv"></div>
   </section>
 
   <section id="rotate" class="page">
     <div class="row spread">
-      <button id="rotAll" class="primary">Rotate all</button>
-      <span class="chip chip-on" title="Always rotate fully so identifiers stay consistent">Consistency &middot; ON</span>
+      <button id="rotAll" class="primary">Rotasi semua</button>
+      <span class="chip chip-on" title="Selalu rotasi penuh biar identitas tetap nyambung">Konsisten &middot; ON</span>
     </div>
-    <div class="rot-note">SSAID &middot; GAID &middot; wlan MAC &middot; BT MAC &middot; device name &mdash; always full, cannot be disabled.</div>
+    <div class="rot-note">SSAID &middot; GAID &middot; WiFi MAC &middot; BT MAC &middot; nama &middot; boot count &mdash; selalu penuh, nggak bisa dimatiin.</div>
     <div class="cards" id="rotCards"></div>
   </section>
 
   <section id="targets" class="page">
     <div class="row spread">
-      <div class="hint">One package per line. Blank lines &amp; # ignored. Companion hot-reloads.</div>
-      <button id="tgtSave" class="primary sm">Save</button>
+      <div class="hint">Satu paket per baris. Baris kosong &amp; # diabaikan. Companion auto-reload.</div>
+      <button id="tgtSave" class="primary sm">Simpan</button>
     </div>
     <textarea id="tgtArea" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
     <div class="row">
-      <button id="tgtReload" class="ghost sm">Reload from disk</button>
+      <button id="tgtReload" class="ghost sm">Muat ulang dari disk</button>
       <div id="tgtStatus" class="hint"></div>
     </div>
   </section>
@@ -61,13 +63,13 @@
   <section id="log" class="page">
     <div class="row spread">
       <select id="logSrc">
-        <option value="logcat">Live logcat (200 lines)</option>
-        <option value="action">Action log (freshen)</option>
-        <option value="rotate">Rotate log</option>
-        <option value="session">Latest session (debug variant)</option>
-        <option value="crashes">Crashes</option>
+        <option value="logcat">Logcat langsung (200 baris)</option>
+        <option value="action">Log Action (undi device)</option>
+        <option value="rotate">Log Rotate</option>
+        <option value="session">Sesi terbaru (varian debug)</option>
+        <option value="crashes">Crash</option>
       </select>
-      <button id="logRefresh" class="ghost sm">Reload</button>
+      <button id="logRefresh" class="ghost sm">Muat ulang</button>
     </div>
     <div id="logBody" class="logbody"></div>
   </section>

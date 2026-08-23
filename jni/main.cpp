@@ -324,6 +324,77 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
 
+/* ── L8: uptime spoof ──────────────────────────────────────────────────
+   Adds a constant offset (UPTIME_SECONDS from identity.prop) to the
+   SystemClock native clocks so a just-booted sandbox reports the fake
+   device's "lived-in" uptime instead of a few seconds. The offset is
+   CONSTANT, so deltas between successive reads are unchanged — Handler /
+   Choreographer / MessageQueue / timer scheduling (which only compare
+   differences, and whose native side receives relative timeouts) keep
+   working. Only the absolute value an app samples as an uptime / boot-time
+   fingerprint shifts. No-op unless UPTIME_SECONDS is a positive integer. */
+#ifndef CLOCK_BOOTTIME
+#define CLOCK_BOOTTIME 7
+#endif
+
+static jlong (*orig_uptime_ms)(JNIEnv*, jclass) = nullptr;
+static jlong (*orig_ert_ms)(JNIEnv*, jclass)    = nullptr;
+static jlong (*orig_ert_ns)(JNIEnv*, jclass)    = nullptr;
+static int64_t g_uptime_off_ms = 0;
+static int64_t g_uptime_off_ns = 0;
+
+static int64_t sbx_clock_ms(clockid_t clk) {
+    struct timespec t; clock_gettime(clk, &t);
+    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+static int64_t sbx_clock_ns(clockid_t clk) {
+    struct timespec t; clock_gettime(clk, &t);
+    return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+/* Fall back to a direct clock read only if the original binding was missed
+   (method absent on this platform) — otherwise chain the real impl. */
+static jlong hook_uptime_ms(JNIEnv* e, jclass c) {
+    int64_t base = orig_uptime_ms ? (int64_t)orig_uptime_ms(e, c) : sbx_clock_ms(CLOCK_MONOTONIC);
+    return (jlong)(base + g_uptime_off_ms);
+}
+static jlong hook_ert_ms(JNIEnv* e, jclass c) {
+    int64_t base = orig_ert_ms ? (int64_t)orig_ert_ms(e, c) : sbx_clock_ms(CLOCK_BOOTTIME);
+    return (jlong)(base + g_uptime_off_ms);
+}
+static jlong hook_ert_ns(JNIEnv* e, jclass c) {
+    int64_t base = orig_ert_ns ? (int64_t)orig_ert_ns(e, c) : sbx_clock_ns(CLOCK_BOOTTIME);
+    return (jlong)(base + g_uptime_off_ns);
+}
+
+static void install_uptime_hook(Api* api, JNIEnv* env) {
+    const std::string& us = val("UPTIME_SECONDS");
+    if (us.empty()) return;
+    char* end = nullptr;
+    long long secs = std::strtoll(us.c_str(), &end, 10);
+    if (end == us.c_str() || secs <= 0) return;   /* absent / zero / garbage → leave clocks real */
+    g_uptime_off_ms = (int64_t)secs * 1000LL;
+    g_uptime_off_ns = (int64_t)secs * 1000000000LL;
+
+    JNINativeMethod m[3] = {
+        {const_cast<char*>("uptimeMillis"),         const_cast<char*>("()J"), reinterpret_cast<void*>(hook_uptime_ms)},
+        {const_cast<char*>("elapsedRealtime"),      const_cast<char*>("()J"), reinterpret_cast<void*>(hook_ert_ms)},
+        {const_cast<char*>("elapsedRealtimeNanos"), const_cast<char*>("()J"), reinterpret_cast<void*>(hook_ert_ns)},
+    };
+    api->hookJniNativeMethods(env, "android/os/SystemClock", m, 3);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGE("L8: JNI exception saat memasang uptime hook");
+    }
+    orig_uptime_ms = reinterpret_cast<jlong (*)(JNIEnv*, jclass)>(m[0].fnPtr);
+    orig_ert_ms    = reinterpret_cast<jlong (*)(JNIEnv*, jclass)>(m[1].fnPtr);
+    orig_ert_ns    = reinterpret_cast<jlong (*)(JNIEnv*, jclass)>(m[2].fnPtr);
+    LOGD("L8 uptime hook installed (+%llds) orig=%p/%p/%p", (long long)secs,
+         reinterpret_cast<void*>(orig_uptime_ms),
+         reinterpret_cast<void*>(orig_ert_ms),
+         reinterpret_cast<void*>(orig_ert_ns));
+}
+
 struct SbxCrashRec {
     uint32_t magic;
     int32_t  sig;
@@ -574,6 +645,7 @@ public:
         install_build_hook(env_);
         install_prop_hook(api_, env_);
         install_leak_sensors(api_, env_);
+        install_uptime_hook(api_, env_);
 #ifdef SBX_DEBUG
         for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
