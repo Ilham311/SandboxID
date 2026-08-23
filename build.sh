@@ -83,7 +83,17 @@ build_variant() {
   [ -f target.txt ] && cp target.txt "$PKG/"
   [ -f helpers.sh ] && cp helpers.sh "$PKG/"
   [ -f rotate_ids.sh ] && cp rotate_ids.sh "$PKG/"
+  [ -f personas.tsv ] && cp personas.tsv "$PKG/"
+  [ -f autopif.sh ] && cp autopif.sh "$PKG/"
   [ -d webroot ] && cp -R webroot "$PKG/"
+
+  # Opt-in: refresh the PACKAGED persona pool from Google's live Pixel build
+  # data at build time (CI has curl, unlike most devices). Mutates only the
+  # $PKG copy, never the source tree. Enable with AUTOPIF_REFRESH=1.
+  if [ "${AUTOPIF_REFRESH:-0}" = "1" ] && [ -f "$PKG/autopif.sh" ]; then
+    echo "  ==> refreshing persona pool (autopif, build-time)"
+    PERSONAS_FILE="$PKG/personas.tsv" MODDIR="$PKG" sh "$PKG/autopif.sh" || true
+  fi
 
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"

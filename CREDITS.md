@@ -56,6 +56,18 @@ the verb (verified against the on-device usage banners).
     osm0sis ← chiteroman (PlayIntegrityFix) ← kdrag0n (ProtonAOSP /
     Universal SafetyNet Fix) ← Displax.
 
+- **autopif.sh (canary fingerprint fetcher)** — [dannycreations' `autopif.sh`
+  gist](https://gist.github.com/dannycreations/659e0b780e8b89ea5140c2d837ac2ed5)
+  (no license stated). The *technique* of scraping Google's public Pixel pages
+  (versions → factory-image → flash-station API → security bulletin) to derive
+  the newest **canary** build fingerprint is adapted in this repo's `autopif.sh`.
+  The scraping steps necessarily mirror the source because they follow Google's
+  page structure, but the SandboxID script is **rewritten** for on-device
+  Android `sh` and to *upsert* the persona pool (`personas.tsv`) — with a SoC
+  allow-list and an offline no-op guard — instead of writing a PlayIntegrityFix
+  `pif.json`. No gist code is copied verbatim; because the gist states no
+  license, only the documented technique is reused, not its source.
+
 ---
 
 ## Licensing note

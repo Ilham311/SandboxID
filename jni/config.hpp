@@ -11,6 +11,9 @@ inline constexpr char MODDIR[]        = "/data/adb/modules/sandboxid";
 inline constexpr char IDENTITY_FILE[] = "/data/adb/modules/sandboxid/identity.prop";
 inline constexpr char MOUNTDIR[]      = "/data/adb/modules/sandboxid/mount";
 inline constexpr char TARGET_FILE[]   = "/data/adb/modules/sandboxid/target.txt";
+// Persona pool source (replaces the old compiled-in pool.hpp). Tab-separated,
+// one Pixel persona per line; refreshed on-device by autopif.sh. See personas.tsv.
+inline constexpr char PERSONAS_FILE[] = "/data/adb/modules/sandboxid/personas.tsv";
 
 inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/sandboxid/identity.prop.bak";
 inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mode";
