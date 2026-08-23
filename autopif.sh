@@ -31,6 +31,22 @@
 #
 # Aliases for `device`: gen, multibrand, profile.
 
+# autopif fetches ONE fresh Google Pixel *canary* persona (latest SDK/release)
+# straight from Google's flash-station API and writes it to persona.override,
+# which `freshen` applies directly. This online path is Pixel-only by nature —
+# only Google publishes an open build API.
+#
+# Multi-brand / non-Google devices are supported through the OFFLINE pool in
+# personas.tsv instead (Samsung/Xiaomi/… rows with the optional brand columns);
+# `freshen` picks from there, matched to the device's real SDK, whenever no
+# override is present.
+#
+# Because the fetched canary is always the LATEST Android, `freshen` will REFUSE
+# to apply this override on a device running an older Android (it never presents
+# a higher SDK than the device runs) and falls back to the SDK-matched pool pick.
+# So on Android 12-15 devices autopif is effectively a no-op and the pool drives
+# the identity; on Android 16 devices it applies the fresh canary.
+
 MODDIR="${MODDIR:-/data/adb/modules/sandboxid}"
 OVERRIDE_FILE="${PERSONA_OVERRIDE:-$MODDIR/persona.override}"
 
