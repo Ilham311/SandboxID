@@ -346,8 +346,22 @@ static Identity gen_identity() {
     id.kv["BOARD"]           = p.board;
     id.kv["HARDWARE"]        = p.board;
     id.kv["BOARD_PLATFORM"]  = p.platform;
+    // ro.soc.model / Build.SOC_MODEL. Google's Tensor SoC model string is a
+    // pure function of the platform (chip generation), so derive it from
+    // p.platform instead of carrying a redundant persona column. Mirrors
+    // modem_prefix() below; parse_persona_line() already rejects unknown
+    // platforms, so the fallback is only a guard.
+    auto soc_model = [](const char* plat) -> const char* {
+        if (!strcmp(plat, "gs101"))   return "GS101";
+        if (!strcmp(plat, "gs201"))   return "GS201";
+        if (!strcmp(plat, "zuma"))    return "GS301";
+        if (!strcmp(plat, "zumapro")) return "GS401";
+        if (!strcmp(plat, "laguna"))  return "GS501";
+        fprintf(stderr, "! unknown platform '%s' — no SoC model mapping\n", plat);
+        return "unknown";
+    };
     id.kv["SOC_MANUFACTURER"] = "Google";
-    id.kv["SOC_MODEL"]       = p.soc_model;
+    id.kv["SOC_MODEL"]       = soc_model(p.platform.c_str());
     id.kv["ID"]              = p.id;
     id.kv["INCREMENTAL"]     = p.incremental;
     id.kv["RELEASE"]         = p.release;
