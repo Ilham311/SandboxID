@@ -169,7 +169,8 @@ make_tmp() {
   TMP_DIR=$(mktemp -d 2>/dev/null)
   if [ -z "$TMP_DIR" ] || [ ! -d "$TMP_DIR" ]; then
     TMP_DIR="${TMPDIR:-/data/local/tmp}/autopif.$$"
-    mkdir -p "$TMP_DIR" 2>/dev/null || return 1
+    [ -e "$TMP_DIR" ] && return 1        # refuse to reuse/pre-existing path
+    mkdir "$TMP_DIR" 2>/dev/null || return 1
   fi
   return 0
 }
@@ -434,9 +435,9 @@ assemble_identity() {
   INCREMENTAL=$(col "$_row" 13); SECPATCH=$(col "$_row" 14)
   RELEASE_DATE=$(col "$_row" 15)
 
-  for _v in "$BRAND" "$MANUFACTURER" "$MODEL" "$DEVICE" "$PRODUCT" "$BOARD" \
-            "$SOC_MODEL" "$SDK" "$RELEASE" "$BUILD_ID" "$INCREMENTAL" \
-            "$SECPATCH" "$RELEASE_DATE"; do
+  for _v in "$BRAND" "$MANUFACTURER" "$MARKETNAME" "$MODEL" "$DEVICE" "$PRODUCT" \
+            "$BOARD" "$SOC_MANUF" "$SOC_MODEL" "$SDK" "$RELEASE" "$BUILD_ID" \
+            "$INCREMENTAL" "$SECPATCH" "$RELEASE_DATE"; do
     [ -n "$_v" ] || { ERRMSG="$ERRMSG empty-required-field"; return 1; }
   done
   case "$SDK" in ''|*[!0-9]*) ERRMSG="$ERRMSG non-numeric-sdk"; return 1 ;; esac
