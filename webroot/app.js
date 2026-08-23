@@ -13,6 +13,38 @@ function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
 const ENV = `cd ${shq(MODDIR)} && export MODDIR=${shq(MODDIR)} && export PATH=${shq(MODDIR + '/bin')}:\"$PATH\"`;
 
+// Palet warna per-brand: aksen UI ganti sesuai brand yang lagi aktif biar
+// "meriah" & langsung ketahuan ini device apa. Di-set via CSSOM setProperty
+// (bukan atribut style inline yang diblok CSP style-src 'self').
+const BRAND_ACCENT = {
+  google: '#4285f4', samsung: '#2e6be6', xiaomi: '#ff6900', redmi: '#ff453a',
+  poco: '#ffd400', oppo: '#12b981', vivo: '#00a6ff', infinix: '#00c2a8',
+};
+const DEFAULT_ACCENT = '#3ba1ff';
+
+function hexToRgb(hex) {
+  const h = String(hex).replace('#', '');
+  const n = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  return { r: parseInt(n.slice(0, 2), 16), g: parseInt(n.slice(2, 4), 16), b: parseInt(n.slice(4, 6), 16) };
+}
+function mixHex(hex, target, t) { // t=0 -> hex, t=1 -> target
+  const a = hexToRgb(hex), b = hexToRgb(target);
+  const to2 = v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+  return `#${to2(a.r + (b.r - a.r) * t)}${to2(a.g + (b.g - a.g) * t)}${to2(a.b + (b.b - a.b) * t)}`;
+}
+function setAccent(hex) {
+  const base = /^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(String(hex || '')) ? hex : DEFAULT_ACCENT;
+  const { r, g, b } = hexToRgb(base);
+  const root = document.documentElement.style;
+  root.setProperty('--accent', base);
+  root.setProperty('--accent-hi', mixHex(base, '#ffffff', 0.18));
+  root.setProperty('--accent-lo', mixHex(base, '#000000', 0.12));
+  root.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, .16)`);
+}
+function accentForBrand(brand) {
+  return BRAND_ACCENT[String(brand || '').trim().toLowerCase()] || DEFAULT_ACCENT;
+}
+
 function exec(cmd) {
   return new Promise((resolve, reject) => {
     if (typeof ksu === 'undefined' || !ksu.exec) {
@@ -151,15 +183,22 @@ function renderLogHtml(text) {
   }).join('');
 }
 
-function summarizeFreshen(out) {
+function summarizeAction(out) {
   const text = String(out || '');
-  if (/^OK - fresh/m.test(text)) {
-    const m = text.match(/^\s*MODEL\s*:\s*(.+)$/m);
-    const model = m ? m[1].trim() : '';
-    return { kind: 'ok', title: model ? `Persona baru \u00b7 ${model}` : 'Persona baru siap', detail: text };
+  // jalur multibrand baru (action.sh)
+  if (/^OK - persona baru aktif/m.test(text)) {
+    const b = (text.match(/^\s*BRAND\s*:\s*(.+)$/m) || [])[1];
+    const md = (text.match(/^\s*MODEL\s*:\s*(.+)$/m) || [])[1];
+    const label = [b && b.trim(), md && md.trim()].filter(Boolean).join(' \u00b7 ');
+    return { kind: 'ok', title: label ? `Device baru \u00b7 ${label}` : 'Device baru aktif', detail: text };
   }
-  const bang = (text.match(/^!.*$/m) || [])[0];
-  return { kind: 'error', title: trimTitle(bang || text || 'Freshen gagal'), detail: text };
+  // jalur cadangan freshen (Pixel bawaan)
+  if (/^OK - fresh/m.test(text)) {
+    const md = (text.match(/^\s*MODEL\s*:\s*(.+)$/m) || [])[1];
+    return { kind: 'ok', title: md ? `Persona baru \u00b7 ${md.trim()}` : 'Persona baru siap', detail: text };
+  }
+  const bang = (text.match(/^[\u2717!].*$/m) || [])[0];
+  return { kind: 'error', title: trimTitle(bang || text || 'Undi device gagal'), detail: text };
 }
 
 function summarizeRotate(out, label) {
@@ -232,27 +271,73 @@ function skKv(n) {
   return s;
 }
 
-const PERSONA_KEYS = [
-  'MODEL', 'BRAND', 'MANUFACTURER', 'DEVICE', 'PRODUCT',
-  'FINGERPRINT', 'SERIAL', 'RADIO',
-  'ANDROID_ID', 'GOOGLE_AID',
-  'WIFI_MAC', 'BLUETOOTH_ADDR', 'BLUETOOTH_NAME',
+// grid detail (di bawah hero + tiles). label ramah, key = kosakata identity.prop.
+const DETAIL_KEYS = [
+  ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'], ['BOARD', 'Board'],
+  ['SOC_MANUFACTURER', 'SoC vendor'], ['SOC_MODEL', 'SoC'],
+  ['SECURITY_PATCH', 'Security patch'],
+  ['SERIAL', 'Serial'], ['ANDROID_ID', 'Android ID'], ['GOOGLE_AID', 'Google AID'],
+  ['WIFI_MAC', 'WiFi MAC'], ['BLUETOOTH_ADDR', 'BT MAC'], ['BLUETOOTH_NAME', 'Nama BT'],
+  ['RADIO', 'Radio'], ['FIRST_BOOT', 'Boot awal'], ['LAST_BOOT', 'Boot terakhir'],
 ];
 
+function renderHero(kv) {
+  const brand = kv.BRAND || '';
+  const mkt = kv.MARKETNAME || kv.MODEL || '(tak dikenal)';
+  const sub = [kv.MODEL, kv.DEVICE].filter(Boolean).join(' \u00b7 ');
+  const rel = kv.RELEASE || '', sdk = kv.SDK_INT || '';
+  const os = rel
+    ? `Android ${escapeHtml(rel)}${sdk ? ` \u00b7 SDK ${escapeHtml(sdk)}` : ''}`
+    : '';
+  return `${brand ? `<span class="brandchip">${escapeHtml(brand)}</span>` : ''}` +
+    `<div class="mkt">${escapeHtml(mkt)}</div>` +
+    `${sub ? `<div class="mdl">${escapeHtml(sub)}</div>` : ''}` +
+    `${os ? `<div class="os">${os}</div>` : ''}` +
+    `${kv.FINGERPRINT ? `<div class="fp">${escapeHtml(kv.FINGERPRINT)}</div>` : ''}`;
+}
+
+function renderTiles(kv) {
+  const t = [];
+  if (kv.BOOT_COUNT)
+    t.push(`<div class="tile boot"><div class="tlabel">Boot count</div><div class="tval">${escapeHtml(kv.BOOT_COUNT)}</div><div class="tsub">kali reboot</div></div>`);
+  const up = kv.UPTIME_HUMAN || (kv.UPTIME_SECONDS ? kv.UPTIME_SECONDS + 's' : '');
+  if (up)
+    t.push(`<div class="tile up"><div class="tlabel">Uptime</div><div class="tval">${escapeHtml(up)}</div><div class="tsub">nyala terus</div></div>`);
+  if (kv.FRESH) {
+    const yes = /^(y|yes|true|1)$/i.test(kv.FRESH.trim());
+    t.push(`<div class="tile fresh"><div class="tlabel">Fresh</div><div class="tval ${yes ? 'yes' : 'no'}">${yes ? 'Ya' : 'Nggak'}</div><div class="tsub">baru direset?</div></div>`);
+  }
+  if (kv.USAGE_PROFILE)
+    t.push(`<div class="tile usage"><div class="tlabel">Pemakaian</div><div class="tval">${escapeHtml(kv.USAGE_PROFILE)}</div><div class="tsub">pola pakai</div></div>`);
+  return t.join('');
+}
+
 async function loadPersona() {
+  const hero = document.getElementById('hero');
+  const tiles = document.getElementById('tiles');
   const el = document.getElementById('identity');
+  hero.innerHTML = '';
+  tiles.innerHTML = '';
   el.className = 'kv';
-  el.innerHTML = skKv(7);
+  el.innerHTML = skKv(6);
   const r = await safeExec(`cat ${shq(IDENTITY)} 2>/dev/null || true`);
   if (!r.ok || !r.out.trim()) {
-    el.innerHTML = '<div class="empty">Belum ada identity.prop. Tap Freshen persona.</div>';
+    setAccent(DEFAULT_ACCENT);
+    hero.innerHTML = '<div class="empty">Belum ada device. Tap \ud83c\udfb2 Undi device baru buat mulai.</div>';
+    el.className = 'kv';
+    el.innerHTML = '<div class="empty">identity.prop belum ada.</div>';
     return;
   }
   const kv = parseProp(r.out);
-  const html = PERSONA_KEYS.map(k => {
+  setAccent(accentForBrand(kv.BRAND));
+  hero.innerHTML = renderHero(kv);
+  tiles.innerHTML = renderTiles(kv);
+  // stagger animasi tile via CSSOM (--i), aman terhadap CSP.
+  tiles.querySelectorAll('.tile').forEach((elt, i) => elt.style.setProperty('--i', i));
+  const html = DETAIL_KEYS.map(([k, label]) => {
     const v = kv[k];
     if (v === undefined || v === '') return '';
-    return `<div class="k">${k}</div><div class="v">${escapeHtml(v)}</div>`;
+    return `<div class="k">${escapeHtml(label)}</div><div class="v">${escapeHtml(v)}</div>`;
   }).join('');
   el.className = 'kv in';
   el.innerHTML = html || '<div class="empty">identity.prop kosong.</div>';
@@ -260,26 +345,23 @@ async function loadPersona() {
 
 document.getElementById('refreshBtn').addEventListener('click', loadPersona);
 document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
-  const cmd = `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
-    `{ printf '[%s] ==> freshen (webui)\\n' "$(date '+%F %T')"; ` +
-    `./bin/sandboxid unlock >/dev/null 2>&1 || true; ` +
-    `./bin/sandboxid freshen 2>&1; RC=$?; ` +
-    `./bin/sandboxid lock >/dev/null 2>&1 || true; ` +
-    `if [ $RC -eq 0 ]; then printf '[%s] [OK] freshen selesai \u00b7 locked\\n' "$(date '+%F %T')"; ` +
-    `else printf '[%s] [ERR] freshen exit %s\\n' "$(date '+%F %T')" "$RC"; fi; } | ` +
-    `tee -a ${shq(ACTION_LOG)}`;
+  // Jalankan action.sh: undi 1 device acak multi-brand -> apply-boot -> reset
+  // app target -> rotasi ID (SSAID/GAID/MAC/nama/boot-count). Persis tombol
+  // Action fisik di KSU/APatch, jadi hasil dari web = hasil dari tombol.
+  const cmd = `${ENV} && sh ${shq(MODDIR)}/action.sh 2>&1`;
   const r = await run(cmd);
-  if (!r.ok) toast(trimTitle(r.err.message || 'Freshen gagal'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
-  else { const s = summarizeFreshen(r.out); toast(s.title, { kind: s.kind, detail: s.detail }); }
+  if (!r.ok) toast(trimTitle(r.err.message || 'Undi device gagal'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
+  else { const s = summarizeAction(r.out); toast(s.title, { kind: s.kind, detail: s.detail }); }
   loadPersona();
 }));
 
 const ROT_CARDS = [
-  { key: 'ssaid',       name: 'SSAID',         desc: 'Per-app Settings.Secure.ANDROID_ID (wipe butuh reboot untuk regen)', get: 'ANDROID_ID' },
-  { key: 'gaid',        name: 'Google AID',    desc: 'Advertising ID (Settings.Global + GMS xml)',          get: 'GOOGLE_AID' },
-  { key: 'wlan-mac',    name: 'wlan MAC',      desc: 'wlan0 MAC + WifiConfigStore reset',                   get: 'WIFI_MAC' },
-  { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'BT adapter MAC + bt_config.conf Address',             get: 'BLUETOOTH_ADDR' },
-  { key: 'device-name', name: 'Device name',   desc: 'settings global device_name = identity.prop MODEL',   get: 'MODEL' },
+  { key: 'ssaid',       name: 'SSAID',         desc: 'Android ID per-app (Settings.Secure) — wipe butuh reboot buat regen', get: 'ANDROID_ID' },
+  { key: 'gaid',        name: 'Google AID',    desc: 'Advertising ID (Settings.Global + XML GMS)',        get: 'GOOGLE_AID' },
+  { key: 'wlan-mac',    name: 'WiFi MAC',      desc: 'MAC wlan0 + reset WifiConfigStore',                 get: 'WIFI_MAC' },
+  { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'MAC adapter BT + Address di bt_config.conf',        get: 'BLUETOOTH_ADDR' },
+  { key: 'device-name', name: 'Nama device',   desc: 'device_name = MODEL dari identity.prop',            get: 'MODEL' },
+  { key: 'boot-count',  name: 'Boot count',    desc: 'Settings.Global.boot_count = BOOT_COUNT identity.prop', get: 'BOOT_COUNT' },
 ];
 
 async function loadRotate() {
@@ -289,7 +371,7 @@ async function loadRotate() {
       <div class="name">${c.name}</div>
       <div class="desc">${c.desc}</div>
       <div class="val sk sk-line" data-slot="val"></div>
-      <div class="actions"><button class="sm" data-rot="${c.key}">Rotate</button></div>
+      <div class="actions"><button class="sm" data-rot="${c.key}">Rotasi</button></div>
     </div>`).join('');
   // M9/CSP: index stagger di-set lewat CSSOM (.style.setProperty), bukan atribut
   // inline style="--i:.." — atribut inline diblok oleh style-src 'self' tanpa
@@ -384,6 +466,13 @@ function escapeHtml(s) {
   nav.addEventListener('scroll', moveIndicator);
   window.addEventListener('resize', moveIndicator);
   window.addEventListener('load', moveIndicator);
+  // live dot: hijau berdenyut kalau root bridge kebaca, merah kalau nggak.
+  const bridge = (typeof ksu !== 'undefined' && !!ksu.exec);
+  const live = document.getElementById('live');
+  if (live) {
+    live.classList.add(bridge ? 'on' : 'off');
+    live.title = bridge ? 'root bridge aktif' : 'root bridge tak tersedia';
+  }
   (async () => {
     const v = await run(`sed -n 's/^version=//p' ${shq(MODDIR)}/module.prop 2>/dev/null | head -n 1`);
     if (v.ok && v.out.trim()) document.getElementById('version').textContent = v.out.trim();

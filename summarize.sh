@@ -132,8 +132,8 @@ TOTAL_SIZE=$(du -h "$IN" | cut -f1)
     echo ""
 
     echo "==============================================================="
-    echo "End of summary.  If you need the full log, gzip it and share:"
-    echo "  gzip -c $IN > /sdcard/Download/session.log.gz"
+    echo "End of summary.  Full log lives next to this file:"
+    echo "  $IN"
     echo "==============================================================="
 
 } > "$OUT"

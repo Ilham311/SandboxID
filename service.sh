@@ -14,9 +14,12 @@ if [ -f "$MODDIR/debug_variant" ]; then
     mkdir -p "$MODDIR/debug"
     chmod 0755 "$MODDIR/debug"
 
+    # keep only the 5 newest session logs
     ls -1t "$MODDIR/debug"/session-*.log 2>/dev/null | tail -n +6 | while read f; do
-        rm -f "$f" "$f.gz" 2>/dev/null
+        rm -f "$f" 2>/dev/null
     done
+    # one-time sweep: buang sisa arsip .log.gz dari versi lama (fitur gz dihapus)
+    rm -f "$MODDIR/debug"/session-*.log.gz "$MODDIR/debug/report"/*.log.gz 2>/dev/null
 
     TS=$(date +%Y%m%d-%H%M%S)
     LOGFILE="$MODDIR/debug/session-$TS.log"

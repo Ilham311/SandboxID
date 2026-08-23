@@ -4,26 +4,35 @@
 # from real firmware (build.prop dumps on dumps.tadiphone.dev / GitHub device
 # trees, cross-checked against vendor spec sheets). No fictional models.
 #
-# `autopif.sh device` picks ONE row at random, layers a coherent synthetic
-# lifecycle on top (boot count / uptime / "fresh" state derived from the
-# device's release date), and writes a verbatim identity.prop-style artifact to
-# $MODDIR/device.identity. Apply opt-in with:
+# `autopif.sh device` picks ONE row and layers a coherent synthetic lifecycle on
+# top (boot count / uptime / "fresh" state derived from the device's release
+# date), then writes a verbatim identity.prop-style artifact to
+# $MODDIR/device.identity. It is applied automatically by the Action button, or
+# opt-in by hand with:
 #     cp device.identity identity.prop && sandboxid apply-boot
-# This is SEPARATE from the default no-arg `fetch` path (Pixel canary), which is
-# unchanged. Lines starting with # and blank lines are ignored by the reader.
+#
+# FAIR PER-BRAND PICK: the picker chooses a BRAND first (uniformly across the
+# distinct brands below), THEN a model within that brand. So every brand has the
+# same chance regardless of how many rows it has — Google (14 rows) is no more
+# likely than POCO (2 rows). Google/Pixel is just one brand in the pool now, with
+# equal odds, not a special default.
+#
+# The separate no-arg `fetch` path (online Pixel canary -> persona.override) is
+# unchanged and still Pixel-only; it is best-effort and skipped on devices with
+# no curl/wget. Lines starting with # and blank lines are ignored by the reader.
 #
 # 15 TAB-separated columns (note: sdk comes BEFORE release):
-#   1 brand            ro.product.brand              (real casing: Infinix, OPPO, vivo, samsung, Xiaomi, Redmi, POCO)
-#   2 manufacturer     ro.product.manufacturer       (Redmi/POCO -> Xiaomi; Infinix -> INFINIX caps)
+#   1 brand            ro.product.brand              (real casing: Infinix, OPPO, vivo, samsung, Xiaomi, Redmi, POCO, google)
+#   2 manufacturer     ro.product.manufacturer       (Redmi/POCO -> Xiaomi; Infinix -> INFINIX caps; Pixel -> Google)
 #   3 marketname       human-readable retail name
 #   4 model            ro.product.model / Build.MODEL
 #   5 device           ro.product.device / Build.DEVICE (codename)
 #   6 product          ro.product.name               (fingerprint product segment)
-#   7 board            ro.board.platform             (SoC-detect anchor; Exynos uses erdXXXX)
+#   7 board            ro.board.platform             (SoC-detect anchor; Exynos erdXXXX; Pixel = Tensor platform)
 #   8 soc_manufacturer ro.soc.manufacturer
-#   9 soc_model        ro.soc.model                  (Exynos s5eXXXX; Snapdragon SMXXXX; MediaTek MTXXXX)
+#   9 soc_model        ro.soc.model                  (Exynos s5eXXXX; Snapdragon SMXXXX; MediaTek MTXXXX; Tensor GSxxx)
 #  10 sdk              ro.build.version.sdk          (int)
-#  11 release          ro.build.version.release      (must map from sdk: 33->13 34->14 35->15)
+#  11 release          ro.build.version.release      (must map from sdk: 33->13 34->14 35->15 36->16)
 #  12 build_id         ro.build.id                   (fingerprint build_id segment)
 #  13 incremental      ro.build.version.incremental  (fingerprint incremental segment)
 #  14 security_patch   ro.build.version.security_patch (YYYY-MM-DD)
@@ -34,7 +43,13 @@
 # (eng.compil.*) — verifiable and internally consistent with the generated
 # fingerprint, but engineering-channel rather than a retail OTA string. Every
 # other vivo field (model/device/board/soc/sdk/release/build_id/patch) is real.
-# All Oppo/Samsung/Xiaomi/Redmi/POCO/Infinix incrementals are retail.
+# All Oppo/Samsung/Xiaomi/Redmi/POCO/Infinix/Pixel incrementals are retail.
+#
+# CAVEAT (Pixel rows): board = the Tensor SoC platform (gs101/gs201/zuma/
+# zumapro/laguna) so ro.board.platform stays coherent with soc_model (GS101..
+# GS501) and the SoC-detect anchor is correct. Real Pixels expose the codename
+# (e.g. shiba) in ro.product.board while ro.hardware/ro.board.platform is the
+# platform — a minor divergence; the fingerprint (google/<codename>/...) is exact.
 Infinix	INFINIX	Infinix Note 30	Infinix X6833B	Infinix-X6833B	X6833B-GL	mt6789	MediaTek	MT6789	33	13	TP1A.220624.014	230817V2345	2023-08-05	2023-05
 Infinix	INFINIX	Infinix GT 10 Pro	Infinix X6739	Infinix-X6739	X6739-GL	mt6893	MediaTek	MT6893	33	13	TP1A.220624.014	231024V2278	2023-10-05	2023-08
 Infinix	INFINIX	Infinix Zero 30 5G	Infinix X6731	Infinix-X6731	X6731-GL	mt6893	MediaTek	MT6893	33	13	TP1A.220624.014	240829V442	2024-07-05	2023-09
@@ -61,3 +76,17 @@ OPPO	OPPO	OPPO A79 5G	CPH2557	OP573DL1	CPH2557	mt6833	MediaTek	MT6833	34	14	UP1A
 OPPO	OPPO	OPPO A58	CPH2577	OP574FL1	CPH2577	mt6768	MediaTek	MT6768	34	14	UP1A.230620.001	T.R4T2.1537533_1a3e6	2023-12-05	2023-09
 OPPO	OPPO	OPPO Reno10 Pro+ 5G	CPH2521	OP56D3L1	CPH2521	taro	Qualcomm	SM8475	35	15	AP3A.240617.008	T.R4T3.1c82702-2-1	2025-02-01	2023-08
 OPPO	OPPO	OPPO Reno8 5G	CPH2359	OP5339L1	CPH2359	mt6893	MediaTek	MT6893	34	14	UKQ1.230924.001	S.179f3a1_501a	2024-04-05	2022-09
+google	Google	Pixel 6	Pixel 6	oriole	oriole	gs101	Google	GS101	33	13	TQ3A.230901.001	10750268	2023-09-05	2021-10
+google	Google	Pixel 6a	Pixel 6a	bluejay	bluejay	gs101	Google	GS101	34	14	UP1A.231105.001	11010452	2023-11-05	2022-07
+google	Google	Pixel 7	Pixel 7	panther	panther	gs201	Google	GS201	34	14	UP1A.231105.003	11015216	2023-11-05	2022-10
+google	Google	Pixel 7 Pro	Pixel 7 Pro	cheetah	cheetah	gs201	Google	GS201	34	14	UP1A.231105.003	11015217	2023-11-05	2022-10
+google	Google	Pixel 7a	Pixel 7a	lynx	lynx	gs201	Google	GS201	34	14	UP1A.231105.003	11015218	2023-11-05	2023-05
+google	Google	Pixel 8	Pixel 8	shiba	shiba	zuma	Google	GS301	35	15	AP3A.240905.015	12244875	2024-09-05	2023-10
+google	Google	Pixel 8 Pro	Pixel 8 Pro	husky	husky	zuma	Google	GS301	35	15	AP3A.240905.015	12244876	2024-09-05	2023-10
+google	Google	Pixel 8a	Pixel 8a	akita	akita	zuma	Google	GS301	35	15	AP3A.240905.015	12244877	2024-09-05	2024-05
+google	Google	Pixel 9	Pixel 9	tokay	tokay	zumapro	Google	GS401	35	15	AP3A.241005.015	12580210	2024-10-05	2024-08
+google	Google	Pixel 9 Pro	Pixel 9 Pro	caiman	caiman	zumapro	Google	GS401	35	15	AP3A.241005.015	12580211	2024-10-05	2024-08
+google	Google	Pixel 9 Pro XL	Pixel 9 Pro XL	komodo	komodo	zumapro	Google	GS401	35	15	AP3A.241005.015	12580212	2024-10-05	2024-08
+google	Google	Pixel 9a	Pixel 9a	tegu	tegu	zumapro	Google	GS401	35	15	AP3A.241005.015	12580213	2024-10-05	2025-04
+google	Google	Pixel 10	Pixel 10	frankel	frankel	laguna	Google	GS501	36	16	BP1A.250705.006	13051207	2025-07-05	2025-08
+google	Google	Pixel 10 Pro	Pixel 10 Pro	blazer	blazer	laguna	Google	GS501	36	16	BP1A.250705.006	13051208	2025-07-05	2025-08
