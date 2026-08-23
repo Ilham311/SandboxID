@@ -237,6 +237,13 @@ static std::vector<PixelEntry> builtin_personas() {
     };
 }
 
+// Platforms recognized by modem_prefix() below. Must stay in sync with
+// map_platform() in autopif.sh.
+static bool is_known_platform(const std::string& plat) {
+    return plat == "gs101" || plat == "gs201" || plat == "zuma" ||
+           plat == "zumapro" || plat == "laguna";
+}
+
 // Parse one TAB-separated persona line into `out`. Returns false for
 // comment/blank/malformed lines so the caller skips them.
 static bool parse_persona_line(const std::string& raw, PixelEntry& out) {
@@ -264,6 +271,15 @@ static bool parse_persona_line(const std::string& raw, PixelEntry& out) {
 
     // A persona with no codename or a nonsensical SDK is useless.
     if (out.device.empty() || out.sdk <= 0) return false;
+
+    // An unrecognized platform would silently fall back to the gs101 modem
+    // prefix in modem_prefix(), producing an inconsistent RADIO fingerprint.
+    // Reject the line instead so it never enters the persona pool.
+    if (!is_known_platform(out.platform)) {
+        fprintf(stderr, "! persona '%s' has unknown platform '%s' — skipping\n",
+                out.device.c_str(), out.platform.c_str());
+        return false;
+    }
     return true;
 }
 
@@ -353,13 +369,16 @@ static Identity gen_identity() {
     id.kv["DESCRIPTION"] = desc;
 
     auto modem_prefix = [](const char* plat) -> const char* {
-        if (!plat) return "g5123b";
         if (!strcmp(plat, "gs101"))   return "g5123b";
         if (!strcmp(plat, "gs201"))   return "g5300b";
         if (!strcmp(plat, "zuma"))    return "g5300q";
         if (!strcmp(plat, "zumapro")) return "g5400";
         if (!strcmp(plat, "laguna"))  return "g5500";
-        return "g5123b";
+        // Unreachable for personas loaded via parse_persona_line(), which
+        // rejects unknown platforms before they enter the pool. Guard here
+        // too rather than silently mislabeling the RADIO fingerprint.
+        fprintf(stderr, "! unknown platform '%s' — no modem prefix mapping\n", plat);
+        return "unknown";
     };
     char pdate[8] = "000000";
     if (p.security_patch.size() >= 10) {

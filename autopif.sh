@@ -90,7 +90,10 @@ map_platform() {
 
 # --- 1. Latest Pixel version page --------------------------------------------
 download "https://developer.android.com/about/versions" "versions.html"
-LATEST_URL=$(grep -o 'https://developer.android.com/about/versions/.*[0-9]"' "versions.html" 2>/dev/null | sort -ru | cut -d\" -f1 | head -n1)
+# Prefix each candidate URL with its trailing version number so sort -n orders
+# by numeric value (plain `sort -ru` is lexicographic and would rank "9" above
+# "16"), then strip the key back off before taking the top result.
+LATEST_URL=$(grep -o 'https://developer.android.com/about/versions/.*[0-9]"' "versions.html" 2>/dev/null | sed 's;.*/\([0-9][0-9]*\)"$;\1 &;' | sort -rn | cut -d' ' -f2- | cut -d\" -f1 | head -n1)
 [ -z "$LATEST_URL" ] && { log "could not resolve latest versions URL — keeping bundled pool"; exit 0; }
 download "$LATEST_URL" "latest.html"
 
