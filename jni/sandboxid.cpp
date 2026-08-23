@@ -16,7 +16,6 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include "pool.hpp"
 #include "config.hpp"
 #include <sys/system_properties.h>
 
@@ -26,6 +25,7 @@ static const char* MODE_FILE      = sandboxid::MODE_FILE;
 static const char* RESETPROP      = sandboxid::RESETPROP;
 static const char* MOUNTDIR       = sandboxid::MOUNTDIR;
 static const char* TARGET_FILE    = sandboxid::TARGET_FILE;
+static const char* PERSONAS_FILE  = sandboxid::PERSONAS_FILE;
 
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
@@ -214,16 +214,106 @@ static std::string gen_host_suffix() {
     return host;
 }
 
+// ---------------------------------------------------------------------------
+// Persona pool. Previously a constexpr PixelEntry[] baked into pool.hpp; now
+// parsed at runtime from PERSONAS_FILE (personas.tsv) so the pool can be
+// refreshed by autopif.sh WITHOUT a native rebuild. Field layout is identical
+// to the old struct, so gen_identity()'s selection + derivation are unchanged.
+// ---------------------------------------------------------------------------
+struct PixelEntry {
+    std::string model, device, product, board, platform;
+    int         sdk = 0;
+    std::string release, id, incremental, security_patch;
+};
+
+// Last-resort personas used ONLY when personas.tsv is missing/empty/unreadable
+// (e.g. a corrupted install). The shipped personas.tsv is the real source; this
+// just guarantees `freshen` never yields an empty identity when offline. One
+// entry per currently-shipping SDK level keeps SDK-matching functional.
+static std::vector<PixelEntry> builtin_personas() {
+    return {
+        {"Pixel 6",  "oriole",  "oriole",  "oriole",  "gs101",  33, "13", "TQ3A.230901.001", "10750268", "2023-09-05"},
+        {"Pixel 8",  "shiba",   "shiba",   "shiba",   "zuma",   35, "15", "AP3A.240905.015", "12244875", "2024-09-05"},
+        {"Pixel 10", "frankel", "frankel", "frankel", "laguna", 36, "16", "BP1A.250705.006", "13051207", "2025-07-05"},
+    };
+}
+
+// Platforms recognized by modem_prefix() below. Must stay in sync with
+// map_platform() in autopif.sh.
+static bool is_known_platform(const std::string& plat) {
+    return plat == "gs101" || plat == "gs201" || plat == "zuma" ||
+           plat == "zumapro" || plat == "laguna";
+}
+
+// Parse one TAB-separated persona line into `out`. Returns false for
+// comment/blank/malformed lines so the caller skips them.
+static bool parse_persona_line(const std::string& raw, PixelEntry& out) {
+    std::string line = raw;
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+        line.pop_back();
+    if (line.empty() || line[0] == '#') return false;
+
+    std::vector<std::string> col;
+    std::string cur;
+    std::istringstream ss(line);
+    while (std::getline(ss, cur, '\t')) col.push_back(cur);
+    if (col.size() < 10) return false;
+
+    out.model          = col[0];
+    out.device         = col[1];
+    out.product        = col[2];
+    out.board          = col[3];
+    out.platform       = col[4];
+    out.sdk            = atoi(col[5].c_str());
+    out.release        = col[6];
+    out.id             = col[7];
+    out.incremental    = col[8];
+    out.security_patch = col[9];
+
+    // A persona with no codename or a nonsensical SDK is useless.
+    if (out.device.empty() || out.sdk <= 0) return false;
+
+    // An unrecognized platform would silently fall back to the gs101 modem
+    // prefix in modem_prefix(), producing an inconsistent RADIO fingerprint.
+    // Reject the line instead so it never enters the persona pool.
+    if (!is_known_platform(out.platform)) {
+        fprintf(stderr, "! persona '%s' has unknown platform '%s' — skipping\n",
+                out.device.c_str(), out.platform.c_str());
+        return false;
+    }
+    return true;
+}
+
+// Load the persona pool from PERSONAS_FILE, falling back to builtin_personas().
+static std::vector<PixelEntry> load_personas() {
+    std::vector<PixelEntry> pool;
+    std::ifstream f(PERSONAS_FILE);
+    std::string line;
+    while (std::getline(f, line)) {
+        PixelEntry e;
+        if (parse_persona_line(line, e)) pool.push_back(std::move(e));
+    }
+    if (pool.empty()) {
+        fprintf(stderr,
+                "! persona pool empty/unreadable (%s) — using built-in fallback\n",
+                PERSONAS_FILE);
+        pool = builtin_personas();
+    }
+    return pool;
+}
+
 static Identity gen_identity() {
     std::random_device rd;
     std::mt19937 g(rd());
-    constexpr size_t N = sizeof(SBX_POOL) / sizeof(SBX_POOL[0]);
+
+    std::vector<PixelEntry> pool = load_personas();
+    const size_t N = pool.size();
 
     int dev = device_sdk();
 
     std::vector<size_t> cand;
     for (size_t i = 0; i < N; ++i)
-        if (dev > 0 && SBX_POOL[i].sdk == dev) cand.push_back(i);
+        if (dev > 0 && pool[i].sdk == dev) cand.push_back(i);
 
     if (cand.empty()) {
 
@@ -231,7 +321,7 @@ static Identity gen_identity() {
                 "TERIMA RISIKO inkonsistensi lintas-permukaan "
                 "(SDK_INT vs RELEASE vs FINGERPRINT)\n", dev);
         for (size_t i = 0; i < N; ++i)
-            if (dev > 0 && SBX_POOL[i].sdk <= dev) cand.push_back(i);
+            if (dev > 0 && pool[i].sdk <= dev) cand.push_back(i);
     }
 
     size_t idx;
@@ -240,11 +330,11 @@ static Identity gen_identity() {
     } else {
 
         idx = 0;
-        for (size_t i = 1; i < N; ++i) if (SBX_POOL[i].sdk < SBX_POOL[idx].sdk) idx = i;
+        for (size_t i = 1; i < N; ++i) if (pool[i].sdk < pool[idx].sdk) idx = i;
         fprintf(stderr, "! device SDK %d below all personas; using SDK %d (upgrade, risky)\n",
-                dev, SBX_POOL[idx].sdk);
+                dev, pool[idx].sdk);
     }
-    const PixelEntry& p = SBX_POOL[idx];
+    const PixelEntry& p = pool[idx];
 
     Identity id;
     id.kv["BRAND"]           = "google";
@@ -271,33 +361,37 @@ static Identity gen_identity() {
 
     char fp[512];
     snprintf(fp, sizeof(fp), "google/%s/%s:%s/%s/%s:user/release-keys",
-             p.product, p.device, p.release, p.id, p.incremental);
+             p.product.c_str(), p.device.c_str(), p.release.c_str(),
+             p.id.c_str(), p.incremental.c_str());
     id.kv["FINGERPRINT"] = fp;
     id.kv["DISPLAY"]     = p.id;
 
     char desc[512];
     snprintf(desc, sizeof(desc), "%s-user %s %s %s release-keys",
-             p.product, p.release, p.id, p.incremental);
+             p.product.c_str(), p.release.c_str(), p.id.c_str(), p.incremental.c_str());
     id.kv["DESCRIPTION"] = desc;
 
     auto modem_prefix = [](const char* plat) -> const char* {
-        if (!plat) return "g5123b";
         if (!strcmp(plat, "gs101"))   return "g5123b";
         if (!strcmp(plat, "gs201"))   return "g5300b";
         if (!strcmp(plat, "zuma"))    return "g5300q";
         if (!strcmp(plat, "zumapro")) return "g5400";
         if (!strcmp(plat, "laguna"))  return "g5500";
-        return "g5123b";
+        // Unreachable for personas loaded via parse_persona_line(), which
+        // rejects unknown platforms before they enter the pool. Guard here
+        // too rather than silently mislabeling the RADIO fingerprint.
+        fprintf(stderr, "! unknown platform '%s' — no modem prefix mapping\n", plat);
+        return "unknown";
     };
     char pdate[8] = "000000";
-    if (std::strlen(p.security_patch) >= 10) {
+    if (p.security_patch.size() >= 10) {
         pdate[0] = p.security_patch[2]; pdate[1] = p.security_patch[3];
         pdate[2] = p.security_patch[5]; pdate[3] = p.security_patch[6];
         pdate[4] = p.security_patch[8]; pdate[5] = p.security_patch[9];
     }
     char rad[128];
     snprintf(rad, sizeof(rad), "%s-%s-B-%s",
-             modem_prefix(p.platform), pdate, p.incremental);
+             modem_prefix(p.platform.c_str()), pdate, p.incremental.c_str());
     id.kv["RADIO"] = rad;
 
     id.kv["SERIAL"]     = random_hex(8, true);

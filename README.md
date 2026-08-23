@@ -127,6 +127,26 @@ Empty or absent `identity.prop` is handled gracefully (the module continues
 without applying a persona). `rotate_ids.sh` adds `WIFI_MAC`,
 `BLUETOOTH_ADDR`, and `BLUETOOTH_NAME` to the file as they are generated.
 
+### `personas.tsv`
+
+The pool `sandboxid freshen` picks a persona from. Located at
+`/data/adb/modules/sandboxid/personas.tsv`; tab-separated, 10 columns:
+
+```
+model	device	product	board	platform	sdk	release	id	incremental	security_patch
+```
+
+`#`-prefixed lines are comments. The bundled file is a curated set of **stable**
+Pixel builds — editing it (or dropping in your own rows) changes the pool
+directly; no rebuild needed. If the file is missing or empty, the native binary
+falls back to a small built-in list, so `freshen` always works.
+
+`autopif.sh` (run automatically by `action.sh`, best-effort) refreshes this file
+with the latest **canary** Pixel fingerprints scraped from Google, when the
+device has `curl`/`wget`. It is a **no-op offline** and skips any device whose
+SoC it can't map, so it never makes the pool inconsistent. See
+[Credits](#credits--references).
+
 ---
 
 ## CLI Reference

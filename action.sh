@@ -17,6 +17,16 @@ mkdir -p "$MODDIR/debug" 2>/dev/null
 RC_FRESHEN=0
 RC_ROTATE=0
 
+# Step 0/2: best-effort refresh of the persona pool (personas.tsv) from Google's
+# live Pixel build data. autopif.sh is a NO-OP when the device has no curl/wget
+# (the common case) -- the bundled stable pool stays in force -- and it always
+# exits 0, so it can never block freshen.
+AUTOPIF="$MODDIR/autopif.sh"
+if [ -f "$AUTOPIF" ]; then
+    echo "[SandboxID] refresh persona pool (autopif, best-effort)..."
+    MODDIR="$MODDIR" sh "$AUTOPIF" 2>&1 | tee -a "$LOGFILE" "$ACTION_LOG"
+fi
+
 if [ -x "$BIN" ]; then
     echo "[SandboxID] freshen (step 1/2)..."
     "$BIN" unlock >/dev/null 2>&1 || true

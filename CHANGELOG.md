@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+Dynamic persona pool: the compiled Pixel table is replaced by a runtime data
+file, with an optional live refresh from Google's canary build data. Persona
+selection, SoC/RADIO derivation, and SDK-matching are all preserved — behavior
+offline is identical to before.
+
+### Added
+
+- `personas.tsv` (repo root, shipped to `/data/adb/modules/sandboxid/`) — the
+  curated **stable** Pixel pool (the same 14 entries that were compiled into
+  `jni/pool.hpp`), now editable data instead of C++. Tab-separated, 10 columns:
+  `model device product board platform sdk release id incremental security_patch`.
+  `#`-prefixed lines are comments. This file alone reproduces today's behavior.
+- `autopif.sh` — best-effort refresher that scrapes Google's public Pixel pages
+  for the latest **canary** build per model and *upserts* those personas into
+  `personas.tsv` (dedupe by codename). Adapted from dannycreations' `autopif.sh`
+  (see [CREDITS.md](./CREDITS.md)); rewritten for on-device Android `sh`.
+  - **No-op offline:** exits 0 without touching anything when the device has no
+    `curl`/`wget` (the usual case), so the bundled stable pool stays in force.
+  - **SoC allow-list:** devices whose codename doesn't map to a known platform
+    (`gs101`/`gs201`/`zuma`/`zumapro`/`laguna`) are skipped, never guessed, so a
+    spoofed `RADIO` / `ro.board.platform` can't go inconsistent.
+  - Wired into `action.sh` as a best-effort step 0 (before `freshen`); can also
+    run at build time to refresh the packaged pool via `AUTOPIF_REFRESH=1`.
+
+### Changed
+
+- `jni/sandboxid.cpp` `gen_identity()`: loads the pool from `personas.tsv` at
+  runtime (`load_personas()`), falling back to a small built-in list if the file
+  is missing/empty. Selection logic (exact SDK match → `sdk<=dev` → lowest) is
+  unchanged.
+- `customize.sh` / `build.sh`: install and package `personas.tsv` + `autopif.sh`.
+
+### Removed
+
+- `jni/pool.hpp` — the compiled `SBX_POOL` table. Its data now lives in
+  `personas.tsv`; `jni/config.hpp` gains `PERSONAS_FILE`.
+
 ## v2.0.0 (2026-08-21)
 
 Rebrand to SandboxID — a generic, privacy-research / education framing with no

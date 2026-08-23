@@ -1,0 +1,28 @@
+# SandboxID persona pool (device fingerprint source)
+#
+# This file REPLACES the old compiled-in jni/pool.hpp. The `sandboxid` CLI
+# parses it at `freshen`/`seed` time and picks one persona matched to the
+# device's real SDK level (same selection logic as before). Shipping it as
+# data (instead of a C++ header) means personas can be refreshed WITHOUT a
+# native rebuild -- autopif.sh upserts fresh Google builds into it.
+#
+# Format: 10 TAB-separated columns, one persona per line. Lines starting
+# with '#' and blank lines are ignored. `platform` MUST stay within
+# {gs101, gs201, zuma, zumapro, laguna} so the modem/RADIO + ro.board.platform
+# (SoC) mapping in sandboxid.cpp resolves correctly.
+#
+# model	device	product	board	platform	sdk	release	id	incremental	security_patch
+Pixel 6	oriole	oriole	oriole	gs101	33	13	TQ3A.230901.001	10750268	2023-09-05
+Pixel 6a	bluejay	bluejay	bluejay	gs101	34	14	UP1A.231105.001	11010452	2023-11-05
+Pixel 7	panther	panther	panther	gs201	34	14	UP1A.231105.003	11015216	2023-11-05
+Pixel 7 Pro	cheetah	cheetah	cheetah	gs201	34	14	UP1A.231105.003	11015217	2023-11-05
+Pixel 7a	lynx	lynx	lynx	gs201	34	14	UP1A.231105.003	11015218	2023-11-05
+Pixel 8	shiba	shiba	shiba	zuma	35	15	AP3A.240905.015	12244875	2024-09-05
+Pixel 8 Pro	husky	husky	husky	zuma	35	15	AP3A.240905.015	12244876	2024-09-05
+Pixel 8a	akita	akita	akita	zuma	35	15	AP3A.240905.015	12244877	2024-09-05
+Pixel 9	tokay	tokay	tokay	zumapro	35	15	AP3A.241005.015	12580210	2024-10-05
+Pixel 9 Pro	caiman	caiman	caiman	zumapro	35	15	AP3A.241005.015	12580211	2024-10-05
+Pixel 9 Pro XL	komodo	komodo	komodo	zumapro	35	15	AP3A.241005.015	12580212	2024-10-05
+Pixel 9a	tegu	tegu	tegu	zumapro	35	15	AP3A.241005.015	12580213	2024-10-05
+Pixel 10	frankel	frankel	frankel	laguna	36	16	BP1A.250705.006	13051207	2025-07-05
+Pixel 10 Pro	blazer	blazer	blazer	laguna	36	16	BP1A.250705.006	13051208	2025-07-05
