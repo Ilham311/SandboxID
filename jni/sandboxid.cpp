@@ -218,34 +218,58 @@ static std::string gen_host_suffix() {
 // ---------------------------------------------------------------------------
 // Persona pool. Previously a constexpr PixelEntry[] baked into pool.hpp; now
 // parsed at runtime from PERSONAS_FILE (personas.tsv) so the pool can be
-// refreshed by autopif.sh WITHOUT a native rebuild. Field layout is identical
-// to the old struct, so gen_identity()'s selection + derivation are unchanged.
+// refreshed by autopif.sh WITHOUT a native rebuild.
+//
+// The first 10 columns are the original Pixel layout. Columns 11-16 are
+// OPTIONAL brand-identity fields that let the pool carry NON-Google devices
+// (Samsung/Xiaomi/…) — see parse_persona_line(). When they are empty the
+// row is treated as a Google/Tensor Pixel and every field is derived exactly
+// as before, so old 10-column rows stay byte-identical.
 // ---------------------------------------------------------------------------
 struct PixelEntry {
     std::string model, device, product, board, platform;
     int         sdk = 0;
     std::string release, id, incremental, security_patch;
+    // Optional cols 11-16. Empty => derive Google/Tensor defaults (Pixel row).
+    // Ordered so the fields a real OEM row always knows (brand, manufacturer,
+    // marketname, soc_*) come first and `radio` is the trailing, omittable
+    // column — no public baseband data exists for these devices, and a fake
+    // baseband is more detectable than the device's real one (which we keep by
+    // leaving RADIO unset; see apply_native's empty-value skip).
+    std::string brand, manufacturer, marketname, soc_manufacturer, soc_model, radio;
 };
 
-// Last-resort personas used ONLY when personas.tsv is missing/empty/unreadable
-// (e.g. a corrupted install). The shipped personas.tsv is the real source; this
-// just guarantees `freshen` never yields an empty identity when offline. One
-// entry per currently-shipping SDK level keeps SDK-matching functional.
-static std::vector<PixelEntry> builtin_personas() {
-    return {
-        {"Pixel 6",  "oriole",  "oriole",  "oriole",  "gs101",  33, "13", "TQ3A.230901.001", "10750268", "2023-09-05"},
-        {"Pixel 8",  "shiba",   "shiba",   "shiba",   "zuma",   35, "15", "AP3A.240905.015", "12244875", "2024-09-05"},
-        {"Pixel 10", "frankel", "frankel", "frankel", "laguna", 36, "16", "BP1A.250705.006", "13051207", "2025-07-05"},
-    };
-}
-
-// Platforms recognized by modem_prefix() below. Must stay in sync with
-// map_platform() in autopif.sh.
-static bool is_known_platform(const std::string& plat) {
+// Google Tensor SoC generations. These are the ONLY platforms for which
+// derive_identity() can synthesise the SoC model + modem/RADIO prefix from the
+// platform string alone. Any OTHER (non-Google) device MUST spell out its
+// brand/SoC/radio in the optional persona columns — parse_persona_line()
+// enforces that so a non-Tensor row can never silently inherit a GS/g5 value.
+// Must stay in sync with map_platform() in autopif.sh.
+static bool is_tensor_platform(const std::string& plat) {
     return plat == "gs101" || plat == "gs201" || plat == "zuma" ||
            plat == "zumapro" || plat == "laguna";
 }
 
+// Last-resort personas used ONLY when personas.tsv is missing/empty/unreadable
+// (e.g. a corrupted install). The shipped personas.tsv is the real source; this
+// just guarantees `freshen` never yields an empty identity when offline. One
+// entry per currently-shipping SDK level keeps SDK-matching functional. All are
+// Google/Tensor, so the trailing brand columns are left default-empty.
+static std::vector<PixelEntry> builtin_personas() {
+    std::vector<PixelEntry> v;
+    // {model, device, product, board, platform, sdk, release, id, incremental, security_patch}
+    auto add = [&](const char* mo, const char* de, const char* pl, int sd,
+                   const char* re, const char* id, const char* in, const char* sp) {
+        PixelEntry e; e.model = mo; e.device = de; e.product = de; e.board = de;
+        e.platform = pl; e.sdk = sd; e.release = re; e.id = id;
+        e.incremental = in; e.security_patch = sp; v.push_back(std::move(e));
+    };
+    add("Pixel 6",  "oriole",  "gs101",  31, "12", "SD1A.210817.036", "7805805",  "2021-10-05");
+    add("Pixel 6",  "oriole",  "gs101",  33, "13", "TQ3A.230901.001", "10750268", "2023-09-05");
+    add("Pixel 8",  "shiba",   "zuma",   35, "15", "AP3A.240905.015", "12244875", "2024-09-05");
+    add("Pixel 10", "frankel", "laguna", 36, "16", "BP1A.250705.006", "13051207", "2025-07-05");
+    return v;
+}
 // Parse one TAB-separated persona line into `out`. Returns false for
 // comment/blank/malformed lines so the caller skips them.
 static bool parse_persona_line(const std::string& raw, PixelEntry& out) {
@@ -271,16 +295,36 @@ static bool parse_persona_line(const std::string& raw, PixelEntry& out) {
     out.incremental    = col[8];
     out.security_patch = col[9];
 
+    // Optional brand-identity columns (11-16). Absent => empty => Google/Tensor
+    // defaults are derived in derive_identity(). Present => this row can describe
+    // a non-Google device. `radio` is last so a non-Tensor row that has no
+    // baseband string (the common case — none is published) just stops at 15
+    // columns rather than needing a trailing empty field.
+    if (col.size() > 10) out.brand            = col[10];
+    if (col.size() > 11) out.manufacturer     = col[11];
+    if (col.size() > 12) out.marketname       = col[12];
+    if (col.size() > 13) out.soc_manufacturer = col[13];
+    if (col.size() > 14) out.soc_model        = col[14];
+    if (col.size() > 15) out.radio            = col[15];
+
     // A persona with no codename or a nonsensical SDK is useless.
     if (out.device.empty() || out.sdk <= 0) return false;
 
-    // An unrecognized platform would silently fall back to the gs101 modem
-    // prefix in modem_prefix(), producing an inconsistent RADIO fingerprint.
-    // Reject the line instead so it never enters the persona pool.
-    if (!is_known_platform(out.platform)) {
-        fprintf(stderr, "! persona '%s' has unknown platform '%s' — skipping\n",
-                out.device.c_str(), out.platform.c_str());
-        return false;
+    // Google Tensor rows may omit the brand columns (they are derived from the
+    // platform). A NON-Tensor row cannot: without an explicit brand + SoC model
+    // it would silently inherit the google/GS101 Tensor values and leak an
+    // inconsistent fingerprint. Require those two so a half-specified foreign
+    // device can never enter the pool. `radio` is NOT required — no baseband
+    // data is published for these devices, and derive_identity leaves RADIO
+    // unset (keeping the device's real baseband) rather than fabricating one.
+    if (!is_tensor_platform(out.platform)) {
+        if (out.brand.empty() || out.soc_model.empty()) {
+            fprintf(stderr,
+                    "! persona '%s' has non-Tensor platform '%s' but is missing "
+                    "brand/soc_model columns — skipping\n",
+                    out.device.c_str(), out.platform.c_str());
+            return false;
+        }
     }
     return true;
 }
@@ -346,32 +390,53 @@ static PixelEntry pick_persona() {
 // byte-identical field derivation -- there is no second source of truth for the
 // fingerprint format.
 static Identity derive_identity(const PixelEntry& p) {
+    const bool tensor = is_tensor_platform(p.platform);
+
+    // Tensor-only derivations. Google's SoC model and modem/RADIO prefix are a
+    // pure function of the platform (chip generation). NON-Tensor devices carry
+    // these explicitly in the persona columns (parse_persona_line enforces it),
+    // so these helpers are consulted ONLY for Tensor rows.
+    auto tensor_soc_model = [](const std::string& plat) -> const char* {
+        if (plat == "gs101")   return "GS101";
+        if (plat == "gs201")   return "GS201";
+        if (plat == "zuma")    return "GS301";
+        if (plat == "zumapro") return "GS401";
+        if (plat == "laguna")  return "GS501";
+        return "unknown";
+    };
+    auto tensor_modem_prefix = [](const std::string& plat) -> const char* {
+        if (plat == "gs101")   return "g5123b";
+        if (plat == "gs201")   return "g5300b";
+        if (plat == "zuma")    return "g5300q";
+        if (plat == "zumapro") return "g5400";
+        if (plat == "laguna")  return "g5500";
+        return "unknown";
+    };
+
+    // Brand identity: explicit persona columns win; Google/Tensor defaults fill
+    // the gaps, so a bare 10-column Pixel row behaves EXACTLY as before.
+    const std::string brand   = p.brand.empty()        ? "google" : p.brand;
+    const std::string manuf   = p.manufacturer.empty() ? "Google" : p.manufacturer;
+    const std::string soc_man = !p.soc_manufacturer.empty() ? p.soc_manufacturer
+                                : (tensor ? "Google" : std::string());
+    const std::string soc_mod = !p.soc_model.empty() ? p.soc_model
+                                : (tensor ? tensor_soc_model(p.platform) : std::string());
+
     Identity id;
-    id.kv["BRAND"]           = "google";
-    id.kv["MANUFACTURER"]    = "Google";
+    id.kv["BRAND"]           = brand;
+    id.kv["MANUFACTURER"]    = manuf;
     id.kv["MODEL"]           = p.model;
-    id.kv["MARKETNAME"]      = p.model;
+    // ro.product.marketname: on OEM devices the retail name ("Galaxy S24 Ultra")
+    // differs from Build.MODEL ("SM-S928B"). Pixel rows omit it => MARKETNAME
+    // falls back to model ("Pixel 8"), which is exactly right for Pixel.
+    id.kv["MARKETNAME"]      = p.marketname.empty() ? p.model : p.marketname;
     id.kv["DEVICE"]          = p.device;
     id.kv["PRODUCT"]         = p.product;
     id.kv["BOARD"]           = p.board;
     id.kv["HARDWARE"]        = p.board;
     id.kv["BOARD_PLATFORM"]  = p.platform;
-    // ro.soc.model / Build.SOC_MODEL. Google's Tensor SoC model string is a
-    // pure function of the platform (chip generation), so derive it from
-    // p.platform instead of carrying a redundant persona column. Mirrors
-    // modem_prefix() below; parse_persona_line() already rejects unknown
-    // platforms, so the fallback is only a guard.
-    auto soc_model = [](const char* plat) -> const char* {
-        if (!strcmp(plat, "gs101"))   return "GS101";
-        if (!strcmp(plat, "gs201"))   return "GS201";
-        if (!strcmp(plat, "zuma"))    return "GS301";
-        if (!strcmp(plat, "zumapro")) return "GS401";
-        if (!strcmp(plat, "laguna"))  return "GS501";
-        fprintf(stderr, "! unknown platform '%s' — no SoC model mapping\n", plat);
-        return "unknown";
-    };
-    id.kv["SOC_MANUFACTURER"] = "Google";
-    id.kv["SOC_MODEL"]       = soc_model(p.platform.c_str());
+    id.kv["SOC_MANUFACTURER"] = soc_man;
+    id.kv["SOC_MODEL"]       = soc_mod;
     id.kv["ID"]              = p.id;
     id.kv["INCREMENTAL"]     = p.incremental;
     id.kv["RELEASE"]         = p.release;
@@ -383,10 +448,12 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["TYPE"]            = "user";
     id.kv["TAGS"]            = "release-keys";
 
+    // FINGERPRINT prefix is the brand — matches ro.product.brand exactly on real
+    // devices (google/…, samsung/…, Redmi/…).
     char fp[512];
-    snprintf(fp, sizeof(fp), "google/%s/%s:%s/%s/%s:user/release-keys",
-             p.product.c_str(), p.device.c_str(), p.release.c_str(),
-             p.id.c_str(), p.incremental.c_str());
+    snprintf(fp, sizeof(fp), "%s/%s/%s:%s/%s/%s:user/release-keys",
+             brand.c_str(), p.product.c_str(), p.device.c_str(),
+             p.release.c_str(), p.id.c_str(), p.incremental.c_str());
     id.kv["FINGERPRINT"] = fp;
     id.kv["DISPLAY"]     = p.id;
 
@@ -395,28 +462,27 @@ static Identity derive_identity(const PixelEntry& p) {
              p.product.c_str(), p.release.c_str(), p.id.c_str(), p.incremental.c_str());
     id.kv["DESCRIPTION"] = desc;
 
-    auto modem_prefix = [](const char* plat) -> const char* {
-        if (!strcmp(plat, "gs101"))   return "g5123b";
-        if (!strcmp(plat, "gs201"))   return "g5300b";
-        if (!strcmp(plat, "zuma"))    return "g5300q";
-        if (!strcmp(plat, "zumapro")) return "g5400";
-        if (!strcmp(plat, "laguna"))  return "g5500";
-        // Unreachable for personas loaded via parse_persona_line(), which
-        // rejects unknown platforms before they enter the pool. Guard here
-        // too rather than silently mislabeling the RADIO fingerprint.
-        fprintf(stderr, "! unknown platform '%s' — no modem prefix mapping\n", plat);
-        return "unknown";
-    };
-    char pdate[8] = "000000";
-    if (p.security_patch.size() >= 10) {
-        pdate[0] = p.security_patch[2]; pdate[1] = p.security_patch[3];
-        pdate[2] = p.security_patch[5]; pdate[3] = p.security_patch[6];
-        pdate[4] = p.security_patch[8]; pdate[5] = p.security_patch[9];
+    // RADIO / baseband. Non-Tensor personas MAY carry a full baseband string
+    // verbatim (Qualcomm/Exynos formats vary and are not derivable), but usually
+    // don't — no public baseband data exists for most OEM builds. Tensor rows
+    // synthesise Google's g5xxx-<patchdate>-B-<incremental> form.
+    if (!p.radio.empty()) {
+        id.kv["RADIO"] = p.radio;
+    } else if (tensor) {
+        char pdate[8] = "000000";
+        if (p.security_patch.size() >= 10) {
+            pdate[0] = p.security_patch[2]; pdate[1] = p.security_patch[3];
+            pdate[2] = p.security_patch[5]; pdate[3] = p.security_patch[6];
+            pdate[4] = p.security_patch[8]; pdate[5] = p.security_patch[9];
+        }
+        char rad[128];
+        snprintf(rad, sizeof(rad), "%s-%s-B-%s",
+                 tensor_modem_prefix(p.platform), pdate, p.incremental.c_str());
+        id.kv["RADIO"] = rad;
     }
-    char rad[128];
-    snprintf(rad, sizeof(rad), "%s-%s-B-%s",
-             modem_prefix(p.platform.c_str()), pdate, p.incremental.c_str());
-    id.kv["RADIO"] = rad;
+    // else: non-Tensor with no baseband string — leave RADIO unset. apply_native
+    // skips empty values, so gsm.version.baseband / ro.build.expect.baseband keep
+    // the device's REAL baseband rather than a fabricated (more detectable) one.
 
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
@@ -842,15 +908,33 @@ static int cmd_freshen() {
 
     // autopif.sh may have fetched a fresh random Pixel and left it as a one-shot
     // override. When present, derive the identity straight from it (bypassing the
-    // SDK-matched pool pick) so each `action`/autopif run gets a NEW model. Its
-    // SDK is spoofed across all surfaces, so it stays internally consistent even
-    // when it differs from the device's real SDK.
+    // SDK-matched pool pick) so each `action`/autopif run gets a NEW model.
+    //
+    // BUT: autopif always fetches Google's LATEST canary (currently SDK 36 /
+    // Android 16). Applying that verbatim onto an Android 12–15 device makes
+    // SDK_INT / RELEASE / FINGERPRINT claim an OS newer than the real kernel and
+    // framework. That "upgrade spoof" is exactly what makes apps crash
+    // (API-level mismatch, missing runtime behaviour) and trips integrity
+    // checks. So apply the override directly ONLY when it does not present a
+    // newer Android than the device actually runs; otherwise discard it and fall
+    // back to the SDK-matched pool pick. take_persona_override() has already
+    // unlinked the file, so a rejected override cannot wedge future freshens.
     PixelEntry ov;
     Identity id;
+    const int dev_sdk = device_sdk();
     if (take_persona_override(ov)) {
-        fprintf(stderr, "* autopif persona: %s (%s/%s, SDK %d) — applied directly, no pool pick\n",
-                ov.model.c_str(), ov.device.c_str(), ov.platform.c_str(), ov.sdk);
-        id = derive_identity(ov);
+        if (dev_sdk > 0 && ov.sdk > dev_sdk) {
+            fprintf(stderr,
+                    "! autopif persona %s (SDK %d) is newer than device SDK %d — "
+                    "refusing upgrade-spoof (would crash/leak on this Android "
+                    "version); using SDK-matched pool pick instead\n",
+                    ov.model.c_str(), ov.sdk, dev_sdk);
+            id = gen_identity();
+        } else {
+            fprintf(stderr, "* autopif persona: %s (%s/%s, SDK %d) — applied directly, no pool pick\n",
+                    ov.model.c_str(), ov.device.c_str(), ov.platform.c_str(), ov.sdk);
+            id = derive_identity(ov);
+        }
     } else {
         id = gen_identity();
     }

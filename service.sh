@@ -49,7 +49,12 @@ if [ -f "$MODDIR/debug_variant" ]; then
         sleep 10
         touch "$CRASHFILE"
         chmod 0644 "$CRASHFILE"
-        tail -F "$LOGFILE" 2>/dev/null | grep --line-buffered -E 'CRASH|DEATH|LEAK' >> "$CRASHFILE" 2>&1
+        # NOTE: use awk, not `grep --line-buffered`. On Android the grep in PATH
+        # is BusyBox/toybox, and NEITHER supports GNU's --line-buffered flag --
+        # it aborts with "unrecognized option" and crashes.log is never written.
+        # awk is present in both BusyBox and toybox; fflush() gives the same
+        # per-line flush so a crash line lands in crashes.log immediately.
+        tail -F "$LOGFILE" 2>/dev/null | awk '/CRASH|DEATH|LEAK/ { print; fflush() }' >> "$CRASHFILE" 2>&1
     ) &
     echo "$!" > "$MODDIR/debug/journal.pid"
 fi
