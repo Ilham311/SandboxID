@@ -84,6 +84,7 @@ build_variant() {
   [ -f helpers.sh ] && cp helpers.sh "$PKG/"
   [ -f rotate_ids.sh ] && cp rotate_ids.sh "$PKG/"
   [ -f personas.tsv ] && cp personas.tsv "$PKG/"
+  [ -f devices.tsv ] && cp devices.tsv "$PKG/"
   [ -f autopif.sh ] && cp autopif.sh "$PKG/"
   [ -d webroot ] && cp -R webroot "$PKG/"
 
