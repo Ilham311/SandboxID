@@ -443,9 +443,12 @@ function escapeHtml(s) {
 
 // ---- Tema terang/gelap ----------------------------------------------------
 // Default: ikut tema sistem (diatur lewat prefers-color-scheme di style.css).
-// Tombol tema menulis data-theme di <html> dan menyimpan pilihan manual ke
-// localStorage, jadi pilihan tetap bertahan antar sesi dan menang atas tema
-// sistem. Tanpa data-theme, cascade CSS kembali mengikuti sistem.
+// Pilihan manual sudah diterapkan lebih dulu oleh theme-init.js (dimuat di
+// <head> sebelum style.css) agar tidak ada kedipan tema salah saat halaman
+// dibuka. Di sini kita hanya memasang handler tombol tema, yang menulis
+// data-theme di <html> dan menyimpan pilihan manual ke localStorage, jadi
+// pilihan tetap bertahan antar sesi dan menang atas tema sistem. Tanpa
+// data-theme, cascade CSS kembali mengikuti sistem.
 function applyTheme(mode) {
   const root = document.documentElement;
   if (mode === 'light' || mode === 'dark') root.setAttribute('data-theme', mode);
@@ -457,9 +460,6 @@ function currentTheme() {
   return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
 }
 function initTheme() {
-  let saved = null;
-  try { saved = localStorage.getItem('sbx-theme'); } catch (e) {}
-  if (saved === 'light' || saved === 'dark') applyTheme(saved);
   const btn = document.getElementById('themeBtn');
   if (!btn) return;
   btn.addEventListener('click', () => {
