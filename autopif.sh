@@ -268,6 +268,11 @@ assemble_identity() {
   INCREMENTAL=$(col "$_row" 13); SECPATCH=$(col "$_row" 14)
   RELEASE_DATE=$(col "$_row" 15)
 
+  # Kunci versi (dari cmd_device): kalau di-set, paksa SDK/RELEASE ke Android asli
+  # perangkat. FINGERPRINT di bawah dibangun ulang dari $RELEASE, jadi ikut sinkron.
+  [ -n "${LOCK_SDK:-}" ] && SDK=$LOCK_SDK
+  [ -n "${LOCK_REL:-}" ] && RELEASE=$LOCK_REL
+
   for _v in "$BRAND" "$MANUFACTURER" "$MODEL" "$DEVICE" "$PRODUCT" "$BOARD" \
             "$SOC_MODEL" "$SDK" "$RELEASE" "$BUILD_ID" "$INCREMENTAL" \
             "$SECPATCH" "$RELEASE_DATE"; do
@@ -377,12 +382,48 @@ cmd_device() {
   cleanup_dev() { rm -rf "$TMP_DIR" 2>/dev/null; }
   trap cleanup_dev EXIT
 
+  RAW_ALL="$TMP_DIR/devices.all"
+  grep -v '^[[:space:]]*#' "$DEVICES_FILE" 2>/dev/null | grep -v '^[[:space:]]*$' > "$RAW_ALL"
+  total_all=$(wc -l < "$RAW_ALL" 2>/dev/null | tr -d ' ')
+  case "$total_all" in ''|*[!0-9]*) total_all=0 ;; esac
+  if [ "$total_all" -eq 0 ]; then
+    log "database device kosong setelah difilter — nggak ada yang bisa dibikin"
+    return 0
+  fi
+
+  # ── KUNCI VERSI ANDROID ke perangkat ────────────────────────────────────────
+  # Native memasang Build.VERSION.SDK_INT/RELEASE dari persona apa adanya
+  # (main.cpp set_int/set_str + hook properti). Kalau SDK persona != Android asli
+  # hp, app bisa error (lihat kebijakan native pick_persona() di sandboxid.cpp yg
+  # sudah mencocokkan persona ke SDK perangkat). Jalur multibrand ini dulu belum.
+  # Aturan: utamakan model yang MEMANG rilis di Android ini; kalau pool nggak
+  # punya, tetap ambil model lain TAPI paksa SDK/RELEASE ke versi asli perangkat.
   RAW="$TMP_DIR/devices.raw"
-  grep -v '^[[:space:]]*#' "$DEVICES_FILE" 2>/dev/null | grep -v '^[[:space:]]*$' > "$RAW"
+  LOCK_SDK=""; LOCK_REL=""
+  _dev_sdk="${SBX_REAL_SDK:-$(getprop ro.build.version.sdk 2>/dev/null || :)}"
+  _dev_rel="${SBX_REAL_RELEASE:-$(getprop ro.build.version.release 2>/dev/null || :)}"
+  case "$_dev_sdk" in ''|*[!0-9]*) _dev_sdk="" ;; esac
+  if [ -n "$_dev_sdk" ]; then
+    awk -F'\t' -v s="$_dev_sdk" '$10==s' "$RAW_ALL" > "$RAW"
+    _nmatch=$(wc -l < "$RAW" 2>/dev/null | tr -d ' ')
+    case "$_nmatch" in ''|*[!0-9]*) _nmatch=0 ;; esac
+    if [ "$_nmatch" -ge 1 ]; then
+      log "kunci versi: Android ${_dev_rel:-?} (SDK $_dev_sdk) — $_nmatch model bawaan versi ini dipakai"
+    else
+      cp -f "$RAW_ALL" "$RAW" 2>/dev/null
+      LOCK_SDK="$_dev_sdk"
+      LOCK_REL=$(sdk_release "$_dev_sdk"); [ -z "$LOCK_REL" ] && LOCK_REL="$_dev_rel"
+      log "kunci versi: nggak ada model bawaan Android ${_dev_rel:-$_dev_sdk} di pool — model lain dipakai, SDK/RELEASE dipaksa ke SDK $_dev_sdk"
+    fi
+  else
+    cp -f "$RAW_ALL" "$RAW" 2>/dev/null
+    log "kunci versi dilewat: versi Android perangkat nggak kebaca (getprop)"
+  fi
+
   total=$(wc -l < "$RAW" 2>/dev/null | tr -d ' ')
   case "$total" in ''|*[!0-9]*) total=0 ;; esac
   if [ "$total" -eq 0 ]; then
-    log "database device kosong setelah difilter — nggak ada yang bisa dibikin"
+    log "pool device kosong setelah kunci versi — batal"
     return 0
   fi
 
