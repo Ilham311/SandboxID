@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <sys/system_properties.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <android/log.h>
 #include <string>
@@ -324,85 +325,74 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
 
-/* ── L8: uptime spoof ──────────────────────────────────────────────────
-   Adds a constant offset (UPTIME_SECONDS from identity.prop) to the
-   SystemClock native clocks so a just-booted sandbox reports the fake
-   device's "lived-in" uptime instead of a few seconds. The offset is
-   CONSTANT, so deltas between successive reads are unchanged — Handler /
-   Choreographer / MessageQueue / timer scheduling (which only compare
-   differences, and whose native side receives relative timeouts) keep
-   working. Only the absolute value an app samples as an uptime / boot-time
-   fingerprint shifts. No-op unless UPTIME_SECONDS is a positive integer. */
 #ifndef CLOCK_BOOTTIME
 #define CLOCK_BOOTTIME 7
 #endif
+#ifndef CLOCK_BOOTTIME_ALARM
+#define CLOCK_BOOTTIME_ALARM 9
+#endif
 
-/* SystemClock.uptimeMillis / elapsedRealtime / elapsedRealtimeNanos are
-   @CriticalNative (verified against AOSP SystemClock.java + android_os_SystemClock.cpp):
-   ART invokes them with NO JNIEnv* and NO jclass — the registered native is a plain
-   zero-arg function returning jlong, exactly like the platform's own registration
-   `{ "elapsedRealtime", "()J", (void*) elapsedRealtime }`. Both our replacements AND
-   the saved originals MUST use that zero-arg convention; a (JNIEnv*, jclass) signature
-   misreads the argument registers and hands garbage to the original → SIGSEGV the first
-   time a target app reads the clock (ActivityThread does so during startup), so the app
-   never opens. The offset itself is CONSTANT, so inter-call deltas are unchanged and
-   Handler / Choreographer / timer scheduling keep working. */
-static jlong (*orig_uptime_ms)() = nullptr;
-static jlong (*orig_ert_ms)()    = nullptr;
-static jlong (*orig_ert_ns)()    = nullptr;
-static int64_t g_uptime_off_ms = 0;
-static int64_t g_uptime_off_ns = 0;
+static int (*orig_clock_gettime)(clockid_t, struct timespec*) = nullptr;
+static int64_t g_boot_off_sec = 0;
 
-static int64_t sbx_clock_ms(clockid_t clk) {
-    struct timespec t; clock_gettime(clk, &t);
-    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
-}
-static int64_t sbx_clock_ns(clockid_t clk) {
-    struct timespec t; clock_gettime(clk, &t);
-    return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
+static int sbx_hooked_clock_gettime(clockid_t clk, struct timespec* ts) {
+    int r = orig_clock_gettime ? orig_clock_gettime(clk, ts) : clock_gettime(clk, ts);
+    if (r == 0 && ts && (clk == CLOCK_BOOTTIME || clk == CLOCK_BOOTTIME_ALARM))
+        ts->tv_sec += g_boot_off_sec;
+    return r;
 }
 
-/* Zero-arg (@CriticalNative) trampolines. Fall back to a direct clock read only if
-   the original binding was missed (method not matched) — otherwise chain the real impl. */
-static jlong hook_uptime_ms() {
-    int64_t base = orig_uptime_ms ? (int64_t)orig_uptime_ms() : sbx_clock_ms(CLOCK_MONOTONIC);
-    return (jlong)(base + g_uptime_off_ms);
-}
-static jlong hook_ert_ms() {
-    int64_t base = orig_ert_ms ? (int64_t)orig_ert_ms() : sbx_clock_ms(CLOCK_BOOTTIME);
-    return (jlong)(base + g_uptime_off_ms);
-}
-static jlong hook_ert_ns() {
-    int64_t base = orig_ert_ns ? (int64_t)orig_ert_ns() : sbx_clock_ns(CLOCK_BOOTTIME);
-    return (jlong)(base + g_uptime_off_ns);
+static bool sbx_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino) {
+    FILE* f = fopen("/proc/self/maps", "re");
+    if (!f) return false;
+    char line[512];
+    size_t sl = strlen(suffix);
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        char* path = strchr(line, '/');
+        if (!path) continue;
+        size_t pl = strlen(path);
+        if (pl && path[pl - 1] == '\n') path[--pl] = '\0';
+        if (pl >= sl && strcmp(path + pl - sl, suffix) == 0) {
+            struct stat st;
+            if (stat(path, &st) == 0) { *out_dev = st.st_dev; *out_ino = st.st_ino; found = true; }
+            break;
+        }
+    }
+    fclose(f);
+    return found;
 }
 
-static void install_uptime_hook(Api* api, JNIEnv* env) {
+static void install_uptime_hook(Api* api, JNIEnv* /*env*/) {
     const std::string& us = val("UPTIME_SECONDS");
     if (us.empty()) return;
     char* end = nullptr;
     long long secs = std::strtoll(us.c_str(), &end, 10);
-    if (end == us.c_str() || secs <= 0) return;   /* absent / zero / garbage → leave clocks real */
-    g_uptime_off_ms = (int64_t)secs * 1000LL;
-    g_uptime_off_ns = (int64_t)secs * 1000000000LL;
+    if (end == us.c_str() || secs <= 0) return;
+    g_boot_off_sec = (int64_t)secs;
 
-    JNINativeMethod m[3] = {
-        {const_cast<char*>("uptimeMillis"),         const_cast<char*>("()J"), reinterpret_cast<void*>(hook_uptime_ms)},
-        {const_cast<char*>("elapsedRealtime"),      const_cast<char*>("()J"), reinterpret_cast<void*>(hook_ert_ms)},
-        {const_cast<char*>("elapsedRealtimeNanos"), const_cast<char*>("()J"), reinterpret_cast<void*>(hook_ert_ns)},
-    };
-    api->hookJniNativeMethods(env, "android/os/SystemClock", m, 3);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        LOGE("L8: JNI exception saat memasang uptime hook");
+    static const char* const kLibs[] = { "/libutils.so", "/libandroid_runtime.so" };
+    int registered = 0;
+    for (size_t i = 0; i < sizeof(kLibs) / sizeof(kLibs[0]); ++i) {
+        dev_t dev = 0; ino_t ino = 0;
+        if (!sbx_lib_dev_inode(kLibs[i], &dev, &ino)) continue;
+        api->pltHookRegister(dev, ino, "clock_gettime",
+                             reinterpret_cast<void*>(sbx_hooked_clock_gettime),
+                             reinterpret_cast<void**>(&orig_clock_gettime));
+        ++registered;
     }
-    orig_uptime_ms = reinterpret_cast<jlong (*)()>(m[0].fnPtr);
-    orig_ert_ms    = reinterpret_cast<jlong (*)()>(m[1].fnPtr);
-    orig_ert_ns    = reinterpret_cast<jlong (*)()>(m[2].fnPtr);
-    LOGD("L8 uptime hook installed (+%llds) orig=%p/%p/%p", (long long)secs,
-         reinterpret_cast<void*>(orig_uptime_ms),
-         reinterpret_cast<void*>(orig_ert_ms),
-         reinterpret_cast<void*>(orig_ert_ns));
+    if (registered == 0) { LOGW("L8: chokepoint lib tak ketemu — uptime tak dispoof"); return; }
+    if (!api->pltHookCommit()) {
+        orig_clock_gettime = nullptr;
+        LOGW("L8: pltHookCommit gagal — uptime tak dispoof (jam asli)");
+        return;
+    }
+    if (orig_clock_gettime == nullptr) {
+        LOGW("L8: commit OK tapi clock_gettime tak ter-hook (orig=null) — uptime tak dispoof");
+        return;
+    }
+    LOGD("L8 boottime PLT hook aktif (+%llds, %d lib) orig=%p",
+         (long long)secs, registered, reinterpret_cast<void*>(orig_clock_gettime));
 }
 
 struct SbxCrashRec {
