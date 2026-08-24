@@ -295,12 +295,29 @@ assemble_identity() {
   GAID=$(rand_uuid)
   HOSTN="$(printf '%s' "$BRAND" | tr '[:upper:]' '[:lower:]')-build-$(rand_range 100 999)"
 
-  # Kill switch rebuild-free: kalau ada file penanda $MODDIR/no_uptime, jangan kirim
-  # UPTIME_SECONDS asli (kirim 0). Native install_uptime_hook nge-skip saat
-  # UPTIME_SECONDS<=0, jadi apps balik ke uptime beneran TANPA rebuild/reflash.
-  # (UPTIME_S internal tetap utuh biar validate_lifecycle lolos.)
-  _uptime_emit=$UPTIME_S
-  [ -f "$MODDIR/no_uptime" ] && _uptime_emit=0
+  # ── Uptime spoof: OFF secara default (opt-in) ───────────────────────────────
+  # Kenapa OFF: SystemClock.uptimeMillis / elapsedRealtime[Nanos] cuma pembungkus
+  # tipis di atas clock_gettime(CLOCK_MONOTONIC / CLOCK_BOOTTIME) (AOSP
+  # android_os_SystemClock.cpp -> libutils systemTime()). Jam yang SAMA dibaca
+  # banyak jalur yang TAK bisa di-hook dari Java: systemTime() native (dipakai
+  # ART, sistem input, vsync Choreographer & animator), System.nanoTime(),
+  # clock_gettime vDSO milik libc, dan /proc/uptime. Hook Java cuma menggeser
+  # pemanggil Java; jalur lain tetap waktu asli. Begitu app membandingkan nilai
+  # ke-hook (mis. deadline animasi/loading dari uptimeMillis) dengan jam
+  # tak-ke-hook (frame vsync / nanoTime), selisihnya sebesar offset -> deadline
+  # nggak pernah tercapai atau animasi nyangkut di frame 0 -> "stuck loading"
+  # (terbukti on-device: UPTIME_SECONDS=0 bikin app kebuka, >0 bikin nyangkut).
+  # Virtualisasi waktu yang konsisten cuma bisa di kernel (time namespace
+  # CLONE_NEWTIME, Linux 5.6+, /proc/<pid>/timens_offsets) yang menggeser semua
+  # pembaca sekaligus — tapi unshare(CLONE_NEWTIME) cuma berlaku utk proses ANAK,
+  # jadi tak terjangkau dari hook Zygisk yang jalan SETELAH app di-fork. Modul
+  # spoof matang (PlayIntegrityFix, TrickyStore, dsb.) pun tidak menyentuh
+  # SystemClock. Jadi default = 0 (native install_uptime_hook nge-skip saat <=0,
+  # semua app aman TANPA rebuild). Riset yang paham risikonya: aktifkan dengan
+  # `touch $MODDIR/enable_uptime`. (UPTIME_S internal tetap utuh biar
+  # validate_lifecycle lolos.)
+  _uptime_emit=0
+  [ -f "$MODDIR/enable_uptime" ] && _uptime_emit=$UPTIME_S
 
   # native baca balik key ini apa adanya (load_identity) & menerapkannya; key
   # ekstra (BOOT_COUNT, UPTIME_*, ...) diabaikan apply_native, aman sbg metadata.
@@ -337,7 +354,7 @@ AGE_DAYS=$AGE_DAYS
 OWNED_DAYS=$OWNED_DAYS
 BOOT_COUNT=$BOOT_COUNT
 UPTIME_SECONDS=$_uptime_emit
-UPTIME_HUMAN=$(fmt_dur "$UPTIME_S")
+UPTIME_HUMAN=$( [ "$_uptime_emit" -gt 0 ] && fmt_dur "$UPTIME_S" || printf '%s' 'asli (tidak dispoof)' )
 FIRST_BOOT=$FIRST_BOOT
 LAST_BOOT=$(epoch_to_ymd "$LAST_BOOT_EP")
 USAGE_PROFILE=$PROFILE
@@ -359,7 +376,11 @@ display_profile() {
   printf '  │ %-13s %s\n' "Fingerprint" "$FINGERPRINT"
   echo "  ├─ riwayat pakai (nyambung rilis $RELEASE_DATE) ──────────"
   printf '  │ %-13s %s  (~1 reboot / %s.%s hari)\n' "Jml boot"  "$BOOT_COUNT" "$(( DPB10 / 10 ))" "$(( DPB10 % 10 ))"
-  printf '  │ %-13s %s  (%ss)\n' "Lama nyala"  "$(fmt_dur "$UPTIME_S")" "$UPTIME_S"
+  if [ -f "$MODDIR/enable_uptime" ]; then
+    printf '  │ %-13s %s  (%ss)\n' "Lama nyala"  "$(fmt_dur "$UPTIME_S")" "$UPTIME_S"
+  else
+    printf '  │ %-13s %s\n' "Lama nyala"  "asli — spoof uptime OFF (touch enable_uptime utk aktifkan)"
+  fi
   printf '  │ %-13s %s\n' "Boot awal"  "$FIRST_BOOT"
   printf '  │ %-13s %s  (umur %sh, dipakai %sh)\n' "Pemakaian"  "$PROFILE" "$AGE_DAYS" "$OWNED_DAYS"
   printf '  │ %-13s %s%s\n' "Fresh"  "$FRESH" "$( [ "$RESET" -eq 1 ] && echo '  (baru factory-reset)' )"

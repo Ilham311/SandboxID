@@ -324,15 +324,28 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
 
-/* ── L8: uptime spoof ──────────────────────────────────────────────────
+/* ── L8: uptime spoof (OPT-IN, default OFF) ─────────────────────────────
    Adds a constant offset (UPTIME_SECONDS from identity.prop) to the
-   SystemClock native clocks so a just-booted sandbox reports the fake
-   device's "lived-in" uptime instead of a few seconds. The offset is
-   CONSTANT, so deltas between successive reads are unchanged — Handler /
-   Choreographer / MessageQueue / timer scheduling (which only compare
-   differences, and whose native side receives relative timeouts) keep
-   working. Only the absolute value an app samples as an uptime / boot-time
-   fingerprint shifts. No-op unless UPTIME_SECONDS is a positive integer. */
+   SystemClock native clocks so the sandbox can report a "lived-in" uptime.
+
+   HAZARD — why this ships OFF by default: uptimeMillis / elapsedRealtime[Nanos]
+   are thin wrappers over clock_gettime(CLOCK_MONOTONIC / CLOCK_BOOTTIME). The
+   SAME clocks are read by many paths this Java hook does NOT cover: native
+   systemTime() (ART, input, Choreographer vsync & the animation pipeline),
+   System.nanoTime(), libc's vDSO clock_gettime, and /proc/uptime. A constant
+   offset keeps HOOKED-vs-HOOKED deltas intact, but the moment an app compares a
+   hooked absolute value (e.g. an animation/loading deadline seeded from
+   uptimeMillis) against an UNHOOKED clock (the vsync frame time, nanoTime), the
+   two diverge by the whole offset → the deadline never arrives / the animation
+   sticks at frame 0 → the app hangs on its loading screen (confirmed on-device:
+   UPTIME_SECONDS=0 lets the app open, >0 hangs it). Consistent time
+   virtualization is only possible in the kernel (time namespaces, CLONE_NEWTIME)
+   and unreachable from a post-fork Zygisk hook. Mature spoofing modules avoid
+   SystemClock entirely for this reason.
+
+   So autopif.sh emits UPTIME_SECONDS=0 unless the user opts in with
+   `touch $MODDIR/enable_uptime`, and this function no-ops unless UPTIME_SECONDS
+   is a positive integer. Left installed for opt-in research; not on by default. */
 #ifndef CLOCK_BOOTTIME
 #define CLOCK_BOOTTIME 7
 #endif
@@ -344,9 +357,9 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
    `{ "elapsedRealtime", "()J", (void*) elapsedRealtime }`. Both our replacements AND
    the saved originals MUST use that zero-arg convention; a (JNIEnv*, jclass) signature
    misreads the argument registers and hands garbage to the original → SIGSEGV the first
-   time a target app reads the clock (ActivityThread does so during startup), so the app
-   never opens. The offset itself is CONSTANT, so inter-call deltas are unchanged and
-   Handler / Choreographer / timer scheduling keep working. */
+   time a target app reads the clock (ActivityThread does so during startup). See the
+   HAZARD note above for why a constant offset is still not safe enough to enable by
+   default even once the convention is correct. */
 static jlong (*orig_uptime_ms)() = nullptr;
 static jlong (*orig_ert_ms)()    = nullptr;
 static jlong (*orig_ert_ns)()    = nullptr;
