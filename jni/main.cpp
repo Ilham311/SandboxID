@@ -345,8 +345,9 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
 
    CRUCIAL — offset CLOCK_BOOTTIME ONLY, never CLOCK_MONOTONIC:
      * CLOCK_BOOTTIME backs elapsedRealtime()/elapsedRealtimeNanos() — the real
-       "time since boot" fingerprint. Safe to shift: little in-app logic waits
-       on an *absolute* boottime deadline.
+       "time since boot" fingerprint. Safe to shift for IN-PROCESS use: almost
+       nothing inside one app blocks on an *absolute* boottime deadline (the one
+       exception that matters is cross-process — see the residual gaps below).
      * CLOCK_MONOTONIC backs uptimeMillis(), Choreographer vsync, the animator,
        and pthread_cond / futex / timerfd *absolute* timed-waits. The kernel
        evaluates those waits against the REAL monotonic clock, so shifting the
@@ -355,8 +356,17 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
        consistently, and that is child-only → unreachable from a post-fork
        Zygisk hook. So uptimeMillis stays real; that is COHERENT — a device that
        mostly sleeps has uptimeMillis ≪ elapsedRealtime.
-   Residual gap: /proc/uptime is a file read, not clock_gettime, so it is not
-   spoofed; apps that parse it directly (rare) see the real value.
+   Residual gaps (inherent to a per-app userland offset — no crash, but not a
+   fully virtualized clock):
+     * /proc/uptime is a file read, not clock_gettime → not spoofed (apps that
+       parse it directly are rare).
+     * Cross-process ELAPSED_REALTIME[_WAKEUP] alarms: the app derives an
+       absolute deadline from its OFFSET elapsedRealtime and hands it to
+       AlarmManager in system_server, which still runs on the REAL boottime → the
+       alarm can fire up to the offset late (bounded by the autopif uptime cap,
+       ≤21d). App launch is unaffected; only app→system_server boottime
+       scheduling (some AlarmManager/WorkManager/JobScheduler paths) skews. A
+       full fix needs kernel time namespaces (unreachable post-fork).
 
    Fail-safe: if the chokepoint lib isn't found or the commit fails we leave all
    clocks real (no crash — the spoof just doesn't apply). No-op when
@@ -432,6 +442,15 @@ static void install_uptime_hook(Api* api, JNIEnv* /*env*/) {
     if (!api->pltHookCommit()) {
         orig_clock_gettime = nullptr;
         LOGW("L8: pltHookCommit gagal — uptime tak dispoof (jam asli)");
+        return;
+    }
+    /* pltHookCommit bisa balik true walau TAK ADA slot clock_gettime yang benar
+       dipatch (mis. import-nya ke-inline / ke-resolve statis di sebagian ROM):
+       tandanya orig_clock_gettime tetap null — pltHookRegister tak pernah mengisi
+       trampolin. Hook kita tak akan pernah dipanggil → tak ada offset. Jangan
+       lapor "aktif" palsu; ini yang bikin diagnosa non-aktif di perangkat susah. */
+    if (orig_clock_gettime == nullptr) {
+        LOGW("L8: commit OK tapi clock_gettime tak ter-hook (orig=null) — uptime tak dispoof");
         return;
     }
     LOGD("L8 boottime PLT hook aktif (+%llds, %d lib) orig=%p",
