@@ -180,6 +180,27 @@ sdk_release() {
   esac
 }
 
+# security-patch & tanggal rilis representatif utk sebuah SDK. Dipakai saat
+# LOCK_SDK/LOCK_REL aktif (assemble_identity) biar SECPATCH/RELEASE_DATE ikut
+# sinkron ke Android yang DIPAKSA, bukan ketinggalan di Android asli baris
+# device yang dipilih.
+sdk_secpatch() {
+  case "$1" in
+    30) echo "2021-08-05" ;; 31) echo "2022-08-05" ;; 32) echo "2022-08-05" ;;
+    33) echo "2023-08-05" ;; 34) echo "2024-08-05" ;; 35) echo "2024-11-05" ;;
+    36) echo "2025-08-05" ;;
+    *)  echo "" ;;
+  esac
+}
+sdk_release_date() {
+  case "$1" in
+    30) echo "2020-09" ;; 31) echo "2021-10" ;; 32) echo "2022-07" ;;
+    33) echo "2022-08" ;; 34) echo "2023-10" ;; 35) echo "2024-10" ;;
+    36) echo "2025-06" ;;
+    *)  echo "" ;;
+  esac
+}
+
 col() { printf '%s' "$1" | cut -f"$2"; }
 
 # ramu jml-boot / lama-nyala / status-fresh yang nyambung dari tgl rilis model.
@@ -268,6 +289,19 @@ assemble_identity() {
   INCREMENTAL=$(col "$_row" 13); SECPATCH=$(col "$_row" 14)
   RELEASE_DATE=$(col "$_row" 15)
 
+  # Kunci versi (dari cmd_device): kalau di-set, paksa SDK/RELEASE ke Android asli
+  # perangkat. FINGERPRINT di bawah dibangun ulang dari $RELEASE, jadi ikut sinkron.
+  # SECPATCH/RELEASE_DATE baris asal masih nempel ke SDK/RELEASE ASLI baris itu —
+  # kalau dibiarkan, metadata build (patch level & tanggal rilis) nggak nyambung
+  # sama RELEASE yang dipaksa. Timpa juga keduanya ke nilai representatif SDK
+  # yang dipaksa biar semua field build tetap konsisten satu sama lain.
+  if [ -n "${LOCK_SDK:-}" ]; then
+    SDK=$LOCK_SDK
+    _lock_secpatch=$(sdk_secpatch "$LOCK_SDK"); [ -n "$_lock_secpatch" ] && SECPATCH="$_lock_secpatch"
+    _lock_reldate=$(sdk_release_date "$LOCK_SDK"); [ -n "$_lock_reldate" ] && RELEASE_DATE="$_lock_reldate"
+  fi
+  [ -n "${LOCK_REL:-}" ] && RELEASE=$LOCK_REL
+
   for _v in "$BRAND" "$MANUFACTURER" "$MODEL" "$DEVICE" "$PRODUCT" "$BOARD" \
             "$SOC_MODEL" "$SDK" "$RELEASE" "$BUILD_ID" "$INCREMENTAL" \
             "$SECPATCH" "$RELEASE_DATE"; do
@@ -289,6 +323,13 @@ assemble_identity() {
   ANDROID_ID=$(rand_hex 8)
   GAID=$(rand_uuid)
   HOSTN="$(printf '%s' "$BRAND" | tr '[:upper:]' '[:lower:]')-build-$(rand_range 100 999)"
+
+  # Kill switch rebuild-free: kalau ada file penanda $MODDIR/no_uptime, jangan kirim
+  # UPTIME_SECONDS asli (kirim 0). Native install_uptime_hook nge-skip saat
+  # UPTIME_SECONDS<=0, jadi apps balik ke uptime beneran TANPA rebuild/reflash.
+  # (UPTIME_S internal tetap utuh biar validate_lifecycle lolos.)
+  _uptime_emit=$UPTIME_S
+  [ -f "$MODDIR/no_uptime" ] && _uptime_emit=0
 
   # native baca balik key ini apa adanya (load_identity) & menerapkannya; key
   # ekstra (BOOT_COUNT, UPTIME_*, ...) diabaikan apply_native, aman sbg metadata.
@@ -324,7 +365,7 @@ RELEASE_DATE=$RELEASE_DATE
 AGE_DAYS=$AGE_DAYS
 OWNED_DAYS=$OWNED_DAYS
 BOOT_COUNT=$BOOT_COUNT
-UPTIME_SECONDS=$UPTIME_S
+UPTIME_SECONDS=$_uptime_emit
 UPTIME_HUMAN=$(fmt_dur "$UPTIME_S")
 FIRST_BOOT=$FIRST_BOOT
 LAST_BOOT=$(epoch_to_ymd "$LAST_BOOT_EP")
@@ -370,12 +411,48 @@ cmd_device() {
   cleanup_dev() { rm -rf "$TMP_DIR" 2>/dev/null; }
   trap cleanup_dev EXIT
 
+  RAW_ALL="$TMP_DIR/devices.all"
+  grep -v '^[[:space:]]*#' "$DEVICES_FILE" 2>/dev/null | grep -v '^[[:space:]]*$' > "$RAW_ALL"
+  total_all=$(wc -l < "$RAW_ALL" 2>/dev/null | tr -d ' ')
+  case "$total_all" in ''|*[!0-9]*) total_all=0 ;; esac
+  if [ "$total_all" -eq 0 ]; then
+    log "database device kosong setelah difilter — nggak ada yang bisa dibikin"
+    return 0
+  fi
+
+  # ── KUNCI VERSI ANDROID ke perangkat ────────────────────────────────────────
+  # Native memasang Build.VERSION.SDK_INT/RELEASE dari persona apa adanya
+  # (main.cpp set_int/set_str + hook properti). Kalau SDK persona != Android asli
+  # hp, app bisa error (lihat kebijakan native pick_persona() di sandboxid.cpp yg
+  # sudah mencocokkan persona ke SDK perangkat). Jalur multibrand ini dulu belum.
+  # Aturan: utamakan model yang MEMANG rilis di Android ini; kalau pool nggak
+  # punya, tetap ambil model lain TAPI paksa SDK/RELEASE ke versi asli perangkat.
   RAW="$TMP_DIR/devices.raw"
-  grep -v '^[[:space:]]*#' "$DEVICES_FILE" 2>/dev/null | grep -v '^[[:space:]]*$' > "$RAW"
+  LOCK_SDK=""; LOCK_REL=""
+  _dev_sdk="${SBX_REAL_SDK:-$(getprop ro.build.version.sdk 2>/dev/null || :)}"
+  _dev_rel="${SBX_REAL_RELEASE:-$(getprop ro.build.version.release 2>/dev/null || :)}"
+  case "$_dev_sdk" in ''|*[!0-9]*) _dev_sdk="" ;; esac
+  if [ -n "$_dev_sdk" ]; then
+    awk -F'\t' -v s="$_dev_sdk" '$10==s' "$RAW_ALL" > "$RAW"
+    _nmatch=$(wc -l < "$RAW" 2>/dev/null | tr -d ' ')
+    case "$_nmatch" in ''|*[!0-9]*) _nmatch=0 ;; esac
+    if [ "$_nmatch" -ge 1 ]; then
+      log "kunci versi: Android ${_dev_rel:-?} (SDK $_dev_sdk) — $_nmatch model bawaan versi ini dipakai"
+    else
+      cp -f "$RAW_ALL" "$RAW" 2>/dev/null
+      LOCK_SDK="$_dev_sdk"
+      LOCK_REL=$(sdk_release "$_dev_sdk"); [ -z "$LOCK_REL" ] && LOCK_REL="$_dev_rel"
+      log "kunci versi: nggak ada model bawaan Android ${_dev_rel:-$_dev_sdk} di pool — model lain dipakai, SDK/RELEASE dipaksa ke SDK $_dev_sdk"
+    fi
+  else
+    cp -f "$RAW_ALL" "$RAW" 2>/dev/null
+    log "kunci versi dilewat: versi Android perangkat nggak kebaca (getprop)"
+  fi
+
   total=$(wc -l < "$RAW" 2>/dev/null | tr -d ' ')
   case "$total" in ''|*[!0-9]*) total=0 ;; esac
   if [ "$total" -eq 0 ]; then
-    log "database device kosong setelah difilter — nggak ada yang bisa dibikin"
+    log "pool device kosong setelah kunci versi — batal"
     return 0
   fi
 
