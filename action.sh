@@ -39,6 +39,7 @@ say "Diundi acak dari brand yang punya model buat versi Android HP-mu (peluang t
 say "Versi Android dikunci sesuai perangkat biar app target nggak error — makin baru versinya, biasanya makin sedikit pilihan brand-nya."
 say ""
 
+rm -f "$DEVICE_ID" 2>/dev/null
 if [ -f "$AUTOPIF" ] && [ -f "$MODDIR/devices.tsv" ]; then
     say "① Ngundi device…"
     MODDIR="$MODDIR" sh "$AUTOPIF" device 2>&1 | tee2

@@ -133,6 +133,23 @@ sdk_release() {
   esac
 }
 
+sdk_secpatch() {
+  case "$1" in
+    30) echo "2021-08-05" ;; 31) echo "2022-08-05" ;; 32) echo "2022-08-05" ;;
+    33) echo "2023-08-05" ;; 34) echo "2024-08-05" ;; 35) echo "2024-11-05" ;;
+    36) echo "2025-08-05" ;;
+    *)  echo "" ;;
+  esac
+}
+sdk_release_date() {
+  case "$1" in
+    30) echo "2020-09" ;; 31) echo "2021-10" ;; 32) echo "2022-07" ;;
+    33) echo "2022-08" ;; 34) echo "2023-10" ;; 35) echo "2024-10" ;;
+    36) echo "2025-06" ;;
+    *)  echo "" ;;
+  esac
+}
+
 col() { printf '%s' "$1" | cut -f"$2"; }
 
 gen_lifecycle() {
@@ -210,7 +227,11 @@ assemble_identity() {
   INCREMENTAL=$(col "$_row" 13); SECPATCH=$(col "$_row" 14)
   RELEASE_DATE=$(col "$_row" 15)
 
-  [ -n "${LOCK_SDK:-}" ] && SDK=$LOCK_SDK
+  if [ -n "${LOCK_SDK:-}" ]; then
+    SDK=$LOCK_SDK
+    _lock_secpatch=$(sdk_secpatch "$LOCK_SDK"); [ -n "$_lock_secpatch" ] && SECPATCH="$_lock_secpatch"
+    _lock_reldate=$(sdk_release_date "$LOCK_SDK"); [ -n "$_lock_reldate" ] && RELEASE_DATE="$_lock_reldate"
+  fi
   [ -n "${LOCK_REL:-}" ] && RELEASE=$LOCK_REL
 
   for _v in "$BRAND" "$MANUFACTURER" "$MODEL" "$DEVICE" "$PRODUCT" "$BOARD" \

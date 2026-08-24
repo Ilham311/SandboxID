@@ -8,12 +8,42 @@
 # Shipping personas as data (not a C++ header) also lets this list be edited
 # WITHOUT a native rebuild.
 #
-# Format: 10 TAB-separated columns, one persona per line. Lines starting
-# with '#' and blank lines are ignored. `platform` MUST stay within
-# {gs101, gs201, zuma, zumapro, laguna} so the modem/RADIO + ro.board.platform
-# (SoC) mapping in sandboxid.cpp resolves correctly.
+# Format: TAB-separated columns, one persona per line. Lines starting with '#'
+# and blank lines are ignored.
 #
-# model	device	product	board	platform	sdk	release	id	incremental	security_patch
+# Required cols 1-10:
+#   model  device  product  board  platform  sdk  release  id  incremental  security_patch
+#
+# Optional cols 11-16 (brand identity, for NON-Google devices):
+#   brand  manufacturer  marketname  soc_manufacturer  soc_model  radio
+#
+# Google/Tensor Pixel rows OMIT cols 11-16: brand defaults to `google`,
+# marketname to `model`, and the SoC model + modem/RADIO prefix are derived from
+# `platform`, which MUST then be one of {gs101, gs201, zuma, zumapro, laguna}
+# (kept in sync with autopif.sh).
+#
+# A NON-Tensor device (any other `platform`) MUST fill at least `brand` and
+# `soc_model` (marketname strongly recommended) — otherwise the row is rejected,
+# because it can't safely inherit the Tensor google/GS*/g5* values. `radio` is
+# the LAST column and is OPTIONAL: no public baseband data exists for most OEM
+# builds, so leave it off and the device keeps its REAL baseband (safer than a
+# fabricated one). board == platform is fine for OEM rows (both hold the SoC
+# platform, e.g. `pineapple`), and ro.hardware then tracks that too.
+#
+# SDK<->Android:  31=12  32=12L  33=13  34=14  35=15  36=16
+# The CLI matches a persona to the device's real SDK and NEVER presents a higher
+# SDK than the device runs (an "upgrade spoof" crashes apps / trips integrity),
+# so keep coverage across the whole Android range you want to support (12-16).
+#
+# model	device	product	board	platform	sdk	release	id	incremental	security_patch	[brand	manufacturer	marketname	soc_manufacturer	soc_model	radio]
+#
+# --- Android 12 (SDK 31): Pixel 6 series launch builds. These give A12/12L
+#     devices a matching persona so they never have to upgrade-spoof to 13+.
+#     Older fingerprints are best for Build-prop consistency; refresh via autopif
+#     on-device when strong integrity is required. ---
+Pixel 6	oriole	oriole	oriole	gs101	31	12	SD1A.210817.036	7805805	2021-10-05
+Pixel 6 Pro	raven	raven	raven	gs101	31	12	SD1A.210817.036	7805805	2021-10-05
+# --- Android 13-16 (Pixel, Tensor) ---
 Pixel 6	oriole	oriole	oriole	gs101	33	13	TQ3A.230901.001	10750268	2023-09-05
 Pixel 6a	bluejay	bluejay	bluejay	gs101	34	14	UP1A.231105.001	11010452	2023-11-05
 Pixel 7	panther	panther	panther	gs201	34	14	UP1A.231105.003	11015216	2023-11-05
@@ -28,3 +58,24 @@ Pixel 9 Pro XL	komodo	komodo	komodo	zumapro	35	15	AP3A.241005.015	12580212	2024-
 Pixel 9a	tegu	tegu	tegu	zumapro	35	15	AP3A.241005.015	12580213	2024-10-05
 Pixel 10	frankel	frankel	frankel	laguna	36	16	BP1A.250705.006	13051207	2025-07-05
 Pixel 10 Pro	blazer	blazer	blazer	laguna	36	16	BP1A.250705.006	13051208	2025-07-05
+#
+# ===========================================================================
+# NON-GOOGLE devices (cols 11-16 filled). These prove the pool is not
+# "locked to Google": `freshen` picks these too, SDK-matched. Data is real,
+# cross-checked against firmware dumps; `radio` is omitted (no public baseband
+# strings — the device keeps its own). board==platform (the SoC platform).
+# ===========================================================================
+# --- Android 13 (SDK 33) ---
+2211133G	fuxi	fuxi_global	kalama	kalama	33	13	TKQ1.220905.001	V14.0.7.0.TMCMIXM	2023-04-01	Xiaomi	Xiaomi	Xiaomi 13	Qualcomm	SM8550
+2312DRA50G	garnet	garnet_global	parrot	parrot	33	13	TKQ1.221114.001	V14.0.6.0.TNRMIXM	2024-01-01	Redmi	Xiaomi	Redmi Note 13 Pro 5G	Qualcomm	SM7435
+23049PCD8G	marble	marble_global	taro	taro	33	13	TKQ1.221114.001	V14.0.4.0.TMRMIXM	2023-04-01	POCO	Xiaomi	POCO F5	Qualcomm	SM7475
+Infinix X6833B	Infinix-X6833B	X6833B-GL	mt6789	mt6789	33	13	TP1A.220624.014	230817V2345	2023-08-05	Infinix	INFINIX	Infinix Note 30	MediaTek	MT6789
+23100RN82L	gale	gale_global	mt6768	mt6768	33	13	TP1A.220624.014	V14.0.6.0.TGPMIXM	2023-10-01	Redmi	Xiaomi	Redmi 13C	MediaTek	MT6769Z
+# --- Android 14 (SDK 34) ---
+23127PN0CG	houji	houji_global	pineapple	pineapple	34	14	UKQ1.230804.001	V816.0.12.0.UNCMIXM	2024-07-01	Xiaomi	Xiaomi	Xiaomi 14	Qualcomm	SM8650
+SM-S928B	e3q	e3qxxx	pineapple	pineapple	34	14	UP1A.231005.007	S928BXXU1AWM9	2024-01-01	samsung	samsung	Galaxy S24 Ultra	Qualcomm	SM8650
+SM-S921B	e1q	e1qxxx	erd9945	erd9945	34	14	UP1A.231005.007	S921BXXS2AXED	2024-05-01	samsung	samsung	Galaxy S24	Samsung	s5e9945
+2311DRK48G	duchamp	duchamp_global	mt6897	mt6897	34	14	UP1A.230905.011	V816.0.2.0.UNLMIXM	2023-12-01	POCO	Xiaomi	POCO X6 Pro 5G	MediaTek	MT6897
+CPH2557	OP573DL1	CPH2557	mt6833	mt6833	34	14	UP1A.230620.001	T.R4T2.1b4042b_1	2024-12-05	OPPO	OPPO	OPPO A79 5G	MediaTek	MT6833
+# --- Android 15 (SDK 35) ---
+CPH2521	OP56D3L1	CPH2521	taro	taro	35	15	AP3A.240617.008	T.R4T3.1c82702-2-1	2025-02-01	OPPO	OPPO	OPPO Reno10 Pro+ 5G	Qualcomm	SM8475

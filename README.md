@@ -235,7 +235,7 @@ Environment overrides:
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `VARIANT` | `both` | `release`, `debug`, or `both` |
-| `MIN_SDK` | `33` | Android platform target |
+| `MIN_SDK` | `26` | Native min API level (26 = Android 8; low floor so the .so loads across Android 12–16) |
 | `SBX_ENABLE_LSPLANT` | `OFF` | Enable the experimental L3 LSPlant Java-method hook |
 
 Build with `-Wall -Wextra` per ABI. The `debug` variant enables verbose

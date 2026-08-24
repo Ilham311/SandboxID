@@ -5,7 +5,12 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
 : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to your NDK path (r26+)}"
-MIN_SDK="${MIN_SDK:-33}"
+# Native min API level. Was 33 (Android 13), which built the CLI + Zygisk .so
+# against API-33 libc and left them liable to fail loading on Android 12
+# (API 31) — the module must run universally across Android 12–16. The code
+# only uses long-stable libc (`__system_property_get`, pipe2, sigaction, …),
+# nothing above API 26, so 26 is a safe floor that covers Android 8–16.
+MIN_SDK="${MIN_SDK:-26}"
 VARIANT="${VARIANT:-both}"
 VERSION="$(grep '^version=' module.prop | cut -d= -f2)"
 
