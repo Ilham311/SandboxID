@@ -290,6 +290,13 @@ assemble_identity() {
   GAID=$(rand_uuid)
   HOSTN="$(printf '%s' "$BRAND" | tr '[:upper:]' '[:lower:]')-build-$(rand_range 100 999)"
 
+  # Kill switch rebuild-free: kalau ada file penanda $MODDIR/no_uptime, jangan kirim
+  # UPTIME_SECONDS asli (kirim 0). Native install_uptime_hook nge-skip saat
+  # UPTIME_SECONDS<=0, jadi apps balik ke uptime beneran TANPA rebuild/reflash.
+  # (UPTIME_S internal tetap utuh biar validate_lifecycle lolos.)
+  _uptime_emit=$UPTIME_S
+  [ -f "$MODDIR/no_uptime" ] && _uptime_emit=0
+
   # native baca balik key ini apa adanya (load_identity) & menerapkannya; key
   # ekstra (BOOT_COUNT, UPTIME_*, ...) diabaikan apply_native, aman sbg metadata.
   IDENTITY_KV=$(cat <<EOF
@@ -324,7 +331,7 @@ RELEASE_DATE=$RELEASE_DATE
 AGE_DAYS=$AGE_DAYS
 OWNED_DAYS=$OWNED_DAYS
 BOOT_COUNT=$BOOT_COUNT
-UPTIME_SECONDS=$UPTIME_S
+UPTIME_SECONDS=$_uptime_emit
 UPTIME_HUMAN=$(fmt_dur "$UPTIME_S")
 FIRST_BOOT=$FIRST_BOOT
 LAST_BOOT=$(epoch_to_ymd "$LAST_BOOT_EP")

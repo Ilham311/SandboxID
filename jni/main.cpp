@@ -337,9 +337,19 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
 #define CLOCK_BOOTTIME 7
 #endif
 
-static jlong (*orig_uptime_ms)(JNIEnv*, jclass) = nullptr;
-static jlong (*orig_ert_ms)(JNIEnv*, jclass)    = nullptr;
-static jlong (*orig_ert_ns)(JNIEnv*, jclass)    = nullptr;
+/* SystemClock.uptimeMillis / elapsedRealtime / elapsedRealtimeNanos are
+   @CriticalNative (verified against AOSP SystemClock.java + android_os_SystemClock.cpp):
+   ART invokes them with NO JNIEnv* and NO jclass — the registered native is a plain
+   zero-arg function returning jlong, exactly like the platform's own registration
+   `{ "elapsedRealtime", "()J", (void*) elapsedRealtime }`. Both our replacements AND
+   the saved originals MUST use that zero-arg convention; a (JNIEnv*, jclass) signature
+   misreads the argument registers and hands garbage to the original → SIGSEGV the first
+   time a target app reads the clock (ActivityThread does so during startup), so the app
+   never opens. The offset itself is CONSTANT, so inter-call deltas are unchanged and
+   Handler / Choreographer / timer scheduling keep working. */
+static jlong (*orig_uptime_ms)() = nullptr;
+static jlong (*orig_ert_ms)()    = nullptr;
+static jlong (*orig_ert_ns)()    = nullptr;
 static int64_t g_uptime_off_ms = 0;
 static int64_t g_uptime_off_ns = 0;
 
@@ -352,18 +362,18 @@ static int64_t sbx_clock_ns(clockid_t clk) {
     return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
-/* Fall back to a direct clock read only if the original binding was missed
-   (method absent on this platform) — otherwise chain the real impl. */
-static jlong hook_uptime_ms(JNIEnv* e, jclass c) {
-    int64_t base = orig_uptime_ms ? (int64_t)orig_uptime_ms(e, c) : sbx_clock_ms(CLOCK_MONOTONIC);
+/* Zero-arg (@CriticalNative) trampolines. Fall back to a direct clock read only if
+   the original binding was missed (method not matched) — otherwise chain the real impl. */
+static jlong hook_uptime_ms() {
+    int64_t base = orig_uptime_ms ? (int64_t)orig_uptime_ms() : sbx_clock_ms(CLOCK_MONOTONIC);
     return (jlong)(base + g_uptime_off_ms);
 }
-static jlong hook_ert_ms(JNIEnv* e, jclass c) {
-    int64_t base = orig_ert_ms ? (int64_t)orig_ert_ms(e, c) : sbx_clock_ms(CLOCK_BOOTTIME);
+static jlong hook_ert_ms() {
+    int64_t base = orig_ert_ms ? (int64_t)orig_ert_ms() : sbx_clock_ms(CLOCK_BOOTTIME);
     return (jlong)(base + g_uptime_off_ms);
 }
-static jlong hook_ert_ns(JNIEnv* e, jclass c) {
-    int64_t base = orig_ert_ns ? (int64_t)orig_ert_ns(e, c) : sbx_clock_ns(CLOCK_BOOTTIME);
+static jlong hook_ert_ns() {
+    int64_t base = orig_ert_ns ? (int64_t)orig_ert_ns() : sbx_clock_ns(CLOCK_BOOTTIME);
     return (jlong)(base + g_uptime_off_ns);
 }
 
@@ -386,9 +396,9 @@ static void install_uptime_hook(Api* api, JNIEnv* env) {
         env->ExceptionClear();
         LOGE("L8: JNI exception saat memasang uptime hook");
     }
-    orig_uptime_ms = reinterpret_cast<jlong (*)(JNIEnv*, jclass)>(m[0].fnPtr);
-    orig_ert_ms    = reinterpret_cast<jlong (*)(JNIEnv*, jclass)>(m[1].fnPtr);
-    orig_ert_ns    = reinterpret_cast<jlong (*)(JNIEnv*, jclass)>(m[2].fnPtr);
+    orig_uptime_ms = reinterpret_cast<jlong (*)()>(m[0].fnPtr);
+    orig_ert_ms    = reinterpret_cast<jlong (*)()>(m[1].fnPtr);
+    orig_ert_ns    = reinterpret_cast<jlong (*)()>(m[2].fnPtr);
     LOGD("L8 uptime hook installed (+%llds) orig=%p/%p/%p", (long long)secs,
          reinterpret_cast<void*>(orig_uptime_ms),
          reinterpret_cast<void*>(orig_ert_ms),
