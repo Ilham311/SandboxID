@@ -1,15 +1,4 @@
 #!/system/bin/sh
-# SandboxID — tombol Action (WebUI / KernelSU).
-#
-# Alurnya simpel:
-#   ① undi 1 device acak dari SEMUA brand (peluang tiap brand sama rata)
-#   ② pasang identitasnya apa adanya  -> sandboxid apply-boot
-#   ③ reset app target biar baca identitas baru
-#   ④ rotasi ID lain: SSAID · GAID · WiFi/BT MAC · nama · boot count
-#
-# Semua opt-in: cuma jalan kalau kamu yang pencet, dan cuma nyentuh app yang
-# kamu daftarin di target.txt. Kalau undian multibrand gagal (mis. devices.tsv
-# hilang), otomatis mundur ke cara lama (freshen Pixel) biar tombol tetap guna.
 
 MODDIR="${0%/*}"
 BIN="$MODDIR/bin/sandboxid"
@@ -25,8 +14,6 @@ touch "$LOGFILE" 2>/dev/null
 ACTION_LOG="$MODDIR/debug/action.log"
 mkdir -p "$MODDIR/debug" 2>/dev/null
 
-# helpers.sh -> _fw_run (std-FD /dev/null, anti binder-fail), force_stop,
-# identity_get. Kalau nggak ada, pasang versi minimal biar action.sh mandiri.
 [ -r "$MODDIR/helpers.sh" ] && . "$MODDIR/helpers.sh" 2>/dev/null
 command -v _fw_run    >/dev/null 2>&1 || _fw_run()    { "$@" </dev/null >/dev/null 2>&1; }
 command -v force_stop >/dev/null 2>&1 || force_stop() { am force-stop --user 0 "$1" </dev/null >/dev/null 2>&1; }
@@ -34,7 +21,6 @@ command -v identity_get >/dev/null 2>&1 || identity_get() {
     awk -F= -v k="$1" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$IDENTITY" 2>/dev/null
 }
 
-# tee ke layar + log boot + log action
 tee2() { tee -a "$LOGFILE" "$ACTION_LOG"; }
 say()  { printf '%s\n' "$*" | tee2; }
 
@@ -53,7 +39,6 @@ say "Diundi acak dari brand yang punya model buat versi Android HP-mu (peluang t
 say "Versi Android dikunci sesuai perangkat biar app target nggak error — makin baru versinya, biasanya makin sedikit pilihan brand-nya."
 say ""
 
-# ── ① undi 1 device multibrand -> device.identity ───────────────────────────
 if [ -f "$AUTOPIF" ] && [ -f "$MODDIR/devices.tsv" ]; then
     say "① Ngundi device…"
     MODDIR="$MODDIR" sh "$AUTOPIF" device 2>&1 | tee2
@@ -61,7 +46,6 @@ else
     say "① Undian dilewat (autopif.sh / devices.tsv nggak ada) — pakai cara lama."
 fi
 
-# ── ② pasang identitas hasil undian apa adanya (verbatim, tanpa Googlefikasi) ─
 if [ -x "$BIN" ] && [ -s "$DEVICE_ID" ]; then
     [ -f "$IDENTITY" ] && cp -f "$IDENTITY" "$MODDIR/identity.prop.bak" 2>/dev/null
     if cp -f "$DEVICE_ID" "$IDENTITY" 2>/dev/null; then
@@ -79,7 +63,6 @@ if [ -x "$BIN" ] && [ -s "$DEVICE_ID" ]; then
     fi
 fi
 
-# ── ②b cadangan: kalau undian/apply gagal, pakai freshen (Pixel) ────────────
 if [ -z "$APPLIED" ]; then
     if [ -x "$BIN" ]; then
         "$BIN" unlock >/dev/null 2>&1 || true
@@ -96,11 +79,6 @@ if [ -z "$APPLIED" ]; then
     fi
 fi
 
-# ── ③ reset app target (pm clear + force-stop) ──────────────────────────────
-# apply-boot nggak nge-reset app (cuma freshen yang wipe). Jadi di jalur
-# multibrand kita reset sendiri app di target.txt: biar mereka baca identitas
-# baru dari nol & buang cache/ID lama. pm/am dijalanin dgn std-FD /dev/null
-# (kalau nggak, system_server nolak dgn FAILED_TRANSACTION).
 if [ "$APPLIED" = "multibrand" ]; then
     say ""
     say "③ Reset app target (biar baca identitas baru)…"
@@ -124,7 +102,6 @@ if [ "$APPLIED" = "multibrand" ]; then
     fi
 fi
 
-# ── ④ rotasi ID lain (SSAID · GAID · MAC · nama · boot count) ────────────────
 if [ -r "$ROTATE" ]; then
     say ""
     say "④ Rotasi ID lain (SSAID · GAID · WiFi/BT MAC · nama · boot count)…"
@@ -135,7 +112,6 @@ else
     say "④ rotate_ids.sh nggak ada — rotasi ID dilewat."
 fi
 
-# ── ⑤ ringkasan: enak dibaca + bisa diparse WebUI ───────────────────────────
 say ""
 if [ "$APPLIED" = "multibrand" ]; then
     _brand=$(identity_get BRAND);      _mkt=$(identity_get MARKETNAME)
@@ -165,7 +141,6 @@ fi
 [ "$RC_ROT" != 0 ] && [ "$RC_ROT" != 1 ] && \
     say "  (catatan: rotasi ID rc=$RC_ROT — sebagian ID mungkin belum ganti; cek tab Log)"
 
-# ── ⑥ artefak debug (root-only): ringkasan + crashes; TANPA .log.gz ─────────
 if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then
     LATEST=$(ls -1t "$MODDIR/debug"/session-*.log 2>/dev/null | head -1)
     if [ -n "$LATEST" ]; then
@@ -180,8 +155,6 @@ if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then
         [ -f "$MODDIR/debug/crashes.log" ] && \
             cp "$MODDIR/debug/crashes.log" "$OUTDIR/crashes-$TS.log" 2>/dev/null
 
-        # Simpan 10 terbaru per jenis. Log mentah TIDAK di-gzip lagi — cukup buka
-        # session-*.log langsung lewat tab Log (lebih enak dibaca, nggak perlu unzip).
         for pattern in "summary-*.txt" "crashes-*.log"; do
             ls -1t $OUTDIR/$pattern 2>/dev/null | tail -n +11 | xargs rm -f 2>/dev/null
         done

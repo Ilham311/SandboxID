@@ -325,52 +325,6 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
 
-/* ── L8: uptime spoof — boottime-only PLT hook (elapsedRealtime), default ON ──
-   GOAL: make a fresh sandbox look "lived-in" without hanging target apps.
-
-   HISTORY / why this shape: the first version hooked the 3 Java SystemClock
-   natives (@CriticalNative) via hookJniNativeMethods. That shifted ONLY the
-   Java callers while the same kernel clocks read by native systemTime()
-   (Choreographer vsync / the animator), nanoTime, the vDSO and /proc stayed
-   real → an app comparing a hooked absolute (a loading/animation deadline)
-   against an unhooked clock diverged by the offset → stuck on the loading
-   screen (proven on-device: UPTIME_SECONDS=0 opened the app, >0 hung it).
-
-   FIX: hook one level lower — PLT-hook libc clock_gettime in the framework's
-   clock chokepoint (libutils.so, where android/os/SystemClock's
-   elapsedRealtime[Nanos] and native systemTime() both resolve the clock) using
-   the Zygisk API's own pltHookRegister/pltHookCommit — no extra dependency.
-   BOTH the Java path and native callers funnel through that one libc import, so
-   they now see a single consistent value → no divergence, no hang.
-
-   CRUCIAL — offset CLOCK_BOOTTIME ONLY, never CLOCK_MONOTONIC:
-     * CLOCK_BOOTTIME backs elapsedRealtime()/elapsedRealtimeNanos() — the real
-       "time since boot" fingerprint. Safe to shift for IN-PROCESS use: almost
-       nothing inside one app blocks on an *absolute* boottime deadline (the one
-       exception that matters is cross-process — see the residual gaps below).
-     * CLOCK_MONOTONIC backs uptimeMillis(), Choreographer vsync, the animator,
-       and pthread_cond / futex / timerfd *absolute* timed-waits. The kernel
-       evaluates those waits against the REAL monotonic clock, so shifting the
-       userland READ would make every absolute wait overshoot by the offset →
-       re-hang. Only kernel time namespaces (CLONE_NEWTIME) shift monotonic
-       consistently, and that is child-only → unreachable from a post-fork
-       Zygisk hook. So uptimeMillis stays real; that is COHERENT — a device that
-       mostly sleeps has uptimeMillis ≪ elapsedRealtime.
-   Residual gaps (inherent to a per-app userland offset — no crash, but not a
-   fully virtualized clock):
-     * /proc/uptime is a file read, not clock_gettime → not spoofed (apps that
-       parse it directly are rare).
-     * Cross-process ELAPSED_REALTIME[_WAKEUP] alarms: the app derives an
-       absolute deadline from its OFFSET elapsedRealtime and hands it to
-       AlarmManager in system_server, which still runs on the REAL boottime → the
-       alarm can fire up to the offset late (bounded by the autopif uptime cap,
-       ≤2d). App launch is unaffected; only app→system_server boottime
-       scheduling (some AlarmManager/WorkManager/JobScheduler paths) skews. A
-       full fix needs kernel time namespaces (unreachable post-fork).
-
-   Fail-safe: if the chokepoint lib isn't found or the commit fails we leave all
-   clocks real (no crash — the spoof just doesn't apply). No-op when
-   UPTIME_SECONDS <= 0 (autopif emits 0 for the `no_uptime` kill switch). */
 #ifndef CLOCK_BOOTTIME
 #define CLOCK_BOOTTIME 7
 #endif
@@ -379,12 +333,8 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
 #endif
 
 static int (*orig_clock_gettime)(clockid_t, struct timespec*) = nullptr;
-static int64_t g_boot_off_sec = 0;   /* whole-second offset applied to CLOCK_BOOTTIME */
+static int64_t g_boot_off_sec = 0;
 
-/* Runs on every clock_gettime() the chokepoint lib makes — must stay trivial and
-   allocation/lock-free (hot path). Offsets boottime reads only; every other clock
-   (incl. CLOCK_MONOTONIC) passes through untouched. Calling ::clock_gettime here
-   hits real libc (we only hooked libutils' PLT, not our own) — no recursion. */
 static int sbx_hooked_clock_gettime(clockid_t clk, struct timespec* ts) {
     int r = orig_clock_gettime ? orig_clock_gettime(clk, ts) : clock_gettime(clk, ts);
     if (r == 0 && ts && (clk == CLOCK_BOOTTIME || clk == CLOCK_BOOTTIME_ALARM))
@@ -392,9 +342,6 @@ static int sbx_hooked_clock_gettime(clockid_t clk, struct timespec* ts) {
     return r;
 }
 
-/* Resolve a mapped library's (dev, inode) for pltHookRegister: find its path in
-   /proc/self/maps, then stat() it (encoding-safe, and works wherever the lib
-   lives — /system/lib64 or an APEX). */
 static bool sbx_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return false;
@@ -421,13 +368,9 @@ static void install_uptime_hook(Api* api, JNIEnv* /*env*/) {
     if (us.empty()) return;
     char* end = nullptr;
     long long secs = std::strtoll(us.c_str(), &end, 10);
-    if (end == us.c_str() || secs <= 0) return;   /* 0 / kill-switch / garbage → clocks real */
+    if (end == us.c_str() || secs <= 0) return;
     g_boot_off_sec = (int64_t)secs;
 
-    /* libutils.so is the definitive chokepoint (elapsedRealtimeNanos + systemTime
-       live there); libandroid_runtime.so is hooked too in case the SystemClock
-       JNI layer calls clock_gettime directly. Both import the same libc symbol,
-       so orig_clock_gettime resolves to one pointer. */
     static const char* const kLibs[] = { "/libutils.so", "/libandroid_runtime.so" };
     int registered = 0;
     for (size_t i = 0; i < sizeof(kLibs) / sizeof(kLibs[0]); ++i) {
@@ -444,11 +387,6 @@ static void install_uptime_hook(Api* api, JNIEnv* /*env*/) {
         LOGW("L8: pltHookCommit gagal — uptime tak dispoof (jam asli)");
         return;
     }
-    /* pltHookCommit bisa balik true walau TAK ADA slot clock_gettime yang benar
-       dipatch (mis. import-nya ke-inline / ke-resolve statis di sebagian ROM):
-       tandanya orig_clock_gettime tetap null — pltHookRegister tak pernah mengisi
-       trampolin. Hook kita tak akan pernah dipanggil → tak ada offset. Jangan
-       lapor "aktif" palsu; ini yang bikin diagnosa non-aktif di perangkat susah. */
     if (orig_clock_gettime == nullptr) {
         LOGW("L8: commit OK tapi clock_gettime tak ter-hook (orig=null) — uptime tak dispoof");
         return;

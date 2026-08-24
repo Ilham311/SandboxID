@@ -1,49 +1,18 @@
 #!/system/bin/sh
-#
-# autopif.sh — pembikin persona SandboxID.
-#
-# Dua subcommand:
-#
-#   device   (default)  OFFLINE. Ambil SATU device asli secara ACAK ADIL dari
-#                        devices.tsv — brand dipilih dulu (rata di semua brand:
-#                        Samsung/Xiaomi/Redmi/POCO/vivo/OPPO/Infinix/Google),
-#                        baru model di dalam brand itu. Jadi tiap brand punya
-#                        peluang SAMA, nggak peduli berapa banyak modelnya. Lalu
-#                        diramu identity Android yang utuh + nyambung (fingerprint,
-#                        build prop, serial/AndroidID/GAID acak) plus riwayat pakai
-#                        yang masuk akal (jml boot, lama nyala, status "fresh"
-#                        yang dicek biar cocok sama umur device). Hasilnya
-#                        ditampilkan + ditulis ke device.identity siap-pakai.
-#                        Ini yang dipakai tombol Action.
-#                        Alias: gen, multibrand, profile.
-#
-#   fetch    (online)    Best-effort: tarik SATU persona Pixel canary acak dari
-#                        data build resmi Google, tulis sebagai persona.override
-#                        satu-kali yang dikonsumsi `sandboxid freshen`. NO-OP
-#                        (exit 0) kalau device nggak punya curl/wget. Ini path
-#                        LAMA yang khusus Pixel — dibiarkan buat yang mau, tapi
-#                        tombol Action nggak lagi memakainya (biar adil multibrand).
 
 MODDIR="${MODDIR:-/data/adb/modules/sandboxid}"
 OVERRIDE_FILE="${PERSONA_OVERRIDE:-$MODDIR/persona.override}"
 
-# knob fetch (Pixel canary)
 CANARY_RELEASE="${CANARY_RELEASE:-16}"
 CANARY_SDK="${CANARY_SDK:-36}"
 MAX_TRY="${AUTOPIF_MAX_TRY:-4}"
 
-# knob device (multi-brand)
 DEVICES_FILE="${AUTOPIF_DEVICES:-$MODDIR/devices.tsv}"
 IDENTITY_ARTIFACT="${AUTOPIF_ARTIFACT:-$MODDIR/device.identity}"
 GEN_MAX_TRY="${AUTOPIF_GEN_MAX_TRY:-8}"
 
 log() { echo "[autopif] $*"; }
 
-# --------------------------------------------------------------------------
-# helper bareng
-# --------------------------------------------------------------------------
-
-# integer uniform di [0, n)
 rand_below() {
   _n="$1"
   [ "$_n" -gt 0 ] 2>/dev/null || { echo 0; return; }
@@ -52,14 +21,12 @@ rand_below() {
   echo $(( _r % _n ))
 }
 
-# integer uniform di [lo, hi] inklusif
 rand_range() {
   _lo="$1"; _hi="$2"
   [ "$_hi" -le "$_lo" ] 2>/dev/null && { echo "$_lo"; return; }
   echo $(( _lo + $(rand_below $(( _hi - _lo + 1 )) ) ))
 }
 
-# hex huruf-kecil sepanjang 2*nbytes dari /dev/urandom (fallback: seed pid)
 rand_hex() {
   _nb="$1"
   _x=$(od -An -N"$_nb" -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
@@ -76,21 +43,16 @@ rand_hex() {
   printf '%s' "$_x"
 }
 
-# UUID v4 (huruf kecil) — bentuk GAID/AAID
 rand_uuid() {
   _a=$(rand_hex 4); _b=$(rand_hex 2); _c=$(rand_hex 2); _d=$(rand_hex 2); _e=$(rand_hex 6)
-  _c="4$(printf '%s' "$_c" | cut -c2-4)"                       # versi 4
-  _v=$(printf '89ab' | cut -c$(( $(rand_below 4) + 1 )))       # varian 10xx
+  _c="4$(printf '%s' "$_c" | cut -c2-4)"
+  _v=$(printf '89ab' | cut -c$(( $(rand_below 4) + 1 )))
   _d="${_v}$(printf '%s' "$_d" | cut -c2-4)"
   printf '%s-%s-%s-%s-%s' "$_a" "$_b" "$_c" "$_d" "$_e"
 }
 
-# buang satu nol depan biar dash/mksh nggak baca "08"/"09" sebagai oktal salah
 strip0() { case "$1" in 0?) echo "${1#0}" ;; *) echo "$1" ;; esac; }
 
-# hari sejak 1970-01-01 utk Y M D (Gregorian proleptik, algoritma Howard Hinnant).
-# Semua input di sini pasca-1970 jadi cabang negatif referensi mati — dihapus
-# biar tetap POSIX.
 days_from_civil() {
   _y="$1"; _m="$2"; _d="$3"
   [ "$_m" -le 2 ] && _y=$(( _y - 1 ))
@@ -102,7 +64,6 @@ days_from_civil() {
   echo $(( _era * 146097 + _doe - 719468 ))
 }
 
-# epoch (UTC 00:00) utk YYYY-MM atau YYYY-MM-DD (tanpa tanggal => tgl 15)
 ymd_to_epoch() {
   _y=$(echo "$1" | cut -d- -f1)
   _mo=$(echo "$1" | cut -d- -f2)
@@ -112,7 +73,6 @@ ymd_to_epoch() {
   echo $(( $(days_from_civil "$_y" "$_mo" "$_da") * 86400 ))
 }
 
-# epoch -> YYYY-MM-DD (UTC). z selalu > 0 utk tanggal kita -> tanpa cabang negatif.
 epoch_to_ymd() {
   _z=$(( $1 / 86400 + 719468 ))
   _era=$(( _z / 146097 ))
@@ -127,13 +87,11 @@ epoch_to_ymd() {
   printf '%04d-%02d-%02d' "$_y" "$_mo" "$_d"
 }
 
-# detik -> "Xd Yh Zm"
 fmt_dur() {
   _s="$1"
   printf '%dd %dh %dm' $(( _s / 86400 )) $(( (_s % 86400) / 3600 )) $(( (_s % 3600) / 60 ))
 }
 
-# sekarang (epoch). AUTOPIF_NOW meng-override buat tes yang bisa diulang.
 now_epoch() {
   if [ -n "$AUTOPIF_NOW" ]; then echo "$AUTOPIF_NOW"; return; fi
   _n=$(date +%s 2>/dev/null)
@@ -167,11 +125,6 @@ make_tmp() {
   return 0
 }
 
-# --------------------------------------------------------------------------
-# subcommand: device  (generator identity + riwayat multi-brand, offline)
-# --------------------------------------------------------------------------
-
-# release Android yang diharapkan utk sebuah SDK (penjaga konsistensi)
 sdk_release() {
   case "$1" in
     30) echo "11" ;; 31) echo "12" ;; 32) echo "12" ;;
@@ -182,18 +135,13 @@ sdk_release() {
 
 col() { printf '%s' "$1" | cut -f"$2"; }
 
-# ramu jml-boot / lama-nyala / status-fresh yang nyambung dari tgl rilis model.
-# Set global: AGE_DAYS OWNED_DAYS BOOT_COUNT UPTIME_S FIRST_BOOT LAST_BOOT_EP
-#             FRESH PROFILE DPB10 RESET
 gen_lifecycle() {
   _rel="$1"; _now="$2"
   _rel_ep=$(ymd_to_epoch "$_rel")
   _age_days=$(( (_now - _rel_ep) / 86400 ))
-  [ "$_age_days" -lt 1 ] && _age_days=$(rand_range 1 30)     # rilis masa depan/baru => anggap baru
-  [ "$_age_days" -gt 1825 ] && _age_days=1825                # batasi umur absurd (~5th)
+  [ "$_age_days" -lt 1 ] && _age_days=$(rand_range 1 30)
+  [ "$_age_days" -gt 1825 ] && _age_days=1825
 
-  # ~18% baru factory-reset (jual-beli/servis/identitas baru — skenario modul ini
-  # sendiri): waktu pakai menciut ke hitungan hari & BOOT_COUNT mulai rendah lagi.
   _reset=0
   if [ "$(rand_below 100)" -lt 18 ]; then
     _reset=1
@@ -202,13 +150,13 @@ gen_lifecycle() {
   elif [ "$_age_days" -le 45 ]; then
     _owned_days=$(rand_range 1 "$_age_days")
   else
-    _pct=$(rand_range 50 100)                                 # dimiliki 50–100% umur model
+    _pct=$(rand_range 50 100)
     _owned_days=$(( _age_days * _pct / 100 ))
     [ "$_owned_days" -lt 1 ] && _owned_days=1
   fi
 
-  _dpb10=$(rand_range 30 100)                                 # 3.0–10.0 hari/boot (x10)
-  _setup_boots=$(rand_range 2 5)                              # boot setup awal + OTA awal
+  _dpb10=$(rand_range 30 100)
+  _setup_boots=$(rand_range 2 5)
   _boot_count=$(( _owned_days * 10 / _dpb10 + _setup_boots ))
   [ "$_boot_count" -lt 1 ] && _boot_count=1
   [ "$_boot_count" -gt 1500 ] && _boot_count=1500
@@ -216,11 +164,11 @@ gen_lifecycle() {
   _dpb=$(( _dpb10 / 10 )); [ "$_dpb" -lt 1 ] && _dpb=1
   _up_cap_days=$(( _dpb * 3 / 2 + 1 ))
   [ "$_up_cap_days" -gt "$_owned_days" ] && _up_cap_days=$_owned_days
-  [ "$_up_cap_days" -gt 2 ] && _up_cap_days=2         # cap 2 hari: batasi skew alarm ELAPSED_REALTIME lintas-proses
+  [ "$_up_cap_days" -gt 2 ] && _up_cap_days=2
   [ "$_up_cap_days" -lt 1 ] && _up_cap_days=1
   _up_max_s=$(( _up_cap_days * 86400 ))
   _a=$(rand_range 1200 "$_up_max_s"); _b=$(rand_range 1200 "$_up_max_s")
-  if [ "$_a" -le "$_b" ]; then _uptime_s=$_a; else _uptime_s=$_b; fi   # condong pendek
+  if [ "$_a" -le "$_b" ]; then _uptime_s=$_a; else _uptime_s=$_b; fi
 
   _first_boot_ep=$(( _now - _owned_days * 86400 ))
   _last_boot_ep=$(( _now - _uptime_s ))
@@ -239,9 +187,6 @@ gen_lifecycle() {
   DPB10=$_dpb10; RESET=$_reset
 }
 
-# cek invarian riwayat; kalau gagal tambahkan alasan ke ERRMSG & return nonzero.
-# Baca global dari gen_lifecycle. Panggil LANGSUNG (bukan di $(...)) biar lihat
-# global shell induk.
 validate_lifecycle() {
   _now="$1"; _f=0
   [ "$AGE_DAYS" -ge 1 ] || { ERRMSG="$ERRMSG bad-age($AGE_DAYS)"; _f=1; }
@@ -254,9 +199,6 @@ validate_lifecycle() {
   return $_f
 }
 
-# bangun KV identity lengkap (kosakata identity.prop native) ke IDENTITY_KV, dari
-# satu baris devices.tsv. Kalau error tambahkan alasan ke ERRMSG & return nonzero.
-# Set banyak global -> WAJIB dipanggil langsung, bukan di dalam $(...).
 assemble_identity() {
   _row="$1"
   BRAND=$(col "$_row" 1);        MANUFACTURER=$(col "$_row" 2)
@@ -268,8 +210,6 @@ assemble_identity() {
   INCREMENTAL=$(col "$_row" 13); SECPATCH=$(col "$_row" 14)
   RELEASE_DATE=$(col "$_row" 15)
 
-  # Kunci versi (dari cmd_device): kalau di-set, paksa SDK/RELEASE ke Android asli
-  # perangkat. FINGERPRINT di bawah dibangun ulang dari $RELEASE, jadi ikut sinkron.
   [ -n "${LOCK_SDK:-}" ] && SDK=$LOCK_SDK
   [ -n "${LOCK_REL:-}" ] && RELEASE=$LOCK_REL
 
@@ -295,27 +235,9 @@ assemble_identity() {
   GAID=$(rand_uuid)
   HOSTN="$(printf '%s' "$BRAND" | tr '[:upper:]' '[:lower:]')-build-$(rand_range 100 999)"
 
-  # ── Uptime spoof: ON default (kill-switch: touch $MODDIR/no_uptime) ─────────
-  # Native (main.cpp L8) meng-hook libc clock_gettime di libutils.so lewat PLT
-  # hook Zygisk, dan HANYA menggeser CLOCK_BOOTTIME (elapsedRealtime) — jam
-  # "sejak boot" yang jadi fingerprint utama. CLOCK_MONOTONIC (uptimeMillis,
-  # vsync, animasi, pthread_cond/futex/timerfd) sengaja TIDAK digeser: kernel
-  # menilai timed-wait absolut pakai monotonic asli, jadi menggeser bacaannya
-  # bikin wait molor sebesar offset -> app nyangkut lagi. Hasilnya
-  # elapsedRealtime dispoof konsisten (Java + native lewat chokepoint yang sama,
-  # nggak ada divergensi -> nggak nyangkut), uptimeMillis tetap asli (masih
-  # koheren: device yang sering tidur punya uptimeMillis << elapsedRealtime).
-  # /proc/uptime tetap asli (bacaan file, bukan clock_gettime) — celah kecil.
-  # Matiin tanpa rebuild: touch $MODDIR/no_uptime. Dua lapis: (1) di sini, saat
-  # generate/apply berikutnya, kita emit 0; dan (2) companion.cpp menimpa
-  # UPTIME_SECONDS jadi 0 di blob yang disajikan tiap app launch — jadi identity
-  # LAMA pun langsung ikut mati tanpa perlu regenerate. Native no-op saat secs<=0
-  # -> semua jam asli. UPTIME_S internal tetap utuh biar validate_lifecycle lolos.
   _uptime_emit=$UPTIME_S
   [ -f "$MODDIR/no_uptime" ] && _uptime_emit=0
 
-  # native baca balik key ini apa adanya (load_identity) & menerapkannya; key
-  # ekstra (BOOT_COUNT, UPTIME_*, ...) diabaikan apply_native, aman sbg metadata.
   IDENTITY_KV=$(cat <<EOF
 BRAND=$BRAND
 MANUFACTURER=$MANUFACTURER
@@ -407,13 +329,6 @@ cmd_device() {
     return 0
   fi
 
-  # ── KUNCI VERSI ANDROID ke perangkat ────────────────────────────────────────
-  # Native memasang Build.VERSION.SDK_INT/RELEASE dari persona apa adanya
-  # (main.cpp set_int/set_str + hook properti). Kalau SDK persona != Android asli
-  # hp, app bisa error (lihat kebijakan native pick_persona() di sandboxid.cpp yg
-  # sudah mencocokkan persona ke SDK perangkat). Jalur multibrand ini dulu belum.
-  # Aturan: utamakan model yang MEMANG rilis di Android ini; kalau pool nggak
-  # punya, tetap ambil model lain TAPI paksa SDK/RELEASE ke versi asli perangkat.
   RAW="$TMP_DIR/devices.raw"
   LOCK_SDK=""; LOCK_REL=""
   _dev_sdk="${SBX_REAL_SDK:-$(getprop ro.build.version.sdk 2>/dev/null || :)}"
@@ -430,12 +345,6 @@ cmd_device() {
       LOCK_SDK="$_dev_sdk"
       LOCK_REL=$(sdk_release "$_dev_sdk"); [ -z "$LOCK_REL" ] && LOCK_REL="$_dev_rel"
       if [ -z "$LOCK_REL" ]; then
-        # Finding 3: SDK di luar peta {30..36} DAN getprop release kosong -> RELEASE
-        # koheren nggak ketebak. Setengah-kunci (SDK dipaksa, RELEASE ikut persona)
-        # dijamin bentrok di guard sdk!=release -> assemble_identity gagal utk SEMUA
-        # row -> multibrand diam-diam selalu jatuh ke fallback. Batalin kunci: pakai
-        # persona apa adanya (koheren). Utk Android masa depan (SDK persona < asli)
-        # ini tetap aman — versi spoof nggak pernah LEBIH TINGGI dari perangkat.
         LOCK_SDK=""; LOCK_REL=""
         log "kunci versi dibatalin: RELEASE utk SDK $_dev_sdk nggak ketebak (di luar 30..36 & getprop kosong) — persona dipakai apa adanya"
       else
@@ -454,10 +363,6 @@ cmd_device() {
     return 0
   fi
 
-  # ACAK ADIL 2 TAHAP. Tahap 1: kumpulkan brand unik (kolom 1) lalu pilih SATU
-  # brand rata. Tahap 2: pilih satu model rata di dalam brand itu. Ini inti
-  # permintaan "biar semua brand kebagian" — brand berbanyak model (Google=14)
-  # nggak lebih sering muncul dari yang sedikit (POCO=2).
   BRANDS="$TMP_DIR/brands.lst"
   cut -f1 "$RAW" | awk 'NF && !seen[$0]++' > "$BRANDS"
   nbrands=$(wc -l < "$BRANDS" 2>/dev/null | tr -d ' ')
@@ -472,12 +377,10 @@ cmd_device() {
   while [ "$try" -lt "$GEN_MAX_TRY" ]; do
     try=$(( try + 1 ))
 
-    # tahap 1 — pilih brand rata
     bidx=$(( $(rand_below "$nbrands") + 1 ))
     brand=$(sed -n "${bidx}p" "$BRANDS")
     [ -z "$brand" ] && continue
 
-    # tahap 2 — pilih 1 model di dalam brand itu, rata
     BROWS="$TMP_DIR/brand.rows"
     awk -F'\t' -v b="$brand" '$1==b' "$RAW" > "$BROWS"
     bcount=$(wc -l < "$BROWS" 2>/dev/null | tr -d ' ')
@@ -490,8 +393,6 @@ cmd_device() {
     RELEASE_DATE_PRE=$(col "$row" 15)
     [ -z "$RELEASE_DATE_PRE" ] && continue
     gen_lifecycle "$RELEASE_DATE_PRE" "$NOW"
-    # CATATAN: assemble_identity / validate_lifecycle men-set global, jadi WAJIB
-    # jalan di shell INI. Kalau di $(...) semua assignment-nya kebuang.
     ERRMSG=""
     if ! assemble_identity "$row"; then
       log "baris brand '$brand' nggak valid:$ERRMSG — coba lagi"; continue
@@ -526,10 +427,6 @@ cmd_device() {
   fi
   return 0
 }
-
-# --------------------------------------------------------------------------
-# subcommand: fetch  (Pixel canary online -> persona.override)  [khusus Pixel]
-# --------------------------------------------------------------------------
 
 map_platform() {
   case "$1" in
@@ -567,10 +464,6 @@ resolve_persona() {
   [ -z "$_bid" ] && { log "lewati $_model: nggak ada build id"; return 1; }
   [ -z "$_incr" ] && { log "lewati $_model: nggak ada incremental"; return 1; }
 
-  # build canary "id" menyimpan bulan security-patch sbg YYYYMM tepat setelah
-  # "canary-". Ambil ekor setelah "canary-" terakhir, ambil rentetan 6-digit
-  # pertama, format YYYY-MM. Menolak input non-6-digit mencegah id rusak (yang
-  # dulu membocorkan tanggal koma-nyasar spt "2026-08,-05") sampai ke freshen.
   _canary_tail=$(grep '"id"' "canary.json" | sed 's;.*canary-;;' | head -n1)
   _canary_ym=$(printf '%s' "$_canary_tail" | sed 's;^\([0-9]\{6\}\).*;\1;')
   case "$_canary_ym" in
@@ -583,7 +476,6 @@ resolve_persona() {
     _spatch=$(grep "<td>$_canary_id" "secbull.html" 2>/dev/null | sed 's;.*<td>\(.*\)</td>;\1;' | head -n1)
   fi
   [ -z "$_spatch" ] && [ -n "$_canary_id" ] && _spatch="${_canary_id}-05"
-  # penjaga akhir: hanya terima security patch YYYY-MM-DD yang benar
   case "$_spatch" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
     *) log "lewati $_model: security patch '$_spatch' nggak kebaca"; return 1 ;;
@@ -685,9 +577,6 @@ cmd_fetch() {
   return 0
 }
 
-# --------------------------------------------------------------------------
-# dispatch  (device = default sekarang, biar acak multibrand yang jalan)
-# --------------------------------------------------------------------------
 case "${1:-device}" in
   device|gen|multibrand|profile|"") cmd_device ;;
   fetch)                            cmd_fetch ;;
