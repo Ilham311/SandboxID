@@ -180,6 +180,27 @@ sdk_release() {
   esac
 }
 
+# security-patch & tanggal rilis representatif utk sebuah SDK. Dipakai saat
+# LOCK_SDK/LOCK_REL aktif (assemble_identity) biar SECPATCH/RELEASE_DATE ikut
+# sinkron ke Android yang DIPAKSA, bukan ketinggalan di Android asli baris
+# device yang dipilih.
+sdk_secpatch() {
+  case "$1" in
+    30) echo "2021-08-05" ;; 31) echo "2022-08-05" ;; 32) echo "2022-08-05" ;;
+    33) echo "2023-08-05" ;; 34) echo "2024-08-05" ;; 35) echo "2024-11-05" ;;
+    36) echo "2025-08-05" ;;
+    *)  echo "" ;;
+  esac
+}
+sdk_release_date() {
+  case "$1" in
+    30) echo "2020-09" ;; 31) echo "2021-10" ;; 32) echo "2022-07" ;;
+    33) echo "2022-08" ;; 34) echo "2023-10" ;; 35) echo "2024-10" ;;
+    36) echo "2025-06" ;;
+    *)  echo "" ;;
+  esac
+}
+
 col() { printf '%s' "$1" | cut -f"$2"; }
 
 # ramu jml-boot / lama-nyala / status-fresh yang nyambung dari tgl rilis model.
@@ -270,7 +291,15 @@ assemble_identity() {
 
   # Kunci versi (dari cmd_device): kalau di-set, paksa SDK/RELEASE ke Android asli
   # perangkat. FINGERPRINT di bawah dibangun ulang dari $RELEASE, jadi ikut sinkron.
-  [ -n "${LOCK_SDK:-}" ] && SDK=$LOCK_SDK
+  # SECPATCH/RELEASE_DATE baris asal masih nempel ke SDK/RELEASE ASLI baris itu —
+  # kalau dibiarkan, metadata build (patch level & tanggal rilis) nggak nyambung
+  # sama RELEASE yang dipaksa. Timpa juga keduanya ke nilai representatif SDK
+  # yang dipaksa biar semua field build tetap konsisten satu sama lain.
+  if [ -n "${LOCK_SDK:-}" ]; then
+    SDK=$LOCK_SDK
+    _lock_secpatch=$(sdk_secpatch "$LOCK_SDK"); [ -n "$_lock_secpatch" ] && SECPATCH="$_lock_secpatch"
+    _lock_reldate=$(sdk_release_date "$LOCK_SDK"); [ -n "$_lock_reldate" ] && RELEASE_DATE="$_lock_reldate"
+  fi
   [ -n "${LOCK_REL:-}" ] && RELEASE=$LOCK_REL
 
   for _v in "$BRAND" "$MANUFACTURER" "$MODEL" "$DEVICE" "$PRODUCT" "$BOARD" \
