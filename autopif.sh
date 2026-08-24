@@ -216,7 +216,7 @@ gen_lifecycle() {
   _dpb=$(( _dpb10 / 10 )); [ "$_dpb" -lt 1 ] && _dpb=1
   _up_cap_days=$(( _dpb * 3 / 2 + 1 ))
   [ "$_up_cap_days" -gt "$_owned_days" ] && _up_cap_days=$_owned_days
-  [ "$_up_cap_days" -gt 21 ] && _up_cap_days=21
+  [ "$_up_cap_days" -gt 2 ] && _up_cap_days=2         # cap 2 hari: batasi skew alarm ELAPSED_REALTIME lintas-proses
   [ "$_up_cap_days" -lt 1 ] && _up_cap_days=1
   _up_max_s=$(( _up_cap_days * 86400 ))
   _a=$(rand_range 1200 "$_up_max_s"); _b=$(rand_range 1200 "$_up_max_s")
@@ -249,7 +249,7 @@ validate_lifecycle() {
   [ "$BOOT_COUNT" -ge 1 ] || { ERRMSG="$ERRMSG boot<1"; _f=1; }
   _os=$(( OWNED_DAYS * 86400 ))
   { [ "$UPTIME_S" -ge 1 ] && [ "$UPTIME_S" -le "$_os" ]; } || { ERRMSG="$ERRMSG uptime-not-in-[1,owned]"; _f=1; }
-  [ "$UPTIME_S" -le 1814400 ] || { ERRMSG="$ERRMSG uptime>21d"; _f=1; }
+  [ "$UPTIME_S" -le 172800 ] || { ERRMSG="$ERRMSG uptime>2d"; _f=1; }
   [ "$LAST_BOOT_EP" -ge "$(( _now - _os ))" ] || { ERRMSG="$ERRMSG last_boot<first_boot"; _f=1; }
   return $_f
 }
@@ -306,9 +306,11 @@ assemble_identity() {
   # nggak ada divergensi -> nggak nyangkut), uptimeMillis tetap asli (masih
   # koheren: device yang sering tidur punya uptimeMillis << elapsedRealtime).
   # /proc/uptime tetap asli (bacaan file, bukan clock_gettime) — celah kecil.
-  # Matiin tanpa rebuild: touch $MODDIR/no_uptime -> emit 0 -> native no-op
-  # (secs<=0) -> semua jam asli. UPTIME_S internal tetap utuh biar
-  # validate_lifecycle lolos.
+  # Matiin tanpa rebuild: touch $MODDIR/no_uptime. Dua lapis: (1) di sini, saat
+  # generate/apply berikutnya, kita emit 0; dan (2) companion.cpp menimpa
+  # UPTIME_SECONDS jadi 0 di blob yang disajikan tiap app launch — jadi identity
+  # LAMA pun langsung ikut mati tanpa perlu regenerate. Native no-op saat secs<=0
+  # -> semua jam asli. UPTIME_S internal tetap utuh biar validate_lifecycle lolos.
   _uptime_emit=$UPTIME_S
   [ -f "$MODDIR/no_uptime" ] && _uptime_emit=0
 
@@ -427,7 +429,18 @@ cmd_device() {
       cp -f "$RAW_ALL" "$RAW" 2>/dev/null
       LOCK_SDK="$_dev_sdk"
       LOCK_REL=$(sdk_release "$_dev_sdk"); [ -z "$LOCK_REL" ] && LOCK_REL="$_dev_rel"
-      log "kunci versi: nggak ada model bawaan Android ${_dev_rel:-$_dev_sdk} di pool — model lain dipakai, SDK/RELEASE dipaksa ke SDK $_dev_sdk"
+      if [ -z "$LOCK_REL" ]; then
+        # Finding 3: SDK di luar peta {30..36} DAN getprop release kosong -> RELEASE
+        # koheren nggak ketebak. Setengah-kunci (SDK dipaksa, RELEASE ikut persona)
+        # dijamin bentrok di guard sdk!=release -> assemble_identity gagal utk SEMUA
+        # row -> multibrand diam-diam selalu jatuh ke fallback. Batalin kunci: pakai
+        # persona apa adanya (koheren). Utk Android masa depan (SDK persona < asli)
+        # ini tetap aman — versi spoof nggak pernah LEBIH TINGGI dari perangkat.
+        LOCK_SDK=""; LOCK_REL=""
+        log "kunci versi dibatalin: RELEASE utk SDK $_dev_sdk nggak ketebak (di luar 30..36 & getprop kosong) — persona dipakai apa adanya"
+      else
+        log "kunci versi: nggak ada model bawaan Android ${_dev_rel:-$_dev_sdk} di pool — model lain dipakai, SDK/RELEASE dipaksa ke SDK $_dev_sdk"
+      fi
     fi
   else
     cp -f "$RAW_ALL" "$RAW" 2>/dev/null

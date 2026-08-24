@@ -309,6 +309,33 @@ extern "C" void sandboxid_companion(int client) {
                     LOGE("target '%s' tapi identity.prop kosong SETELAH seed on-demand — "
                          "fail-open: app jalan TANPA spoofing", pkg.c_str());
             }
+
+            // Kill-switch runtime: kalau user `touch $MODDIR/no_uptime`, paksa
+            // UPTIME_SECONDS=0 di blob yang disajikan — TANPA regenerate identity.
+            // Native (main.cpp L8) no-op saat <=0, jadi jam asli mulai app launch
+            // berikutnya. Companion jalan sbg root -> boleh baca file modul (app
+            // domain kena SELinux di /data/adb). Ganti line-oriented pada satu baris
+            // kunci; koheren dgn autopif yg juga emit 0 saat file ini ada.
+            if (!d.empty()) {
+                std::string kill = std::string(sandboxid::MODDIR) + "/no_uptime";
+                struct stat kst;
+                if (::stat(kill.c_str(), &kst) == 0) {
+                    static const std::string key = "UPTIME_SECONDS=";
+                    size_t p = 0;
+                    while (p <= d.size()) {
+                        if (d.compare(p, key.size(), key) == 0) {
+                            size_t eol = d.find('\n', p);
+                            if (eol == std::string::npos) eol = d.size();
+                            d.replace(p, eol - p, key + "0");
+                            break;   // identity.prop cuma punya satu baris ini
+                        }
+                        size_t nl = d.find('\n', p);
+                        if (nl == std::string::npos) break;
+                        p = nl + 1;
+                    }
+                    LOGD("no_uptime aktif -> UPTIME_SECONDS dipaksa 0 utk '%s'", pkg.c_str());
+                }
+            }
             LOGD("ACCEPT pkg='%s' (%zu bytes)", pkg.c_str(), d.size());
 
             uint32_t l = (uint32_t)d.size();

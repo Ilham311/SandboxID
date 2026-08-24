@@ -49,8 +49,8 @@ APPLIED=""
 
 say ""
 say "SandboxID — bikin identitas device baru"
-say "Diundi acak dari semua brand (Pixel, Samsung, Xiaomi, POCO, OPPO, vivo, Redmi, Infinix), peluang tiap brand sama rata."
-say "Versi Android-nya dikunci sesuai perangkatmu biar app target nggak error."
+say "Diundi acak dari brand yang punya model buat versi Android HP-mu (peluang tiap brand yang tersedia sama rata)."
+say "Versi Android dikunci sesuai perangkat biar app target nggak error — makin baru versinya, biasanya makin sedikit pilihan brand-nya."
 say ""
 
 # ── ① undi 1 device multibrand -> device.identity ───────────────────────────

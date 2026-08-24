@@ -364,7 +364,7 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
        absolute deadline from its OFFSET elapsedRealtime and hands it to
        AlarmManager in system_server, which still runs on the REAL boottime → the
        alarm can fire up to the offset late (bounded by the autopif uptime cap,
-       ≤21d). App launch is unaffected; only app→system_server boottime
+       ≤2d). App launch is unaffected; only app→system_server boottime
        scheduling (some AlarmManager/WorkManager/JobScheduler paths) skews. A
        full fix needs kernel time namespaces (unreachable post-fork).
 
