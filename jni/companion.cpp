@@ -314,20 +314,25 @@ extern "C" void sandboxid_companion(int client) {
                 std::string kill = std::string(sandboxid::MODDIR) + "/no_uptime";
                 struct stat kst;
                 if (::stat(kill.c_str(), &kst) == 0) {
-                    static const std::string key = "UPTIME_SECONDS=";
-                    size_t p = 0;
-                    while (p <= d.size()) {
-                        if (d.compare(p, key.size(), key) == 0) {
-                            size_t eol = d.find('\n', p);
-                            if (eol == std::string::npos) eol = d.size();
-                            d.replace(p, eol - p, key + "0");
-                            break;
+                    static const std::string sec_key = "UPTIME_SECONDS=";
+                    static const std::string human_key = "UPTIME_HUMAN=";
+                    for (const auto &kv : {std::make_pair(sec_key, std::string("0")),
+                                            std::make_pair(human_key, std::string("0d 0h 0m"))}) {
+                        const std::string &key = kv.first;
+                        size_t p = 0;
+                        while (p <= d.size()) {
+                            if (d.compare(p, key.size(), key) == 0) {
+                                size_t eol = d.find('\n', p);
+                                if (eol == std::string::npos) eol = d.size();
+                                d.replace(p, eol - p, key + kv.second);
+                                break;
+                            }
+                            size_t nl = d.find('\n', p);
+                            if (nl == std::string::npos) break;
+                            p = nl + 1;
                         }
-                        size_t nl = d.find('\n', p);
-                        if (nl == std::string::npos) break;
-                        p = nl + 1;
                     }
-                    LOGD("no_uptime aktif -> UPTIME_SECONDS dipaksa 0 utk '%s'", pkg.c_str());
+                    LOGD("no_uptime aktif -> UPTIME_SECONDS/UPTIME_HUMAN dipaksa 0 utk '%s'", pkg.c_str());
                 }
             }
             LOGD("ACCEPT pkg='%s' (%zu bytes)", pkg.c_str(), d.size());
