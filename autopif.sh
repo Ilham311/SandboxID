@@ -89,7 +89,10 @@ epoch_to_ymd() {
 
 fmt_dur() {
   _s="$1"
-  printf '%dd %dh %dm' $(( _s / 86400 )) $(( (_s % 86400) / 3600 )) $(( (_s % 3600) / 60 ))
+  _dd=$(( _s / 86400 )); _hh=$(( (_s % 86400) / 3600 )); _mm=$(( (_s % 3600) / 60 ))
+  if   [ "$_dd" -gt 0 ]; then printf '%dd %dh %dm' "$_dd" "$_hh" "$_mm"
+  elif [ "$_hh" -gt 0 ]; then printf '%dh %dm' "$_hh" "$_mm"
+  else printf '%dm' "$_mm"; fi
 }
 
 now_epoch() {
@@ -159,49 +162,35 @@ gen_lifecycle() {
   [ "$_age_days" -lt 1 ] && _age_days=$(rand_range 1 30)
   [ "$_age_days" -gt 1825 ] && _age_days=1825
 
-  _reset=0
-  if [ "$(rand_below 100)" -lt 18 ]; then
-    _reset=1
-    _owned_days=$(rand_range 1 25)
-    [ "$_owned_days" -gt "$_age_days" ] && _owned_days=$_age_days
-  elif [ "$_age_days" -le 45 ]; then
-    _owned_days=$(rand_range 1 "$_age_days")
-  else
-    _pct=$(rand_range 50 100)
-    _owned_days=$(( _age_days * _pct / 100 ))
-    [ "$_owned_days" -lt 1 ] && _owned_days=1
-  fi
+  # Selalu "fresh": device baru dipasang / baru factory-reset, dipakai sebentar.
+  _owned_days=$(rand_range 1 30)
+  [ "$_owned_days" -gt "$_age_days" ] && _owned_days=$_age_days
 
-  _dpb10=$(rand_range 30 100)
-  _setup_boots=$(rand_range 2 5)
-  _boot_count=$(( _owned_days * 10 / _dpb10 + _setup_boots ))
+  # Boot count rendah & wajar: beberapa boot setup + sesekali reboot, dijaga 1..30.
+  _setup_boots=$(rand_range 2 4)
+  _extra_cap=$_owned_days
+  [ "$_extra_cap" -gt 26 ] && _extra_cap=26
+  _boot_count=$(( _setup_boots + $(rand_range 0 "$_extra_cap") ))
   [ "$_boot_count" -lt 1 ] && _boot_count=1
-  [ "$_boot_count" -gt 1500 ] && _boot_count=1500
+  [ "$_boot_count" -gt 30 ] && _boot_count=30
 
-  _dpb=$(( _dpb10 / 10 )); [ "$_dpb" -lt 1 ] && _dpb=1
-  _up_cap_days=$(( _dpb * 3 / 2 + 1 ))
-  [ "$_up_cap_days" -gt "$_owned_days" ] && _up_cap_days=$_owned_days
-  [ "$_up_cap_days" -gt 2 ] && _up_cap_days=2
-  [ "$_up_cap_days" -lt 1 ] && _up_cap_days=1
-  _up_max_s=$(( _up_cap_days * 86400 ))
-  _a=$(rand_range 1200 "$_up_max_s"); _b=$(rand_range 1200 "$_up_max_s")
-  if [ "$_a" -le "$_b" ]; then _uptime_s=$_a; else _uptime_s=$_b; fi
+  # Uptime: beberapa menit s/d maksimal ~1 jam (nggak pernah lebih).
+  _uptime_s=$(rand_range 180 3600)
+  _owned_s=$(( _owned_days * 86400 ))
+  [ "$_uptime_s" -gt "$_owned_s" ] && _uptime_s=$_owned_s
 
   _first_boot_ep=$(( _now - _owned_days * 86400 ))
   _last_boot_ep=$(( _now - _uptime_s ))
 
-  if [ "$_reset" -eq 1 ] || [ "$_owned_days" -lt 21 ] || [ "$_boot_count" -lt 8 ]; then
-    _fresh="yes"; _profile="fresh"
-  elif [ "$_owned_days" -gt 540 ] || [ "$_boot_count" -gt 160 ]; then
-    _fresh="no"; _profile="seasoned"
-  else
-    _fresh="no"; _profile="active"
-  fi
+  # ~40% device fresh itu hasil factory-reset, sisanya baru dipasang.
+  _reset=0
+  [ "$(rand_below 100)" -lt 40 ] && _reset=1
+  _fresh="yes"; _profile="fresh"
 
   AGE_DAYS=$_age_days; OWNED_DAYS=$_owned_days; BOOT_COUNT=$_boot_count
   UPTIME_S=$_uptime_s; FIRST_BOOT=$(epoch_to_ymd "$_first_boot_ep")
   LAST_BOOT_EP=$_last_boot_ep; FRESH=$_fresh; PROFILE=$_profile
-  DPB10=$_dpb10; RESET=$_reset
+  RESET=$_reset
 }
 
 validate_lifecycle() {
@@ -292,7 +281,7 @@ AGE_DAYS=$AGE_DAYS
 OWNED_DAYS=$OWNED_DAYS
 BOOT_COUNT=$BOOT_COUNT
 UPTIME_SECONDS=$_uptime_emit
-UPTIME_HUMAN=$( [ "$_uptime_emit" -gt 0 ] && fmt_dur "$UPTIME_S" || printf '%s' '0d 0h 0m' )
+UPTIME_HUMAN=$( [ "$_uptime_emit" -gt 0 ] && fmt_dur "$UPTIME_S" || printf '%s' '0m' )
 FIRST_BOOT=$FIRST_BOOT
 LAST_BOOT=$(epoch_to_ymd "$LAST_BOOT_EP")
 USAGE_PROFILE=$PROFILE
@@ -304,29 +293,24 @@ EOF
 
 display_profile() {
   echo ""
-  echo "  ┌─ Profil device SandboxID ──────────────────────────────"
-  printf '  │ %-13s %s\n' "Brand"        "$BRAND"
-  printf '  │ %-13s %s\n' "Pabrikan"     "$MANUFACTURER"
-  printf '  │ %-13s %s (%s)\n' "Model"    "$MARKETNAME" "$MODEL"
-  printf '  │ %-13s %s / %s\n' "Kode"     "$DEVICE" "$PRODUCT"
-  printf '  │ %-13s %s %s (%s)\n' "SoC"    "$SOC_MANUF" "$SOC_MODEL" "$BOARD"
-  printf '  │ %-13s Android %s (SDK %s), patch %s\n' "OS" "$RELEASE" "$SDK" "$SECPATCH"
-  printf '  │ %-13s %s\n' "Fingerprint" "$FINGERPRINT"
-  echo "  ├─ riwayat pakai (nyambung rilis $RELEASE_DATE) ──────────"
-  printf '  │ %-13s %s  (~1 reboot / %s.%s hari)\n' "Jml boot"  "$BOOT_COUNT" "$(( DPB10 / 10 ))" "$(( DPB10 % 10 ))"
-  if [ ! -f "$MODDIR/no_uptime" ]; then
-    printf '  │ %-13s %s  (%ss, elapsedRealtime)\n' "Lama nyala"  "$(fmt_dur "$UPTIME_S")" "$UPTIME_S"
+  echo "  Profil device"
+  printf '  %-12s %s\n'        "Brand"       "$BRAND"
+  printf '  %-12s %s\n'        "Pabrikan"    "$MANUFACTURER"
+  printf '  %-12s %s (%s)\n'   "Model"       "$MARKETNAME" "$MODEL"
+  printf '  %-12s %s / %s\n'   "Kode"        "$DEVICE" "$PRODUCT"
+  printf '  %-12s %s %s (%s)\n' "SoC"        "$SOC_MANUF" "$SOC_MODEL" "$BOARD"
+  printf '  %-12s Android %s (SDK %s), patch %s\n' "OS" "$RELEASE" "$SDK" "$SECPATCH"
+  printf '  %-12s %s\n'        "Fingerprint" "$FINGERPRINT"
+  printf '  %-12s %s\n'        "Boot count"  "$BOOT_COUNT"
+  if [ -f "$MODDIR/no_uptime" ]; then
+    printf '  %-12s %s\n'      "Uptime"      "asli (spoof off)"
   else
-    printf '  │ %-13s %s\n' "Lama nyala"  "asli — spoof uptime OFF (rm no_uptime utk nyalain)"
+    printf '  %-12s %s\n'      "Uptime"      "$(fmt_dur "$UPTIME_S")"
   fi
-  printf '  │ %-13s %s\n' "Boot awal"  "$FIRST_BOOT"
-  printf '  │ %-13s %s  (umur %sh, dipakai %sh)\n' "Pemakaian"  "$PROFILE" "$AGE_DAYS" "$OWNED_DAYS"
-  printf '  │ %-13s %s%s\n' "Fresh"  "$FRESH" "$( [ "$RESET" -eq 1 ] && echo '  (baru factory-reset)' )"
-  echo "  ├─ acak per-identitas ───────────────────────────────────"
-  printf '  │ %-13s %s\n' "Serial"      "$SERIAL"
-  printf '  │ %-13s %s\n' "Android ID"  "$ANDROID_ID"
-  printf '  │ %-13s %s\n' "GAID"        "$GAID"
-  echo "  └─────────────────────────────────────────────────────────"
+  printf '  %-12s %s\n'        "Status"      "$( [ "$RESET" -eq 1 ] && echo 'fresh (baru direset)' || echo 'fresh (baru dipasang)' )"
+  printf '  %-12s %s\n'        "Serial"      "$SERIAL"
+  printf '  %-12s %s\n'        "Android ID"  "$ANDROID_ID"
+  printf '  %-12s %s\n'        "GAID"        "$GAID"
   echo ""
 }
 
@@ -441,7 +425,7 @@ cmd_device() {
   if printf '%s\n' "$IDENTITY_KV" > "$IDENTITY_ARTIFACT.tmp.$$" 2>/dev/null \
      && mv -f "$IDENTITY_ARTIFACT.tmp.$$" "$IDENTITY_ARTIFACT" 2>/dev/null; then
     chmod 0644 "$IDENTITY_ARTIFACT" 2>/dev/null
-    log "beres — identity siap-pakai ditulis ke $IDENTITY_ARTIFACT"
+    log "identity ditulis ke $IDENTITY_ARTIFACT"
   else
     rm -f "$IDENTITY_ARTIFACT.tmp.$$" 2>/dev/null
     log "gagal nulis artifact $IDENTITY_ARTIFACT"
