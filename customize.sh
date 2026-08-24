@@ -6,48 +6,48 @@ SKIPUNZIP=0
 
 SBX_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
 ui_print "- SandboxID ${SBX_VER:-(versi ?)}"
-ui_print "- Bikin app ngeliat HP kamu sebagai device lain:"
+ui_print "- Membuat aplikasi melihat perangkat ini sebagai perangkat lain:"
 ui_print "-   model, brand, pabrikan, fingerprint, serial"
-ui_print "-   plus Android ID / SSAID per-app"
-ui_print "- Device-nya diundi acak dari banyak brand:"
-ui_print "-   Pixel · Samsung · Xiaomi · POCO · OPPO · vivo · Redmi · Infinix"
-ui_print "-   peluang tiap brand sama rata, nggak ada yang jadi favorit."
-ui_print "- Spoof jalan pre-zygote (sebelum app kebuka)"
-ui_print "- Aman: cuma ganti string identitas, nggak nyentuh HW/framework"
-ui_print "- Tombol Action (sekali pencet): undi device -> pasang -> rotasi ID"
+ui_print "-   plus Android ID / SSAID per-aplikasi"
+ui_print "- Identitas perangkat diacak dari banyak brand:"
+ui_print "-   Pixel, Samsung, Xiaomi, POCO, OPPO, vivo, Redmi, Infinix"
+ui_print "-   peluang tiap brand sama rata."
+ui_print "- Spoof berjalan pre-zygote, sebelum aplikasi terbuka."
+ui_print "- Aman: hanya mengganti string identitas, tidak menyentuh HW/framework."
+ui_print "- Tombol Action (sekali tekan): acak perangkat, terapkan, rotasi ID"
 ui_print "-   (SSAID, GAID, WiFi/BT MAC, nama, boot count)"
-ui_print "- Target app kamu atur sendiri di target.txt (kosong = modul nganggur)"
-ui_print "- WebUI: buka modul ini di manager KernelSU/APatch"
+ui_print "- Aplikasi target diatur sendiri di target.txt (kosong = modul nonaktif)."
+ui_print "- WebUI: buka modul ini di manajer KernelSU/APatch."
 ui_print ""
 
 LIVE_TARGET="/data/adb/modules/sandboxid/target.txt"
 if [ -s "$LIVE_TARGET" ]; then
-    ui_print "- target.txt dari install sebelumnya dipertahankan"
+    ui_print "- target.txt dari instalasi sebelumnya dipertahankan"
     cp -f "$LIVE_TARGET" "$MODPATH/target.txt"
 else
-    ui_print "- Pasang target.txt (kosong dulu; isi nama paket app buat ngaktifin)"
+    ui_print "- Menyiapkan target.txt (kosong dulu; isi nama paket aplikasi untuk mengaktifkan)"
 fi
 
 if [ -f "$MODPATH/debug_variant" ]; then
-    ui_print "- ! Varian DEBUG kedeteksi"
-    ui_print "-   Auto-log nyala pas boot berikutnya."
+    ui_print "- ! Varian DEBUG terdeteksi"
+    ui_print "-   Auto-log aktif pada boot berikutnya."
     ui_print "-   Lokasi: /data/adb/modules/sandboxid/debug/"
     ui_print "-   Pola nama file: session-YYYYMMDD-HHMMSS.log"
-    ui_print "-   Pencet Action buat nyimpen ringkasan log terbaru"
+    ui_print "-   Tekan Action untuk menyimpan ringkasan log terbaru"
     ui_print "-   ke $MODPATH/debug/report/ (khusus root)"
     ui_print ""
 fi
 
 ABI=$(getprop ro.product.cpu.abi)
-ui_print "- ABI device: $ABI"
+ui_print "- ABI perangkat: $ABI"
 
-[ -d /data/adb/modules ] || abort "! root nggak kedeteksi"
+[ -d /data/adb/modules ] || abort "! root tidak terdeteksi"
 
 ZOK=0
 [ -d /data/adb/modules/zygisksu ] && ZOK=1
 [ -d /data/adb/modules/ReZygisk ] && ZOK=1
 [ "${MAGISK_VER_CODE:-0}" -ge 26100 ] && ZOK=1
-[ "$ZOK" = "0" ] && ui_print "! PERHATIAN: Zygisk nggak kedeteksi - pasang ZygiskNext / ReZygisk dulu"
+[ "$ZOK" = "0" ] && ui_print "! PERHATIAN: Zygisk tidak terdeteksi — pasang ZygiskNext / ReZygisk dulu"
 
 set_perm_recursive $MODPATH 0 0 0755 0644
 set_perm $MODPATH/action.sh                 0 0 0755
@@ -81,7 +81,7 @@ if [ -f $MODPATH/bin/resetprop-rs ]; then
         if ( cd "$MODPATH/bin" && sha256sum -c resetprop-rs.sha256 >/dev/null 2>&1 ); then
             ui_print "- Checksum resetprop-rs OK"
         else
-            ui_print "! Checksum resetprop-rs nggak cocok - binary bawaan dihapus"
+            ui_print "! Checksum resetprop-rs tidak cocok — binary bawaan dihapus"
             rm -f "$MODPATH/bin/resetprop-rs"
         fi
     fi
@@ -89,7 +89,7 @@ if [ -f $MODPATH/bin/resetprop-rs ]; then
 
     if [ -f "$MODPATH/bin/resetprop-rs" ] && [ "$ABI" != "arm64-v8a" ]; then
         rm -f "$MODPATH/bin/resetprop-rs" "$MODPATH/bin/resetprop-rs.sha256"
-        ui_print "- Catatan: resetprop-rs cuma buat arm64; dihapus di $ABI (pakai resetprop Magisk)."
+        ui_print "- Catatan: resetprop-rs hanya untuk arm64 — dihapus di $ABI (pakai resetprop Magisk)."
     fi
 fi
 
@@ -98,7 +98,7 @@ case "$ABI" in
     armeabi-v7a) ln -sf sandboxid-arm    $MODPATH/bin/sandboxid ;;
     x86_64)      ln -sf sandboxid-x86_64 $MODPATH/bin/sandboxid ;;
     x86)         ln -sf sandboxid-x86    $MODPATH/bin/sandboxid ;;
-    *)           ui_print "! ABI nggak dikenal: $ABI" ;;
+    *)           ui_print "! ABI tidak dikenal: $ABI" ;;
 esac
 
 echo "fresh" > $MODPATH/identity.mode
@@ -112,4 +112,4 @@ mkdir -p $MODPATH/mount/system_ext
 set_perm_recursive $MODPATH/mount 0 0 0755 0644
 
 ui_print ""
-ui_print "- Kelar dipasang! Reboot, terus pencet Action buat undi device baru."
+ui_print "- Selesai dipasang. Reboot, lalu tekan Action untuk mengacak perangkat baru."

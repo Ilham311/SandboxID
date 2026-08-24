@@ -13,36 +13,19 @@ function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
 const ENV = `cd ${shq(MODDIR)} && export MODDIR=${shq(MODDIR)} && export PATH=${shq(MODDIR + '/bin')}:\"$PATH\"`;
 
-// Palet warna per-brand: aksen UI ganti sesuai brand yang lagi aktif biar
-// "meriah" & langsung ketahuan ini device apa. Di-set via CSSOM setProperty
-// (bukan atribut style inline yang diblok CSP style-src 'self').
-const BRAND_ACCENT = {
+// Titik warna brand (dot 8px pada chip hero, via .brandchip::before). Hanya
+// penanda kecil — tema utama (aksen, teks, latar) tetap konsisten dan tidak ikut
+// berubah per-brand. Nilai di-set lewat CSSOM setProperty karena atribut style
+// inline diblok CSP (style-src 'self'); penulisan CSSOM tidak tunduk pada CSP.
+const BRAND_DOT = {
   google: '#4285f4', samsung: '#2e6be6', xiaomi: '#ff6900', redmi: '#ff453a',
-  poco: '#ffd400', oppo: '#12b981', vivo: '#00a6ff', infinix: '#00c2a8',
+  poco: '#ffcc00', oppo: '#10b981', vivo: '#3aa0ff', infinix: '#00c2a8',
 };
-const DEFAULT_ACCENT = '#3ba1ff';
-
-function hexToRgb(hex) {
-  const h = String(hex).replace('#', '');
-  const n = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
-  return { r: parseInt(n.slice(0, 2), 16), g: parseInt(n.slice(2, 4), 16), b: parseInt(n.slice(4, 6), 16) };
-}
-function mixHex(hex, target, t) { // t=0 -> hex, t=1 -> target
-  const a = hexToRgb(hex), b = hexToRgb(target);
-  const to2 = v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
-  return `#${to2(a.r + (b.r - a.r) * t)}${to2(a.g + (b.g - a.g) * t)}${to2(a.b + (b.b - a.b) * t)}`;
-}
-function setAccent(hex) {
-  const base = /^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(String(hex || '')) ? hex : DEFAULT_ACCENT;
-  const { r, g, b } = hexToRgb(base);
+function setBrand(brand) {
+  const hex = BRAND_DOT[String(brand || '').trim().toLowerCase()] || '';
   const root = document.documentElement.style;
-  root.setProperty('--accent', base);
-  root.setProperty('--accent-hi', mixHex(base, '#ffffff', 0.18));
-  root.setProperty('--accent-lo', mixHex(base, '#000000', 0.12));
-  root.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, .16)`);
-}
-function accentForBrand(brand) {
-  return BRAND_ACCENT[String(brand || '').trim().toLowerCase()] || DEFAULT_ACCENT;
+  if (hex) root.setProperty('--brand', hex);
+  else root.removeProperty('--brand');
 }
 
 function exec(cmd) {
@@ -190,15 +173,15 @@ function summarizeAction(out) {
     const b = (text.match(/^\s*BRAND\s*:\s*(.+)$/m) || [])[1];
     const md = (text.match(/^\s*MODEL\s*:\s*(.+)$/m) || [])[1];
     const label = [b && b.trim(), md && md.trim()].filter(Boolean).join(' \u00b7 ');
-    return { kind: 'ok', title: label ? `Device baru \u00b7 ${label}` : 'Device baru aktif', detail: text };
+    return { kind: 'ok', title: label ? `Perangkat baru \u00b7 ${label}` : 'Perangkat baru aktif', detail: text };
   }
   // jalur cadangan freshen (Pixel bawaan)
   if (/^OK - fresh/m.test(text)) {
     const md = (text.match(/^\s*MODEL\s*:\s*(.+)$/m) || [])[1];
-    return { kind: 'ok', title: md ? `Persona baru \u00b7 ${md.trim()}` : 'Persona baru siap', detail: text };
+    return { kind: 'ok', title: md ? `Perangkat baru \u00b7 ${md.trim()}` : 'Perangkat baru siap', detail: text };
   }
   const bang = (text.match(/^(?:Gagal\b|[\u2717!]).*$/m) || [])[0];
-  return { kind: 'error', title: trimTitle(bang || text || 'Undi device gagal'), detail: text };
+  return { kind: 'error', title: trimTitle(bang || text || 'Gagal mengacak perangkat'), detail: text };
 }
 
 function summarizeRotate(out, label) {
@@ -207,7 +190,7 @@ function summarizeRotate(out, label) {
   const warns = (text.match(/\[WARN\]/g) || []).length;
   const fail = text.match(/(\d+) step\(s\) reported failure/);
   const reboot = /REBOOT REQUIRED/i.test(text);
-  const name = label || 'Rotate';
+  const name = label || 'Rotasi';
   if (errs > 0 || (fail && Number(fail[1]) > 0)) {
     const n = fail ? fail[1] : String(errs);
     return { kind: 'error', title: `${name}: ${n} langkah gagal`, detail: text };
@@ -283,7 +266,7 @@ const DETAIL_KEYS = [
 
 function renderHero(kv) {
   const brand = kv.BRAND || '';
-  const mkt = kv.MARKETNAME || kv.MODEL || '(tak dikenal)';
+  const mkt = kv.MARKETNAME || kv.MODEL || '(tidak dikenal)';
   const sub = [kv.MODEL, kv.DEVICE].filter(Boolean).join(' \u00b7 ');
   const rel = kv.RELEASE || '', sdk = kv.SDK_INT || '';
   const os = rel
@@ -299,13 +282,13 @@ function renderHero(kv) {
 function renderTiles(kv) {
   const t = [];
   if (kv.BOOT_COUNT)
-    t.push(`<div class="tile boot"><div class="tlabel">Boot count</div><div class="tval">${escapeHtml(kv.BOOT_COUNT)}</div><div class="tsub">kali reboot</div></div>`);
+    t.push(`<div class="tile boot"><div class="tlabel">Boot count</div><div class="tval">${escapeHtml(kv.BOOT_COUNT)}</div><div class="tsub">jumlah reboot</div></div>`);
   const up = kv.UPTIME_HUMAN || (kv.UPTIME_SECONDS ? kv.UPTIME_SECONDS + 's' : '');
   if (up)
-    t.push(`<div class="tile up"><div class="tlabel">Uptime</div><div class="tval">${escapeHtml(up)}</div><div class="tsub">nyala terus</div></div>`);
+    t.push(`<div class="tile up"><div class="tlabel">Uptime</div><div class="tval">${escapeHtml(up)}</div><div class="tsub">lama menyala</div></div>`);
   if (kv.FRESH) {
     const yes = /^(y|yes|true|1)$/i.test(kv.FRESH.trim());
-    t.push(`<div class="tile fresh"><div class="tlabel">Fresh</div><div class="tval ${yes ? 'yes' : 'no'}">${yes ? 'Ya' : 'Nggak'}</div><div class="tsub">baru direset?</div></div>`);
+    t.push(`<div class="tile fresh"><div class="tlabel">Fresh</div><div class="tval ${yes ? 'yes' : 'no'}">${yes ? 'Ya' : 'Tidak'}</div><div class="tsub">baru direset?</div></div>`);
   }
   if (kv.USAGE_PROFILE)
     t.push(`<div class="tile usage"><div class="tlabel">Pemakaian</div><div class="tval">${escapeHtml(kv.USAGE_PROFILE)}</div><div class="tsub">pola pakai</div></div>`);
@@ -322,14 +305,14 @@ async function loadPersona() {
   el.innerHTML = skKv(6);
   const r = await safeExec(`cat ${shq(IDENTITY)} 2>/dev/null || true`);
   if (!r.ok || !r.out.trim()) {
-    setAccent(DEFAULT_ACCENT);
-    hero.innerHTML = '<div class="empty">Belum ada device. Tap \ud83c\udfb2 Undi device baru buat mulai.</div>';
+    setBrand('');
+    hero.innerHTML = '<div class="empty">Belum ada perangkat. Tekan "Acak perangkat baru" untuk mulai.</div>';
     el.className = 'kv';
     el.innerHTML = '<div class="empty">identity.prop belum ada.</div>';
     return;
   }
   const kv = parseProp(r.out);
-  setAccent(accentForBrand(kv.BRAND));
+  setBrand(kv.BRAND);
   hero.innerHTML = renderHero(kv);
   tiles.innerHTML = renderTiles(kv);
   // stagger animasi tile via CSSOM (--i), aman terhadap CSP.
@@ -350,17 +333,17 @@ document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoad
   // Action fisik di KSU/APatch, jadi hasil dari web = hasil dari tombol.
   const cmd = `${ENV} && sh ${shq(MODDIR)}/action.sh 2>&1`;
   const r = await run(cmd);
-  if (!r.ok) toast(trimTitle(r.err.message || 'Undi device gagal'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
+  if (!r.ok) toast(trimTitle(r.err.message || 'Gagal mengacak perangkat'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
   else { const s = summarizeAction(r.out); toast(s.title, { kind: s.kind, detail: s.detail }); }
   loadPersona();
 }));
 
 const ROT_CARDS = [
-  { key: 'ssaid',       name: 'SSAID',         desc: 'Android ID per-app (Settings.Secure) — wipe butuh reboot buat regen', get: 'ANDROID_ID' },
+  { key: 'ssaid',       name: 'SSAID',         desc: 'Android ID per-aplikasi (Settings.Secure) — dihapus, dibuat ulang setelah reboot', get: 'ANDROID_ID' },
   { key: 'gaid',        name: 'Google AID',    desc: 'Advertising ID (Settings.Global + XML GMS)',        get: 'GOOGLE_AID' },
   { key: 'wlan-mac',    name: 'WiFi MAC',      desc: 'MAC wlan0 + reset WifiConfigStore',                 get: 'WIFI_MAC' },
   { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'MAC adapter BT + Address di bt_config.conf',        get: 'BLUETOOTH_ADDR' },
-  { key: 'device-name', name: 'Nama device',   desc: 'device_name = MODEL dari identity.prop',            get: 'MODEL' },
+  { key: 'device-name', name: 'Nama perangkat', desc: 'device_name = MODEL dari identity.prop',           get: 'MODEL' },
   { key: 'boot-count',  name: 'Boot count',    desc: 'Settings.Global.boot_count = BOOT_COUNT identity.prop', get: 'BOOT_COUNT' },
 ];
 
@@ -397,7 +380,7 @@ function rotateCmd(key) {
 }
 
 function finishRotate(r, label) {
-  if (!r.ok) toast(trimTitle(r.err.message || 'Rotate gagal'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
+  if (!r.ok) toast(trimTitle(r.err.message || 'Rotasi gagal'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
   else { const s = summarizeRotate(r.out, label); toast(s.title, { kind: s.kind, detail: s.detail }); }
   loadRotate();
 }
@@ -412,7 +395,7 @@ async function rotateOne(key, btn) {
 
 document.getElementById('rotAll').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
   const r = await run(rotateCmd('all'));
-  finishRotate(r, 'Rotate all');
+  finishRotate(r, 'Rotasi semua');
 }));
 
 async function loadTargets() {
@@ -430,7 +413,7 @@ document.getElementById('tgtSave').addEventListener('click', (ev) => withLoading
   const r = await safeExec(cmd, 'target.txt tersimpan');
   if (r.ok) {
     const lines = content.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length;
-    document.getElementById('tgtStatus').textContent = `${lines} paket \u00b7 hot-reload saat spawn berikutnya`;
+    document.getElementById('tgtStatus').textContent = `${lines} paket \u00b7 dimuat ulang saat spawn berikutnya`;
   }
 }));
 
@@ -439,9 +422,9 @@ async function loadLog() {
   const body = document.getElementById('logBody');
   body.innerHTML = skLines(10);
   let cmd;
-  if (src === 'action')  cmd = `tail -n 400 ${shq(ACTION_LOG)} 2>/dev/null || echo '(belum ada action.log \u2014 tap Freshen atau tombol Action KSU/APatch)'`;
-  else if (src === 'rotate') cmd = `tail -n 400 ${shq(ROTATE_LOG)} 2>/dev/null || echo '(belum ada rotate.log \u2014 tap tombol Rotate)'`;
-  else if (src === 'session') cmd = `ls -t ${shq(MODDIR)}/debug/session-*.log 2>/dev/null | head -n 1 | xargs -r tail -n 400 || echo '(tidak ada session log \u2014 flash varian debug)'`;
+  if (src === 'action')  cmd = `tail -n 400 ${shq(ACTION_LOG)} 2>/dev/null || echo '(belum ada action.log \u2014 tekan "Acak perangkat baru" atau tombol Action di KSU/APatch)'`;
+  else if (src === 'rotate') cmd = `tail -n 400 ${shq(ROTATE_LOG)} 2>/dev/null || echo '(belum ada rotate.log \u2014 tekan tombol Rotasi)'`;
+  else if (src === 'session') cmd = `ls -t ${shq(MODDIR)}/debug/session-*.log 2>/dev/null | head -n 1 | xargs -r tail -n 400 || echo '(tidak ada session log \u2014 pasang varian debug)'`;
   else if (src === 'crashes') cmd = `tail -n 400 ${shq(MODDIR)}/debug/crashes.log 2>/dev/null || echo '(belum ada crashes.log)'`;
   else if (src === 'logcat') cmd = `logcat -d -t 200 -v time -s SandboxID:V SandboxIDCompanion:V 2>&1 | tail -n 200`;
   const r = await safeExec(cmd);
@@ -458,7 +441,36 @@ function escapeHtml(s) {
   }[c]));
 }
 
+// ---- Tema terang/gelap ----------------------------------------------------
+// Default: ikut tema sistem (diatur lewat prefers-color-scheme di style.css).
+// Tombol tema menulis data-theme di <html> dan menyimpan pilihan manual ke
+// localStorage, jadi pilihan tetap bertahan antar sesi dan menang atas tema
+// sistem. Tanpa data-theme, cascade CSS kembali mengikuti sistem.
+function applyTheme(mode) {
+  const root = document.documentElement;
+  if (mode === 'light' || mode === 'dark') root.setAttribute('data-theme', mode);
+  else root.removeAttribute('data-theme');
+}
+function currentTheme() {
+  const attr = document.documentElement.getAttribute('data-theme');
+  if (attr === 'light' || attr === 'dark') return attr;
+  return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+}
+function initTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem('sbx-theme'); } catch (e) {}
+  if (saved === 'light' || saved === 'dark') applyTheme(saved);
+  const btn = document.getElementById('themeBtn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const next = currentTheme() === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    try { localStorage.setItem('sbx-theme', next); } catch (e) {}
+  });
+}
+
 (function boot() {
+  initTheme();
   toastInit();
   wireTabs();
   moveIndicator();
@@ -466,12 +478,12 @@ function escapeHtml(s) {
   nav.addEventListener('scroll', moveIndicator);
   window.addEventListener('resize', moveIndicator);
   window.addEventListener('load', moveIndicator);
-  // live dot: hijau berdenyut kalau root bridge kebaca, merah kalau nggak.
+  // live dot: hijau kalau root bridge terbaca, merah kalau tidak.
   const bridge = (typeof ksu !== 'undefined' && !!ksu.exec);
   const live = document.getElementById('live');
   if (live) {
     live.classList.add(bridge ? 'on' : 'off');
-    live.title = bridge ? 'root bridge aktif' : 'root bridge tak tersedia';
+    live.title = bridge ? 'root bridge aktif' : 'root bridge tidak tersedia';
   }
   (async () => {
     const v = await run(`sed -n 's/^version=//p' ${shq(MODDIR)}/module.prop 2>/dev/null | head -n 1`);
