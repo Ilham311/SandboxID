@@ -34,17 +34,15 @@ RC_ROT=0
 APPLIED=""
 
 say ""
-say "SandboxID — bikin identitas device baru"
-say "Diundi acak dari brand yang punya model buat versi Android HP-mu (peluang tiap brand yang tersedia sama rata)."
-say "Versi Android dikunci sesuai perangkat biar app target nggak error — makin baru versinya, biasanya makin sedikit pilihan brand-nya."
+say "SandboxID — membuat identitas perangkat baru"
 say ""
 
 rm -f "$DEVICE_ID" 2>/dev/null
 if [ -f "$AUTOPIF" ] && [ -f "$MODDIR/devices.tsv" ]; then
-    say "① Ngundi device…"
+    say "==> Mengacak perangkat"
     MODDIR="$MODDIR" sh "$AUTOPIF" device 2>&1 | tee2
 else
-    say "① Undian dilewat (autopif.sh / devices.tsv nggak ada) — pakai cara lama."
+    say "==> Pengacakan dilewati (autopif.sh / devices.tsv tidak ada) — pakai metode lama."
 fi
 
 if [ -x "$BIN" ] && [ -s "$DEVICE_ID" ]; then
@@ -53,14 +51,14 @@ if [ -x "$BIN" ] && [ -s "$DEVICE_ID" ]; then
         chmod 0644 "$IDENTITY" 2>/dev/null
         "$BIN" unlock >/dev/null 2>&1 || true
         say ""
-        say "② Memasang identitas ke sistem (apply-boot)…"
+        say "==> Menerapkan identitas (apply-boot)"
         APPLY_OUT="$MODDIR/debug/.apply.$$"
         "$BIN" apply-boot </dev/null >"$APPLY_OUT" 2>&1; RC=$?
         tee2 < "$APPLY_OUT"; rm -f "$APPLY_OUT" 2>/dev/null
         "$BIN" lock >/dev/null 2>&1 || true
         [ "$RC" = 0 ] && APPLIED="multibrand"
     else
-        say "② Gagal menyalin hasil undian ke identity.prop — pakai cara lama."
+        say "Gagal menyalin hasil acak ke identity.prop — pakai metode lama."
     fi
 fi
 
@@ -68,21 +66,21 @@ if [ -z "$APPLIED" ]; then
     if [ -x "$BIN" ]; then
         "$BIN" unlock >/dev/null 2>&1 || true
         say ""
-        say "② Cadangan: freshen (persona Pixel bawaan)…"
+        say "==> Metode cadangan: freshen (persona Pixel bawaan)"
         FR_OUT="$MODDIR/debug/.freshen.$$"
         "$BIN" freshen </dev/null >"$FR_OUT" 2>&1; RC=$?
         tee2 < "$FR_OUT"; rm -f "$FR_OUT" 2>/dev/null
         "$BIN" lock >/dev/null 2>&1 || true
         [ "$RC" = 0 ] && APPLIED="freshen"
     else
-        say "Gagal: $BIN nggak bisa dijalankan — identitas native nggak dipasang."
+        say "Gagal: $BIN tidak bisa dijalankan — identitas native tidak dipasang."
         RC=127
     fi
 fi
 
 if [ "$APPLIED" = "multibrand" ]; then
     say ""
-    say "③ Reset app target (biar baca identitas baru)…"
+    say "==> Mereset aplikasi target (agar membaca identitas baru)"
     if [ -r "$MODDIR/target.txt" ] && command -v pm >/dev/null 2>&1; then
         _wiped=0
         while IFS= read -r _line || [ -n "$_line" ]; do
@@ -93,24 +91,24 @@ if [ "$APPLIED" = "multibrand" ]; then
             if _fw_run pm clear --user 0 "$_line"; then
                 say "   - $_line — direset"
             else
-                say "   - $_line — dilewat (belum terpasang?)"
+                say "   - $_line — dilewati (belum terpasang?)"
             fi
             _wiped=$((_wiped + 1))
         done < "$MODDIR/target.txt"
-        [ "$_wiped" = 0 ] && say "   target.txt kosong — nggak ada app yang direset (aman, sesuai desain)."
+        [ "$_wiped" = 0 ] && say "   target.txt kosong — tidak ada aplikasi yang direset (aman, sesuai desain)."
     else
-        say "   target.txt kosong / pm nggak ada — dilewat."
+        say "   target.txt kosong / pm tidak ada — dilewati."
     fi
 fi
 
 if [ -r "$ROTATE" ]; then
     say ""
-    say "④ Rotasi ID lain (SSAID · GAID · WiFi/BT MAC · nama · boot count)…"
+    say "==> Rotasi ID lain (SSAID, GAID, WiFi/BT MAC, nama, boot count)"
     ROT_OUT="$MODDIR/debug/.rotate.$$"
     MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all </dev/null >"$ROT_OUT" 2>&1; RC_ROT=$?
     tee2 < "$ROT_OUT"; rm -f "$ROT_OUT" 2>/dev/null
 else
-    say "④ rotate_ids.sh nggak ada — rotasi ID dilewat."
+    say "==> Rotasi ID dilewati (rotate_ids.sh tidak ada)."
 fi
 
 say ""
@@ -132,15 +130,15 @@ if [ "$APPLIED" = "multibrand" ]; then
     say "  SERIAL      : $_ser"
     say "  ANDROID ID  : $_aid"
     say ""
-    say "Selesai — buka lagi app targetmu, sekarang dia lihat device di atas."
+    say "Selesai. Buka ulang aplikasi target — sekarang membaca identitas perangkat di atas."
 elif [ "$APPLIED" = "freshen" ]; then
-    say "OK - persona (cadangan Pixel) aktif. Lihat detail MODEL di atas."
+    say "OK - persona cadangan Pixel aktif — lihat detail MODEL di atas."
 else
-    say "Gagal pasang identitas (rc=$RC). Cek pesan di atas atau tab Log."
+    say "Gagal menerapkan identitas (rc=$RC). Cek pesan di atas atau tab Log."
 fi
 
 [ "$RC_ROT" != 0 ] && [ "$RC_ROT" != 1 ] && \
-    say "  (catatan: rotasi ID rc=$RC_ROT — sebagian ID mungkin belum ganti; cek tab Log)"
+    say "  (catatan: rotasi ID rc=$RC_ROT — sebagian ID mungkin belum berganti; cek tab Log)"
 
 if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then
     LATEST=$(ls -1t "$MODDIR/debug"/session-*.log 2>/dev/null | head -1)
@@ -161,10 +159,10 @@ if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then
         done
 
         say ""
-        say "Artefak debug (root-only): $OUTDIR/"
-        [ -f "$SUMMARY" ] && say "   • ringkasan  $(basename "$SUMMARY")  ($(du -h "$SUMMARY" | cut -f1))"
-        [ -f "$OUTDIR/crashes-$TS.log" ] && say "   • crashes    crashes-$TS.log  ($(du -h "$OUTDIR/crashes-$TS.log" | cut -f1))"
-        say "   Log lengkap: buka tab Log di WebUI, atau file session-*.log di folder debug/."
+        say "Artefak debug (khusus root): $OUTDIR/"
+        [ -f "$SUMMARY" ] && say "   - ringkasan  $(basename "$SUMMARY")  ($(du -h "$SUMMARY" | cut -f1))"
+        [ -f "$OUTDIR/crashes-$TS.log" ] && say "   - crashes    crashes-$TS.log  ($(du -h "$OUTDIR/crashes-$TS.log" | cut -f1))"
+        say "   Log lengkap ada di tab Log WebUI, atau file session-*.log di folder debug/."
     fi
 fi
 

@@ -185,14 +185,14 @@ sync_boot_count() {
     bc="$(identity_get BOOT_COUNT 2>/dev/null || true)"
     case "$bc" in
         ''|*[!0-9]*)
-            log_info "boot_count: identity.prop belum punya angka valid — dilewat"
+            log_info "boot_count: identity.prop belum punya angka valid — dilewati"
             return 0 ;;
     esac
     log_step "Set Settings.Global.boot_count = $bc (dari identity.prop)"
     if settings_put global boot_count "$bc"; then
         log_ok "boot_count ke $bc"
     else
-        log_warn "settings put boot_count gagal (mungkin device tak izinkan)"
+        log_warn "settings put boot_count gagal (mungkin tidak diizinkan perangkat)"
         return 1
     fi
     return 0

@@ -1,11 +1,13 @@
 <!doctype html>
-<html lang="en">
+<html lang="id">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0a0a0a">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0c0e" media="(prefers-color-scheme: dark)">
 <title>SandboxID</title>
+<script src="theme-init.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -14,16 +16,22 @@
     <div class="logo">sb</div>
     <div class="brand-txt">
       <div class="title">SandboxID<span class="live" id="live" title="root bridge"></span></div>
-      <div class="sub">lab identitas device &middot; multi-brand</div>
+      <div class="sub">Identitas perangkat &middot; multi-brand</div>
     </div>
   </div>
-  <span class="pill" id="version">…</span>
+  <div class="head-right">
+    <button class="icon-btn" id="themeBtn" type="button" aria-label="Ganti tema terang/gelap" title="Ganti tema">
+      <svg class="ico ico-sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.4M12 19v2.4M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2.6 12h2.4M19 12h2.4M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7"/></svg>
+      <svg class="ico ico-moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.3 6.3 0 0 0 10.5 10.5z"/></svg>
+    </button>
+    <span class="pill" id="version">&hellip;</span>
+  </div>
 </header>
 
 <nav id="nav">
-  <button class="tab active" data-tab="persona">Persona</button>
-  <button class="tab" data-tab="rotate">Rotate</button>
-  <button class="tab" data-tab="targets">Targets</button>
+  <button class="tab active" data-tab="persona">Perangkat</button>
+  <button class="tab" data-tab="rotate">Rotasi</button>
+  <button class="tab" data-tab="targets">Target</button>
   <button class="tab" data-tab="log">Log</button>
   <span class="nav-ind" id="navInd"></span>
 </nav>
@@ -31,7 +39,7 @@
 <main>
   <section id="persona" class="page active">
     <div class="row">
-      <button id="freshenBtn" class="primary">🎲 Undi device baru</button>
+      <button id="freshenBtn" class="primary">Acak perangkat baru</button>
       <button id="refreshBtn" class="ghost">Muat ulang</button>
     </div>
     <div id="hero" class="hero"></div>
@@ -42,15 +50,15 @@
   <section id="rotate" class="page">
     <div class="row spread">
       <button id="rotAll" class="primary">Rotasi semua</button>
-      <span class="chip chip-on" title="Selalu rotasi penuh biar identitas tetap nyambung">Konsisten &middot; ON</span>
+      <span class="chip chip-on" title="Selalu rotasi penuh agar identitas tetap konsisten">Konsisten &middot; ON</span>
     </div>
-    <div class="rot-note">SSAID &middot; GAID &middot; WiFi MAC &middot; BT MAC &middot; nama &middot; boot count &mdash; selalu penuh, nggak bisa dimatiin.</div>
+    <div class="rot-note">SSAID &middot; GAID &middot; WiFi MAC &middot; BT MAC &middot; nama &middot; boot count &mdash; selalu aktif, tidak bisa dimatikan.</div>
     <div class="cards" id="rotCards"></div>
   </section>
 
   <section id="targets" class="page">
     <div class="row spread">
-      <div class="hint">Satu paket per baris. Baris kosong &amp; # diabaikan. Companion auto-reload.</div>
+      <div class="hint">Satu paket per baris. Baris kosong dan diawali # diabaikan. Companion memuat ulang otomatis.</div>
       <button id="tgtSave" class="primary sm">Simpan</button>
     </div>
     <textarea id="tgtArea" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
@@ -64,8 +72,8 @@
     <div class="row spread">
       <select id="logSrc">
         <option value="logcat">Logcat langsung (200 baris)</option>
-        <option value="action">Log Action (undi device)</option>
-        <option value="rotate">Log Rotate</option>
+        <option value="action">Log Action (acak perangkat)</option>
+        <option value="rotate">Log Rotasi</option>
         <option value="session">Sesi terbaru (varian debug)</option>
         <option value="crashes">Crash</option>
       </select>
@@ -78,8 +86,8 @@
 <div id="toast" class="toast" role="status" aria-live="polite">
   <span class="toast-icon" id="toastIcon"></span>
   <span class="toast-title" id="toastTitle"></span>
-  <button class="toast-exp" id="toastExp" aria-label="View detail" hidden>&#8964;</button>
-  <button class="toast-close" id="toastClose" aria-label="Close">&times;</button>
+  <button class="toast-exp" id="toastExp" aria-label="Lihat detail" hidden>&#8964;</button>
+  <button class="toast-close" id="toastClose" aria-label="Tutup">&times;</button>
   <div class="toast-detail" id="toastDetail" hidden></div>
 </div>
 
