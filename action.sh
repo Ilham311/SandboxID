@@ -48,9 +48,9 @@ RC_ROT=0
 APPLIED=""
 
 say ""
-say "🎲 SandboxID — bikin identitas device baru"
-say "   Diundi acak dari semua brand: Pixel · Samsung · Xiaomi · POCO · OPPO · vivo · Redmi · Infinix."
-say "   Tiap brand peluangnya sama rata, nggak ada yang jadi favorit."
+say "SandboxID — bikin identitas device baru"
+say "Diundi acak dari semua brand (Pixel, Samsung, Xiaomi, POCO, OPPO, vivo, Redmi, Infinix), peluang tiap brand sama rata."
+say "Versi Android-nya dikunci sesuai perangkatmu biar app target nggak error."
 say ""
 
 # ── ① undi 1 device multibrand -> device.identity ───────────────────────────
@@ -91,7 +91,7 @@ if [ -z "$APPLIED" ]; then
         "$BIN" lock >/dev/null 2>&1 || true
         [ "$RC" = 0 ] && APPLIED="freshen"
     else
-        say "✗ $BIN nggak bisa dijalankan — identitas native nggak dipasang."
+        say "Gagal: $BIN nggak bisa dijalankan — identitas native nggak dipasang."
         RC=127
     fi
 fi
@@ -112,9 +112,9 @@ if [ "$APPLIED" = "multibrand" ]; then
             [ -n "$_line" ] || continue
             force_stop "$_line" >/dev/null 2>&1
             if _fw_run pm clear --user 0 "$_line"; then
-                say "   ✓ $_line"
+                say "   - $_line — direset"
             else
-                say "   ⚠ $_line (belum terpasang?)"
+                say "   - $_line — dilewat (belum terpasang?)"
             fi
             _wiped=$((_wiped + 1))
         done < "$MODDIR/target.txt"
@@ -144,7 +144,7 @@ if [ "$APPLIED" = "multibrand" ]; then
     _fp=$(identity_get FINGERPRINT);   _bc=$(identity_get BOOT_COUNT)
     _up=$(identity_get UPTIME_HUMAN);  _ser=$(identity_get SERIAL)
     _aid=$(identity_get ANDROID_ID)
-    say "OK - persona baru aktif 🎉"
+    say "OK - persona baru aktif"
     say "  BRAND       : $_brand"
     say "  MODEL       : $_mkt ($_model)"
     say "  DEVICE      : $_dev"
@@ -155,11 +155,11 @@ if [ "$APPLIED" = "multibrand" ]; then
     say "  SERIAL      : $_ser"
     say "  ANDROID ID  : $_aid"
     say ""
-    say "Beres! Buka lagi app targetmu — sekarang dia lihat device di atas."
+    say "Selesai — buka lagi app targetmu, sekarang dia lihat device di atas."
 elif [ "$APPLIED" = "freshen" ]; then
     say "OK - persona (cadangan Pixel) aktif. Lihat detail MODEL di atas."
 else
-    say "✗ Belum berhasil pasang identitas (rc=$RC). Cek pesan di atas / tab Log."
+    say "Gagal pasang identitas (rc=$RC). Cek pesan di atas atau tab Log."
 fi
 
 [ "$RC_ROT" != 0 ] && [ "$RC_ROT" != 1 ] && \
@@ -187,7 +187,7 @@ if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then
         done
 
         say ""
-        say "🗂  Artefak debug (root-only): $OUTDIR/"
+        say "Artefak debug (root-only): $OUTDIR/"
         [ -f "$SUMMARY" ] && say "   • ringkasan  $(basename "$SUMMARY")  ($(du -h "$SUMMARY" | cut -f1))"
         [ -f "$OUTDIR/crashes-$TS.log" ] && say "   • crashes    crashes-$TS.log  ($(du -h "$OUTDIR/crashes-$TS.log" | cut -f1))"
         say "   Log lengkap: buka tab Log di WebUI, atau file session-*.log di folder debug/."

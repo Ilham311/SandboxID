@@ -197,7 +197,7 @@ function summarizeAction(out) {
     const md = (text.match(/^\s*MODEL\s*:\s*(.+)$/m) || [])[1];
     return { kind: 'ok', title: md ? `Persona baru \u00b7 ${md.trim()}` : 'Persona baru siap', detail: text };
   }
-  const bang = (text.match(/^[\u2717!].*$/m) || [])[0];
+  const bang = (text.match(/^(?:Gagal\b|[\u2717!]).*$/m) || [])[0];
   return { kind: 'error', title: trimTitle(bang || text || 'Undi device gagal'), detail: text };
 }
 
