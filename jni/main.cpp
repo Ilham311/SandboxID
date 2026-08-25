@@ -8,14 +8,17 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <cstdarg>
 #include <sys/system_properties.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/syscall.h>
 #include <android/log.h>
 #include <string>
 #include <map>
 #include <vector>
+#include <utility>
 #include <sstream>
 #include <signal.h>
 #include <ctime>
@@ -23,6 +26,25 @@
 #include "zygisk.hpp"
 #include "config.hpp"
 #include "sbx_lsplant.hpp"
+#include "sbx_native_read.hpp"
+
+// memfd_create backs the file-redirect path (L9). MFD_CLOEXEC / __NR_memfd_create
+// are guarded so the module builds even against an older sysroot; the numbers are
+// the stable per-ABI syscall IDs. A missing/failed memfd degrades to passthrough.
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef __NR_memfd_create
+# if defined(__aarch64__)
+#  define __NR_memfd_create 279
+# elif defined(__arm__)
+#  define __NR_memfd_create 385
+# elif defined(__x86_64__)
+#  define __NR_memfd_create 319
+# elif defined(__i386__)
+#  define __NR_memfd_create 356
+# endif
+#endif
 
 #define LOG_TAG "SandboxID"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -62,7 +84,6 @@ static const std::string& val(const std::string& k) {
 }
 
 static jstring (*orig_native_get)(JNIEnv*, jclass, jstring, jstring) = nullptr;
-
 static const std::map<std::string, std::string>& prop_to_identity_map() {
     static const std::map<std::string, std::string> m = {
         {"ro.serialno",                     "SERIAL"},
@@ -156,6 +177,27 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
     return m;
 }
 
+// Single source of truth for "what value should key `k` report". Shared by the
+// Java SystemProperties hook (L2) and the native __system_property_* hooks (L9)
+// so a native read can NEVER disagree with the Java getter. Returns true and sets
+// `out` when the key should be spoofed; false => caller falls through to the real
+// property. Pure lookup: no JNI, safe to call from the native hooks.
+static bool spoof_prop_value(const std::string& k, std::string& out) {
+    const auto& map = prop_to_identity_map();
+    auto it = map.find(k);
+    if (it != map.end()) {
+        const std::string& v = val(it->second);
+        if (!v.empty()) { out = v; return true; }
+    }
+    for (size_t i = 0; i < sandboxid::STATIC_PROP_DEFAULTS_N; ++i) {
+        if (k == sandboxid::STATIC_PROP_DEFAULTS[i].k) {
+            out = sandboxid::STATIC_PROP_DEFAULTS[i].v;
+            return true;
+        }
+    }
+    return false;
+}
+
 static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
 
@@ -165,21 +207,10 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
     env->ReleaseStringUTFChars(j_key, raw);
     LOGD("L2 native_get('%s')", k.c_str());
 
-    const auto& map = prop_to_identity_map();
-    auto it = map.find(k);
-    if (it != map.end()) {
-        const std::string& v = val(it->second);
-        if (!v.empty()) {
-            LOGD("L2 SPOOF '%s' -> '%s'", k.c_str(), v.c_str());
-            return env->NewStringUTF(v.c_str());
-        }
-    }
-
-    for (size_t i = 0; i < sandboxid::STATIC_PROP_DEFAULTS_N; ++i) {
-        if (k == sandboxid::STATIC_PROP_DEFAULTS[i].k) {
-            LOGD("L2 SPOOF-STATIC '%s' -> '%s'", k.c_str(), sandboxid::STATIC_PROP_DEFAULTS[i].v);
-            return env->NewStringUTF(sandboxid::STATIC_PROP_DEFAULTS[i].v);
-        }
+    std::string v;
+    if (spoof_prop_value(k, v)) {
+        LOGD("L2 SPOOF '%s' -> '%s'", k.c_str(), v.c_str());
+        return env->NewStringUTF(v.c_str());
     }
 
     if (orig_native_get) return orig_native_get(env, clazz, j_key, j_def);
@@ -393,6 +424,294 @@ static void install_uptime_hook(Api* api, JNIEnv* /*env*/) {
     }
     LOGD("L8 boottime PLT hook aktif (+%llds, %d lib) orig=%p",
          (long long)secs, registered, reinterpret_cast<void*>(orig_clock_gettime));
+}
+
+// ===========================================================================
+// L9 — native property reads + /proc & /sys file reads.
+//
+// The Java hooks (L2/L7) only see android.os.SystemProperties. Native code that
+// calls __system_property_* directly, or reads /proc//sys as plain files, sees
+// the REAL device. L9 closes those paths with the SAME lookup the Java hook uses
+// (spoof_prop_value) plus deterministic pseudo-file content from sbx_native_read.
+//
+// Mechanism: Zygisk PLT/GOT hooks across every mapped, file-backed .so — the same
+// no-Dobby approach as the uptime hook. PLT hooks are per-caller-GOT, so this can
+// only cover libraries already mapped at specialize time (system libs); an app's
+// own JNI libs loaded LATER via System.loadLibrary are not reached. That is an
+// inherent limit of specialize-time PLT hooking, shared with the L8 hook.
+//
+// Fail-safe: every hook falls through to its captured real function (or a raw
+// syscall) whenever spoofing is inactive or content can't be built, so a target
+// app never breaks — at worst a value is not spoofed.
+// ===========================================================================
+
+#ifndef O_TMPFILE
+#define O_TMPFILE 0
+#endif
+
+typedef int   (*sbx_open_fn)(const char*, int, ...);
+typedef int   (*sbx_openat_fn)(int, const char*, int, ...);
+typedef FILE* (*sbx_fopen_fn)(const char*, const char*);
+typedef int   (*sbx_spg_fn)(const char*, char*);
+typedef int   (*sbx_spr_fn)(const void*, char*, char*);
+typedef void  (*sbx_prop_cb)(void*, const char*, const char*, uint32_t);
+typedef void  (*sbx_sprcb_fn)(const void*, sbx_prop_cb, void*);
+
+static sbx_open_fn   orig_open   = nullptr;
+static sbx_openat_fn orig_openat = nullptr;
+static sbx_fopen_fn  orig_fopen  = nullptr;
+static sbx_spg_fn    orig_spg    = nullptr;
+static sbx_spr_fn    orig_spr    = nullptr;
+static sbx_sprcb_fn  orig_sprcb  = nullptr;
+
+// Set true ONLY after a successful pltHookCommit. Gates every spoof so that a
+// failed/partial install serves real values (via the captured origs) rather than
+// crashing or half-spoofing. Written once (single-threaded) after commit.
+static bool        g_nr_active    = false;
+static std::string g_boot_id;       // /proc/sys/kernel/random/boot_id
+static std::string g_wifi_mac;      // /sys/class/net/wlan*/address
+static std::string g_proc_version;  // /proc/version
+static std::string g_cpu_repl;      // replacement Hardware: value (qcom/mtk)
+static int         g_ram_gb    = 0;         // 0 => derive MemTotal from real
+static int         g_cpu_action = sbxnr::CPU_NONE;
+
+// --- native system-property hooks -----------------------------------------
+static void sbx_fill_prop(char* value, const std::string& v) {
+    size_t n = v.size();
+    if (n > PROP_VALUE_MAX - 1) n = PROP_VALUE_MAX - 1;
+    memcpy(value, v.data(), n);
+    value[n] = '\0';
+}
+
+static int sbx_spg(const char* name, char* value) {
+    if (g_nr_active && name && value) {
+        std::string v;
+        if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
+    }
+    if (orig_spg) return orig_spg(name, value);
+    if (value) value[0] = '\0';
+    return 0;
+}
+
+static int sbx_spr(const void* pi, char* name, char* value) {
+    int r = orig_spr ? orig_spr(pi, name, value) : -1;
+    if (r >= 0 && g_nr_active && name && value) {
+        std::string v;
+        if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
+    }
+    return r;
+}
+
+struct SbxCbCtx { sbx_prop_cb cb; void* cookie; };
+static void sbx_cb_tramp(void* cookie, const char* name, const char* value, uint32_t serial) {
+    SbxCbCtx* c = static_cast<SbxCbCtx*>(cookie);
+    std::string v;
+    if (g_nr_active && name && spoof_prop_value(name, v))
+        c->cb(c->cookie, name, v.c_str(), serial);
+    else
+        c->cb(c->cookie, name, value, serial);
+}
+static void sbx_sprcb(const void* pi, sbx_prop_cb cb, void* cookie) {
+    if (!orig_sprcb) return;                       // unhooked lib can't reach here
+    if (!cb) { orig_sprcb(pi, cb, cookie); return; }
+    SbxCbCtx ctx{cb, cookie};                      // stack ctx: callback is synchronous
+    orig_sprcb(pi, sbx_cb_tramp, &ctx);
+}
+
+// --- file-redirect helpers -------------------------------------------------
+static int sbx_make_memfd(const std::string& content) {
+#ifdef __NR_memfd_create
+    // Avoid a module-identifying memfd name; readlink(/proc/self/fd/N) still
+    // reveals "/memfd:...", so keep it generic.
+    int fd = (int)syscall(__NR_memfd_create, "", (unsigned)MFD_CLOEXEC);
+    if (fd < 0) return -1;
+    if (!sandboxid::write_full(fd, content.data(), content.size())) { ::close(fd); return -1; }
+    if (::lseek(fd, 0, SEEK_SET) != 0) { ::close(fd); return -1; }
+    return fd;
+#else
+    (void)content;
+    return -1;
+#endif
+}
+
+// Read a real pseudo-file via the captured raw openat — never re-enters the PLT,
+// so meminfo/cpuinfo can be read for patching without recursing into our hook.
+static std::string sbx_read_real(const char* path) {
+    if (!orig_openat) return "";
+    int fd = orig_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return "";
+    std::string data;
+    char buf[4096];
+    for (;;) {
+        ssize_t r = ::read(fd, buf, sizeof(buf));
+        if (r > 0) { data.append(buf, (size_t)r); continue; }
+        if (r < 0 && errno == EINTR) continue;
+        break;
+    }
+    ::close(fd);
+    return data;
+}
+
+static bool sbx_build_content(sbxnr::Kind kind, std::string& out) {
+    switch (kind) {
+        case sbxnr::BOOTID:  out = g_boot_id;      out.push_back('\n'); return true;
+        case sbxnr::MAC:     out = g_wifi_mac;     out.push_back('\n'); return true;
+        case sbxnr::VERSION: out = g_proc_version; out.push_back('\n'); return true;
+        case sbxnr::MEMINFO: {
+            std::string real = sbx_read_real("/proc/meminfo");
+            if (real.empty()) return false;
+            out = sbxnr::patch_meminfo(real, g_ram_gb);
+            return true;
+        }
+        case sbxnr::CPUINFO: {
+            if (g_cpu_action == sbxnr::CPU_NONE) return false;
+            std::string real = sbx_read_real("/proc/cpuinfo");
+            if (real.empty()) return false;
+            return sbxnr::patch_cpuinfo(real, g_cpu_action, g_cpu_repl, out);  // false => passthrough
+        }
+        default: return false;
+    }
+}
+
+// -1 => not a spoof target / could not build => caller serves the real file.
+static int sbx_spoof_fd(const char* path) {
+    sbxnr::Kind kind = sbxnr::classify(path);
+    if (kind == sbxnr::NONE) return -1;
+    std::string content;
+    if (!sbx_build_content(kind, content)) return -1;
+    int fd = sbx_make_memfd(content);
+    if (fd >= 0) LOGD("L9 redirect '%s' -> memfd (%zu B)", path, content.size());
+    return fd;
+}
+
+static inline bool sbx_is_pure_read(int flags) {
+    return (flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_TMPFILE));
+}
+
+static int sbx_openat(int dirfd, const char* pathname, int flags, ...) {
+    mode_t mode = 0;
+    bool has_mode = (flags & (O_CREAT | O_TMPFILE)) != 0;
+    if (has_mode) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
+
+    if (g_nr_active && pathname && sbx_is_pure_read(flags)) {
+        int fd = sbx_spoof_fd(pathname);
+        if (fd >= 0) return fd;
+    }
+    if (orig_openat)
+        return has_mode ? orig_openat(dirfd, pathname, flags, mode)
+                        : orig_openat(dirfd, pathname, flags);
+    return (int)syscall(__NR_openat, dirfd, pathname, flags, mode);
+}
+
+static int sbx_open(const char* pathname, int flags, ...) {
+    mode_t mode = 0;
+    bool has_mode = (flags & (O_CREAT | O_TMPFILE)) != 0;
+    if (has_mode) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
+
+    if (g_nr_active && pathname && sbx_is_pure_read(flags)) {
+        int fd = sbx_spoof_fd(pathname);
+        if (fd >= 0) return fd;
+    }
+    if (orig_open)
+        return has_mode ? orig_open(pathname, flags, mode) : orig_open(pathname, flags);
+    if (orig_openat)
+        return has_mode ? orig_openat(AT_FDCWD, pathname, flags, mode)
+                        : orig_openat(AT_FDCWD, pathname, flags);
+    return (int)syscall(__NR_openat, AT_FDCWD, pathname, flags, mode);
+}
+
+static FILE* sbx_fopen(const char* path, const char* mode) {
+    // Only pure-read opens ("r", "rb", "rt") — never "r+"/"rb+"/"w"/"a".
+    if (g_nr_active && path && mode && mode[0] == 'r' && !strchr(mode, '+')) {
+        int fd = sbx_spoof_fd(path);
+        if (fd >= 0) {
+            FILE* fp = fdopen(fd, "r");
+            if (fp) return fp;
+            ::close(fd);
+        }
+    }
+    if (orig_fopen) return orig_fopen(path, mode);
+    errno = ENOSYS;
+    return nullptr;
+}
+
+// --- install ---------------------------------------------------------------
+static void sbx_reg_lib(Api* api, dev_t dev, ino_t ino) {
+    api->pltHookRegister(dev, ino, "__system_property_get",
+                         reinterpret_cast<void*>(sbx_spg),  reinterpret_cast<void**>(&orig_spg));
+    api->pltHookRegister(dev, ino, "__system_property_read",
+                         reinterpret_cast<void*>(sbx_spr),  reinterpret_cast<void**>(&orig_spr));
+    api->pltHookRegister(dev, ino, "__system_property_read_callback",
+                         reinterpret_cast<void*>(sbx_sprcb), reinterpret_cast<void**>(&orig_sprcb));
+    api->pltHookRegister(dev, ino, "open",
+                         reinterpret_cast<void*>(sbx_open),   reinterpret_cast<void**>(&orig_open));
+    api->pltHookRegister(dev, ino, "openat",
+                         reinterpret_cast<void*>(sbx_openat), reinterpret_cast<void**>(&orig_openat));
+    api->pltHookRegister(dev, ino, "fopen",
+                         reinterpret_cast<void*>(sbx_fopen),  reinterpret_cast<void**>(&orig_fopen));
+    api->pltHookRegister(dev, ino, "open64",
+                         reinterpret_cast<void*>(sbx_open),   reinterpret_cast<void**>(&orig_open));
+    api->pltHookRegister(dev, ino, "openat64",
+                         reinterpret_cast<void*>(sbx_openat), reinterpret_cast<void**>(&orig_openat));
+    api->pltHookRegister(dev, ino, "fopen64",
+                         reinterpret_cast<void*>(sbx_fopen),  reinterpret_cast<void**>(&orig_fopen));
+}
+
+static int sbx_register_across_libs(Api* api) {
+    FILE* f = fopen("/proc/self/maps", "re");
+    if (!f) return 0;
+    std::vector<std::pair<dev_t, ino_t>> seen;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        char* path = strchr(line, '/');
+        if (!path) continue;
+        size_t pl = strlen(path);
+        if (pl && path[pl - 1] == '\n') path[--pl] = '\0';
+        if (pl < 3 || strcmp(path + pl - 3, ".so") != 0) continue;   // file-backed .so only
+        if (strstr(path, "sandboxid")) continue;                     // never hook ourselves
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+        bool dup = false;
+        for (const auto& p : seen)
+            if (p.first == st.st_dev && p.second == st.st_ino) { dup = true; break; }
+        if (dup) continue;
+        seen.push_back(std::make_pair(st.st_dev, st.st_ino));
+        sbx_reg_lib(api, st.st_dev, st.st_ino);
+    }
+    fclose(f);
+    return (int)seen.size();
+}
+
+static void install_native_read_hooks(Api* api) {
+    // Rebuild-free kill switch: companion rewrites the served blob to
+    // SBX_NATIVE_READ=0 when $MODDIR/no_native_read exists (see companion.cpp).
+    if (val("SBX_NATIVE_READ") == "0") { LOGD("L9 disabled via kill switch"); return; }
+
+    // Deterministic, identity-derived content — computed ONCE here (single-threaded,
+    // before any hook goes live) so the hooks only ever read these globals.
+    uint64_t seed = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" + val("ANDROID_ID"));
+    g_boot_id = sbxnr::uuid_from_seed(seed);
+
+    const std::string& pmac = val("WIFI_MAC");   // reuse the shell-persisted MAC if present
+    g_wifi_mac = sbxnr::is_valid_mac(pmac) ? pmac
+                                           : sbxnr::mac_from_seed(seed ^ 0x9E3779B97F4A7C15ULL);
+
+    g_proc_version = sbxnr::synth_proc_version(val("RELEASE"), val("INCREMENTAL"),
+                                               val("BOARD_PLATFORM"), val("HOST"), seed);
+    g_ram_gb     = sbxnr::pixel_ram_gb(val("MODEL"));                 // 0 => derive from real
+    g_cpu_action = sbxnr::cpu_action_for(val("SOC_MANUFACTURER"), val("SOC_MODEL"), g_cpu_repl);
+
+    int libs = sbx_register_across_libs(api);
+    if (libs == 0) { LOGW("L9: no mapped .so to hook — native reads not spoofed"); return; }
+    if (!api->pltHookCommit()) {
+        // Some hooks may have applied; leaving g_nr_active=false means each still
+        // passes through via its (valid) captured orig — real values, no crash.
+        LOGW("L9: pltHookCommit gagal — native reads tak dispoof (nilai asli)");
+        return;
+    }
+    g_nr_active = true;
+    LOGD("L9 aktif (%d lib): boot_id=%s mac=%s ram=%dGB cpu=%d",
+         libs, g_boot_id.c_str(), g_wifi_mac.c_str(), g_ram_gb, g_cpu_action);
 }
 
 struct SbxCrashRec {
@@ -646,6 +965,7 @@ public:
         install_prop_hook(api_, env_);
         install_leak_sensors(api_, env_);
         install_uptime_hook(api_, env_);
+        install_native_read_hooks(api_);
 #ifdef SBX_DEBUG
         for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
