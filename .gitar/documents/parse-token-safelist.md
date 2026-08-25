@@ -48,9 +48,12 @@ Line-level colouring in the Log tab keys off these prefixes:
 ## 4. `identity.prop` key vocabulary — `parseProp()` + consumers
 
 The WebUI reads `identity.prop` as `KEY=VALUE` and looks up these exact keys.
-Renaming a key in the writer (`sandboxid freshen`, `rotate_ids.sh`,
-`helpers.sh identity_persist`) without updating `app.js` drops the field from
-the UI silently.
+Renaming a key in a writer without updating `app.js` drops the field from the UI
+silently. Writers: `autopif.sh device` (builds `device.identity`, copied to
+`identity.prop` at `action.sh:52` — the primary path and the *sole* producer of
+`BOOT_COUNT`, `UPTIME_HUMAN`, `UPTIME_SECONDS`, `FRESH`, `USAGE_PROFILE`,
+`FIRST_BOOT`, `LAST_BOOT`), native `sandboxid freshen`, `rotate_ids.sh`, and
+`helpers.sh identity_persist`.
 
 - **Hero** (`renderHero`, `app.js:284`): `BRAND`, `MARKETNAME`, `MODEL`,
   `DEVICE`, `RELEASE`, `SDK_INT`, `FINGERPRINT`

@@ -38,7 +38,7 @@ typo fix that keeps the parse tokens intact is a **Suggestion**.
 ## Parse-safety when editing copy (Important / Critical)
 
 Before approving any change to a printed line, cross-check
-`@../documents/parse-token-safelist.md`:
+`documents/parse-token-safelist.md`:
 
 - Success banners `OK - persona baru aktif` and `OK - fresh`, the `BRAND :` /
   `MODEL :` label shape, and the `Gagal` / `✗` / `!` failure markers are

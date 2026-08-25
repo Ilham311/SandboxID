@@ -8,9 +8,10 @@ device. Terms used throughout the code and these instructions:
 - **Persona / identity** — a coherent set of device fields (`Build.*`,
   `ro.product.*`, serial, MACs, IDs) written to `identity.prop` and applied.
 - **freshen** — native `sandboxid freshen`: pick a persona from `personas.tsv`
-  (Pixel pool) and write `identity.prop`. The backup path when multibrand fails.
+  (the multi-brand offline-fallback pool) and write `identity.prop`. The backup
+  path when multibrand fails.
 - **multibrand / device** — `autopif.sh device` draws a real-device persona
-  from `devices.tsv` (Samsung/Xiaomi/Poco/Vivo/Oppo/Infinix/Redmi) into
+  from `devices.tsv` (Google/Samsung/Xiaomi/Poco/Vivo/Oppo/Infinix/Redmi) into
   `device.identity`, applied by the native binary. The primary `action.sh` path.
 - **rotate** — `rotate_ids.sh`: regenerate the *shell-layer* IDs (SSAID, GAID,
   Wi-Fi/BT MAC, device name, boot count) to match the persona.

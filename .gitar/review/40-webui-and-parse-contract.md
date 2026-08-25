@@ -2,7 +2,7 @@
 
 The WebUI is a KernelSU/APatch **WebUI** page (`webroot/index.html`, `app.js`,
 `style.css`) that talks to the device only through the root bridge
-`ksu.exec(cmd, "{}", cb)` (`webroot/app.js:48`). Two concerns dominate review
+`ksu.exec(cmd, "{}", cb)` (`webroot/app.js:68`). Two concerns dominate review
 here: **shell-injection through that bridge**, and the **parse-token contract**
 (the WebUI parses script stdout, so copy edits can silently break it).
 

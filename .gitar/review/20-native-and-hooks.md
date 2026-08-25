@@ -55,14 +55,17 @@ PR). Review it as guilty-until-proven-safe.
 
 ## Boot-stage safety
 
-- `apply-boot` (`service.sh`) and `seed` (`post-fs-data.sh`) run during boot. A
-  hang, deadlock, or crash here bootloops the device. Both are gated on a
-  **non-empty `target.txt`** (`service.sh:8`, `post-fs-data.sh:13`) — do not
-  remove that guard, and keep boot-stage work bounded and fail-open.
+- `seed` (`post-fs-data.sh:16`) runs in the **blocking post-fs-data stage** — a
+  hang/deadlock/crash there can hang or bootloop the device (**Critical**).
+  `apply-boot` (`service.sh:10`) runs later, only after `sys.boot_completed=1`
+  (`service.sh:3-4`) — a hang there won't bootloop but leaves props
+  un-/mis-applied; keep it bounded and fail-open. Both are gated on a **non-empty
+  `target.txt`** (`service.sh:8`, `post-fs-data.sh:13`) — do not remove that
+  guard.
 
 ## Build / compiler constraints (`jni/CMakeLists.txt`)
 
-- C++20; release flags `-Os -Wall -Wextra -flto -fvisibility=hidden
+- C++20; key release flags include `-Os -Wall -Wextra -flto -fvisibility=hidden
   -fno-exceptions -fno-rtti` (`:19`). **The main module is `-fno-exceptions
   -fno-rtti`** — do not add `throw`/`try` or RTTI (`typeid`, `dynamic_cast`) to
   it; only the opt-in LSPlant/Dobby subtargets enable exceptions/RTTI (`:46-50`).

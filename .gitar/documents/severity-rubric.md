@@ -28,7 +28,7 @@ request-level.
 ## Important — should fix; may merge with a tracked follow-up
 
 - **Silent WebUI breakage** from the parse-token contract (see
-  `@../documents/parse-token-safelist.md`): a renamed field, dropped tile, or
+  `parse-token-safelist.md`): a renamed field, dropped tile, or
   mis-classified log line — visible wrong state, but not a safety issue.
 - Missing kill-switch / fail-safe on a risky native feature (a runtime toggle
   that no longer disables the code path it guards).
@@ -54,6 +54,7 @@ Prefer **fewer, higher-confidence findings**. This is a small,
 carefully-reasoned codebase (see the "Known limitations" section of the README —
 the authors already document the honest gaps). Do **not** re-report a documented
 limitation as a bug: per-app `ANDROID_ID` needing the disabled L3 hook, the
-`SystemProperties.find()` fast path being unhooked, non-target apps seeing a
-mixed identity, and `/proc/uptime` not being spoofed are all **known and
-intentional**, not findings.
+`SystemProperties.find()` fast path being unhooked, and non-target apps seeing a
+mixed identity are documented there. `/proc/uptime` not being spoofed is likewise
+a known, intentional residual (of the clock-virtualization design), though not
+itself a README-listed limitation. None are findings.

@@ -50,12 +50,16 @@ weakens one is **Critical**.
 
 ## Filesystem, secrets, supply chain
 
-- **Atomic writes**: `identity.prop` / `module.prop` are updated via
-  `helpers.sh identity_persist` (awk + rename) — atomic upsert. A non-atomic
-  in-place rewrite that can be interrupted mid-boot is a corruption finding.
-- **Backups before destructive ops**: the README promises a backup before
-  wiping `WifiConfigStore.xml` and before rotating SSAID. Deleting a settings
-  XML without the documented backup is Important/Critical.
+- **Atomic writes**: `identity.prop` is updated via `helpers.sh identity_persist`
+  (awk-filter + append + rename, `helpers.sh:155-167`) — atomic upsert.
+  (`module.prop` is CI-owned — see rule `release-artifacts-ci-owned`.) A
+  non-atomic in-place rewrite that can be interrupted mid-boot is a corruption
+  finding.
+- **Backups before destructive ops**: the code backs up before deleting a
+  settings XML — SSAID at `rotate_ids.sh:24` (before `rm` at :25) and
+  `WifiConfigStore.xml` at `rotate_ids.sh:120` (before `rm` at :122); README
+  documents the Wi-Fi backup at `README.md:286`. Deleting either XML without its
+  backup is Important/Critical.
 - **`prebuilt/resetprop-rs` is checksum-gated** (`prebuilt/resetprop-rs.sha256`,
   verified in `build.sh`/`customize.sh`). Never bypass or weaken the checksum —
   it is the supply-chain guard for a root binary.
@@ -75,4 +79,6 @@ weakens one is **Critical**.
   module against itself.
 - The honest gaps in README "Known limitations" (per-app `ANDROID_ID` needs the
   disabled L3 hook; `SystemProperties.find()` fast path unhooked; mixed identity
-  for non-targets; `/proc/uptime` not spoofed) are known and intentional.
+  for non-targets) are known and intentional — as is `/proc/uptime` not being
+  spoofed, an intentional residual of the clock-virtualization design (not itself
+  a README-listed item).
