@@ -495,7 +495,7 @@ static int sbx_spg(const char* name, char* value) {
 
 static int sbx_spr(const void* pi, char* name, char* value) {
     int r = orig_spr ? orig_spr(pi, name, value) : -1;
-    if (g_nr_active && name && value) {
+    if (r >= 0 && g_nr_active && name && value) {
         std::string v;
         if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
     }
@@ -521,7 +521,9 @@ static void sbx_sprcb(const void* pi, sbx_prop_cb cb, void* cookie) {
 // --- file-redirect helpers -------------------------------------------------
 static int sbx_make_memfd(const std::string& content) {
 #ifdef __NR_memfd_create
-    int fd = (int)syscall(__NR_memfd_create, "sbx", (unsigned)MFD_CLOEXEC);
+    // Avoid a module-identifying memfd name; readlink(/proc/self/fd/N) still
+    // reveals "/memfd:...", so keep it generic.
+    int fd = (int)syscall(__NR_memfd_create, "", (unsigned)MFD_CLOEXEC);
     if (fd < 0) return -1;
     if (!sandboxid::write_full(fd, content.data(), content.size())) { ::close(fd); return -1; }
     if (::lseek(fd, 0, SEEK_SET) != 0) { ::close(fd); return -1; }
@@ -619,8 +621,8 @@ static int sbx_open(const char* pathname, int flags, ...) {
 }
 
 static FILE* sbx_fopen(const char* path, const char* mode) {
-    // Only pure-read opens ("r", "rb", "rt") — never "r+"/"w"/"a".
-    if (g_nr_active && path && mode && mode[0] == 'r' && mode[1] != '+') {
+    // Only pure-read opens ("r", "rb", "rt") — never "r+"/"rb+"/"w"/"a".
+    if (g_nr_active && path && mode && mode[0] == 'r' && !strchr(mode, '+')) {
         int fd = sbx_spoof_fd(path);
         if (fd >= 0) {
             FILE* fp = fdopen(fd, "r");
@@ -646,6 +648,12 @@ static void sbx_reg_lib(Api* api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "openat",
                          reinterpret_cast<void*>(sbx_openat), reinterpret_cast<void**>(&orig_openat));
     api->pltHookRegister(dev, ino, "fopen",
+                         reinterpret_cast<void*>(sbx_fopen),  reinterpret_cast<void**>(&orig_fopen));
+    api->pltHookRegister(dev, ino, "open64",
+                         reinterpret_cast<void*>(sbx_open),   reinterpret_cast<void**>(&orig_open));
+    api->pltHookRegister(dev, ino, "openat64",
+                         reinterpret_cast<void*>(sbx_openat), reinterpret_cast<void**>(&orig_openat));
+    api->pltHookRegister(dev, ino, "fopen64",
                          reinterpret_cast<void*>(sbx_fopen),  reinterpret_cast<void**>(&orig_fopen));
 }
 
