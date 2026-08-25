@@ -334,6 +334,17 @@ extern "C" void sandboxid_companion(int client) {
                     }
                     LOGD("no_uptime aktif -> UPTIME_SECONDS/UPTIME_HUMAN dipaksa 0 utk '%s'", pkg.c_str());
                 }
+
+                std::string nrkill = std::string(sandboxid::MODDIR) + "/no_native_read";
+                struct stat nrst;
+                if (::stat(nrkill.c_str(), &nrst) == 0) {
+                    // Native/file read hooks (L9) opt out when SBX_NATIVE_READ=0.
+                    // g_id parsing is last-wins, so appending overrides any prior value
+                    // without a rebuild — the shell never emits this key itself.
+                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
+                    d += "SBX_NATIVE_READ=0\n";
+                    LOGD("no_native_read aktif -> SBX_NATIVE_READ=0 utk '%s'", pkg.c_str());
+                }
             }
             LOGD("ACCEPT pkg='%s' (%zu bytes)", pkg.c_str(), d.size());
 
