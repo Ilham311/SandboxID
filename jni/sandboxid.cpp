@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "config.hpp"
+#include "sbx_carrier.hpp"
 #include "sbx_native_read.hpp"   // hex_from_seed/fnv1a for the deterministic VBMeta digest
 #include <sys/system_properties.h>
 
@@ -171,6 +172,7 @@ struct Identity {
             "BOOTLOADER","HOST","USER","TYPE","TAGS",
             "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
             "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
+            "GSM_OPERATOR_NUMERIC","GSM_OPERATOR_ALPHA","GSM_OPERATOR_ISO","GSM_SIM_STATE",
             "VBMETA_DIGEST",
         };
         std::string out;
@@ -577,6 +579,8 @@ static void apply_native(const Identity& id) {
         {"ro.odm.build.fingerprint",           FP},
         {"ro.product.build.fingerprint",       FP},
         {"ro.system_ext.build.fingerprint",    FP},
+        {"ro.vendor_dlkm.build.fingerprint",   FP},
+        {"ro.odm_dlkm.build.fingerprint",      FP},
 
         {"ro.product.model",                   MODEL},
         {"ro.product.system.model",            MODEL},
@@ -784,6 +788,8 @@ static void generate_mount_files(const Identity& id) {
     add("ro.odm.build.fingerprint",           FP);
     add("ro.product.build.fingerprint",       FP);
     add("ro.system_ext.build.fingerprint",    FP);
+    add("ro.vendor_dlkm.build.fingerprint",   FP);
+    add("ro.odm_dlkm.build.fingerprint",      FP);
     add("ro.product.model",                   MODEL);
     add("ro.product.brand",                   BRAND);
     add("ro.product.manufacturer",            MANUFACTURER);
@@ -949,6 +955,32 @@ static Identity load_identity() {
     return id;
 }
 
+// Merge the persisted carrier/SIM selection (carrier.conf) into an identity.
+// carrier.conf is a small KV file written by the `carrier` command / WebUI:
+//     NAME=Telkomsel
+//     MCC=510
+//     MNC=10
+//     ISO=id
+//     PHANTOM=0|1
+// This function OWNS the carrier keys in `id`: it sets them when a valid
+// operator is configured, and erases them otherwise so serialize() drops them
+// and the module falls back to the built-in default (VAL_DEFAULTS). It runs
+// wherever identity.prop is (re)written from a freshly built identity — freshen
+// and seed's fresh-generate branch — so a chosen carrier survives persona
+// rotation. (The shell `carrier` command applies a selection immediately via
+// identity_persist; apply-boot only re-applies device props and never rewrites
+// identity.prop, so it needs no carrier merge.)
+// PHANTOM=1 additionally forces gsm.sim.state=LOADED, making an empty slot
+// report a SIM present (device-info apps that read the prop). Returns true when
+// a carrier was applied. NOTE: getSimState()/SubscriptionInfo are binder-backed
+// on modern Android and are NOT covered by this props-layer path (needs L3).
+static bool merge_carrier(Identity& id) {
+    // Pure parse + key-apply lives in sbx_carrier.hpp (host-tested). Here we only
+    // supply the file contents and the Identity's kv map.
+    sbxcarrier::CarrierSel sel = sbxcarrier::parse_carrier_conf(read_file(CARRIER_CONF));
+    return sbxcarrier::apply_carrier(id.kv, sel);
+}
+
 static bool ensure_root() {
     if (geteuid() != 0) {
         fprintf(stderr, "! sandboxid must run as root. Use: su -c sandboxid <cmd>\n");
@@ -1002,6 +1034,9 @@ static int cmd_freshen() {
     } else {
         id = gen_identity();
     }
+    // Re-apply any persisted carrier/SIM selection so it survives the persona
+    // regeneration above (freshen builds a brand-new identity from scratch).
+    merge_carrier(id);
     if (!atomic_write(IDENTITY_FILE, id.serialize())) {
         fprintf(stderr, "! failed to write identity.prop\n");
         return 1;
@@ -1066,6 +1101,7 @@ static int cmd_seed() {
     } else {
         DBG("seed: no identity yet, generating fresh");
         id = gen_identity();
+        merge_carrier(id);  // honor a pre-seeded carrier.conf on first boot
         if (!atomic_write(IDENTITY_FILE, id.serialize())) {
             fprintf(stderr, "! seed: failed to write %s\n", IDENTITY_FILE);
             return 1;

@@ -28,6 +28,14 @@ else
     ui_print "- Menyiapkan target.txt (kosong dulu; isi nama paket aplikasi untuk mengaktifkan)"
 fi
 
+# Pilihan operator/SIM (carrier.conf) dibuat saat runtime, tidak ikut di zip.
+# Pertahankan lintas upgrade supaya operator pilihan tidak hilang saat pasang ulang.
+LIVE_CARRIER="/data/adb/modules/sandboxid/carrier.conf"
+if [ -s "$LIVE_CARRIER" ]; then
+    ui_print "- carrier.conf (pilihan operator) dari instalasi sebelumnya dipertahankan"
+    cp -f "$LIVE_CARRIER" "$MODPATH/carrier.conf"
+fi
+
 if [ -f "$MODPATH/debug_variant" ]; then
     ui_print "- ! Varian DEBUG terdeteksi"
     ui_print "-   Auto-log aktif pada boot berikutnya."
@@ -60,6 +68,8 @@ set_perm $MODPATH/service.sh                0 0 0755
 [ -f $MODPATH/autopif.sh ] && set_perm $MODPATH/autopif.sh 0 0 0755
 [ -f $MODPATH/personas.tsv ] && set_perm $MODPATH/personas.tsv 0 0 0644
 [ -f $MODPATH/devices.tsv ] && set_perm $MODPATH/devices.tsv 0 0 0644
+[ -f $MODPATH/carriers.tsv ] && set_perm $MODPATH/carriers.tsv 0 0 0644
+[ -f $MODPATH/carrier.conf ] && set_perm $MODPATH/carrier.conf 0 0 0644
 [ -f $MODPATH/target.txt ] && set_perm $MODPATH/target.txt 0 0 0644
 
 mkdir -p "$MODPATH/backups"

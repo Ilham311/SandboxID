@@ -31,6 +31,7 @@
 <nav id="nav">
   <button class="tab active" data-tab="persona">Perangkat</button>
   <button class="tab" data-tab="rotate">Rotasi</button>
+  <button class="tab" data-tab="sim">SIM</button>
   <button class="tab" data-tab="targets">Target</button>
   <button class="tab" data-tab="selftest">Uji</button>
   <button class="tab" data-tab="log">Log</button>
@@ -55,6 +56,27 @@
     </div>
     <div class="rot-note">SSAID &middot; GAID &middot; WiFi MAC &middot; BT MAC &middot; nama &middot; boot count &mdash; selalu aktif, tidak bisa dimatikan.</div>
     <div class="cards" id="rotCards"></div>
+  </section>
+
+  <section id="sim" class="page">
+    <div class="row spread">
+      <div class="hint">Pilih operator yang dilihat aplikasi. Berlaku saat aplikasi target dibuka lagi.</div>
+      <span class="chip" id="simState">&mdash;</span>
+    </div>
+    <div id="simCurrent" class="kv"></div>
+    <div class="row">
+      <select id="simCountry" aria-label="Negara"><option value="">Negara&hellip;</option></select>
+      <select id="simCarrier" aria-label="Operator"><option value="">Operator&hellip;</option></select>
+    </div>
+    <label class="row simrow" for="simPhantom">
+      <input type="checkbox" id="simPhantom">
+      <span>Mode Tambah SIM &mdash; slot kosong ikut melaporkan SIM ada</span>
+    </label>
+    <div class="row spread">
+      <button id="simApply" class="primary sm">Terapkan</button>
+      <button id="simOff" class="ghost sm">Nonaktifkan</button>
+    </div>
+    <div class="hint">Kode operator, nama, dan negara dilaporkan konsisten. Catatan: status/kehadiran SIM di sebagian aplikasi dibaca lewat layanan telepon (binder) dan belum dicakup lapisan properti ini.</div>
   </section>
 
   <section id="targets" class="page">

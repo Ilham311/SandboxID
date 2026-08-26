@@ -5,6 +5,8 @@ const BIN = `${MODDIR}/bin/sandboxid`;
 const ROTATE_SH = `${MODDIR}/rotate_ids.sh`;
 const IDENTITY = `${MODDIR}/identity.prop`;
 const TARGETS = `${MODDIR}/target.txt`;
+const CARRIERS = `${MODDIR}/carriers.tsv`;
+const CARRIER_CONF = `${MODDIR}/carrier.conf`;
 const SELFTEST_SH = `${MODDIR}/selftest.sh`;
 
 const ROTATE_LOG = `${MODDIR}/debug/rotate.log`;
@@ -227,6 +229,7 @@ function moveIndicator() {
 function onTab(id) {
   if (id === 'persona') loadPersona();
   else if (id === 'rotate') loadRotate();
+  else if (id === 'sim') loadSim();
   else if (id === 'targets') loadTargets();
   else if (id === 'selftest') loadSelftest();
   else if (id === 'log') loadLog();
@@ -398,6 +401,122 @@ async function rotateOne(key, btn) {
 document.getElementById('rotAll').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
   const r = await run(rotateCmd('all'));
   finishRotate(r, 'Rotasi semua');
+}));
+
+// ---- Tab SIM / operator ---------------------------------------------------
+// carriers.tsv (name<TAB>mcc<TAB>mnc<TAB>iso) -> dua dropdown (negara, operator).
+// "Terapkan" memanggil `rotate_ids.sh carrier "MCC|MNC|NAMA|ISO|PHANTOM"`, yang
+// menulis carrier.conf + key GSM_* di identity.prop (berlaku saat app dibuka lagi).
+let SIM_DB = null;
+
+function parseCarriersTsv(text) {
+  const rows = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t[0] === '#') continue;
+    const f = line.split('\t');
+    if (f.length < 4) continue;
+    const name = f[0].trim(), mcc = f[1].trim(), mnc = f[2].trim(), iso = f[3].trim();
+    if (!name || !mcc || !mnc) continue;
+    rows.push({ name, mcc, mnc, iso });
+  }
+  return rows;
+}
+
+function simFillCarriers(current) {
+  const iso = document.getElementById('simCountry').value;
+  const carSel = document.getElementById('simCarrier');
+  const list = SIM_DB.filter(r => !iso || r.iso === iso)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  carSel.innerHTML = '<option value="">Operator…</option>' +
+    list.map(r => {
+      const val = `${r.mcc}|${r.mnc}|${r.name}|${r.iso}`;
+      return `<option value="${escapeHtml(val)}">${escapeHtml(r.name)} · ${escapeHtml(r.mcc + r.mnc)}</option>`;
+    }).join('');
+  if (current && current.MCC && current.MNC) {
+    const want = `${current.MCC}|${current.MNC}|`;
+    for (const opt of carSel.options) {
+      if (opt.value.startsWith(want)) { carSel.value = opt.value; break; }
+    }
+  }
+}
+
+function simFill(current) {
+  const cSel = document.getElementById('simCountry');
+  const isos = Array.from(new Set(SIM_DB.map(r => r.iso).filter(Boolean))).sort();
+  cSel.innerHTML = '<option value="">Negara…</option>' +
+    isos.map(i => `<option value="${escapeHtml(i)}">${escapeHtml(i.toUpperCase())}</option>`).join('');
+  const curIso = (current && current.ISO) ? current.ISO.toLowerCase() : '';
+  if (curIso && isos.includes(curIso)) cSel.value = curIso;
+  simFillCarriers(current);
+}
+
+function renderSimCurrent(cc) {
+  const el = document.getElementById('simCurrent');
+  const st = document.getElementById('simState');
+  if (!cc || !cc.MCC) {
+    st.textContent = 'Bawaan';
+    st.className = 'chip';
+    el.className = 'kv';
+    el.innerHTML = '<div class="empty">Belum ada operator dipilih — pakai bawaan.</div>';
+    return;
+  }
+  st.textContent = (cc.PHANTOM === '1') ? 'Aktif · phantom' : 'Aktif';
+  st.className = 'chip chip-on';
+  const rows = [
+    ['Operator', cc.NAME || ''],
+    ['Kode (MCC+MNC)', (cc.MCC || '') + (cc.MNC || '')],
+    ['Negara', (cc.ISO || '').toUpperCase()],
+    ['Mode Tambah SIM', cc.PHANTOM === '1' ? 'Ya' : 'Tidak'],
+  ];
+  el.className = 'kv in';
+  el.innerHTML = rows.map(([k, v]) => v !== ''
+    ? `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>` : '').join('');
+}
+
+async function loadSim() {
+  const el = document.getElementById('simCurrent');
+  el.className = 'kv';
+  el.innerHTML = skKv(3);
+  if (!SIM_DB || !SIM_DB.length) {
+    const r = await run(`cat ${shq(CARRIERS)} 2>/dev/null || true`);
+    SIM_DB = (r.ok && r.out.trim()) ? parseCarriersTsv(r.out) : [];
+  }
+  if (!SIM_DB.length) {
+    document.getElementById('simState').textContent = '—';
+    el.className = 'kv';
+    el.innerHTML = '<div class="empty">carriers.tsv tidak terbaca.</div>';
+    return;
+  }
+  const rc = await run(`cat ${shq(CARRIER_CONF)} 2>/dev/null || true`);
+  const cc = (rc.ok && rc.out.trim()) ? parseProp(rc.out) : {};
+  simFill(cc);
+  document.getElementById('simPhantom').checked = (cc.PHANTOM === '1');
+  renderSimCurrent(cc);
+}
+
+function carrierCmd(arg) {
+  return `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
+    `{ printf '[%s] ==> carrier ${arg.split('|')[0] === 'off' ? 'off' : 'set'} (webui)\\n' "$(date '+%F %T')"; ` +
+    `sh ${shq(ROTATE_SH)} carrier ${shq(arg)} 2>&1; } | tee -a ${shq(ROTATE_LOG)}`;
+}
+
+document.getElementById('simCountry').addEventListener('change', () => simFillCarriers(null));
+
+document.getElementById('simApply').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
+  const sel = document.getElementById('simCarrier').value;
+  if (!sel) { toast('Pilih operator dulu', { kind: 'warn' }); return; }
+  const phantom = document.getElementById('simPhantom').checked ? '1' : '0';
+  const r = await run(carrierCmd(`${sel}|${phantom}`));
+  finishRotate(r, 'SIM / operator');
+  loadSim();
+}));
+
+document.getElementById('simOff').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
+  const r = await run(carrierCmd('off'));
+  finishRotate(r, 'SIM / operator');
+  document.getElementById('simPhantom').checked = false;
+  loadSim();
 }));
 
 async function loadTargets() {

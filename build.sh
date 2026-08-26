@@ -91,6 +91,7 @@ build_variant() {
   [ -f selftest.sh ] && cp selftest.sh "$PKG/"
   [ -f personas.tsv ] && cp personas.tsv "$PKG/"
   [ -f devices.tsv ] && cp devices.tsv "$PKG/"
+  [ -f carriers.tsv ] && cp carriers.tsv "$PKG/"
   [ -f autopif.sh ] && cp autopif.sh "$PKG/"
   [ -d webroot ] && cp -R webroot "$PKG/"
 
