@@ -76,3 +76,32 @@ no surrounding quotes or reordering that a parser might choke on. `id` must stay
 `sandboxid` (lowercase) — it is the on-device module path
 `/data/adb/modules/sandboxid` hardcoded in `app.js:3` and every script's
 `MODDIR`.
+
+## 6. Self-check grammar — `parseSelftest()` (`webroot/app.js`)
+
+The **Uji** tab runs `selftest.sh` and parses its stdout. `selftest.sh` is
+read-only and prints ONLY these two line shapes; `app.js` matches them exactly:
+
+| Pattern in app.js | Produced by `selftest.sh` | Meaning |
+|---|---|---|
+| `/^SELFTEST\s+(\S+)\s+(PASS\|WARN\|FAIL\|INFO)\s*(.*)$/` | every `emit` line | one check → result card |
+| `/^SELFTEST\s+SUMMARY\s+(.*)$/` then `/(\w+)=(\d+)/g` | the final `SELFTEST SUMMARY pass=N warn=M fail=K info=J` | summary chip |
+
+Contract rules:
+
+- The leading literal token `SELFTEST` and the four status words
+  `PASS`/`WARN`/`FAIL`/`INFO` are fixed. Renaming any of them, or translating
+  them (e.g. to `LULUS`), silently drops every card.
+- `<category>` is a single **space-free** token. `app.js` maps known tokens
+  (`identitas`, `vbmeta`, `build`, `selinux`, `rom`, `root`, `mount`, `hosts`,
+  `hooks`) to friendly labels in `ST_CAT` and falls back to the raw token — so a
+  new category still renders, just unlabelled until added to `ST_CAT`.
+- The summary keys parsed are `pass`/`warn`/`fail`/`info` via a generic
+  `key=number` scan, so extra keys are harmless and order-independent, but
+  renaming these four blanks that field in the chip.
+- **Semantics that must not drift:** per-app effects (property hooks L2/L9,
+  `/proc`,`/sys` read redirects, `build.prop` binds, the opt-in mount-trace
+  hider) and device-global root traces (su, manager dirs, mounts) are reported
+  `INFO`, never `FAIL` — a root shell cannot see inside a target app's hook/mount
+  namespace, so grading them FAIL would be a false negative for the user. Only
+  device-wide, root-shell-visible properties are graded PASS/WARN/FAIL.

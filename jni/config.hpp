@@ -32,9 +32,16 @@ inline constexpr char CARRIER_CONF[]  = "/data/adb/modules/sandboxid/carrier.con
 inline constexpr char CARRIERS_FILE[] = "/data/adb/modules/sandboxid/carriers.tsv";
 inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetprop-rs";
 
+// Opt-in flag for the DEFAULT-OFF root/mount-trace hider (F6). The user creates
+// this file (`touch`) to enable it; absent => hider never runs. The app process
+// can't stat /data/adb, so the companion checks this and mirrors it into the served
+// blob as SBX_HIDE=1 (see companion.cpp), exactly like the no_native_read switch.
+inline constexpr char ENABLE_HIDE[]   = "/data/adb/modules/sandboxid/enable_hide";
+
 enum Cmd : uint8_t {
     CMD_GET_IDENTITY = 2,
     CMD_DO_MOUNTS    = 3,
+    CMD_DO_HIDE      = 4,   // opt-in root/mount-trace hider (F6); gated by ENABLE_HIDE
 };
 
 inline constexpr uint32_t MAX_IDENTITY_BLOB = 64u * 1024u;
@@ -92,6 +99,25 @@ inline constexpr KV STATIC_PROP_DEFAULTS[] = {
     {"dalvik.vm.isa.arm.features",   "default"},
     {"dalvik.vm.heapsize",           "512m"},
     {"ro.build.version.preview_sdk", "0"},
+
+    // Verified-boot / VBMeta coherence (F1) + SELinux enforcing (F3a). Fixed values
+    // for a locked, verified, non-debuggable retail device. The AVB digest is the
+    // one dynamic member (per-identity) and is wired via prop_to_identity_map, not
+    // here. Technique: reveny/Android-VBMeta-Fixer (MIT). These are hardcoded in
+    // three coordinated places -- here (per-app hooks), apply_native rp[]
+    // (device-wide resetprop), and generate_mount_files (build.prop overlay) -- so
+    // hook readers, property-service readers, and file-parsers all agree.
+    {"ro.boot.verifiedbootstate",       "green"},
+    {"ro.boot.vbmeta.device_state",     "locked"},
+    {"ro.boot.flash.locked",            "1"},
+    {"ro.boot.veritymode",              "enforcing"},
+    {"ro.boot.vbmeta.hash_alg",         "sha256"},
+    {"ro.boot.vbmeta.avb_version",      "1.0"},
+    {"ro.boot.vbmeta.invalidate_on_error", "yes"},
+    {"ro.secure",                       "1"},
+    {"ro.debuggable",                   "0"},
+    {"ro.build.selinux",                "1"},
+    {"sys.oem_unlock_allowed",          "0"},
 };
 inline constexpr size_t STATIC_PROP_DEFAULTS_N =
     sizeof(STATIC_PROP_DEFAULTS) / sizeof(STATIC_PROP_DEFAULTS[0]);

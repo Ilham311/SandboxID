@@ -26,6 +26,7 @@
 #include <time.h>
 #include <android/log.h>
 #include "config.hpp"
+#include "sbx_mountinfo.hpp"   // pure select_umount_targets() for the opt-in hider (F6)
 
 #define LOG_TAG "SandboxIDCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -212,6 +213,122 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
     return r.ok;
 }
 
+// ---- F6: opt-in root / mount-trace hider -----------------------------------
+// DEFAULT-OFF (gated by ENABLE_HIDE + SBX_HIDE in the served blob). Modeled on
+// do_mounts_via_fork: a single forked child setns() into the target's mount ns,
+// isolates propagation (MS_SLAVE|MS_REC), then detaches root-manager traces the
+// detector app would otherwise see. The risky "which mounts are traces?" call is
+// the PURE, host-tested sbxmnt::select_umount_targets() — it never selects our
+// own persona binds, MODDIR, /data, or a bare partition root (is_protected()).
+// Technique credit: snake-4/Zygisk-Assistant (MIT); we deliberately diverge (no
+// unshare-strip / setresuid PLT hooks, narrow target set) — see CREDITS.md.
+struct HideResult {
+    uint32_t detached = 0, fail = 0, candidates = 0;
+    int32_t  ns_open_errno    = 0;
+    int32_t  setns_errno      = 0;
+    int32_t  slave_errno      = 0;
+    int32_t  mountinfo_errno  = 0;
+    int32_t  first_fail_errno = 0;
+};
+
+static uint32_t do_hide_via_fork(uint32_t target_pid) {
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) {
+        LOGE("hide: pipe failed errno=%d", errno);
+        return 0;
+    }
+
+    pid_t child = ::fork();
+    if (child < 0) {
+        LOGE("hide: fork failed errno=%d", errno);
+        ::close(pipefd[0]); ::close(pipefd[1]);
+        return 0;
+    }
+
+    if (child == 0) {
+        // CHILD — MUST NOT call liblog here (fork-in-possibly-threaded-proc: liblog
+        // can deadlock on an internal lock/socket). Report only via the pipe struct.
+        ::close(pipefd[0]);
+        HideResult r;
+
+        char path[64];
+        ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
+        int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (tgt_ns < 0) {
+            r.ns_open_errno = errno;
+        } else if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
+            r.setns_errno = errno;
+            ::close(tgt_ns);
+        } else {
+            // Isolate propagation so our detaches never escape back to the host ns.
+            if (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) != 0)
+                r.slave_errno = errno;
+
+            // Now that we've setns'd, /proc/self/mountinfo IS the target's mount
+            // table — exactly the view a detector running inside the app would read.
+            std::string mi = read_file("/proc/self/mountinfo");
+            if (mi.empty()) {
+                r.mountinfo_errno = errno ? errno : ENOENT;
+            } else {
+                std::vector<std::string> targets = sbxmnt::select_umount_targets(mi);
+                r.candidates = (uint32_t)targets.size();
+                // Reverse file order (children before parents) is baked into the
+                // selector; lazy MNT_DETACH so busy mounts still unhook cleanly.
+                for (const auto& mp : targets) {
+                    if (::umount2(mp.c_str(), MNT_DETACH) == 0) {
+                        r.detached++;
+                    } else {
+                        if (!r.first_fail_errno) r.first_fail_errno = errno;
+                        r.fail++;
+                    }
+                }
+            }
+            ::close(tgt_ns);
+        }
+
+        sandboxid::write_full(pipefd[1], &r, sizeof(r));
+        ::close(pipefd[1]);
+        ::_exit(0);
+    }
+
+    ::close(pipefd[1]);
+    HideResult r;
+    bool got = sandboxid::read_full(pipefd[0], &r, sizeof(r));
+    ::close(pipefd[0]);
+
+    int status = 0;
+    ::waitpid(child, &status, 0);
+
+    if (!got) {
+        LOGE("hide child for pid=%u produced no result (crashed?)", target_pid);
+        return 0;
+    }
+    if (r.ns_open_errno) {
+        LOGE("hide pid=%u: open /proc/%u/ns/mnt failed errno=%d", target_pid, target_pid, r.ns_open_errno);
+        return 0;
+    }
+    if (r.setns_errno) {
+        LOGE("hide pid=%u: setns failed errno=%d", target_pid, r.setns_errno);
+        return 0;
+    }
+    if (r.slave_errno) {
+        LOGW("hide pid=%u: MS_SLAVE gagal errno=%d — detach bisa bocor ke host ns!",
+             target_pid, r.slave_errno);
+    }
+    if (r.mountinfo_errno) {
+        LOGE("hide pid=%u: baca /proc/self/mountinfo gagal errno=%d", target_pid, r.mountinfo_errno);
+        return 0;
+    }
+    if (r.fail) {
+        LOGW("hide pid=%u: %u detach GAGAL (first errno=%d) dari %u kandidat [%s]",
+             target_pid, r.fail, r.first_fail_errno, r.candidates, SBX_VARIANT_TAG);
+    }
+    LOGI("hide pid=%u: %u detached, %u fail, %u candidate(s) [%s]",
+         target_pid, r.detached, r.fail, r.candidates, SBX_VARIANT_TAG);
+
+    return r.detached;
+}
+
 static void watch_target_death(uint32_t pid, int client_fd) {
     pid_t f1 = ::fork();
     if (f1 < 0) return;
@@ -345,6 +462,17 @@ extern "C" void sandboxid_companion(int client) {
                     d += "SBX_NATIVE_READ=0\n";
                     LOGD("no_native_read aktif -> SBX_NATIVE_READ=0 utk '%s'", pkg.c_str());
                 }
+
+                if (::stat(sandboxid::ENABLE_HIDE, &nrst) == 0) {
+                    // Opt-in root/mount-trace hider (F6). The app can't stat /data/adb,
+                    // so — exactly like SBX_NATIVE_READ — we mirror the flag into the
+                    // served blob. main.cpp reads SBX_HIDE and asks the companion
+                    // (CMD_DO_HIDE) to detach root traces inside the app's mount ns.
+                    // Last-wins parse => appending overrides without a rebuild.
+                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
+                    d += "SBX_HIDE=1\n";
+                    LOGD("enable_hide aktif -> SBX_HIDE=1 utk '%s'", pkg.c_str());
+                }
             }
             LOGD("ACCEPT pkg='%s' (%zu bytes)", pkg.c_str(), d.size());
 
@@ -373,6 +501,41 @@ extern "C" void sandboxid_companion(int client) {
             }
             uint32_t ok = do_mounts_via_fork(pid, client);
             if (!sandboxid::write_full(client, &ok, sizeof(ok))) break;
+
+        } else if (cmd == sandboxid::CMD_DO_HIDE) {
+            uint32_t pid = 0;
+            if (!sandboxid::read_full(client, &pid, sizeof(pid))) break;
+            if (pid == 0) {
+                uint32_t z = 0;
+                sandboxid::write_full(client, &z, sizeof(z));
+                break;
+            }
+
+            // Same fail-closed SO_PEERCRED gate as CMD_DO_MOUNTS: the caller must be
+            // the very root process we're about to act on (its own specialize path).
+            bool authorized = have_peer && peer.uid == 0 && (pid_t)pid == peer.pid;
+            if (!authorized) {
+                LOGE("DO_HIDE DITOLAK: have_peer=%d peer.uid=%d peer.pid=%d target pid=%u "
+                     "[SO_PEERCRED fail-closed]",
+                     (int)have_peer, have_peer ? peer.uid : -1,
+                     have_peer ? peer.pid : -1, pid);
+                uint32_t z = 0;
+                sandboxid::write_full(client, &z, sizeof(z));
+                break;
+            }
+
+            // Re-check the opt-in flag at action time: the blob's SBX_HIDE may be
+            // stale (flag removed after the app read its identity). Absent => no-op.
+            struct stat hst{};
+            if (::stat(sandboxid::ENABLE_HIDE, &hst) != 0) {
+                LOGD("DO_HIDE: enable_hide hilang -> no-op utk pid=%u", pid);
+                uint32_t z = 0;
+                sandboxid::write_full(client, &z, sizeof(z));
+                continue;
+            }
+
+            uint32_t n = do_hide_via_fork(pid);
+            if (!sandboxid::write_full(client, &n, sizeof(n))) break;
 
         } else {
             LOGD("unknown cmd=%u, closing", cmd);

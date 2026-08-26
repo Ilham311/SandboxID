@@ -8,6 +8,7 @@
 // main.cpp and can only be verified on-device after a CI rebuild).
 
 #include "../jni/sbx_native_read.hpp"
+#include "../jni/sbx_mountinfo.hpp"
 
 #include <cassert>
 #include <cstdio>
@@ -249,6 +250,120 @@ static void test_classify() {
           "identity file not matched");
 }
 
+static void test_hex_from_seed() {
+    uint64_t seed = fnv1a("google/husky/husky:14/AP1A.240505.004/11583682:user/release-keys");
+    // vbmeta digest is a 32-byte SHA-256 => 64 lowercase-hex chars.
+    std::string d1 = hex_from_seed(seed, 32);
+    std::string d2 = hex_from_seed(seed, 32);
+    CHECK(d1.size() == 64, "hex_from_seed(32) is 64 chars");
+    CHECK(is_hexlc(d1), "hex_from_seed is lowercase hex");
+    CHECK(d1 == d2, "hex_from_seed deterministic for same seed");
+    CHECK(hex_from_seed(fnv1a("other-identity"), 32) != d1,
+          "hex_from_seed differs for different seed");
+    CHECK(hex_from_seed(seed, 8).size() == 16, "hex_from_seed(8) is 16 chars");
+    CHECK(hex_from_seed(seed, 0).empty(), "hex_from_seed(0) is empty");
+    // prefix stability: first 16 bytes of the 32-byte expansion match the 16-byte one.
+    CHECK(hex_from_seed(seed, 16) == d1.substr(0, 32),
+          "hex_from_seed prefix stable across lengths");
+}
+
+static void test_selinux() {
+    CHECK(classify("/sys/fs/selinux/enforce") == SELINUX_ENFORCE, "selinux enforce classify");
+    CHECK(classify("/sys/fs/selinux/enforcex") == NONE, "selinux enforce exact-match only");
+    CHECK(classify("/sys/fs/selinux/policy") == NONE, "selinux policy not matched");
+    CHECK(classify("/sys/fs/selinux/enforce/x") == NONE, "selinux enforce subpath not matched");
+    std::string c = selinux_enforce_content();
+    CHECK(c == "1", "selinux enforce content is exactly \"1\"");
+    CHECK(c.size() == 1, "selinux enforce content is 1 byte (no trailing newline)");
+}
+
+static void test_hide_prop() {
+    // emulator / qemu tells -> absent
+    CHECK(is_emulator_prop("ro.kernel.qemu"), "ro.kernel.qemu is emulator");
+    CHECK(is_emulator_prop("ro.boot.qemu"), "ro.boot.qemu is emulator");
+    CHECK(is_emulator_prop("qemu.hw.mainkeys"), "qemu.hw.mainkeys is emulator");
+    CHECK(is_emulator_prop("qemu.sf.lcd_density"), "qemu. prefix is emulator");
+    CHECK(is_emulator_prop("ro.boot.qemu.avd_name"), "ro.boot.qemu. prefix is emulator");
+    CHECK(is_emulator_prop("ro.kernel.qemu.gles"), "ro.kernel.qemu.gles is emulator");
+    CHECK(is_emulator_prop("init.svc.qemud"), "init.svc.qemud is emulator");
+    CHECK(!is_emulator_prop("ro.product.model"), "real product prop not emulator");
+    CHECK(!is_emulator_prop("ro.hardware"), "ro.hardware must NOT be blanked");
+    CHECK(!is_emulator_prop("ro.hardware.egl"), "ro.hardware.egl must NOT be blanked");
+    CHECK(!is_emulator_prop(""), "empty prop not emulator");
+    CHECK(!is_emulator_prop(nullptr), "null prop not emulator");
+
+    // custom-ROM / LineageOS tells -> absent
+    CHECK(is_custom_rom_prop("ro.lineage.version"), "ro.lineage.* is custom rom");
+    CHECK(is_custom_rom_prop("lineage.updater.uri"), "lineage.* is custom rom");
+    CHECK(is_custom_rom_prop("ro.modversion"), "ro.modversion is custom rom");
+    CHECK(is_custom_rom_prop("ro.cm.version"), "ro.cm.version is custom rom");
+    CHECK(is_custom_rom_prop("persist.sys.lineage.foo"), "persist.sys.lineage.* is custom rom");
+    CHECK(!is_custom_rom_prop("ro.build.version.sdk"), "sdk prop not custom rom");
+    CHECK(!is_custom_rom_prop("ro.cmdline"), "ro.cmdline not custom rom (ro.cm. must be dotted)");
+    CHECK(!is_custom_rom_prop(nullptr), "null prop not custom rom");
+
+    // combined gate
+    CHECK(should_hide_prop("qemu.hw.mainkeys"), "should_hide covers emulator");
+    CHECK(should_hide_prop("ro.lineage.version"), "should_hide covers custom rom");
+    CHECK(!should_hide_prop("ro.product.brand"), "should_hide leaves normal props");
+}
+
+static bool vec_has(const std::vector<std::string>& v, const char* s) {
+    for (const auto& e : v) if (e == s) return true;
+    return false;
+}
+
+static void test_mountinfo() {
+    using namespace sbxmnt;
+
+    // Direct parse of one row incl. optional fields (shared:2 master:1).
+    MountRow r;
+    bool ok = parse_mountinfo_line(
+        "50 30 0:33 / /data/adb/magisk rw,relatime shared:2 master:1 - ext4 /dev/block/dm-1 rw", r);
+    CHECK(ok, "mountinfo line parses with optional fields");
+    CHECK(r.mount_point == "/data/adb/magisk", "parsed mount point");
+    CHECK(r.fstype == "ext4", "parsed fstype after separator");
+    CHECK(r.source == "/dev/block/dm-1", "parsed source after fstype");
+    CHECK(!parse_mountinfo_line("garbage short line", r), "short line rejected");
+    CHECK(!parse_mountinfo_line("", r), "empty line rejected");
+
+    // File order: two protected roots, three real traces, two of OUR overlays, one
+    // unrelated mount, one malformed line (must all be handled).
+    std::string mi =
+        "10 1 0:1 / / rw shared:1 - ext4 /dev/root rw\n"
+        "30 10 0:21 / /data rw - ext4 /dev/block/dm-2 rw\n"
+        "50 30 0:33 / /data/adb/magisk rw - ext4 /dev/block/dm-1 rw\n"
+        "60 30 0:34 /adb/modules/sandboxid /data/adb/modules/sandboxid rw - ext4 /dev/block/dm-1 rw\n"
+        "70 30 0:35 /adb/mod/mount/system/build.prop /system/build.prop rw - ext4 /dev/block/dm-1 rw\n"
+        "80 30 0:36 / /system/etc/hosts rw - overlay magisk rw\n"
+        "85 1 0:40 / /vendor rw - ext4 /dev/block/dm-9 rw\n"
+        "90 1 0:44 / /mnt/user rw - fuse /dev/fuse rw\n"
+        "this is a malformed line\n"
+        "95 1 0:12 / /debug_ramdisk rw - tmpfs tmpfs rw\n";
+
+    std::vector<std::string> t = select_umount_targets(mi);
+
+    CHECK(t.size() == 3, "exactly three traces selected");
+    CHECK(vec_has(t, "/data/adb/magisk"), "magisk under /data/adb selected");
+    CHECK(vec_has(t, "/system/etc/hosts"), "magisk overlay selected");
+    CHECK(vec_has(t, "/debug_ramdisk"), "debug_ramdisk selected");
+
+    // Protections: never OUR overlays, module tree, /data, bare partition roots.
+    CHECK(!vec_has(t, "/system/build.prop"), "our persona build.prop bind protected");
+    CHECK(!vec_has(t, "/data/adb/modules/sandboxid"), "our module tree protected");
+    CHECK(!vec_has(t, "/data"), "/data never unmounted");
+    CHECK(!vec_has(t, "/"), "/ never unmounted");
+    CHECK(!vec_has(t, "/vendor"), "bare /vendor root never unmounted");
+    CHECK(!vec_has(t, "/mnt/user"), "unrelated fuse mount left alone");
+
+    // Reverse order: last-in-file trace comes first (children before parents).
+    CHECK(t.front() == "/debug_ramdisk", "reverse order: last trace first");
+    CHECK(t.back() == "/data/adb/magisk", "reverse order: first trace last");
+
+    // Empty input -> empty result.
+    CHECK(select_umount_targets("").empty(), "empty mountinfo -> no targets");
+}
+
 int main() {
     test_uuid();
     test_mac();
@@ -257,6 +372,10 @@ int main() {
     test_pixel_ram();
     test_cpuinfo();
     test_classify();
+    test_hex_from_seed();
+    test_selinux();
+    test_hide_prop();
+    test_mountinfo();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;

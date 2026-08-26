@@ -113,6 +113,32 @@ inline bool is_valid_mac(const std::string& m) {
 }
 
 // ---------------------------------------------------------------------------
+// Deterministic lowercase-hex string of `nbytes` bytes (2*nbytes chars), expanded
+// from `seed`. Used for synthetic-but-stable hex fingerprints such as
+// ro.boot.vbmeta.digest -- a locked device advertises a 32-byte (64-hex) AVB
+// digest, and detectors flag an empty/garbage one. Like every builder here it is a
+// pure function of the identity seed: stable per identity, different across
+// identities, and NOT attestable -- a genuine digest would require the device's AVB
+// signing keys (out of scope; documented in CREDITS.md). This only defeats the
+// "digest is missing/malformed" heuristic, not real key attestation.
+// ---------------------------------------------------------------------------
+inline std::string hex_from_seed(uint64_t seed, size_t nbytes) {
+    std::string s;
+    s.reserve(nbytes * 2);
+    uint64_t st = seed;
+    size_t i = 0;
+    while (i < nbytes) {
+        uint64_t v = splitmix64(st);
+        for (int b = 0; b < 8 && i < nbytes; ++b, ++i) {
+            uint8_t byte = static_cast<uint8_t>(v >> (b * 8));
+            s.push_back(hex_lc(byte >> 4));
+            s.push_back(hex_lc(byte & 0xF));
+        }
+    }
+    return s;
+}
+
+// ---------------------------------------------------------------------------
 // /proc/version. The real string leaks the true kernel version, build host and
 // build user — a strong hardware/ROM fingerprint. We synthesise a plausible
 // Google-style GKI line whose kernel base matches the spoofed Tensor generation
@@ -343,7 +369,7 @@ inline bool patch_cpuinfo(const std::string& real, int action,
 // ---------------------------------------------------------------------------
 // Path classification. Only exact, absolute pseudo-file paths are intercepted.
 // ---------------------------------------------------------------------------
-enum Kind { NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO };
+enum Kind { NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE };
 
 inline Kind classify(const char* path) {
     if (!path) return NONE;
@@ -351,6 +377,9 @@ inline Kind classify(const char* path) {
     if (std::strcmp(path, "/proc/version") == 0) return VERSION;
     if (std::strcmp(path, "/proc/meminfo") == 0) return MEMINFO;
     if (std::strcmp(path, "/proc/cpuinfo") == 0) return CPUINFO;
+    // The single-byte SELinux mode node. A permissive ("0") policy is a strong
+    // root/tamper tell; we always report enforcing. Exact match only.
+    if (std::strcmp(path, "/sys/fs/selinux/enforce") == 0) return SELINUX_ENFORCE;
 
     // /sys/class/net/<iface>/address, iface in {wlan*, p2p*} (Wi-Fi only).
     static const char pfx[] = "/sys/class/net/";
@@ -366,6 +395,65 @@ inline Kind classify(const char* path) {
         }
     }
     return NONE;
+}
+
+// The content served for /sys/fs/selinux/enforce. This node is a SINGLE ASCII
+// byte with NO trailing newline ("1"=enforcing, "0"=permissive); the caller must
+// serve it verbatim and must NOT append '\n' (a trailing byte is itself a tell).
+inline std::string selinux_enforce_content() { return std::string("1"); }
+
+// ---------------------------------------------------------------------------
+// Property "mark-absent" matchers (technique: yubunus/Hide-My-Goldfish, MIT, for
+// the emulator set; ezme-nodebug, MIT, for the LineageOS/custom-ROM set). These do
+// NOT rewrite a value -- they tell the property hooks to report the key as if it
+// does not exist, because on a real retail Pixel these keys are simply absent and
+// their mere presence is the fingerprint. Matched by exact name or a small set of
+// namespace roots so an unrelated key is never accidentally blanked. Pure & hot:
+// no allocation (strcmp/strncmp only) since the property hooks call this per read.
+// ---------------------------------------------------------------------------
+inline bool is_emulator_prop(const char* name) {
+    if (!name) return false;
+    // goldfish/ranchu QEMU markers a physical device never exposes.
+    static const char* const exact[] = {
+        "ro.kernel.qemu",
+        "ro.kernel.qemu.gles",
+        "ro.boot.qemu",
+        "ro.boot.qemu.gltransport",
+        "ro.hardware.virtual_device",
+        "qemu.hw.mainkeys",
+        "init.svc.qemud",
+        "init.svc.qemu-props",
+        "init.svc.goldfish-logcat",
+        "init.svc.goldfish-setup",
+        "init.svc.ranchu-net",
+    };
+    for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
+    // Whole QEMU/goldfish namespaces.
+    if (std::strncmp(name, "qemu.", 5) == 0)            return true;
+    if (std::strncmp(name, "ro.kernel.qemu.", 15) == 0) return true;
+    if (std::strncmp(name, "ro.boot.qemu.", 13) == 0)   return true;
+    return false;
+}
+
+inline bool is_custom_rom_prop(const char* name) {
+    if (!name) return false;
+    static const char* const exact[] = {
+        "ro.modversion",
+        "ro.cm.version",
+        "ro.cm.build.date",
+    };
+    for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
+    if (std::strncmp(name, "ro.lineage.", 11) == 0)          return true;
+    if (std::strncmp(name, "lineage.", 8) == 0)              return true;
+    if (std::strncmp(name, "ro.cm.", 6) == 0)                return true;
+    if (std::strncmp(name, "persist.sys.lineage.", 20) == 0) return true;
+    return false;
+}
+
+// A property the persona should present as ABSENT (either an emulator tell or a
+// custom-ROM tell). The hooks consult this before any value-spoof lookup.
+inline bool should_hide_prop(const char* name) {
+    return is_emulator_prop(name) || is_custom_rom_prop(name);
 }
 
 }  // namespace sbxnr

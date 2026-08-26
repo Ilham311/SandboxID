@@ -338,6 +338,22 @@ button:disabled { opacity: .5; pointer-events: none; }
 }
 .card .actions { margin-top: 12px; }
 
+/* ---- Uji (self-check) result cards -------------------------------------- */
+.card.st { border-left-width: 3px; }
+.st-head { display: flex; align-items: center; gap: 8px; }
+.st-badge {
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  letter-spacing: .03em; padding: 2px 6px; border-radius: 6px;
+}
+.card.st-pass { border-left-color: var(--ok); }
+.card.st-warn { border-left-color: var(--warn); }
+.card.st-fail { border-left-color: var(--err); }
+.card.st-info { border-left-color: var(--accent); }
+.st-pass .st-badge { color: var(--ok);     background: var(--ok-weak); }
+.st-warn .st-badge { color: var(--warn);   background: var(--warn-weak); }
+.st-fail .st-badge { color: var(--err);    background: var(--err-weak); }
+.st-info .st-badge { color: var(--accent); background: var(--accent-weak); }
+
 /* ---- Inputs ------------------------------------------------------------- */
 textarea {
   width: 100%;

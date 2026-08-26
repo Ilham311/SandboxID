@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include "config.hpp"
 #include "sbx_carrier.hpp"
+#include "sbx_native_read.hpp"   // hex_from_seed/fnv1a for the deterministic VBMeta digest
 #include <sys/system_properties.h>
 
 static const char* IDENTITY_FILE  = sandboxid::IDENTITY_FILE;
@@ -172,6 +173,7 @@ struct Identity {
             "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
             "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
             "GSM_OPERATOR_NUMERIC","GSM_OPERATOR_ALPHA","GSM_OPERATOR_ISO","GSM_SIM_STATE",
+            "VBMETA_DIGEST",
         };
         std::string out;
         for (const auto& k : order) {
@@ -490,6 +492,14 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
+    // Deterministic 32-byte (64 hex) AVB digest for ro.boot.vbmeta.digest (F1).
+    // A REAL digest needs the verified-boot key + full vbmeta image (out of scope;
+    // documented in CREDITS.md), so we emit a stable per-identity value derived
+    // from the fingerprint+serial: coherent with the locked/green state and, above
+    // all, CONSTANT across reads — which is what naive digest checks compare.
+    // Technique: reveny/Android-VBMeta-Fixer (MIT).
+    id.kv["VBMETA_DIGEST"] =
+        sbxnr::hex_from_seed(sbxnr::fnv1a(id.kv["FINGERPRINT"] + "|" + id.kv["SERIAL"]), 32);
     return id;
 }
 
@@ -641,6 +651,30 @@ static void apply_native(const Identity& id) {
 
         {"ro.bootloader",                      std::string("unknown")},
         {"ro.boot.bootloader",                 std::string("unknown")},
+
+        // --- Verified-boot / VBMeta coherence (F1) + SELinux enforcing (F3a) ---
+        // Fixed values for a locked, verified, non-debuggable retail device. Kept
+        // in sync with STATIC_PROP_DEFAULTS (per-app hooks) and generate_mount_files
+        // (build.prop overlay). Device-wide resetprop is the belt that also catches
+        // native readers that bypass our PLT hooks. The digest is the one dynamic
+        // member (per-identity, deterministic). Technique: reveny/Android-VBMeta-Fixer
+        // (MIT); the enforcing/secure/debuggable set is clean-room from AOSP facts.
+        {"ro.boot.verifiedbootstate",          std::string("green")},
+        {"ro.boot.vbmeta.device_state",        std::string("locked")},
+        {"ro.boot.flash.locked",               std::string("1")},
+        {"ro.boot.veritymode",                 std::string("enforcing")},
+        {"ro.boot.vbmeta.hash_alg",            std::string("sha256")},
+        {"ro.boot.vbmeta.avb_version",         std::string("1.0")},
+        {"ro.boot.vbmeta.invalidate_on_error", std::string("yes")},
+        {"ro.boot.vbmeta.digest",              get("VBMETA_DIGEST")},
+        {"ro.secure",                          std::string("1")},
+        {"ro.debuggable",                      std::string("0")},
+        {"ro.build.selinux",                   std::string("1")},
+
+        // Coherent with the locked bootloader above: on a device that has never had
+        // OEM unlocking enabled this toggle reads 0 (F4, clean-room). Per-app readers
+        // get this via STATIC_PROP_DEFAULTS; here it is enforced device-wide too.
+        {"sys.oem_unlock_allowed",             std::string("0")},
     };
 
     bool have_bundled = (::access(RESETPROP, X_OK) == 0);
@@ -789,6 +823,24 @@ static void generate_mount_files(const Identity& id) {
     add("ro.build.product",                   DEVICE);
     add("gsm.version.baseband",               RADIO);
     add("ro.build.expect.baseband",           RADIO);
+
+    // Verified-boot / VBMeta coherence (F1) + SELinux enforcing (F3a), for apps
+    // that PARSE build.prop directly rather than going through property-service.
+    // Kept in sync with STATIC_PROP_DEFAULTS (hooks) and apply_native (resetprop).
+    // sys.oem_unlock_allowed is deliberately NOT written here — sys.* props do not
+    // conventionally live in build.prop, so its presence would itself be a tell; it
+    // is covered by the hook + device-wide resetprop paths instead.
+    add("ro.boot.verifiedbootstate",          std::string("green"));
+    add("ro.boot.vbmeta.device_state",        std::string("locked"));
+    add("ro.boot.flash.locked",               std::string("1"));
+    add("ro.boot.veritymode",                 std::string("enforcing"));
+    add("ro.boot.vbmeta.hash_alg",            std::string("sha256"));
+    add("ro.boot.vbmeta.avb_version",         std::string("1.0"));
+    add("ro.boot.vbmeta.invalidate_on_error", std::string("yes"));
+    add("ro.boot.vbmeta.digest",              g("VBMETA_DIGEST"));
+    add("ro.secure",                          std::string("1"));
+    add("ro.debuggable",                      std::string("0"));
+    add("ro.build.selinux",                   std::string("1"));
 
     struct { const char* dir; const char* pfx; } parts[] = {
         {"system",     "ro.product.system."},
