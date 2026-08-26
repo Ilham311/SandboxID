@@ -18,7 +18,7 @@
 #include <cstdlib>
 #include "config.hpp"
 #include "sbx_carrier.hpp"
-#include "sbx_native_read.hpp"   // hex_from_seed/fnv1a for the deterministic VBMeta digest
+#include "sbx_native_read.hpp"
 #include <sys/system_properties.h>
 
 static const char* IDENTITY_FILE  = sandboxid::IDENTITY_FILE;
@@ -29,6 +29,7 @@ static const char* MOUNTDIR       = sandboxid::MOUNTDIR;
 static const char* TARGET_FILE    = sandboxid::TARGET_FILE;
 static const char* PERSONAS_FILE  = sandboxid::PERSONAS_FILE;
 static const char* PERSONA_OVERRIDE = sandboxid::PERSONA_OVERRIDE;
+static const char* CARRIER_CONF   = sandboxid::CARRIER_CONF;
 
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
@@ -219,49 +220,22 @@ static std::string gen_host_suffix() {
     return host;
 }
 
-// ---------------------------------------------------------------------------
-// Persona pool. Previously a constexpr PixelEntry[] baked into pool.hpp; now
-// parsed at runtime from PERSONAS_FILE (personas.tsv) so the pool can be
-// refreshed by autopif.sh WITHOUT a native rebuild.
-//
-// The first 10 columns are the original Pixel layout. Columns 11-16 are
-// OPTIONAL brand-identity fields that let the pool carry NON-Google devices
-// (Samsung/Xiaomi/…) — see parse_persona_line(). When they are empty the
-// row is treated as a Google/Tensor Pixel and every field is derived exactly
-// as before, so old 10-column rows stay byte-identical.
-// ---------------------------------------------------------------------------
 struct PixelEntry {
     std::string model, device, product, board, platform;
     int         sdk = 0;
     std::string release, id, incremental, security_patch;
-    // Optional cols 11-16. Empty => derive Google/Tensor defaults (Pixel row).
-    // Ordered so the fields a real OEM row always knows (brand, manufacturer,
-    // marketname, soc_*) come first and `radio` is the trailing, omittable
-    // column — no public baseband data exists for these devices, and a fake
-    // baseband is more detectable than the device's real one (which we keep by
-    // leaving RADIO unset; see apply_native's empty-value skip).
+
     std::string brand, manufacturer, marketname, soc_manufacturer, soc_model, radio;
 };
 
-// Google Tensor SoC generations. These are the ONLY platforms for which
-// derive_identity() can synthesise the SoC model + modem/RADIO prefix from the
-// platform string alone. Any OTHER (non-Google) device MUST spell out its
-// brand/SoC/radio in the optional persona columns — parse_persona_line()
-// enforces that so a non-Tensor row can never silently inherit a GS/g5 value.
-// Must stay in sync with map_platform() in autopif.sh.
 static bool is_tensor_platform(const std::string& plat) {
     return plat == "gs101" || plat == "gs201" || plat == "zuma" ||
            plat == "zumapro" || plat == "laguna";
 }
 
-// Last-resort personas used ONLY when personas.tsv is missing/empty/unreadable
-// (e.g. a corrupted install). The shipped personas.tsv is the real source; this
-// just guarantees `freshen` never yields an empty identity when offline. One
-// entry per currently-shipping SDK level keeps SDK-matching functional. All are
-// Google/Tensor, so the trailing brand columns are left default-empty.
 static std::vector<PixelEntry> builtin_personas() {
     std::vector<PixelEntry> v;
-    // {model, device, product, board, platform, sdk, release, id, incremental, security_patch}
+
     auto add = [&](const char* mo, const char* de, const char* pl, int sd,
                    const char* re, const char* id, const char* in, const char* sp) {
         PixelEntry e; e.model = mo; e.device = de; e.product = de; e.board = de;
@@ -274,8 +248,7 @@ static std::vector<PixelEntry> builtin_personas() {
     add("Pixel 10", "frankel", "laguna", 36, "16", "BP1A.250705.006", "13051207", "2025-07-05");
     return v;
 }
-// Parse one TAB-separated persona line into `out`. Returns false for
-// comment/blank/malformed lines so the caller skips them.
+
 static bool parse_persona_line(const std::string& raw, PixelEntry& out) {
     std::string line = raw;
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
@@ -299,11 +272,6 @@ static bool parse_persona_line(const std::string& raw, PixelEntry& out) {
     out.incremental    = col[8];
     out.security_patch = col[9];
 
-    // Optional brand-identity columns (11-16). Absent => empty => Google/Tensor
-    // defaults are derived in derive_identity(). Present => this row can describe
-    // a non-Google device. `radio` is last so a non-Tensor row that has no
-    // baseband string (the common case — none is published) just stops at 15
-    // columns rather than needing a trailing empty field.
     if (col.size() > 10) out.brand            = col[10];
     if (col.size() > 11) out.manufacturer     = col[11];
     if (col.size() > 12) out.marketname       = col[12];
@@ -311,16 +279,8 @@ static bool parse_persona_line(const std::string& raw, PixelEntry& out) {
     if (col.size() > 14) out.soc_model        = col[14];
     if (col.size() > 15) out.radio            = col[15];
 
-    // A persona with no codename or a nonsensical SDK is useless.
     if (out.device.empty() || out.sdk <= 0) return false;
 
-    // Google Tensor rows may omit the brand columns (they are derived from the
-    // platform). A NON-Tensor row cannot: without an explicit brand + SoC model
-    // it would silently inherit the google/GS101 Tensor values and leak an
-    // inconsistent fingerprint. Require those two so a half-specified foreign
-    // device can never enter the pool. `radio` is NOT required — no baseband
-    // data is published for these devices, and derive_identity leaves RADIO
-    // unset (keeping the device's real baseband) rather than fabricating one.
     if (!is_tensor_platform(out.platform)) {
         if (out.brand.empty() || out.soc_model.empty()) {
             fprintf(stderr,
@@ -333,7 +293,6 @@ static bool parse_persona_line(const std::string& raw, PixelEntry& out) {
     return true;
 }
 
-// Load the persona pool from PERSONAS_FILE, falling back to builtin_personas().
 static std::vector<PixelEntry> load_personas() {
     std::vector<PixelEntry> pool;
     std::ifstream f(PERSONAS_FILE);
@@ -351,8 +310,6 @@ static std::vector<PixelEntry> load_personas() {
     return pool;
 }
 
-// Pick a persona from the pool, matched to the device's real SDK level. This is
-// the DEFAULT selection used by seed/freshen when no autopif override is present.
 static PixelEntry pick_persona() {
     std::random_device rd;
     std::mt19937 g(rd());
@@ -388,18 +345,9 @@ static PixelEntry pick_persona() {
     return pool[idx];
 }
 
-// Derive a full Identity (fingerprint, RADIO, SoC model, host suffix, random
-// SERIAL/ANDROID_ID/AAID, ...) from ONE persona. Shared by the SDK-matched pool
-// pick (gen_identity) AND the autopif one-shot override, so both paths produce
-// byte-identical field derivation -- there is no second source of truth for the
-// fingerprint format.
 static Identity derive_identity(const PixelEntry& p) {
     const bool tensor = is_tensor_platform(p.platform);
 
-    // Tensor-only derivations. Google's SoC model and modem/RADIO prefix are a
-    // pure function of the platform (chip generation). NON-Tensor devices carry
-    // these explicitly in the persona columns (parse_persona_line enforces it),
-    // so these helpers are consulted ONLY for Tensor rows.
     auto tensor_soc_model = [](const std::string& plat) -> const char* {
         if (plat == "gs101")   return "GS101";
         if (plat == "gs201")   return "GS201";
@@ -417,8 +365,6 @@ static Identity derive_identity(const PixelEntry& p) {
         return "unknown";
     };
 
-    // Brand identity: explicit persona columns win; Google/Tensor defaults fill
-    // the gaps, so a bare 10-column Pixel row behaves EXACTLY as before.
     const std::string brand   = p.brand.empty()        ? "google" : p.brand;
     const std::string manuf   = p.manufacturer.empty() ? "Google" : p.manufacturer;
     const std::string soc_man = !p.soc_manufacturer.empty() ? p.soc_manufacturer
@@ -430,9 +376,7 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["BRAND"]           = brand;
     id.kv["MANUFACTURER"]    = manuf;
     id.kv["MODEL"]           = p.model;
-    // ro.product.marketname: on OEM devices the retail name ("Galaxy S24 Ultra")
-    // differs from Build.MODEL ("SM-S928B"). Pixel rows omit it => MARKETNAME
-    // falls back to model ("Pixel 8"), which is exactly right for Pixel.
+
     id.kv["MARKETNAME"]      = p.marketname.empty() ? p.model : p.marketname;
     id.kv["DEVICE"]          = p.device;
     id.kv["PRODUCT"]         = p.product;
@@ -452,8 +396,6 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["TYPE"]            = "user";
     id.kv["TAGS"]            = "release-keys";
 
-    // FINGERPRINT prefix is the brand — matches ro.product.brand exactly on real
-    // devices (google/…, samsung/…, Redmi/…).
     char fp[512];
     snprintf(fp, sizeof(fp), "%s/%s/%s:%s/%s/%s:user/release-keys",
              brand.c_str(), p.product.c_str(), p.device.c_str(),
@@ -466,10 +408,6 @@ static Identity derive_identity(const PixelEntry& p) {
              p.product.c_str(), p.release.c_str(), p.id.c_str(), p.incremental.c_str());
     id.kv["DESCRIPTION"] = desc;
 
-    // RADIO / baseband. Non-Tensor personas MAY carry a full baseband string
-    // verbatim (Qualcomm/Exynos formats vary and are not derivable), but usually
-    // don't — no public baseband data exists for most OEM builds. Tensor rows
-    // synthesise Google's g5xxx-<patchdate>-B-<incremental> form.
     if (!p.radio.empty()) {
         id.kv["RADIO"] = p.radio;
     } else if (tensor) {
@@ -484,35 +422,20 @@ static Identity derive_identity(const PixelEntry& p) {
                  tensor_modem_prefix(p.platform), pdate, p.incremental.c_str());
         id.kv["RADIO"] = rad;
     }
-    // else: non-Tensor with no baseband string — leave RADIO unset. apply_native
-    // deletes any stale gsm.version.baseband / ro.build.expect.baseband override
-    // left by a previous persona in this case, so the device's REAL baseband
-    // shows through rather than a fabricated (more detectable) one persisting.
 
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
-    // Deterministic 32-byte (64 hex) AVB digest for ro.boot.vbmeta.digest (F1).
-    // A REAL digest needs the verified-boot key + full vbmeta image (out of scope;
-    // documented in CREDITS.md), so we emit a stable per-identity value derived
-    // from the fingerprint+serial: coherent with the locked/green state and, above
-    // all, CONSTANT across reads — which is what naive digest checks compare.
-    // Technique: reveny/Android-VBMeta-Fixer (MIT).
+
     id.kv["VBMETA_DIGEST"] =
         sbxnr::hex_from_seed(sbxnr::fnv1a(id.kv["FINGERPRINT"] + "|" + id.kv["SERIAL"]), 32);
     return id;
 }
 
-// Default identity generation: SDK-matched random pick from the pool. Used by
-// `seed` (boot) and by `freshen` when autopif left no override.
 static Identity gen_identity() {
     return derive_identity(pick_persona());
 }
 
-// Consume a one-shot persona override left by autopif.sh. Parses the first valid
-// persona line (same validation as the pool) and ALWAYS unlinks the file, so a
-// fetched persona applies exactly once and a malformed file can never wedge
-// freshen. Returns true and fills `out` only when a valid persona was read.
 static bool take_persona_override(PixelEntry& out) {
     std::string raw = read_file(PERSONA_OVERRIDE);
     if (raw.empty()) return false;
@@ -652,13 +575,6 @@ static void apply_native(const Identity& id) {
         {"ro.bootloader",                      std::string("unknown")},
         {"ro.boot.bootloader",                 std::string("unknown")},
 
-        // --- Verified-boot / VBMeta coherence (F1) + SELinux enforcing (F3a) ---
-        // Fixed values for a locked, verified, non-debuggable retail device. Kept
-        // in sync with STATIC_PROP_DEFAULTS (per-app hooks) and generate_mount_files
-        // (build.prop overlay). Device-wide resetprop is the belt that also catches
-        // native readers that bypass our PLT hooks. The digest is the one dynamic
-        // member (per-identity, deterministic). Technique: reveny/Android-VBMeta-Fixer
-        // (MIT); the enforcing/secure/debuggable set is clean-room from AOSP facts.
         {"ro.boot.verifiedbootstate",          std::string("green")},
         {"ro.boot.vbmeta.device_state",        std::string("locked")},
         {"ro.boot.flash.locked",               std::string("1")},
@@ -671,9 +587,6 @@ static void apply_native(const Identity& id) {
         {"ro.debuggable",                      std::string("0")},
         {"ro.build.selinux",                   std::string("1")},
 
-        // Coherent with the locked bootloader above: on a device that has never had
-        // OEM unlocking enabled this toggle reads 0 (F4, clean-room). Per-app readers
-        // get this via STATIC_PROP_DEFAULTS; here it is enforced device-wide too.
         {"sys.oem_unlock_allowed",             std::string("0")},
     };
 
@@ -684,9 +597,7 @@ static void apply_native(const Identity& id) {
             if (r.val.empty() && !r.del_if_empty) continue;
             int rc;
             if (r.val.empty()) {
-                // No value for this run (e.g. non-Tensor persona with no known
-                // baseband) — delete any stale override left by a previous
-                // persona so the device's real prop value shows through again.
+
                 if (have_bundled) {
                     rc = run_bin(RESETPROP, {"resetprop-rs", "--delete", r.key});
                 } else {
@@ -824,12 +735,6 @@ static void generate_mount_files(const Identity& id) {
     add("gsm.version.baseband",               RADIO);
     add("ro.build.expect.baseband",           RADIO);
 
-    // Verified-boot / VBMeta coherence (F1) + SELinux enforcing (F3a), for apps
-    // that PARSE build.prop directly rather than going through property-service.
-    // Kept in sync with STATIC_PROP_DEFAULTS (hooks) and apply_native (resetprop).
-    // sys.oem_unlock_allowed is deliberately NOT written here — sys.* props do not
-    // conventionally live in build.prop, so its presence would itself be a tell; it
-    // is covered by the hook + device-wide resetprop paths instead.
     add("ro.boot.verifiedbootstate",          std::string("green"));
     add("ro.boot.vbmeta.device_state",        std::string("locked"));
     add("ro.boot.flash.locked",               std::string("1"));
@@ -955,28 +860,8 @@ static Identity load_identity() {
     return id;
 }
 
-// Merge the persisted carrier/SIM selection (carrier.conf) into an identity.
-// carrier.conf is a small KV file written by the `carrier` command / WebUI:
-//     NAME=Telkomsel
-//     MCC=510
-//     MNC=10
-//     ISO=id
-//     PHANTOM=0|1
-// This function OWNS the carrier keys in `id`: it sets them when a valid
-// operator is configured, and erases them otherwise so serialize() drops them
-// and the module falls back to the built-in default (VAL_DEFAULTS). It runs
-// wherever identity.prop is (re)written from a freshly built identity — freshen
-// and seed's fresh-generate branch — so a chosen carrier survives persona
-// rotation. (The shell `carrier` command applies a selection immediately via
-// identity_persist; apply-boot only re-applies device props and never rewrites
-// identity.prop, so it needs no carrier merge.)
-// PHANTOM=1 additionally forces gsm.sim.state=LOADED, making an empty slot
-// report a SIM present (device-info apps that read the prop). Returns true when
-// a carrier was applied. NOTE: getSimState()/SubscriptionInfo are binder-backed
-// on modern Android and are NOT covered by this props-layer path (needs L3).
 static bool merge_carrier(Identity& id) {
-    // Pure parse + key-apply lives in sbx_carrier.hpp (host-tested). Here we only
-    // supply the file contents and the Identity's kv map.
+
     sbxcarrier::CarrierSel sel = sbxcarrier::parse_carrier_conf(read_file(CARRIER_CONF));
     return sbxcarrier::apply_carrier(id.kv, sel);
 }
@@ -1002,19 +887,6 @@ static int cmd_freshen() {
     std::string old = read_file(IDENTITY_FILE);
     if (!old.empty()) atomic_write(IDENTITY_BAK, old);
 
-    // autopif.sh may have fetched a fresh random Pixel and left it as a one-shot
-    // override. When present, derive the identity straight from it (bypassing the
-    // SDK-matched pool pick) so each `action`/autopif run gets a NEW model.
-    //
-    // BUT: autopif always fetches Google's LATEST canary (currently SDK 36 /
-    // Android 16). Applying that verbatim onto an Android 12–15 device makes
-    // SDK_INT / RELEASE / FINGERPRINT claim an OS newer than the real kernel and
-    // framework. That "upgrade spoof" is exactly what makes apps crash
-    // (API-level mismatch, missing runtime behaviour) and trips integrity
-    // checks. So apply the override directly ONLY when it does not present a
-    // newer Android than the device actually runs; otherwise discard it and fall
-    // back to the SDK-matched pool pick. take_persona_override() has already
-    // unlinked the file, so a rejected override cannot wedge future freshens.
     PixelEntry ov;
     Identity id;
     const int dev_sdk = device_sdk();
@@ -1034,8 +906,7 @@ static int cmd_freshen() {
     } else {
         id = gen_identity();
     }
-    // Re-apply any persisted carrier/SIM selection so it survives the persona
-    // regeneration above (freshen builds a brand-new identity from scratch).
+
     merge_carrier(id);
     if (!atomic_write(IDENTITY_FILE, id.serialize())) {
         fprintf(stderr, "! failed to write identity.prop\n");
@@ -1101,7 +972,7 @@ static int cmd_seed() {
     } else {
         DBG("seed: no identity yet, generating fresh");
         id = gen_identity();
-        merge_carrier(id);  // honor a pre-seeded carrier.conf on first boot
+        merge_carrier(id);
         if (!atomic_write(IDENTITY_FILE, id.serialize())) {
             fprintf(stderr, "! seed: failed to write %s\n", IDENTITY_FILE);
             return 1;

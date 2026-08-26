@@ -1,11 +1,3 @@
-// tests/native_read_test.cpp — host unit tests for sbx_native_read.hpp.
-//
-// Build & run (mirrors the module's release warning flags):
-//   c++ -std=c++17 -Wall -Wextra -Werror -fno-exceptions -fno-rtti \
-//       tests/native_read_test.cpp -o /tmp/nrt && /tmp/nrt
-//
-// Pure logic only: no JNI/Zygisk/syscalls are exercised here (those live in
-// main.cpp and can only be verified on-device after a CI rebuild).
 
 #include "../jni/sbx_native_read.hpp"
 #include "../jni/sbx_mountinfo.hpp"
@@ -25,7 +17,6 @@ static int g_fails  = 0;
                                           (msg), __FILE__, __LINE__); }  \
 } while (0)
 
-// ---- helpers ----
 static bool is_hexlc(const std::string& s) {
     for (char c : s)
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
@@ -44,11 +35,11 @@ static void test_uuid() {
     char var = u1[19];
     CHECK(var == '8' || var == '9' || var == 'a' || var == 'b',
           "uuid variant nibble in {8,9,a,b}");
-    // hex-only between dashes
+
     std::string stripped;
     for (char c : u1) if (c != '-') stripped.push_back(c);
     CHECK(stripped.size() == 32 && is_hexlc(stripped), "uuid body is 32 lowercase hex");
-    // different identity -> different uuid
+
     uint64_t seed2 = fnv1a("google/husky/husky:14/AP1A.240505.004/11583683:user/release-keys");
     CHECK(uuid_from_seed(seed2) != u1, "uuid differs for different seed");
 }
@@ -73,7 +64,7 @@ static void test_mac() {
 }
 
 static void test_proc_version() {
-    // Pixel 8 (husky) = Tensor gs201? No: husky=Pixel 8 is zuma. Use zuma.
+
     std::string v = synth_proc_version("14", "11583682", "zuma", "abfarm42", 0x1234abcd);
     CHECK(v.rfind("Linux version ", 0) == 0, "version starts 'Linux version '");
     CHECK(v.find("-android14-") != std::string::npos, "android14 token present");
@@ -82,25 +73,20 @@ static void test_proc_version() {
     CHECK(v.find("#1 SMP PREEMPT") != std::string::npos, "SMP PREEMPT present");
     CHECK(v.find("abfarm42") != std::string::npos, "build host present");
 
-    // determinism
     CHECK(synth_proc_version("14", "11583682", "zuma", "abfarm42", 0x1234abcd) == v,
           "proc/version deterministic");
 
-    // platform overrides release for kernel base
     std::string g6 = synth_proc_version("14", "123456", "gs101", "", 42);
     CHECK(g6.find("5.10.") != std::string::npos, "gs101 -> kernel 5.10 even on A14");
 
-    // release drives kernel when platform unknown
     std::string a15 = synth_proc_version("15", "999999", "", "", 7);
     CHECK(a15.find("6.1.") != std::string::npos, "A15 no-platform -> kernel 6.1");
     CHECK(a15.find("clang version 18.0.1") != std::string::npos, "A15 -> clang 18.0.1");
     CHECK(a15.find("-android15-") != std::string::npos, "android15 token");
 
-    // zumapro -> 6.1
     std::string zp = synth_proc_version("15", "888888", "zumapro", "", 5);
     CHECK(zp.find("6.1.") != std::string::npos, "zumapro -> kernel 6.1");
 
-    // empty release still produces a plausible line (fallback android14 / 5.15)
     std::string er = synth_proc_version("", "", "", "", 1);
     CHECK(er.rfind("Linux version ", 0) == 0, "empty inputs still Linux version");
     CHECK(er.find("-android14-") != std::string::npos, "empty release -> android14 fallback");
@@ -113,7 +99,6 @@ static void test_meminfo() {
         "MemFree:         1234567 kB\n"
         "MemAvailable:    2345678 kB\n";
 
-    // explicit Pixel 8 = 8 GB
     std::string p = patch_meminfo(real, 8);
     CHECK(p.find("MemFree:         1234567 kB") != std::string::npos, "meminfo other lines intact");
     CHECK(p.find("MemAvailable:    2345678 kB") != std::string::npos, "meminfo tail intact");
@@ -122,29 +107,24 @@ static void test_meminfo() {
     CHECK(p.find(std::to_string(want8)) != std::string::npos, "8GB memtotal value present");
     CHECK(p.find("7654321") == std::string::npos, "real memtotal replaced");
 
-    // derive from real (7.6 GB rounds up to 8 GB tier)
     std::string d = patch_meminfo(real, 0);
     CHECK(d.find(std::to_string(ram_gb_to_memtotal_kb(8))) != std::string::npos,
           "derive: 7.6GB -> 8GB tier");
 
-    // 11.4 GB rounds up to 12
     std::string real12 =
         "MemTotal:       11901234 kB\nMemFree: 100 kB\n";
     std::string d12 = patch_meminfo(real12, 0);
     CHECK(d12.find(std::to_string(ram_gb_to_memtotal_kb(12))) != std::string::npos,
           "derive: 11.4GB -> 12GB tier");
 
-    // no MemTotal line -> unchanged
     std::string weird = "Foo: 1 kB\nBar: 2 kB\n";
     CHECK(patch_meminfo(weird, 8) == weird, "no MemTotal -> passthrough");
 
-    // MemTotal not at column 0 originally (leading blank line) still handled
     std::string lead = "\nMemTotal:        7654321 kB\nMemFree: 1 kB\n";
     std::string lp = patch_meminfo(lead, 8);
     CHECK(lp.find(std::to_string(want8)) != std::string::npos, "MemTotal after newline patched");
     CHECK(lp.rfind("\n", 0) == 0, "leading newline preserved");
 
-    // idempotence: patching an already-patched buffer to same target is stable
     CHECK(patch_meminfo(p, 8) == p, "meminfo patch idempotent");
 }
 
@@ -160,29 +140,23 @@ static void test_pixel_ram() {
 static void test_cpuinfo() {
     std::string repl;
 
-    // Qualcomm by manufacturer
     int a = cpu_action_for("Qualcomm", "SM8650", repl);
     CHECK(a == CPU_QUALCOMM, "qualcomm manuf -> QUALCOMM");
     CHECK(repl == "Qualcomm Technologies, Inc SM8650", "qualcomm repl string");
 
-    // Qualcomm by model prefix only
     a = cpu_action_for("", "SM7325", repl);
     CHECK(a == CPU_QUALCOMM, "SM prefix -> QUALCOMM");
 
-    // MediaTek
     a = cpu_action_for("MediaTek", "MT6893", repl);
     CHECK(a == CPU_MTK, "mediatek -> MTK");
     CHECK(repl == "MT6893", "mtk repl string");
 
-    // MT prefix only
     a = cpu_action_for("", "MT6877", repl);
     CHECK(a == CPU_MTK, "MT prefix -> MTK");
 
-    // Google/Tensor -> strip
     a = cpu_action_for("Google", "Tensor G3", repl);
     CHECK(a == CPU_STRIP, "google/tensor -> STRIP");
 
-    // --- patching ---
     std::string real_qcom =
         "processor\t: 0\n"
         "BogoMIPS\t: 38.40\n"
@@ -197,7 +171,6 @@ static void test_cpuinfo() {
     CHECK(out.find("BogoMIPS\t: 38.40") != std::string::npos, "other cpuinfo lines intact");
     CHECK(out.find("Revision\t: 0001") != std::string::npos, "trailing line intact");
 
-    // strip: Hardware line removed entirely, tail preserved
     std::string real_pixel =
         "processor\t: 0\n"
         "Hardware\t: Qualcomm Technologies, Inc SM_REAL_CHIP\n"
@@ -209,18 +182,15 @@ static void test_cpuinfo() {
     CHECK(outp.find("Revision\t: 0001") != std::string::npos, "line after stripped Hardware intact");
     CHECK(outp.find("processor\t: 0") != std::string::npos, "line before stripped Hardware intact");
 
-    // no Hardware line -> passthrough (returns false, out cleared)
     std::string no_hw = "processor\t: 0\nBogoMIPS\t: 38.40\n";
     std::string out3;
     bool ch3 = patch_cpuinfo(no_hw, CPU_STRIP, "", out3);
     CHECK(!ch3, "no Hardware -> no change");
     CHECK(out3.empty(), "no-change clears out for passthrough");
 
-    // CPU_NONE -> passthrough
     std::string out4;
     CHECK(!patch_cpuinfo(real_qcom, CPU_NONE, "", out4), "CPU_NONE -> passthrough");
 
-    // Hardware line with no trailing newline (EOF) still handled
     std::string eof_hw = "processor\t: 0\nHardware\t: SM_REAL";
     std::string out5;
     bool ch5 = patch_cpuinfo(eof_hw, CPU_STRIP, "", out5);
@@ -252,7 +222,7 @@ static void test_classify() {
 
 static void test_hex_from_seed() {
     uint64_t seed = fnv1a("google/husky/husky:14/AP1A.240505.004/11583682:user/release-keys");
-    // vbmeta digest is a 32-byte SHA-256 => 64 lowercase-hex chars.
+
     std::string d1 = hex_from_seed(seed, 32);
     std::string d2 = hex_from_seed(seed, 32);
     CHECK(d1.size() == 64, "hex_from_seed(32) is 64 chars");
@@ -262,7 +232,7 @@ static void test_hex_from_seed() {
           "hex_from_seed differs for different seed");
     CHECK(hex_from_seed(seed, 8).size() == 16, "hex_from_seed(8) is 16 chars");
     CHECK(hex_from_seed(seed, 0).empty(), "hex_from_seed(0) is empty");
-    // prefix stability: first 16 bytes of the 32-byte expansion match the 16-byte one.
+
     CHECK(hex_from_seed(seed, 16) == d1.substr(0, 32),
           "hex_from_seed prefix stable across lengths");
 }
@@ -278,7 +248,7 @@ static void test_selinux() {
 }
 
 static void test_hide_prop() {
-    // emulator / qemu tells -> absent
+
     CHECK(is_emulator_prop("ro.kernel.qemu"), "ro.kernel.qemu is emulator");
     CHECK(is_emulator_prop("ro.boot.qemu"), "ro.boot.qemu is emulator");
     CHECK(is_emulator_prop("qemu.hw.mainkeys"), "qemu.hw.mainkeys is emulator");
@@ -292,7 +262,6 @@ static void test_hide_prop() {
     CHECK(!is_emulator_prop(""), "empty prop not emulator");
     CHECK(!is_emulator_prop(nullptr), "null prop not emulator");
 
-    // custom-ROM / LineageOS tells -> absent
     CHECK(is_custom_rom_prop("ro.lineage.version"), "ro.lineage.* is custom rom");
     CHECK(is_custom_rom_prop("lineage.updater.uri"), "lineage.* is custom rom");
     CHECK(is_custom_rom_prop("ro.modversion"), "ro.modversion is custom rom");
@@ -302,7 +271,6 @@ static void test_hide_prop() {
     CHECK(!is_custom_rom_prop("ro.cmdline"), "ro.cmdline not custom rom (ro.cm. must be dotted)");
     CHECK(!is_custom_rom_prop(nullptr), "null prop not custom rom");
 
-    // combined gate
     CHECK(should_hide_prop("qemu.hw.mainkeys"), "should_hide covers emulator");
     CHECK(should_hide_prop("ro.lineage.version"), "should_hide covers custom rom");
     CHECK(!should_hide_prop("ro.product.brand"), "should_hide leaves normal props");
@@ -316,7 +284,6 @@ static bool vec_has(const std::vector<std::string>& v, const char* s) {
 static void test_mountinfo() {
     using namespace sbxmnt;
 
-    // Direct parse of one row incl. optional fields (shared:2 master:1).
     MountRow r;
     bool ok = parse_mountinfo_line(
         "50 30 0:33 / /data/adb/magisk rw,relatime shared:2 master:1 - ext4 /dev/block/dm-1 rw", r);
@@ -327,8 +294,6 @@ static void test_mountinfo() {
     CHECK(!parse_mountinfo_line("garbage short line", r), "short line rejected");
     CHECK(!parse_mountinfo_line("", r), "empty line rejected");
 
-    // File order: two protected roots, three real traces, two of OUR overlays, one
-    // unrelated mount, one malformed line (must all be handled).
     std::string mi =
         "10 1 0:1 / / rw shared:1 - ext4 /dev/root rw\n"
         "30 10 0:21 / /data rw - ext4 /dev/block/dm-2 rw\n"
@@ -348,7 +313,6 @@ static void test_mountinfo() {
     CHECK(vec_has(t, "/system/etc/hosts"), "magisk overlay selected");
     CHECK(vec_has(t, "/debug_ramdisk"), "debug_ramdisk selected");
 
-    // Protections: never OUR overlays, module tree, /data, bare partition roots.
     CHECK(!vec_has(t, "/system/build.prop"), "our persona build.prop bind protected");
     CHECK(!vec_has(t, "/data/adb/modules/sandboxid"), "our module tree protected");
     CHECK(!vec_has(t, "/data"), "/data never unmounted");
@@ -356,11 +320,9 @@ static void test_mountinfo() {
     CHECK(!vec_has(t, "/vendor"), "bare /vendor root never unmounted");
     CHECK(!vec_has(t, "/mnt/user"), "unrelated fuse mount left alone");
 
-    // Reverse order: last-in-file trace comes first (children before parents).
     CHECK(t.front() == "/debug_ramdisk", "reverse order: last trace first");
     CHECK(t.back() == "/data/adb/magisk", "reverse order: first trace last");
 
-    // Empty input -> empty result.
     CHECK(select_umount_targets("").empty(), "empty mountinfo -> no targets");
 }
 
