@@ -529,7 +529,7 @@ static void sbx_cb_tramp(void* cookie, const char* name, const char* value, uint
     SbxCbCtx* c = static_cast<SbxCbCtx*>(cookie);
     std::string v;
     if (g_nr_active && name && sbx_prop_hidden(name))
-        c->cb(c->cookie, name, "", serial);                        // report absent (F2/F4)
+        return;                                                    // omit -> truly absent (F2/F4)
     else if (g_nr_active && name && spoof_prop_value(name, v))
         c->cb(c->cookie, name, v.c_str(), serial);
     else
