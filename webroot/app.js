@@ -5,6 +5,7 @@ const BIN = `${MODDIR}/bin/sandboxid`;
 const ROTATE_SH = `${MODDIR}/rotate_ids.sh`;
 const IDENTITY = `${MODDIR}/identity.prop`;
 const TARGETS = `${MODDIR}/target.txt`;
+const SELFTEST_SH = `${MODDIR}/selftest.sh`;
 
 const ROTATE_LOG = `${MODDIR}/debug/rotate.log`;
 const ACTION_LOG = `${MODDIR}/debug/action.log`;
@@ -227,6 +228,7 @@ function onTab(id) {
   if (id === 'persona') loadPersona();
   else if (id === 'rotate') loadRotate();
   else if (id === 'targets') loadTargets();
+  else if (id === 'selftest') loadSelftest();
   else if (id === 'log') loadLog();
 }
 
@@ -416,6 +418,86 @@ document.getElementById('tgtSave').addEventListener('click', (ev) => withLoading
     document.getElementById('tgtStatus').textContent = `${lines} paket \u00b7 dimuat ulang saat spawn berikutnya`;
   }
 }));
+
+// ---- Uji (detection self-check) -------------------------------------------
+// Parse-token contract with selftest.sh (see .gitar/documents/parse-token-safelist.md):
+//   SELFTEST <category> <PASS|WARN|FAIL|INFO> <detail...>
+//   SELFTEST SUMMARY pass=N warn=M fail=K info=J
+const ST_CAT = {
+  identitas: 'Identitas', vbmeta: 'Verified boot', build: 'Build', selinux: 'SELinux',
+  rom: 'Emulator / ROM', root: 'Root', mount: 'Mount', hosts: 'Hosts', hooks: 'Hook per-app',
+};
+const ST_KIND = {
+  PASS: 'st-pass', WARN: 'st-warn', FAIL: 'st-fail', INFO: 'st-info',
+};
+
+function parseSelftest(out) {
+  const rows = [];
+  let summary = null;
+  for (const line of String(out || '').replace(/\r/g, '').split('\n')) {
+    const s = line.match(/^SELFTEST\s+SUMMARY\s+(.*)$/);
+    if (s) {
+      const g = {};
+      s[1].replace(/(\w+)=(\d+)/g, (_, k, v) => { g[k] = Number(v); return ''; });
+      summary = g;
+      continue;
+    }
+    const m = line.match(/^SELFTEST\s+(\S+)\s+(PASS|WARN|FAIL|INFO)\s*(.*)$/);
+    if (m) rows.push({ cat: m[1], status: m[2], detail: m[3] });
+  }
+  return { rows, summary };
+}
+
+function renderSelftest(out) {
+  const { rows, summary } = parseSelftest(out);
+  const body = document.getElementById('stBody');
+  const sum = document.getElementById('stSummary');
+  if (!rows.length) {
+    body.innerHTML = '<div class="empty">Tidak ada hasil uji. Coba jalankan lagi.</div>';
+    sum.textContent = '';
+    return;
+  }
+  body.innerHTML = rows.map(r => {
+    const cls = ST_KIND[r.status] || ST_KIND.INFO;
+    const cat = ST_CAT[r.cat] || r.cat;
+    return `<div class="card st ${cls}">` +
+      `<div class="st-head"><span class="st-badge">${escapeHtml(r.status)}</span>` +
+      `<span class="name">${escapeHtml(cat)}</span></div>` +
+      `<div class="desc">${escapeHtml(r.detail)}</div></div>`;
+  }).join('');
+  body.querySelectorAll('.card').forEach((el, i) => el.style.setProperty('--i', i));
+  if (summary) {
+    const p = summary.pass || 0, w = summary.warn || 0, f = summary.fail || 0, inf = summary.info || 0;
+    sum.textContent = `${p} pass · ${w} warn · ${f} fail · ${inf} info`;
+  } else {
+    sum.textContent = '';
+  }
+}
+
+async function runSelftest(showToast) {
+  const body = document.getElementById('stBody');
+  body.innerHTML = skLines(8);
+  const r = await run(`${ENV} && sh ${shq(SELFTEST_SH)} 2>&1`);
+  if (!r.ok) {
+    const msg = (r.err && r.err.message) || 'error';
+    body.innerHTML = `<div class="empty">Gagal menjalankan uji: ${escapeHtml(msg)}</div>`;
+    document.getElementById('stSummary').textContent = '';
+    if (showToast) toast(trimTitle(msg), { kind: 'error', detail: (r.err && (r.err.stdout || r.err.stderr)) || '' });
+    return;
+  }
+  renderSelftest(r.out);
+  if (showToast) {
+    const { summary } = parseSelftest(r.out);
+    const f = (summary && summary.fail) || 0, w = (summary && summary.warn) || 0, p = (summary && summary.pass) || 0;
+    const kind = f > 0 ? 'error' : (w > 0 ? 'warn' : 'ok');
+    toast(`Uji selesai · ${p} pass · ${w} warn · ${f} fail`, { kind, detail: r.out });
+  }
+}
+
+async function loadSelftest() { return runSelftest(false); }
+
+document.getElementById('stRun').addEventListener('click', (ev) =>
+  withLoading(ev.currentTarget, () => runSelftest(true)));
 
 async function loadLog() {
   const src = document.getElementById('logSrc').value;

@@ -134,6 +134,10 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.build.tags",                   "TAGS"},
         {"ro.build.type",                   "TYPE"},
 
+        // Verified-boot (F1): the AVB digest is identity-derived (see
+        // derive_identity); the other vbmeta/verifiedboot props are fixed and
+        // live in STATIC_PROP_DEFAULTS. Technique: reveny/Android-VBMeta-Fixer.
+        {"ro.boot.vbmeta.digest",           "VBMETA_DIGEST"},
         {"ro.build.product",                     "DEVICE"},
         {"ro.build.version.release_or_codename", "RELEASE"},
         {"ro.vendor.build.security_patch",       "SECURITY_PATCH"},
@@ -198,6 +202,15 @@ static bool spoof_prop_value(const std::string& k, std::string& out) {
     return false;
 }
 
+// A property the persona must present as ABSENT rather than spoofed to a value:
+// emulator/qemu tells and custom-ROM/LineageOS tells that simply do not exist on a
+// retail Pixel (their PRESENCE is the fingerprint). Kept separate from
+// spoof_prop_value because "report not-found" is a different result than "report
+// value X". Technique: yubunus/Hide-My-Goldfish (emulator), ezme-nodebug (ROM).
+static inline bool sbx_prop_hidden(const char* name) {
+    return name && sbxnr::should_hide_prop(name);
+}
+
 static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
 
@@ -211,6 +224,13 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
     if (spoof_prop_value(k, v)) {
         LOGD("L2 SPOOF '%s' -> '%s'", k.c_str(), v.c_str());
         return env->NewStringUTF(v.c_str());
+    }
+
+    // Emulator/custom-ROM tell: report absent by returning the caller's default,
+    // exactly as a real device without the key would (F2/F4).
+    if (sbx_prop_hidden(k.c_str())) {
+        LOGD("L2 HIDE '%s' (report absent)", k.c_str());
+        return j_def;
     }
 
     if (orig_native_get) return orig_native_get(env, clazz, j_key, j_def);
@@ -485,6 +505,7 @@ static void sbx_fill_prop(char* value, const std::string& v) {
 
 static int sbx_spg(const char* name, char* value) {
     if (g_nr_active && name && value) {
+        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }   // report absent (F2/F4)
         std::string v;
         if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
     }
@@ -496,6 +517,7 @@ static int sbx_spg(const char* name, char* value) {
 static int sbx_spr(const void* pi, char* name, char* value) {
     int r = orig_spr ? orig_spr(pi, name, value) : -1;
     if (r >= 0 && g_nr_active && name && value) {
+        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }   // report absent (F2/F4)
         std::string v;
         if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
     }
@@ -506,7 +528,9 @@ struct SbxCbCtx { sbx_prop_cb cb; void* cookie; };
 static void sbx_cb_tramp(void* cookie, const char* name, const char* value, uint32_t serial) {
     SbxCbCtx* c = static_cast<SbxCbCtx*>(cookie);
     std::string v;
-    if (g_nr_active && name && spoof_prop_value(name, v))
+    if (g_nr_active && name && sbx_prop_hidden(name))
+        c->cb(c->cookie, name, "", serial);                        // report absent (F2/F4)
+    else if (g_nr_active && name && spoof_prop_value(name, v))
         c->cb(c->cookie, name, v.c_str(), serial);
     else
         c->cb(c->cookie, name, value, serial);
@@ -557,6 +581,11 @@ static bool sbx_build_content(sbxnr::Kind kind, std::string& out) {
         case sbxnr::BOOTID:  out = g_boot_id;      out.push_back('\n'); return true;
         case sbxnr::MAC:     out = g_wifi_mac;     out.push_back('\n'); return true;
         case sbxnr::VERSION: out = g_proc_version; out.push_back('\n'); return true;
+        case sbxnr::SELINUX_ENFORCE:
+            // Single ASCII byte, NO trailing newline — the kernel node has none and
+            // an extra byte is itself a tell. Always report enforcing (F3b).
+            out = sbxnr::selinux_enforce_content();
+            return true;
         case sbxnr::MEMINFO: {
             std::string real = sbx_read_real("/proc/meminfo");
             if (real.empty()) return false;
@@ -898,6 +927,23 @@ static void request_companion_mounts(int fd) {
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
+// F6 (opt-in): ask the companion to detach root-manager mount traces inside THIS
+// process's mount namespace. Only called when the served blob carried SBX_HIDE=1
+// (companion mirrors $MODDIR/enable_hide). Same wire shape as CMD_DO_MOUNTS: send
+// cmd + our pid, read back the detached count. The companion re-authorizes via
+// SO_PEERCRED and re-checks enable_hide before acting (fail-closed).
+static void request_companion_hide(int fd) {
+    uint8_t cmd  = sandboxid::CMD_DO_HIDE;
+    uint32_t pid = (uint32_t)::getpid();
+    if (!sandboxid::write_full(fd, &cmd, 1) || !sandboxid::write_full(fd, &pid, sizeof(pid))) {
+        LOGW("companion DO_HIDE write failed (socket unusable post-specialize?)");
+        return;
+    }
+    uint32_t n = 0;
+    if (!sandboxid::read_full(fd, &n, sizeof(n))) { LOGW("companion hide ack failed"); return; }
+    LOGI("root/mount-trace hide via companion: %u detached (pid=%u)", n, pid);
+}
+
 class SandboxID : public zygisk::ModuleBase {
 public:
     void onLoad(Api* api, JNIEnv* env) override {
@@ -982,6 +1028,10 @@ public:
 
         if (comp_fd_ >= 0) {
             request_companion_mounts(comp_fd_);
+            // F6 (opt-in, DEFAULT-OFF): only when the served blob carried SBX_HIDE=1
+            // (companion mirrors $MODDIR/enable_hide). Runs AFTER our persona binds so
+            // the selector's is_protected() view already includes them.
+            if (val("SBX_HIDE") == "1") request_companion_hide(comp_fd_);
             ::close(comp_fd_);
             comp_fd_ = -1;
         }

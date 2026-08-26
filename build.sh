@@ -88,6 +88,7 @@ build_variant() {
   [ -f target.txt ] && cp target.txt "$PKG/"
   [ -f helpers.sh ] && cp helpers.sh "$PKG/"
   [ -f rotate_ids.sh ] && cp rotate_ids.sh "$PKG/"
+  [ -f selftest.sh ] && cp selftest.sh "$PKG/"
   [ -f personas.tsv ] && cp personas.tsv "$PKG/"
   [ -f devices.tsv ] && cp devices.tsv "$PKG/"
   [ -f autopif.sh ] && cp autopif.sh "$PKG/"
