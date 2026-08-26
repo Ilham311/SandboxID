@@ -478,7 +478,7 @@ async function loadSim() {
   const el = document.getElementById('simCurrent');
   el.className = 'kv';
   el.innerHTML = skKv(3);
-  if (!SIM_DB) {
+  if (!SIM_DB || !SIM_DB.length) {
     const r = await run(`cat ${shq(CARRIERS)} 2>/dev/null || true`);
     SIM_DB = (r.ok && r.out.trim()) ? parseCarriersTsv(r.out) : [];
   }

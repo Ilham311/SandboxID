@@ -313,8 +313,8 @@ set_carrier() {
         printf 'MNC=%s\n'  "$mnc"
         printf 'ISO=%s\n'  "$iso"
         printf 'PHANTOM=%s\n' "$phantom"
-    } > "$tmpc" 2>/dev/null || { log_err "carrier: gagal tulis carrier.conf"; rm -f "$tmpc"; return 1; }
-    mv "$tmpc" "$CARRIER_CONF" 2>/dev/null || { log_err "carrier: gagal simpan carrier.conf"; rm -f "$tmpc"; return 1; }
+    } > "$tmpc" 2>/dev/null || { log_err "carrier: gagal tulis carrier.conf"; rm -f "$tmpc"; umask 022; return 1; }
+    mv "$tmpc" "$CARRIER_CONF" 2>/dev/null || { log_err "carrier: gagal simpan carrier.conf"; rm -f "$tmpc"; umask 022; return 1; }
     chmod 0644 "$CARRIER_CONF" 2>/dev/null
     umask 022
 
