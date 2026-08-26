@@ -28,9 +28,6 @@
 #include "sbx_lsplant.hpp"
 #include "sbx_native_read.hpp"
 
-// memfd_create backs the file-redirect path (L9). MFD_CLOEXEC / __NR_memfd_create
-// are guarded so the module builds even against an older sysroot; the numbers are
-// the stable per-ABI syscall IDs. A missing/failed memfd degrades to passthrough.
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif
@@ -136,9 +133,6 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.build.tags",                   "TAGS"},
         {"ro.build.type",                   "TYPE"},
 
-        // Verified-boot (F1): the AVB digest is identity-derived (see
-        // derive_identity); the other vbmeta/verifiedboot props are fixed and
-        // live in STATIC_PROP_DEFAULTS. Technique: reveny/Android-VBMeta-Fixer.
         {"ro.boot.vbmeta.digest",           "VBMETA_DIGEST"},
         {"ro.build.product",                     "DEVICE"},
         {"ro.build.version.release_or_codename", "RELEASE"},
@@ -185,11 +179,6 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
     return m;
 }
 
-// Single source of truth for "what value should key `k` report". Shared by the
-// Java SystemProperties hook (L2) and the native __system_property_* hooks (L9)
-// so a native read can NEVER disagree with the Java getter. Returns true and sets
-// `out` when the key should be spoofed; false => caller falls through to the real
-// property. Pure lookup: no JNI, safe to call from the native hooks.
 static bool spoof_prop_value(const std::string& k, std::string& out) {
     const auto& map = prop_to_identity_map();
     auto it = map.find(k);
@@ -206,11 +195,6 @@ static bool spoof_prop_value(const std::string& k, std::string& out) {
     return false;
 }
 
-// A property the persona must present as ABSENT rather than spoofed to a value:
-// emulator/qemu tells and custom-ROM/LineageOS tells that simply do not exist on a
-// retail Pixel (their PRESENCE is the fingerprint). Kept separate from
-// spoof_prop_value because "report not-found" is a different result than "report
-// value X". Technique: yubunus/Hide-My-Goldfish (emulator), ezme-nodebug (ROM).
 static inline bool sbx_prop_hidden(const char* name) {
     return name && sbxnr::should_hide_prop(name);
 }
@@ -230,8 +214,6 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
         return env->NewStringUTF(v.c_str());
     }
 
-    // Emulator/custom-ROM tell: report absent by returning the caller's default,
-    // exactly as a real device without the key would (F2/F4).
     if (sbx_prop_hidden(k.c_str())) {
         LOGD("L2 HIDE '%s' (report absent)", k.c_str());
         return j_def;
@@ -418,7 +400,7 @@ static bool sbx_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino
     return found;
 }
 
-static void install_uptime_hook(Api* api, JNIEnv* /*env*/) {
+static void install_uptime_hook(Api* api, JNIEnv*  ) {
     const std::string& us = val("UPTIME_SECONDS");
     if (us.empty()) return;
     char* end = nullptr;
@@ -450,25 +432,6 @@ static void install_uptime_hook(Api* api, JNIEnv* /*env*/) {
          (long long)secs, registered, reinterpret_cast<void*>(orig_clock_gettime));
 }
 
-// ===========================================================================
-// L9 — native property reads + /proc & /sys file reads.
-//
-// The Java hooks (L2/L7) only see android.os.SystemProperties. Native code that
-// calls __system_property_* directly, or reads /proc//sys as plain files, sees
-// the REAL device. L9 closes those paths with the SAME lookup the Java hook uses
-// (spoof_prop_value) plus deterministic pseudo-file content from sbx_native_read.
-//
-// Mechanism: Zygisk PLT/GOT hooks across every mapped, file-backed .so — the same
-// no-Dobby approach as the uptime hook. PLT hooks are per-caller-GOT, so this can
-// only cover libraries already mapped at specialize time (system libs); an app's
-// own JNI libs loaded LATER via System.loadLibrary are not reached. That is an
-// inherent limit of specialize-time PLT hooking, shared with the L8 hook.
-//
-// Fail-safe: every hook falls through to its captured real function (or a raw
-// syscall) whenever spoofing is inactive or content can't be built, so a target
-// app never breaks — at worst a value is not spoofed.
-// ===========================================================================
-
 #ifndef O_TMPFILE
 #define O_TMPFILE 0
 #endif
@@ -488,18 +451,14 @@ static sbx_spg_fn    orig_spg    = nullptr;
 static sbx_spr_fn    orig_spr    = nullptr;
 static sbx_sprcb_fn  orig_sprcb  = nullptr;
 
-// Set true ONLY after a successful pltHookCommit. Gates every spoof so that a
-// failed/partial install serves real values (via the captured origs) rather than
-// crashing or half-spoofing. Written once (single-threaded) after commit.
 static bool        g_nr_active    = false;
-static std::string g_boot_id;       // /proc/sys/kernel/random/boot_id
-static std::string g_wifi_mac;      // /sys/class/net/wlan*/address
-static std::string g_proc_version;  // /proc/version
-static std::string g_cpu_repl;      // replacement Hardware: value (qcom/mtk)
-static int         g_ram_gb    = 0;         // 0 => derive MemTotal from real
+static std::string g_boot_id;
+static std::string g_wifi_mac;
+static std::string g_proc_version;
+static std::string g_cpu_repl;
+static int         g_ram_gb    = 0;
 static int         g_cpu_action = sbxnr::CPU_NONE;
 
-// --- native system-property hooks -----------------------------------------
 static void sbx_fill_prop(char* value, const std::string& v) {
     size_t n = v.size();
     if (n > PROP_VALUE_MAX - 1) n = PROP_VALUE_MAX - 1;
@@ -509,7 +468,7 @@ static void sbx_fill_prop(char* value, const std::string& v) {
 
 static int sbx_spg(const char* name, char* value) {
     if (g_nr_active && name && value) {
-        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }   // report absent (F2/F4)
+        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
         std::string v;
         if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
     }
@@ -521,7 +480,7 @@ static int sbx_spg(const char* name, char* value) {
 static int sbx_spr(const void* pi, char* name, char* value) {
     int r = orig_spr ? orig_spr(pi, name, value) : -1;
     if (r >= 0 && g_nr_active && name && value) {
-        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }   // report absent (F2/F4)
+        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
         std::string v;
         if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
     }
@@ -533,24 +492,22 @@ static void sbx_cb_tramp(void* cookie, const char* name, const char* value, uint
     SbxCbCtx* c = static_cast<SbxCbCtx*>(cookie);
     std::string v;
     if (g_nr_active && name && sbx_prop_hidden(name))
-        return;                                                    // omit -> truly absent (F2/F4)
+        return;
     else if (g_nr_active && name && spoof_prop_value(name, v))
         c->cb(c->cookie, name, v.c_str(), serial);
     else
         c->cb(c->cookie, name, value, serial);
 }
 static void sbx_sprcb(const void* pi, sbx_prop_cb cb, void* cookie) {
-    if (!orig_sprcb) return;                       // unhooked lib can't reach here
+    if (!orig_sprcb) return;
     if (!cb) { orig_sprcb(pi, cb, cookie); return; }
-    SbxCbCtx ctx{cb, cookie};                      // stack ctx: callback is synchronous
+    SbxCbCtx ctx{cb, cookie};
     orig_sprcb(pi, sbx_cb_tramp, &ctx);
 }
 
-// --- file-redirect helpers -------------------------------------------------
 static int sbx_make_memfd(const std::string& content) {
 #ifdef __NR_memfd_create
-    // Avoid a module-identifying memfd name; readlink(/proc/self/fd/N) still
-    // reveals "/memfd:...", so keep it generic.
+
     int fd = (int)syscall(__NR_memfd_create, "", (unsigned)MFD_CLOEXEC);
     if (fd < 0) return -1;
     if (!sandboxid::write_full(fd, content.data(), content.size())) { ::close(fd); return -1; }
@@ -562,8 +519,6 @@ static int sbx_make_memfd(const std::string& content) {
 #endif
 }
 
-// Read a real pseudo-file via the captured raw openat — never re-enters the PLT,
-// so meminfo/cpuinfo can be read for patching without recursing into our hook.
 static std::string sbx_read_real(const char* path) {
     if (!orig_openat) return "";
     int fd = orig_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
@@ -586,8 +541,7 @@ static bool sbx_build_content(sbxnr::Kind kind, std::string& out) {
         case sbxnr::MAC:     out = g_wifi_mac;     out.push_back('\n'); return true;
         case sbxnr::VERSION: out = g_proc_version; out.push_back('\n'); return true;
         case sbxnr::SELINUX_ENFORCE:
-            // Single ASCII byte, NO trailing newline — the kernel node has none and
-            // an extra byte is itself a tell. Always report enforcing (F3b).
+
             out = sbxnr::selinux_enforce_content();
             return true;
         case sbxnr::MEMINFO: {
@@ -600,13 +554,12 @@ static bool sbx_build_content(sbxnr::Kind kind, std::string& out) {
             if (g_cpu_action == sbxnr::CPU_NONE) return false;
             std::string real = sbx_read_real("/proc/cpuinfo");
             if (real.empty()) return false;
-            return sbxnr::patch_cpuinfo(real, g_cpu_action, g_cpu_repl, out);  // false => passthrough
+            return sbxnr::patch_cpuinfo(real, g_cpu_action, g_cpu_repl, out);
         }
         default: return false;
     }
 }
 
-// -1 => not a spoof target / could not build => caller serves the real file.
 static int sbx_spoof_fd(const char* path) {
     sbxnr::Kind kind = sbxnr::classify(path);
     if (kind == sbxnr::NONE) return -1;
@@ -654,7 +607,7 @@ static int sbx_open(const char* pathname, int flags, ...) {
 }
 
 static FILE* sbx_fopen(const char* path, const char* mode) {
-    // Only pure-read opens ("r", "rb", "rt") — never "r+"/"rb+"/"w"/"a".
+
     if (g_nr_active && path && mode && mode[0] == 'r' && !strchr(mode, '+')) {
         int fd = sbx_spoof_fd(path);
         if (fd >= 0) {
@@ -668,7 +621,6 @@ static FILE* sbx_fopen(const char* path, const char* mode) {
     return nullptr;
 }
 
-// --- install ---------------------------------------------------------------
 static void sbx_reg_lib(Api* api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "__system_property_get",
                          reinterpret_cast<void*>(sbx_spg),  reinterpret_cast<void**>(&orig_spg));
@@ -700,8 +652,8 @@ static int sbx_register_across_libs(Api* api) {
         if (!path) continue;
         size_t pl = strlen(path);
         if (pl && path[pl - 1] == '\n') path[--pl] = '\0';
-        if (pl < 3 || strcmp(path + pl - 3, ".so") != 0) continue;   // file-backed .so only
-        if (strstr(path, "sandboxid")) continue;                     // never hook ourselves
+        if (pl < 3 || strcmp(path + pl - 3, ".so") != 0) continue;
+        if (strstr(path, "sandboxid")) continue;
         struct stat st;
         if (stat(path, &st) != 0) continue;
         bool dup = false;
@@ -716,29 +668,25 @@ static int sbx_register_across_libs(Api* api) {
 }
 
 static void install_native_read_hooks(Api* api) {
-    // Rebuild-free kill switch: companion rewrites the served blob to
-    // SBX_NATIVE_READ=0 when $MODDIR/no_native_read exists (see companion.cpp).
+
     if (val("SBX_NATIVE_READ") == "0") { LOGD("L9 disabled via kill switch"); return; }
 
-    // Deterministic, identity-derived content — computed ONCE here (single-threaded,
-    // before any hook goes live) so the hooks only ever read these globals.
     uint64_t seed = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" + val("ANDROID_ID"));
     g_boot_id = sbxnr::uuid_from_seed(seed);
 
-    const std::string& pmac = val("WIFI_MAC");   // reuse the shell-persisted MAC if present
+    const std::string& pmac = val("WIFI_MAC");
     g_wifi_mac = sbxnr::is_valid_mac(pmac) ? pmac
                                            : sbxnr::mac_from_seed(seed ^ 0x9E3779B97F4A7C15ULL);
 
     g_proc_version = sbxnr::synth_proc_version(val("RELEASE"), val("INCREMENTAL"),
                                                val("BOARD_PLATFORM"), val("HOST"), seed);
-    g_ram_gb     = sbxnr::pixel_ram_gb(val("MODEL"));                 // 0 => derive from real
+    g_ram_gb     = sbxnr::pixel_ram_gb(val("MODEL"));
     g_cpu_action = sbxnr::cpu_action_for(val("SOC_MANUFACTURER"), val("SOC_MODEL"), g_cpu_repl);
 
     int libs = sbx_register_across_libs(api);
     if (libs == 0) { LOGW("L9: no mapped .so to hook — native reads not spoofed"); return; }
     if (!api->pltHookCommit()) {
-        // Some hooks may have applied; leaving g_nr_active=false means each still
-        // passes through via its (valid) captured orig — real values, no crash.
+
         LOGW("L9: pltHookCommit gagal — native reads tak dispoof (nilai asli)");
         return;
     }
@@ -931,11 +879,6 @@ static void request_companion_mounts(int fd) {
     LOGI("bind-mount via companion: %u ok (pid=%u)", ok, pid);
 }
 
-// F6 (opt-in): ask the companion to detach root-manager mount traces inside THIS
-// process's mount namespace. Only called when the served blob carried SBX_HIDE=1
-// (companion mirrors $MODDIR/enable_hide). Same wire shape as CMD_DO_MOUNTS: send
-// cmd + our pid, read back the detached count. The companion re-authorizes via
-// SO_PEERCRED and re-checks enable_hide before acting (fail-closed).
 static void request_companion_hide(int fd) {
     uint8_t cmd  = sandboxid::CMD_DO_HIDE;
     uint32_t pid = (uint32_t)::getpid();
@@ -1032,9 +975,7 @@ public:
 
         if (comp_fd_ >= 0) {
             request_companion_mounts(comp_fd_);
-            // F6 (opt-in, DEFAULT-OFF): only when the served blob carried SBX_HIDE=1
-            // (companion mirrors $MODDIR/enable_hide). Runs AFTER our persona binds so
-            // the selector's is_protected() view already includes them.
+
             if (val("SBX_HIDE") == "1") request_companion_hide(comp_fd_);
             ::close(comp_fd_);
             comp_fd_ = -1;

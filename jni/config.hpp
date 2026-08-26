@@ -11,37 +11,24 @@ inline constexpr char MODDIR[]        = "/data/adb/modules/sandboxid";
 inline constexpr char IDENTITY_FILE[] = "/data/adb/modules/sandboxid/identity.prop";
 inline constexpr char MOUNTDIR[]      = "/data/adb/modules/sandboxid/mount";
 inline constexpr char TARGET_FILE[]   = "/data/adb/modules/sandboxid/target.txt";
-// Persona pool source (replaces the old compiled-in pool.hpp). Tab-separated,
-// one Pixel persona per line; used as the offline fallback pool. See personas.tsv.
+
 inline constexpr char PERSONAS_FILE[] = "/data/adb/modules/sandboxid/personas.tsv";
 
-// One-shot persona override written by autopif.sh: a SINGLE tab-separated
-// persona line (same 10-column format as personas.tsv). When present, `freshen`
-// derives the identity from THIS persona directly -- bypassing the SDK-matched
-// random pool pick -- then deletes the file, so every `action`/autopif run
-// applies a fresh, randomly-fetched Pixel identity. Absent/invalid => normal
-// pool pick. This is why autopif no longer needs to persist into personas.tsv.
 inline constexpr char PERSONA_OVERRIDE[] = "/data/adb/modules/sandboxid/persona.override";
 
 inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/sandboxid/identity.prop.bak";
 inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mode";
-// Persisted carrier/SIM selection (written by the `carrier` command / WebUI).
-// Simple KV file: NAME=, MCC=, MNC=, ISO=, PHANTOM=0|1. Merged into identity.prop
-// on freshen/seed/apply-boot so the chosen operator survives persona rotation.
+
 inline constexpr char CARRIER_CONF[]  = "/data/adb/modules/sandboxid/carrier.conf";
 inline constexpr char CARRIERS_FILE[] = "/data/adb/modules/sandboxid/carriers.tsv";
 inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetprop-rs";
 
-// Opt-in flag for the DEFAULT-OFF root/mount-trace hider (F6). The user creates
-// this file (`touch`) to enable it; absent => hider never runs. The app process
-// can't stat /data/adb, so the companion checks this and mirrors it into the served
-// blob as SBX_HIDE=1 (see companion.cpp), exactly like the no_native_read switch.
 inline constexpr char ENABLE_HIDE[]   = "/data/adb/modules/sandboxid/enable_hide";
 
 enum Cmd : uint8_t {
     CMD_GET_IDENTITY = 2,
     CMD_DO_MOUNTS    = 3,
-    CMD_DO_HIDE      = 4,   // opt-in root/mount-trace hider (F6); gated by ENABLE_HIDE
+    CMD_DO_HIDE      = 4,
 };
 
 inline constexpr uint32_t MAX_IDENTITY_BLOB = 64u * 1024u;
@@ -100,13 +87,6 @@ inline constexpr KV STATIC_PROP_DEFAULTS[] = {
     {"dalvik.vm.heapsize",           "512m"},
     {"ro.build.version.preview_sdk", "0"},
 
-    // Verified-boot / VBMeta coherence (F1) + SELinux enforcing (F3a). Fixed values
-    // for a locked, verified, non-debuggable retail device. The AVB digest is the
-    // one dynamic member (per-identity) and is wired via prop_to_identity_map, not
-    // here. Technique: reveny/Android-VBMeta-Fixer (MIT). These are hardcoded in
-    // three coordinated places -- here (per-app hooks), apply_native rp[]
-    // (device-wide resetprop), and generate_mount_files (build.prop overlay) -- so
-    // hook readers, property-service readers, and file-parsers all agree.
     {"ro.boot.verifiedbootstate",       "green"},
     {"ro.boot.vbmeta.device_state",     "locked"},
     {"ro.boot.flash.locked",            "1"},

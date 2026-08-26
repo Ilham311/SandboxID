@@ -1,25 +1,4 @@
 #pragma once
-//
-// sbx_native_read.hpp — PURE content logic for the native/file read-spoof layer
-// (L9). NO JNI, NO Zygisk, NO syscalls: everything here is a deterministic string
-// transform so it can be unit-tested on the host (see tests/native_read_test.cpp)
-// with the same -Wall -Wextra -Werror -fno-exceptions -fno-rtti flags the module
-// ships with. main.cpp owns the actual hooks (PLT install, memfd, /proc reads) and
-// calls into these builders.
-//
-// Why native at all: the L2 hook only covers android.os.SystemProperties.native_get
-// (the *Java* path). Native code calling __system_property_get() directly, and any
-// code that reads /proc or /sys as plain files, bypasses every Java-side hook. This
-// layer closes those: native property reads return the SAME value as L2, and a
-// handful of high-signal pseudo-files (/proc/version, boot_id, sysfs Wi-Fi MAC,
-// /proc/meminfo, /proc/cpuinfo Hardware) are rewritten to match the spoofed device.
-//
-// All fabricated values are derived DETERMINISTICALLY from the already-present
-// identity (FINGERPRINT/SERIAL/RELEASE/…), so they are (a) stable across every read
-// and every target app for one identity, (b) different from the real device, and
-// (c) rotate automatically when the identity rotates — no new identity.prop key and
-// no shell/WebUI change required. WIFI_MAC is the one exception: when the shell has
-// already persisted one (helpers.sh/rotate_ids.sh) we reuse it verbatim.
 
 #include <cstdint>
 #include <cstddef>
@@ -31,11 +10,6 @@
 
 namespace sbxnr {
 
-// ---------------------------------------------------------------------------
-// Deterministic hashing / byte expansion. FNV-1a (64) for the seed, splitmix64
-// to expand into as many pseudo-random-but-reproducible bytes as we need. No
-// std::random here: identical identity => identical boot_id/MAC across processes.
-// ---------------------------------------------------------------------------
 inline uint64_t fnv1a(const std::string& s) {
     uint64_t h = 1469598103934665603ULL;
     for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
@@ -62,16 +36,11 @@ inline void fill_bytes(uint64_t seed, uint8_t* out, size_t n) {
 
 inline char hex_lc(unsigned v) { return "0123456789abcdef"[v & 0xF]; }
 
-// ---------------------------------------------------------------------------
-// boot_id: a v4-shaped UUID. /proc/sys/kernel/random/boot_id is a per-boot random
-// UUID; leaving the real one exposed lets two "different" spoofed apps be tied to
-// the same physical boot. We replace it with a stable, identity-derived UUID.
-// ---------------------------------------------------------------------------
 inline std::string uuid_from_seed(uint64_t seed) {
     uint8_t b[16];
     fill_bytes(seed, b, sizeof(b));
-    b[6] = static_cast<uint8_t>((b[6] & 0x0F) | 0x40);        // version 4
-    b[8] = static_cast<uint8_t>((b[8] & 0x3F) | 0x80);        // variant 10x
+    b[6] = static_cast<uint8_t>((b[6] & 0x0F) | 0x40);
+    b[8] = static_cast<uint8_t>((b[8] & 0x3F) | 0x80);
     std::string s;
     s.reserve(36);
     for (int i = 0; i < 16; ++i) {
@@ -82,22 +51,16 @@ inline std::string uuid_from_seed(uint64_t seed) {
     return s;
 }
 
-// ---------------------------------------------------------------------------
-// Wi-Fi MAC. Format matches helpers.sh generate_mac(): a locally-administered
-// 02:xx:xx:xx:xx:xx address (fixed 0x02 first octet, remainder identity-derived).
-// Only used when the shell has NOT already persisted WIFI_MAC.
-// ---------------------------------------------------------------------------
 inline std::string mac_from_seed(uint64_t seed) {
     uint8_t b[6];
     fill_bytes(seed, b, sizeof(b));
-    b[0] = 0x02;                                             // locally administered, unicast
+    b[0] = 0x02;
     char buf[18];
     std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
                   b[0], b[1], b[2], b[3], b[4], b[5]);
     return std::string(buf);
 }
 
-// Accept a persisted MAC only if it is a well-formed, non-null, unicast address.
 inline bool is_valid_mac(const std::string& m) {
     if (m.size() != 17) return false;
     for (int i = 0; i < 17; ++i) {
@@ -106,22 +69,12 @@ inline bool is_valid_mac(const std::string& m) {
         else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
             return false;
     }
-    // reject 00:00:00:00:00:00 (the "unavailable" sentinel) and broadcast.
+
     bool all_zero = true;
     for (char c : m) if (c != '0' && c != ':') { all_zero = false; break; }
     return !all_zero;
 }
 
-// ---------------------------------------------------------------------------
-// Deterministic lowercase-hex string of `nbytes` bytes (2*nbytes chars), expanded
-// from `seed`. Used for synthetic-but-stable hex fingerprints such as
-// ro.boot.vbmeta.digest -- a locked device advertises a 32-byte (64-hex) AVB
-// digest, and detectors flag an empty/garbage one. Like every builder here it is a
-// pure function of the identity seed: stable per identity, different across
-// identities, and NOT attestable -- a genuine digest would require the device's AVB
-// signing keys (out of scope; documented in CREDITS.md). This only defeats the
-// "digest is missing/malformed" heuristic, not real key attestation.
-// ---------------------------------------------------------------------------
 inline std::string hex_from_seed(uint64_t seed, size_t nbytes) {
     std::string s;
     s.reserve(nbytes * 2);
@@ -138,20 +91,10 @@ inline std::string hex_from_seed(uint64_t seed, size_t nbytes) {
     return s;
 }
 
-// ---------------------------------------------------------------------------
-// /proc/version. The real string leaks the true kernel version, build host and
-// build user — a strong hardware/ROM fingerprint. We synthesise a plausible
-// Google-style GKI line whose kernel base matches the spoofed Tensor generation
-// (or, for non-Pixel personas, the Android release) and whose android<N> token
-// matches RELEASE. Sub-version / build tags are identity-derived, not attestable.
-// ---------------------------------------------------------------------------
 inline int release_major(const std::string& release) {
-    return std::atoi(release.c_str());   // "14", "14.0.1" -> 14; "" -> 0
+    return std::atoi(release.c_str());
 }
 
-// Kernel base ("5.10" / "5.15" / "6.1") for a given Tensor platform, else derived
-// from the Android release. Pixel kernels track the SoC generation, not the OS
-// version (a Pixel 6 stays on 5.10 across Android 12/13/14), so platform wins.
 inline const char* kernel_base(const std::string& platform, int rmaj) {
     if (platform == "gs101" || platform == "gs201") return "5.10";
     if (platform == "zuma")                          return "5.15";
@@ -159,14 +102,14 @@ inline const char* kernel_base(const std::string& platform, int rmaj) {
     if (rmaj <= 0)  return "5.15";
     if (rmaj <= 12) return "5.10";
     if (rmaj <= 14) return "5.15";
-    return "6.1";                                    // 15, 16, and newer
+    return "6.1";
 }
 
 inline const char* clang_for(int rmaj) {
     if (rmaj <= 12) return "14.0.6";
     if (rmaj == 13) return "16.0.2";
     if (rmaj == 14) return "17.0.4";
-    return "18.0.1";                                 // 15, 16, and newer
+    return "18.0.1";
 }
 
 inline std::string synth_proc_version(const std::string& release,
@@ -179,16 +122,14 @@ inline std::string synth_proc_version(const std::string& release,
     const char* kbase = kernel_base(platform, rmaj);
     const char* clang = clang_for(rmaj);
 
-    unsigned ksub = 100u + static_cast<unsigned>(seed % 120u);        // .100 .. .219
-    unsigned krev = 1u + static_cast<unsigned>((seed >> 8) % 15u);    // -1 .. -15
+    unsigned ksub = 100u + static_cast<unsigned>(seed % 120u);
+    unsigned krev = 1u + static_cast<unsigned>((seed >> 8) % 15u);
 
     char ghash[13];
     uint64_t gh = splitmix64(seed);
     for (int i = 0; i < 12; ++i) ghash[i] = hex_lc(static_cast<unsigned>(gh >> (i * 4)));
     ghash[12] = '\0';
 
-    // ab<build>: prefer the real incremental digits (already a build number), else
-    // derive one so the field is always present and plausible.
     std::string ab;
     for (char c : incremental) if (c >= '0' && c <= '9') ab.push_back(c);
     if (ab.size() < 6 || ab.size() > 12) {
@@ -209,14 +150,6 @@ inline std::string synth_proc_version(const std::string& release,
     return std::string(out);
 }
 
-// ---------------------------------------------------------------------------
-// /proc/meminfo — MemTotal only. Real MemTotal is a fine device-class fingerprint.
-// If the persona is a Pixel we know the RAM tier; otherwise we snap the real total
-// UP to the nearest marketing capacity (entropy reduction that never claims a wildly
-// different amount). Every other line passes through byte-for-byte.
-// ---------------------------------------------------------------------------
-
-// Marketing RAM (GB) for known Pixel MODELs; 0 => unknown (round the real total).
 inline int pixel_ram_gb(const std::string& model) {
     struct M { const char* model; int gb; };
     static const M tbl[] = {
@@ -232,26 +165,22 @@ inline int pixel_ram_gb(const std::string& model) {
     return 0;
 }
 
-// GB -> a realistic MemTotal in kB. Real devices report ~92-96% of the marketing
-// capacity (kernel/firmware reserve); 0.955 lands inside that band.
 inline uint64_t ram_gb_to_memtotal_kb(int gb) {
     return static_cast<uint64_t>(gb) * 1024ULL * 1024ULL * 955ULL / 1000ULL;
 }
 
 inline uint64_t round_up_marketing_gb(uint64_t real_kb) {
     static const int tiers[] = {2, 3, 4, 6, 8, 12, 16, 18, 24};
-    // ceil(real_kb / 1 GiB), then snap up to the nearest marketing tier.
+
     uint64_t gib = (real_kb + 1048575ULL) / 1048576ULL;
     for (int t : tiers) if (static_cast<uint64_t>(t) >= gib) return static_cast<uint64_t>(t);
-    return gib;   // absurdly large: leave as-is
+    return gib;
 }
 
-// Rewrite the "MemTotal:" line of `real`. target_gb 0 => derive from the real total.
-// If no MemTotal line exists, returns `real` unchanged.
 inline std::string patch_meminfo(const std::string& real, int target_gb) {
     size_t pos = real.find("MemTotal:");
     if (pos != 0 && (pos == std::string::npos || real[pos - 1] != '\n')) {
-        // "MemTotal:" must start a line.
+
         size_t p = real.find("\nMemTotal:");
         if (p == std::string::npos) return real;
         pos = p + 1;
@@ -263,7 +192,7 @@ inline std::string patch_meminfo(const std::string& real, int target_gb) {
     if (target_gb > 0) {
         target_kb = ram_gb_to_memtotal_kb(target_gb);
     } else {
-        // parse the real value to know which tier to round up to.
+
         uint64_t real_kb = 0;
         const char* p = real.c_str() + pos;
         while (*p && (*p < '0' || *p > '9')) ++p;
@@ -283,14 +212,6 @@ inline std::string patch_meminfo(const std::string& real, int target_gb) {
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// /proc/cpuinfo — the "Hardware" line. On arm64 Pixels there is NO Hardware line;
-// Qualcomm/MediaTek devices expose one that names the real SoC. So: for a Pixel
-// (Google/Tensor) persona we STRIP any Hardware line the real device has; for a
-// Qualcomm/MediaTek persona we REWRITE it to a correctly-shaped SoC string. Every
-// other line passes through. If there is nothing to do we signal passthrough so the
-// caller serves the real fd (avoids a needless, /proc/self/fd-detectable memfd).
-// ---------------------------------------------------------------------------
 enum CpuAction { CPU_NONE = 0, CPU_QUALCOMM = 1, CPU_MTK = 2, CPU_STRIP = 3 };
 
 inline bool ci_contains(const std::string& hay, const char* needle) {
@@ -305,8 +226,6 @@ inline bool starts_with(const std::string& s, const char* p) {
     return s.size() >= n && std::memcmp(s.data(), p, n) == 0;
 }
 
-// Decide how a persona's SoC should present in /proc/cpuinfo, and (for the rewrite
-// cases) the replacement Hardware value.
 inline int cpu_action_for(const std::string& soc_manuf, const std::string& soc_model,
                           std::string& repl_out) {
     repl_out.clear();
@@ -324,12 +243,10 @@ inline int cpu_action_for(const std::string& soc_manuf, const std::string& soc_m
         repl_out = soc_model.empty() ? std::string("MT6893") : soc_model;
         return CPU_MTK;
     }
-    // Google/Tensor, Exynos, Kirin, or unknown: real Pixels have no Hardware line,
-    // so the coherent move for the common (Pixel) persona is to strip it.
+
     return CPU_STRIP;
 }
 
-// Returns false => passthrough (nothing changed / no Hardware line to act on).
 inline bool patch_cpuinfo(const std::string& real, int action,
                           const std::string& repl, std::string& out) {
     if (action == CPU_NONE) return false;
@@ -340,7 +257,7 @@ inline bool patch_cpuinfo(const std::string& real, int action,
     while (i < n) {
         size_t eol = real.find('\n', i);
         size_t line_end = (eol == std::string::npos) ? n : eol;
-        // A "Hardware" line: token "Hardware" followed by optional ws then ':'.
+
         bool is_hw = false;
         if (line_end - i >= 8 && std::memcmp(real.data() + i, "Hardware", 8) == 0) {
             size_t j = i + 8;
@@ -354,7 +271,7 @@ inline bool patch_cpuinfo(const std::string& real, int action,
                 out.append(repl);
                 if (eol != std::string::npos) out.push_back('\n');
             }
-            // CPU_STRIP: drop the line entirely (including its newline).
+
         } else {
             out.append(real, i, line_end - i);
             if (eol != std::string::npos) out.push_back('\n');
@@ -366,9 +283,6 @@ inline bool patch_cpuinfo(const std::string& real, int action,
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Path classification. Only exact, absolute pseudo-file paths are intercepted.
-// ---------------------------------------------------------------------------
 enum Kind { NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE };
 
 inline Kind classify(const char* path) {
@@ -377,11 +291,9 @@ inline Kind classify(const char* path) {
     if (std::strcmp(path, "/proc/version") == 0) return VERSION;
     if (std::strcmp(path, "/proc/meminfo") == 0) return MEMINFO;
     if (std::strcmp(path, "/proc/cpuinfo") == 0) return CPUINFO;
-    // The single-byte SELinux mode node. A permissive ("0") policy is a strong
-    // root/tamper tell; we always report enforcing. Exact match only.
+
     if (std::strcmp(path, "/sys/fs/selinux/enforce") == 0) return SELINUX_ENFORCE;
 
-    // /sys/class/net/<iface>/address, iface in {wlan*, p2p*} (Wi-Fi only).
     static const char pfx[] = "/sys/class/net/";
     const size_t pl = sizeof(pfx) - 1;
     if (std::strncmp(path, pfx, pl) == 0) {
@@ -397,23 +309,11 @@ inline Kind classify(const char* path) {
     return NONE;
 }
 
-// The content served for /sys/fs/selinux/enforce. This node is a SINGLE ASCII
-// byte with NO trailing newline ("1"=enforcing, "0"=permissive); the caller must
-// serve it verbatim and must NOT append '\n' (a trailing byte is itself a tell).
 inline std::string selinux_enforce_content() { return std::string("1"); }
 
-// ---------------------------------------------------------------------------
-// Property "mark-absent" matchers (technique: yubunus/Hide-My-Goldfish, MIT, for
-// the emulator set; ezme-nodebug, MIT, for the LineageOS/custom-ROM set). These do
-// NOT rewrite a value -- they tell the property hooks to report the key as if it
-// does not exist, because on a real retail Pixel these keys are simply absent and
-// their mere presence is the fingerprint. Matched by exact name or a small set of
-// namespace roots so an unrelated key is never accidentally blanked. Pure & hot:
-// no allocation (strcmp/strncmp only) since the property hooks call this per read.
-// ---------------------------------------------------------------------------
 inline bool is_emulator_prop(const char* name) {
     if (!name) return false;
-    // goldfish/ranchu QEMU markers a physical device never exposes.
+
     static const char* const exact[] = {
         "ro.kernel.qemu",
         "ro.kernel.qemu.gles",
@@ -428,7 +328,7 @@ inline bool is_emulator_prop(const char* name) {
         "init.svc.ranchu-net",
     };
     for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
-    // Whole QEMU/goldfish namespaces.
+
     if (std::strncmp(name, "qemu.", 5) == 0)            return true;
     if (std::strncmp(name, "ro.kernel.qemu.", 15) == 0) return true;
     if (std::strncmp(name, "ro.boot.qemu.", 13) == 0)   return true;
@@ -450,10 +350,8 @@ inline bool is_custom_rom_prop(const char* name) {
     return false;
 }
 
-// A property the persona should present as ABSENT (either an emulator tell or a
-// custom-ROM tell). The hooks consult this before any value-spoof lookup.
 inline bool should_hide_prop(const char* name) {
     return is_emulator_prop(name) || is_custom_rom_prop(name);
 }
 
-}  // namespace sbxnr
+}

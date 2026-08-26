@@ -1,13 +1,3 @@
-// tests/carrier_test.cpp — host unit tests for sbx_carrier.hpp.
-//
-// Build & run (mirrors the module's release warning flags):
-//   c++ -std=c++17 -Wall -Wextra -Werror -fno-exceptions -fno-rtti \
-//       tests/carrier_test.cpp -o /tmp/ct && /tmp/ct
-//
-// Pure logic only: parses carrier.conf text and applies the four carrier keys
-// onto an identity map. The file I/O + Identity wiring in sandboxid.cpp
-// (merge_carrier) is a thin wrapper over this and is verified on-device after a
-// CI rebuild. This guards the "owns the keys" contract and MCC+MNC formatting.
 
 #include "../jni/sbx_carrier.hpp"
 
@@ -64,7 +54,7 @@ static void test_name_with_spaces_no_phantom() {
 }
 
 static void test_three_digit_mnc() {
-    // Mexico/NANP use 3-digit MNCs; width MUST be preserved in the numeric.
+
     CarrierSel s = parse_carrier_conf("NAME=Telcel\nMCC=334\nMNC=020\nISO=mx\nPHANTOM=0\n");
     std::map<std::string, std::string> kv;
     apply_carrier(kv, s);
@@ -82,7 +72,7 @@ static void test_empty_iso_erased() {
 
 static void test_invalid_empty_and_incomplete() {
     std::map<std::string, std::string> kv;
-    // pre-seed stale carrier keys + an unrelated key
+
     kv["GSM_OPERATOR_NUMERIC"] = "51010";
     kv["GSM_OPERATOR_ALPHA"] = "Telkomsel";
     kv["GSM_OPERATOR_ISO"] = "id";
@@ -99,7 +89,7 @@ static void test_invalid_empty_and_incomplete() {
     CHECK(!has(kv, "GSM_SIM_STATE"), "invalid erases sim state");
     CHECK(get(kv, "MODEL") == "Pixel 8", "unrelated key preserved");
 
-    CarrierSel incomplete = parse_carrier_conf("NAME=Foo\nMCC=111\n");  // no MNC
+    CarrierSel incomplete = parse_carrier_conf("NAME=Foo\nMCC=111\n");
     CHECK(!incomplete.valid, "missing mnc -> invalid");
 }
 
@@ -133,7 +123,7 @@ static void test_reapply_switches_cleanly() {
     std::map<std::string, std::string> kv;
     apply_carrier(kv, parse_carrier_conf("NAME=A\nMCC=310\nMNC=410\nISO=us\nPHANTOM=1\n"));
     CHECK(get(kv, "GSM_SIM_STATE") == "LOADED", "first apply sets phantom");
-    // switch to a carrier without phantom + no iso -> stale keys must clear
+
     apply_carrier(kv, parse_carrier_conf("NAME=B\nMCC=440\nMNC=20\nPHANTOM=0\n"));
     CHECK(get(kv, "GSM_OPERATOR_NUMERIC") == "44020", "numeric updated on re-apply");
     CHECK(get(kv, "GSM_OPERATOR_ALPHA") == "B", "alpha updated on re-apply");
