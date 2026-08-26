@@ -248,15 +248,29 @@ sync_device_name() {
 # Pilih operator/kartu SIM. Menulis carrier.conf (bertahan lintas rotasi persona,
 # di-merge ulang oleh `sandboxid freshen`) DAN langsung menuliskan key GSM_* ke
 # identity.prop supava efektif pada spawn app berikutnya tanpa freshen penuh.
-#   set_carrier "MCC|MNC|NAMA|ISO|PHANTOM"   -> pilih operator (ISO/PHANTOM opsional)
+#   set_carrier "MCC|MNC|NAMA|ISO|PHANTOM|CARRIER_ID"  -> pilih operator (ISO/PHANTOM/CARRIER_ID opsional)
 #   set_carrier off                          -> hapus pilihan (kembali ke bawaan)
 #   set_carrier status                       -> tampilkan pilihan sekarang
 # PHANTOM=1 memaksa gsm.sim.state=LOADED: slot kosong ikut melaporkan SIM ada.
+# CARRIER_ID = id carrier Android (getSimCarrierId). Bila kosong pada spec, diambil
+# dari carriers.tsv sesuai MCC+MNC; tetap kosong bila operator tak ada di daftar.
 _carrier_clear_keys() {
     identity_del GSM_OPERATOR_NUMERIC
     identity_del GSM_OPERATOR_ALPHA
     identity_del GSM_OPERATOR_ISO
+    identity_del GSM_CARRIER_ID
     identity_del GSM_SIM_STATE
+}
+
+# Cari carrier_id (kolom ke-5 carriers.tsv) untuk baris MCC+MNC yang cocok.
+# Kosong bila tak ada di daftar — di perangkat nyata getSimCarrierId() = -1 (UNKNOWN).
+_carrier_lookup_id() {
+    _lk_mcc="$1"; _lk_mnc="$2"
+    [ -r "$CARRIERS_FILE" ] || return 0
+    awk -F'\t' -v mcc="$_lk_mcc" -v mnc="$_lk_mnc" '
+        /^[[:space:]]*#/ || NF < 4 { next }
+        $2 == mcc && $3 == mnc { gsub(/[[:space:]]/, "", $5); print $5; exit }
+    ' "$CARRIERS_FILE" 2>/dev/null
 }
 
 set_carrier() {
@@ -269,10 +283,12 @@ set_carrier() {
                 cm="$(awk -F= '$1=="MCC"{print $2;exit}'  "$CARRIER_CONF" 2>/dev/null)"
                 cc="$(awk -F= '$1=="MNC"{print $2;exit}'  "$CARRIER_CONF" 2>/dev/null)"
                 ci="$(awk -F= '$1=="ISO"{print $2;exit}'  "$CARRIER_CONF" 2>/dev/null)"
+                cid="$(awk -F= '$1=="CARRIER_ID"{print $2;exit}' "$CARRIER_CONF" 2>/dev/null)"
                 cp="$(awk -F= '$1=="PHANTOM"{print $2;exit}' "$CARRIER_CONF" 2>/dev/null)"
                 log_info "Operator : ${cn:-(kosong)}"
                 log_info "Kode     : ${cm}${cc}"
                 log_info "Negara   : ${ci:-(kosong)}"
+                log_info "Carrier ID: ${cid:-(kosong, -1/UNKNOWN)}"
                 [ "$cp" = "1" ] && log_info "Phantom  : aktif (slot kosong lapor SIM ada)"
             else
                 log_info "Belum ada operator dipilih — pakai bawaan (Telkomsel 51010)"
@@ -294,12 +310,22 @@ set_carrier() {
     iso="$(printf '%s'  "$spec" | awk -F'|' '{print $4}' | tr -d ' \t\r' | tr '[:upper:]' '[:lower:]')"
     phantom="$(printf '%s' "$spec" | awk -F'|' '{print $5}' | tr -d ' \t\r')"
     [ "$phantom" = "1" ] || phantom=0
+    cid="$(printf '%s' "$spec" | awk -F'|' '{print $6}' | tr -d ' \t\r')"
 
     case "$mcc" in ''|*[!0-9]*) log_err "carrier: MCC tidak valid ('$mcc') — harus 3 digit angka"; return 2 ;; esac
     case "$mnc" in ''|*[!0-9]*) log_err "carrier: MNC tidak valid ('$mnc') — harus 2-3 digit angka"; return 2 ;; esac
     if [ "${#mcc}" -ne 3 ]; then log_err "carrier: MCC harus 3 digit (dapat '$mcc')"; return 2; fi
     if [ "${#mnc}" -lt 2 ] || [ "${#mnc}" -gt 3 ]; then log_err "carrier: MNC harus 2-3 digit (dapat '$mnc')"; return 2; fi
     if [ -z "$name" ]; then log_err "carrier: nama operator kosong"; return 2; fi
+
+    # carrier_id: pakai yang di spec; bila kosong, coba ambil dari carriers.tsv.
+    [ -z "$cid" ] && cid="$(_carrier_lookup_id "$mcc" "$mnc" | tr -d ' \t\r')"
+    # Validasi: kosong ATAU integer (boleh -1 UNKNOWN). Nilai aneh diabaikan (jangan tebak).
+    case "$cid" in
+        ''|-1) : ;;
+        -[0-9]*|[0-9]*) case "${cid#-}" in *[!0-9]*) log_warn "carrier: CARRIER_ID '$cid' bukan angka — diabaikan"; cid="" ;; esac ;;
+        *) log_warn "carrier: CARRIER_ID '$cid' bukan angka — diabaikan"; cid="" ;;
+    esac
 
     _ph_note=""
     [ "$phantom" = "1" ] && _ph_note=", phantom"
@@ -313,6 +339,7 @@ set_carrier() {
         printf 'MNC=%s\n'  "$mnc"
         printf 'ISO=%s\n'  "$iso"
         printf 'PHANTOM=%s\n' "$phantom"
+        printf 'CARRIER_ID=%s\n' "$cid"
     } > "$tmpc" 2>/dev/null || { log_err "carrier: gagal tulis carrier.conf"; rm -f "$tmpc"; umask 022; return 1; }
     mv "$tmpc" "$CARRIER_CONF" 2>/dev/null || { log_err "carrier: gagal simpan carrier.conf"; rm -f "$tmpc"; umask 022; return 1; }
     chmod 0644 "$CARRIER_CONF" 2>/dev/null
@@ -322,9 +349,10 @@ set_carrier() {
     identity_persist GSM_OPERATOR_NUMERIC "$mcc$mnc" || log_warn "carrier: gagal tulis GSM_OPERATOR_NUMERIC"
     identity_persist GSM_OPERATOR_ALPHA   "$name"    || log_warn "carrier: gagal tulis GSM_OPERATOR_ALPHA"
     if [ -n "$iso" ]; then identity_persist GSM_OPERATOR_ISO "$iso"; else identity_del GSM_OPERATOR_ISO; fi
+    if [ -n "$cid" ]; then identity_persist GSM_CARRIER_ID "$cid"; else identity_del GSM_CARRIER_ID; fi
     if [ "$phantom" = "1" ]; then identity_persist GSM_SIM_STATE "LOADED"; else identity_del GSM_SIM_STATE; fi
 
-    log_ok "Operator aktif: $name ($mcc$mnc) — berlaku saat aplikasi target dibuka lagi"
+    log_ok "Operator aktif: $name ($mcc$mnc${cid:+, id $cid}) — berlaku saat aplikasi target dibuka lagi"
     return 0
 }
 
@@ -401,7 +429,7 @@ Usage: rotate_ids.sh <cmd> [args]
   bt-mac [xx:xx:..]          - set Bluetooth adapter MAC
   device-name [name]         - sync device_name/BT to persona (identity.prop MODEL)
   boot-count                 - write Settings.Global.boot_count from identity.prop BOOT_COUNT
-  carrier <spec>|off|status  - pick SIM/operator; spec = "MCC|MNC|NAME|ISO|PHANTOM"
+  carrier <spec>|off|status  - pick SIM/operator; spec = "MCC|MNC|NAME|ISO|PHANTOM|CARRIER_ID"
   status                     - show current values (read-only)
 USAGE
         exit 0 ;;

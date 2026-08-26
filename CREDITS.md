@@ -132,6 +132,90 @@ source is copied.
 
 ---
 
+## Reference modules studied for the device-identity roadmap
+
+The projects below were **analysed** (read as prior art) while planning
+SandboxID's device-identity coverage. Each entry states the project's license,
+**what SandboxID actually takes** from it, and its honest **status** — because
+crediting a project does not mean its feature already ships here. The clean-room
+boundary at the top of this file governs every entry: **GPL/AGPL projects are
+studied for ideas only, never code; a project with no license is used for
+verifiable platform *facts* only (identifier names), never its expression; MIT
+projects are reimplemented, and any vendored snippet would carry its notice
+inline at the copy site.** URLs are given as `owner/module` locators — confirm
+the exact slug before redistribution.
+
+- **Device Faker** — `Seyud/DeviceFaker` (**GPL-3.0**). Studied for its
+  *approach* to broadening spoof coverage beyond `Build.*` into
+  runtime-queried identity (media DRM / Widevine id, sensor enumeration).
+  **Idea only, no code** — porting any GPL source would relicense this module.
+  *Status: studied; corresponding native layers are roadmap items, not yet
+  implemented here.*
+
+- **TargetedFix** — `VisionR1/TargetedFix` (**GPL-3.0**). Studied for the
+  *per-target-package* application model (apply an identity only to selected
+  apps). SandboxID already scopes effects to `target.txt`; the finer
+  *per-package distinct identity* is a roadmap item. **Idea only, no code.**
+  *Status: concept studied; per-package-distinct identities not yet
+  implemented.*
+
+- **MagiskHidePropsConf (MHPC)** — `Didgeridoohan/MagiskHidePropsConf`
+  ([github.com/Magisk-Modules-Repo/MagiskHidePropsConf](https://github.com/Magisk-Modules-Repo/MagiskHidePropsConf),
+  **MIT** per its README). Referenced for the *curated fingerprint-list*
+  technique (`printslist` — pick a known-good certified fingerprint from a
+  shipped list). SandboxID's analogue is its own `personas.tsv` / `devices.tsv`
+  data pools and CLI picker; the *idea* of shipping a chooseable fingerprint
+  list is the borrowed part, **reimplemented** in this repo's own shell + data.
+  *Status: technique referenced; list-driven persona picking is implemented via
+  `personas.tsv`/`devices.tsv` (the interactive per-device picker is a roadmap
+  item).*
+
+- **Device ID Changer** — `sidex15/Device-ID-Changer` (**AGPL-3.0**). Studied
+  for the *user-facing identifier-reset* surface (Android ID / advertising ID /
+  GSF-style ids). AGPL is the strongest copyleft here, so the caution is
+  strictest: **idea only, never code, never a derived work.** SandboxID's SSAID
+  / GAID rotation is independently implemented in `rotate_ids.sh` +
+  `jni/sandboxid.cpp` against the documented `settings`/Ad-ID surface.
+  *Status: independently implemented; no AGPL code or structure adopted.*
+
+- **DeviceSpoofLab-Magisk** — `yubunus/DeviceSpoofLab-Magisk` (**MIT**; same
+  author as the already-credited Hide-My-Goldfish above). Studied for its
+  layout of a spoof "lab" across build-prop surfaces. **Technique only** — no
+  source copied; SandboxID's prop surfaces predate and differ from it.
+  *Status: technique studied; nothing new vendored.*
+
+- **SpoofingCollection** — `mrx7014/SpoofingCollection` (**no license stated →
+  all rights reserved**). Because no license is granted, **only verifiable
+  facts are used — Samsung/Knox-family property *names* that are facts about the
+  platform, not creative expression.** No file, script, structure, or wording
+  from it is copied or adapted. *Status: property-name facts referenced only;
+  Samsung/Knox persona profiles are a roadmap item and not yet implemented.*
+
+- **FingerprintJS Android** —
+  [github.com/fingerprintjs/fingerprintjs-android](https://github.com/fingerprintjs/fingerprintjs-android)
+  (**MIT**). Used as a **detector oracle and requirements checklist** — which
+  device signals a fingerprinting SDK actually reads (screen metrics, GPU/GLES
+  renderer, sensor list, `statfs` totals, CPU/ABI) — to decide what SandboxID
+  must keep coherent. Alongside the existing `reveny` oracle, it informs the
+  read-only signal checklist in `selftest.sh`. **No code embedded or linked.**
+  *Status: adopted as a test/checklist oracle; the native coverage of some of
+  those signals is a roadmap item.*
+
+- **TrustDevice Android** — `trustdecision/trustdevice-android` (**MIT**).
+  Second **detector oracle / checklist** — a real device-risk SDK whose signal
+  taxonomy is used the same way as FingerprintJS: as a black-box list of "what
+  gets read," never as a source of copied code. *Status: adopted as a checklist
+  oracle only.*
+
+- **Thales device-fingerprint SDK (documentation)** — vendor/proprietary docs.
+  The documentation was **unreachable at analysis time and is therefore
+  unverified**; it is listed only to record that a commercial fingerprinting SDK
+  was considered as a signal reference. **No technique, fact, or code has been
+  adopted from it** pending verification against a reachable primary source.
+  *Status: unverified; nothing adopted.*
+
+---
+
 ## Licensing note
 
 SandboxID stays [MIT](./LICENSE). GPL/AGPL-licensed projects (e.g.

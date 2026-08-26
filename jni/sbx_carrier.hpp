@@ -19,6 +19,7 @@ struct CarrierSel {
     std::string mcc;
     std::string mnc;
     std::string iso;
+    std::string carrier_id;   // Android canonical carrier id (getSimCarrierId); empty = unset/UNKNOWN
     bool        phantom = false;
 };
 
@@ -33,11 +34,12 @@ inline CarrierSel parse_carrier_conf(const std::string& raw) {
         if (eq == std::string::npos) continue;
         std::string k = trim_ws(t.substr(0, eq));
         std::string v = trim_ws(t.substr(eq + 1));
-        if      (k == "NAME")    s.name = v;
-        else if (k == "MCC")     s.mcc  = v;
-        else if (k == "MNC")     s.mnc  = v;
-        else if (k == "ISO")     s.iso  = v;
-        else if (k == "PHANTOM") s.phantom = (v == "1");
+        if      (k == "NAME")       s.name = v;
+        else if (k == "MCC")        s.mcc  = v;
+        else if (k == "MNC")        s.mnc  = v;
+        else if (k == "ISO")        s.iso  = v;
+        else if (k == "CARRIER_ID") s.carrier_id = v;
+        else if (k == "PHANTOM")    s.phantom = (v == "1");
     }
     s.valid = !s.name.empty() && !s.mcc.empty() && !s.mnc.empty();
     return s;
@@ -47,11 +49,13 @@ inline bool apply_carrier(std::map<std::string, std::string>& kv, const CarrierS
     auto erase_all = [&] {
         kv.erase("GSM_OPERATOR_NUMERIC"); kv.erase("GSM_OPERATOR_ALPHA");
         kv.erase("GSM_OPERATOR_ISO");     kv.erase("GSM_SIM_STATE");
+        kv.erase("GSM_CARRIER_ID");
     };
     if (!s.valid) { erase_all(); return false; }
     kv["GSM_OPERATOR_NUMERIC"] = s.mcc + s.mnc;
     kv["GSM_OPERATOR_ALPHA"]   = s.name;
     if (!s.iso.empty()) kv["GSM_OPERATOR_ISO"] = s.iso; else kv.erase("GSM_OPERATOR_ISO");
+    if (!s.carrier_id.empty()) kv["GSM_CARRIER_ID"] = s.carrier_id; else kv.erase("GSM_CARRIER_ID");
     if (s.phantom)      kv["GSM_SIM_STATE"]    = "LOADED"; else kv.erase("GSM_SIM_STATE");
     return true;
 }

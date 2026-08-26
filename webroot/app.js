@@ -404,9 +404,11 @@ document.getElementById('rotAll').addEventListener('click', (ev) => withLoading(
 }));
 
 // ---- Tab SIM / operator ---------------------------------------------------
-// carriers.tsv (name<TAB>mcc<TAB>mnc<TAB>iso) -> dua dropdown (negara, operator).
-// "Terapkan" memanggil `rotate_ids.sh carrier "MCC|MNC|NAMA|ISO|PHANTOM"`, yang
-// menulis carrier.conf + key GSM_* di identity.prop (berlaku saat app dibuka lagi).
+// carriers.tsv (name<TAB>mcc<TAB>mnc<TAB>iso[<TAB>carrier_id]) -> dua dropdown
+// (negara, operator). "Terapkan" memanggil
+// `rotate_ids.sh carrier "MCC|MNC|NAMA|ISO|PHANTOM|CARRIER_ID"`, yang menulis
+// carrier.conf + key GSM_* di identity.prop (berlaku saat app dibuka lagi).
+// CARRIER_ID opsional (id carrier Android / getSimCarrierId); kosong = -1/UNKNOWN.
 let SIM_DB = null;
 
 function parseCarriersTsv(text) {
@@ -418,7 +420,8 @@ function parseCarriersTsv(text) {
     if (f.length < 4) continue;
     const name = f[0].trim(), mcc = f[1].trim(), mnc = f[2].trim(), iso = f[3].trim();
     if (!name || !mcc || !mnc) continue;
-    rows.push({ name, mcc, mnc, iso });
+    const carrierId = (f[4] || '').trim();
+    rows.push({ name, mcc, mnc, iso, carrierId });
   }
   return rows;
 }
@@ -431,7 +434,7 @@ function simFillCarriers(current) {
   carSel.innerHTML = '<option value="">Operator…</option>' +
     list.map(r => {
       const val = `${r.mcc}|${r.mnc}|${r.name}|${r.iso}`;
-      return `<option value="${escapeHtml(val)}">${escapeHtml(r.name)} · ${escapeHtml(r.mcc + r.mnc)}</option>`;
+      return `<option value="${escapeHtml(val)}" data-cid="${escapeHtml(r.carrierId || '')}">${escapeHtml(r.name)} · ${escapeHtml(r.mcc + r.mnc)}</option>`;
     }).join('');
   if (current && current.MCC && current.MNC) {
     const want = `${current.MCC}|${current.MNC}|`;
@@ -467,6 +470,7 @@ function renderSimCurrent(cc) {
     ['Operator', cc.NAME || ''],
     ['Kode (MCC+MNC)', (cc.MCC || '') + (cc.MNC || '')],
     ['Negara', (cc.ISO || '').toUpperCase()],
+    ['Carrier ID', cc.CARRIER_ID ? cc.CARRIER_ID : 'UNKNOWN (-1)'],
     ['Mode Tambah SIM', cc.PHANTOM === '1' ? 'Ya' : 'Tidak'],
   ];
   el.className = 'kv in';
@@ -504,10 +508,13 @@ function carrierCmd(arg) {
 document.getElementById('simCountry').addEventListener('change', () => simFillCarriers(null));
 
 document.getElementById('simApply').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
-  const sel = document.getElementById('simCarrier').value;
+  const carSel = document.getElementById('simCarrier');
+  const sel = carSel.value;
   if (!sel) { toast('Pilih operator dulu', { kind: 'warn' }); return; }
   const phantom = document.getElementById('simPhantom').checked ? '1' : '0';
-  const r = await run(carrierCmd(`${sel}|${phantom}`));
+  const opt = carSel.options[carSel.selectedIndex];
+  const cid = (opt && opt.dataset ? opt.dataset.cid : '') || '';
+  const r = await run(carrierCmd(`${sel}|${phantom}|${cid}`));
   finishRotate(r, 'SIM / operator');
   loadSim();
 }));
@@ -543,8 +550,9 @@ document.getElementById('tgtSave').addEventListener('click', (ev) => withLoading
 //   SELFTEST <category> <PASS|WARN|FAIL|INFO> <detail...>
 //   SELFTEST SUMMARY pass=N warn=M fail=K info=J
 const ST_CAT = {
-  identitas: 'Identitas', vbmeta: 'Verified boot', build: 'Build', selinux: 'SELinux',
-  rom: 'Emulator / ROM', root: 'Root', mount: 'Mount', hosts: 'Hosts', hooks: 'Hook per-app',
+  identitas: 'Identitas', koherensi: 'Koherensi', vbmeta: 'Verified boot', build: 'Build',
+  selinux: 'SELinux', rom: 'Emulator / ROM', root: 'Root', mount: 'Mount', hosts: 'Hosts',
+  hooks: 'Hook per-app',
 };
 const ST_KIND = {
   PASS: 'st-pass', WARN: 'st-warn', FAIL: 'st-fail', INFO: 'st-info',

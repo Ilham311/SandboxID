@@ -25,12 +25,13 @@ static std::string get(const std::map<std::string, std::string>& m, const std::s
 }
 
 static void test_parse_full() {
-    CarrierSel s = parse_carrier_conf("NAME=AT&T\nMCC=310\nMNC=410\nISO=us\nPHANTOM=1\n");
+    CarrierSel s = parse_carrier_conf("NAME=AT&T\nMCC=310\nMNC=410\nISO=us\nCARRIER_ID=1187\nPHANTOM=1\n");
     CHECK(s.valid, "full conf is valid");
     CHECK(s.name == "AT&T", "name parsed");
     CHECK(s.mcc == "310", "mcc parsed");
     CHECK(s.mnc == "410", "mnc parsed");
     CHECK(s.iso == "us", "iso parsed");
+    CHECK(s.carrier_id == "1187", "carrier_id parsed");
     CHECK(s.phantom, "phantom=1 -> true");
 
     std::map<std::string, std::string> kv;
@@ -39,7 +40,28 @@ static void test_parse_full() {
     CHECK(get(kv, "GSM_OPERATOR_NUMERIC") == "310410", "numeric = mcc+mnc");
     CHECK(get(kv, "GSM_OPERATOR_ALPHA") == "AT&T", "alpha = name");
     CHECK(get(kv, "GSM_OPERATOR_ISO") == "us", "iso set");
+    CHECK(get(kv, "GSM_CARRIER_ID") == "1187", "carrier_id set");
     CHECK(get(kv, "GSM_SIM_STATE") == "LOADED", "phantom -> LOADED");
+}
+
+// carrier_id is optional: present sets GSM_CARRIER_ID, absent/blank erases it
+// (mirrors ISO handling). Blank is the truthful value for operators not in
+// Google's carrier DB (a real device reports UNKNOWN_CARRIER_ID = -1 there).
+static void test_carrier_id_optional() {
+    // Telkomsel with its real AOSP carrier id 787.
+    CarrierSel s = parse_carrier_conf("NAME=Telkomsel\nMCC=510\nMNC=10\nISO=id\nCARRIER_ID=787\nPHANTOM=0\n");
+    CHECK(s.carrier_id == "787", "telkomsel carrier_id 787 parsed");
+    std::map<std::string, std::string> kv;
+    apply_carrier(kv, s);
+    CHECK(get(kv, "GSM_CARRIER_ID") == "787", "telkomsel GSM_CARRIER_ID = 787");
+
+    // No CARRIER_ID line -> key absent.
+    CarrierSel none = parse_carrier_conf("NAME=Smartfren\nMCC=510\nMNC=09\nISO=id\nPHANTOM=0\n");
+    CHECK(none.carrier_id.empty(), "missing carrier_id -> empty");
+    std::map<std::string, std::string> kv2;
+    kv2["GSM_CARRIER_ID"] = "999";  // stale
+    apply_carrier(kv2, none);
+    CHECK(!has(kv2, "GSM_CARRIER_ID"), "blank carrier_id erases the key");
 }
 
 static void test_name_with_spaces_no_phantom() {
@@ -76,6 +98,7 @@ static void test_invalid_empty_and_incomplete() {
     kv["GSM_OPERATOR_NUMERIC"] = "51010";
     kv["GSM_OPERATOR_ALPHA"] = "Telkomsel";
     kv["GSM_OPERATOR_ISO"] = "id";
+    kv["GSM_CARRIER_ID"] = "787";
     kv["GSM_SIM_STATE"] = "LOADED";
     kv["MODEL"] = "Pixel 8";
 
@@ -86,6 +109,7 @@ static void test_invalid_empty_and_incomplete() {
     CHECK(!has(kv, "GSM_OPERATOR_NUMERIC"), "invalid erases numeric");
     CHECK(!has(kv, "GSM_OPERATOR_ALPHA"), "invalid erases alpha");
     CHECK(!has(kv, "GSM_OPERATOR_ISO"), "invalid erases iso");
+    CHECK(!has(kv, "GSM_CARRIER_ID"), "invalid erases carrier_id");
     CHECK(!has(kv, "GSM_SIM_STATE"), "invalid erases sim state");
     CHECK(get(kv, "MODEL") == "Pixel 8", "unrelated key preserved");
 
@@ -121,18 +145,21 @@ static void test_phantom_strictly_one() {
 
 static void test_reapply_switches_cleanly() {
     std::map<std::string, std::string> kv;
-    apply_carrier(kv, parse_carrier_conf("NAME=A\nMCC=310\nMNC=410\nISO=us\nPHANTOM=1\n"));
+    apply_carrier(kv, parse_carrier_conf("NAME=A\nMCC=310\nMNC=410\nISO=us\nCARRIER_ID=1187\nPHANTOM=1\n"));
     CHECK(get(kv, "GSM_SIM_STATE") == "LOADED", "first apply sets phantom");
+    CHECK(get(kv, "GSM_CARRIER_ID") == "1187", "first apply sets carrier_id");
 
     apply_carrier(kv, parse_carrier_conf("NAME=B\nMCC=440\nMNC=20\nPHANTOM=0\n"));
     CHECK(get(kv, "GSM_OPERATOR_NUMERIC") == "44020", "numeric updated on re-apply");
     CHECK(get(kv, "GSM_OPERATOR_ALPHA") == "B", "alpha updated on re-apply");
     CHECK(!has(kv, "GSM_SIM_STATE"), "phantom cleared on re-apply");
     CHECK(!has(kv, "GSM_OPERATOR_ISO"), "iso cleared on re-apply");
+    CHECK(!has(kv, "GSM_CARRIER_ID"), "carrier_id cleared on re-apply");
 }
 
 int main() {
     test_parse_full();
+    test_carrier_id_optional();
     test_name_with_spaces_no_phantom();
     test_three_digit_mnc();
     test_empty_iso_erased();

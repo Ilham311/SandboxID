@@ -5,13 +5,19 @@
 # only the human-readable name is normalized. The `carrier` command in
 # rotate_ids.sh reads one row and writes the operator identity into
 # identity.prop (GSM_OPERATOR_NUMERIC = MCC+MNC, GSM_OPERATOR_ALPHA = name,
-# GSM_OPERATOR_ISO = iso). Add your own by appending a row below.
+# GSM_OPERATOR_ISO = iso, GSM_CARRIER_ID = carrier_id). Add your own by
+# appending a row below.
 #
-# Columns (tab-separated): name  mcc  mnc  iso
-#   name  display/operator name (Build gsm.operator.alpha)
-#   mcc   Mobile Country Code (3 digits)
-#   mnc   Mobile Network Code (2-3 digits, width preserved for numeric)
-#   iso   SIM/network country ISO-3166 alpha-2 (lowercase)
+# Columns (tab-separated): name  mcc  mnc  iso  [carrier_id]
+#   name        display/operator name (Build gsm.operator.alpha)
+#   mcc         Mobile Country Code (3 digits)
+#   mnc         Mobile Network Code (2-3 digits, width preserved for numeric)
+#   iso         SIM/network country ISO-3166 alpha-2 (lowercase)
+#   carrier_id  OPTIONAL 5th column: Android canonical carrier id, taken verbatim
+#               from AOSP carrier_list.textpb (TelephonyManager.getSimCarrierId()).
+#               Consumed by the L3 telephony hook. Leave blank when the operator is
+#               not in Google's carrier DB — a real device reports -1 (UNKNOWN) there,
+#               so blank is the truthful value. Do NOT invent numbers.
 #
 Etisalat	424	02	ae
 du	424	03	ae
@@ -67,9 +73,12 @@ A1	219	10	hr
 Hrvatski Telekom	219	01	hr
 Telekom	216	30	hu
 Vodafone	216	70	hu
-Indosat	510	21	id
-Telkomsel	510	10	id
-XL	510	11	id
+Axis	510	08	id	788
+Indosat	510	21	id	789
+Smartfren	510	09	id
+Telkomsel	510	10	id	787
+Tri	510	89	id
+XL	510	11	id	788
 Vodafone	272	01	ie
 eir	272	03	ie
 Cellcom	425	02	il

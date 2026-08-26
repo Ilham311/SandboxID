@@ -25,6 +25,12 @@ inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetpr
 
 inline constexpr char ENABLE_HIDE[]   = "/data/adb/modules/sandboxid/enable_hide";
 
+// L3 telephony hook (LSPlant) kill switch. Present => companion injects
+// SBX_NO_TEL=1 into the served blob, main.cpp skips installing the
+// TelephonyManager binder-value hooks. Absent => hooks run (only when the
+// build was compiled with SBX_ENABLE_LSPLANT, which is OFF by default).
+inline constexpr char NO_TELEPHONY[]  = "/data/adb/modules/sandboxid/no_telephony";
+
 enum Cmd : uint8_t {
     CMD_GET_IDENTITY = 2,
     CMD_DO_MOUNTS    = 3,
@@ -59,6 +65,7 @@ inline constexpr KV VAL_DEFAULTS[] = {
     {"GSM_OPERATOR_NUMERIC",   "51010"},
     {"GSM_OPERATOR_ALPHA",     "Telkomsel"},
     {"GSM_OPERATOR_ISO",       "id"},
+    {"GSM_CARRIER_ID",         "787"},
     {"GSM_SIM_STATE",          ""},
     {"BUILD_CHARACTERISTICS",  "default"},
     {"PERSIST_TIMEZONE",       "Asia/Jakarta"},

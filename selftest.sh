@@ -59,6 +59,93 @@ else
     emit identitas WARN "belum ada persona — tekan Acak perangkat baru"
 fi
 
+# --- coherence self-audit (J): internal consistency of the applied persona -
+# All fields come from identity.prop. A detector that RECOMPUTES the fingerprint
+# from Build.* or MAPS SDK->release will flag any mismatch, and an SDK/RELEASE
+# skew is exactly the "upgrade spoof" that force-closes target apps. Catching it
+# here means a broken persona is spotted before a target app ever sees it. These
+# are read-only string checks on identity.prop and run only when a persona is
+# applied (otherwise the identitas WARN above already covers the empty case).
+if [ -n "$_fp" ]; then
+    _brand="$(id_get BRAND)";     _product="$(id_get PRODUCT)"
+    _device="$(id_get DEVICE)";   _release="$(id_get RELEASE)"
+    _bid="$(id_get ID)";          _incr="$(id_get INCREMENTAL)"
+    _sdk="$(id_get SDK_INT)";     _patch="$(id_get SECURITY_PATCH)"
+    _plat="$(id_get BOARD_PLATFORM)"
+    _socman="$(id_get SOC_MANUFACTURER)"; _socmod="$(id_get SOC_MODEL)"
+    _type="$(id_get TYPE)";       _tags="$(id_get TAGS)"
+
+    # 1. FINGERPRINT == BRAND/PRODUCT/DEVICE:RELEASE/ID/INCREMENTAL:user/release-keys
+    _expfp="${_brand}/${_product}/${_device}:${_release}/${_bid}/${_incr}:user/release-keys"
+    if [ "$_fp" = "$_expfp" ]; then
+        emit koherensi PASS "fingerprint konsisten dengan field Build"
+    else
+        emit koherensi FAIL "fingerprint tidak cocok dengan BRAND/PRODUCT/DEVICE/RELEASE/ID/INCREMENTAL"
+    fi
+
+    # 2. SDK_INT <-> RELEASE major (upgrade-spoof / API-mismatch guard)
+    case "$_sdk" in
+        30) _exprel=11 ;;
+        31) _exprel=12 ;;
+        32) _exprel=12 ;;   # 12L reports release "12"
+        33) _exprel=13 ;;
+        34) _exprel=14 ;;
+        35) _exprel=15 ;;
+        36) _exprel=16 ;;
+        *)  _exprel="" ;;
+    esac
+    _relmaj="${_release%%.*}"
+    if [ -z "$_sdk" ]; then
+        emit koherensi WARN "SDK_INT kosong"
+    elif [ -z "$_exprel" ]; then
+        emit koherensi WARN "SDK_INT=$_sdk di luar rentang yang dipetakan (30-36)"
+    elif [ "$_relmaj" = "$_exprel" ]; then
+        emit koherensi PASS "SDK_INT=$_sdk cocok dengan RELEASE=$_release"
+    else
+        emit koherensi FAIL "SDK_INT=$_sdk tapi RELEASE=$_release (harusnya Android $_exprel)"
+    fi
+
+    # 3. SECURITY_PATCH must be YYYY-MM-DD (10 chars; digits removed leaves "--")
+    _pd="$(printf '%s' "$_patch" | tr -d '0-9')"
+    if [ "${#_patch}" -eq 10 ] && [ "$_pd" = "--" ]; then
+        emit koherensi PASS "security_patch berformat YYYY-MM-DD ($_patch)"
+    else
+        emit koherensi WARN "security_patch bentuk tak lazim (${_patch:-kosong})"
+    fi
+
+    # 4. TYPE=user / TAGS=release-keys (retail tells; must match fingerprint tail)
+    if [ "$_type" = "user" ] && [ "$_tags" = "release-keys" ]; then
+        emit koherensi PASS "TYPE=user TAGS=release-keys"
+    else
+        emit koherensi WARN "TYPE=${_type:-kosong} TAGS=${_tags:-kosong} (bukan user/release-keys)"
+    fi
+
+    # 5. board platform <-> SoC coherence (SoC-leak guard). A Tensor platform
+    #    must report a Google GS* SoC; a non-Tensor row must carry a SoC model.
+    case "$_plat" in
+        gs101|gs201|zuma|zumapro|laguna)
+            case "$_socmod" in
+                GS[0-9][0-9][0-9])
+                    if [ "$_socman" = "Google" ]; then
+                        emit koherensi PASS "SoC Tensor konsisten ($_socman $_socmod / $_plat)"
+                    else
+                        emit koherensi WARN "platform Tensor $_plat tapi SOC_MANUFACTURER=$_socman (bukan Google)"
+                    fi
+                    ;;
+                *) emit koherensi FAIL "platform Tensor $_plat tapi SOC_MODEL=${_socmod:-kosong} (bukan GS*)" ;;
+            esac
+            ;;
+        "") emit koherensi INFO "BOARD_PLATFORM kosong — lewati cek SoC" ;;
+        *)
+            if [ -n "$_socmod" ]; then
+                emit koherensi PASS "SoC non-Tensor terisi ($_socman $_socmod / $_plat)"
+            else
+                emit koherensi WARN "SOC_MODEL kosong untuk platform $_plat"
+            fi
+            ;;
+    esac
+fi
+
 # --- verified boot / VBMeta (device-wide, set by apply_native) ------------
 _vbs="$(gp ro.boot.verifiedbootstate)"
 case "$_vbs" in
