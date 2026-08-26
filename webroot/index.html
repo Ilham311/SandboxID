@@ -32,6 +32,7 @@
   <button class="tab active" data-tab="persona">Perangkat</button>
   <button class="tab" data-tab="rotate">Rotasi</button>
   <button class="tab" data-tab="targets">Target</button>
+  <button class="tab" data-tab="selftest">Uji</button>
   <button class="tab" data-tab="log">Log</button>
   <span class="nav-ind" id="navInd"></span>
 </nav>
@@ -66,6 +67,15 @@
       <button id="tgtReload" class="ghost sm">Muat ulang dari disk</button>
       <div id="tgtStatus" class="hint"></div>
     </div>
+  </section>
+
+  <section id="selftest" class="page">
+    <div class="row spread">
+      <button id="stRun" class="primary">Jalankan uji</button>
+      <span id="stSummary" class="hint"></span>
+    </div>
+    <div class="hint">Pemeriksaan hanya-baca: melaporkan jejak yang akan dilihat aplikasi detektor. Tidak mengubah apa pun. Cek per-aplikasi (hook properti, redirect baca, bind build.prop, hider) ditandai INFO &mdash; verifikasi di dalam aplikasi target, bukan dari sini.</div>
+    <div id="stBody" class="cards"></div>
   </section>
 
   <section id="log" class="page">

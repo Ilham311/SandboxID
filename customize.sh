@@ -56,6 +56,7 @@ set_perm $MODPATH/service.sh                0 0 0755
 [ -f $MODPATH/summarize.sh ] && set_perm $MODPATH/summarize.sh 0 0 0755
 [ -f $MODPATH/helpers.sh ] && set_perm $MODPATH/helpers.sh 0 0 0644
 [ -f $MODPATH/rotate_ids.sh ] && set_perm $MODPATH/rotate_ids.sh 0 0 0755
+[ -f $MODPATH/selftest.sh ] && set_perm $MODPATH/selftest.sh 0 0 0755
 [ -f $MODPATH/autopif.sh ] && set_perm $MODPATH/autopif.sh 0 0 0755
 [ -f $MODPATH/personas.tsv ] && set_perm $MODPATH/personas.tsv 0 0 0644
 [ -f $MODPATH/devices.tsv ] && set_perm $MODPATH/devices.tsv 0 0 0644
