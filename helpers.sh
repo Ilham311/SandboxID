@@ -3,6 +3,8 @@
 MODDIR="${MODDIR:-/data/adb/modules/sandboxid}"
 LOGFILE="${LOGFILE:-/cache/sandboxid-boot.log}"
 IDENTITY_FILE="${IDENTITY_FILE:-$MODDIR/identity.prop}"
+CARRIER_CONF="${CARRIER_CONF:-$MODDIR/carrier.conf}"
+CARRIERS_FILE="${CARRIERS_FILE:-$MODDIR/carriers.tsv}"
 BACKUP_DIR_ROOT="${BACKUP_DIR_ROOT:-$MODDIR/backups}"
 
 mkdir -p "$BACKUP_DIR_ROOT" 2>/dev/null
@@ -161,6 +163,19 @@ identity_persist() {
     tmp="${IDENTITY_FILE}.tmp.$$"
     awk -F= -v k="$key" '$1!=k {print}' "$IDENTITY_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     printf '%s=%s\n' "$key" "$val" >> "$tmp"
+    mv "$tmp" "$IDENTITY_FILE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    chmod 0644 "$IDENTITY_FILE" 2>/dev/null
+    return 0
+}
+
+# Remove a key from identity.prop entirely (so the C++ hook finds it absent and
+# falls back to the built-in default). Used to clear carrier keys on `carrier off`.
+identity_del() {
+    key="$1"
+    [ -z "$key" ] && return 1
+    [ -f "$IDENTITY_FILE" ] || return 0
+    tmp="${IDENTITY_FILE}.tmp.$$"
+    awk -F= -v k="$key" '$1!=k {print}' "$IDENTITY_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     mv "$tmp" "$IDENTITY_FILE" 2>/dev/null || { rm -f "$tmp"; return 1; }
     chmod 0644 "$IDENTITY_FILE" 2>/dev/null
     return 0

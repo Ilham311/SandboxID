@@ -25,6 +25,11 @@ inline constexpr char PERSONA_OVERRIDE[] = "/data/adb/modules/sandboxid/persona.
 
 inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/sandboxid/identity.prop.bak";
 inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mode";
+// Persisted carrier/SIM selection (written by the `carrier` command / WebUI).
+// Simple KV file: NAME=, MCC=, MNC=, ISO=, PHANTOM=0|1. Merged into identity.prop
+// on freshen/seed/apply-boot so the chosen operator survives persona rotation.
+inline constexpr char CARRIER_CONF[]  = "/data/adb/modules/sandboxid/carrier.conf";
+inline constexpr char CARRIERS_FILE[] = "/data/adb/modules/sandboxid/carriers.tsv";
 inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetprop-rs";
 
 enum Cmd : uint8_t {
@@ -60,6 +65,7 @@ inline constexpr KV VAL_DEFAULTS[] = {
     {"GSM_OPERATOR_NUMERIC",   "51010"},
     {"GSM_OPERATOR_ALPHA",     "Telkomsel"},
     {"GSM_OPERATOR_ISO",       "id"},
+    {"GSM_SIM_STATE",          ""},
     {"BUILD_CHARACTERISTICS",  "default"},
     {"PERSIST_TIMEZONE",       "Asia/Jakarta"},
     {"CPU_ABI",                "arm64-v8a"},

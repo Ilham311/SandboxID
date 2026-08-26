@@ -39,6 +39,55 @@ offline is identical to before.
 - `jni/pool.hpp` — the compiled `SBX_POOL` table. Its data now lives in
   `personas.tsv`; `jni/config.hpp` gains `PERSONAS_FILE`.
 
+## v2.1.0 (2026-08-26)
+
+SIM / mobile-operator identity. Adds a user-controlled way to study the operator
+fields apps read (`gsm.operator.*` / `Build`-adjacent SIM props), with an
+optional "phantom" mode that reports a SIM as present on an empty slot. Like the
+rest of the module this ships **inert**: no carrier is applied until the user
+picks one, and clearing it falls straight back to the built-in defaults.
+
+### Added
+
+- `carriers.tsv` (repo root, shipped to `/data/adb/modules/sandboxid/`) — a
+  curated table of **140 real operators across 67 countries** sourced from the
+  public MCC/MNC dataset. Tab-separated, 4 columns: `name mcc mnc iso`;
+  `#`-prefixed lines are comments.
+- `carrier` (alias `sim`) subcommand in `rotate_ids.sh`:
+  - `carrier "MCC|MNC|NAME|ISO|PHANTOM"` — validate (MCC = 3 digits, MNC = 2–3
+    digits) and write `carrier.conf` (atomic, `umask 077`), then persist the
+    `GSM_OPERATOR_NUMERIC/ALPHA/ISO` keys (and `GSM_SIM_STATE=LOADED` when
+    `PHANTOM=1`) into `identity.prop`.
+  - `carrier off` — clear the selection and erase the carrier keys.
+  - `carrier status` — print the active selection.
+- WebUI **SIM** tab (`webroot/index.html` + `app.js`): country/operator dropdowns
+  driven by `carriers.tsv`, a "phantom" checkbox, and Apply/Off buttons that call
+  the `carrier` subcommand and reflect the live `carrier.conf`.
+- `jni/sbx_carrier.hpp` — pure, host-testable carrier-selection parsing
+  (`parse_carrier_conf` + `apply_carrier`), split out so the shell and native
+  paths agree on the "a valid selection sets the keys, anything else erases
+  them" contract. Covered by `tests/carrier_test.cpp` (40 checks).
+- New identity key `GSM_SIM_STATE` (default empty) with `gsm.sim.state` /
+  `gsm.sim.state.ril` property mappings; `PHANTOM=1` maps it to `LOADED`.
+
+### Changed
+
+- `jni/sandboxid.cpp` `merge_carrier()`: honors `carrier.conf` on `freshen` and
+  on first-boot `seed`, folding the parsed selection into the generated identity.
+- `jni/main.cpp`: added `ro.vendor_dlkm.build.fingerprint` /
+  `ro.odm_dlkm.build.fingerprint` → `FINGERPRINT` mappings so the newer
+  partition fingerprints stay consistent with the rest of the build identity.
+- `customize.sh` preserves a live `carrier.conf` across upgrades; `build.sh`
+  packages `carriers.tsv`.
+
+### Notes
+
+- This is a **property-layer** path. SIM presence/state read through the
+  telephony binder (`TelephonyManager.getSimState`, `SubscriptionInfo`) is **not**
+  covered here and would need a separate framework-hook layer ("L3").
+- Native changes require a CI rebuild + reflash; the pure carrier logic is
+  verified on-host by `tests/carrier_test.cpp`.
+
 ## v2.0.0 (2026-08-21)
 
 Rebrand to SandboxID — a generic, privacy-research / education framing with no

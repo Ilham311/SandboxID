@@ -119,6 +119,8 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"gsm.sim.operator.alpha",          "GSM_OPERATOR_ALPHA"},
         {"gsm.operator.iso-country",        "GSM_OPERATOR_ISO"},
         {"gsm.sim.operator.iso-country",    "GSM_OPERATOR_ISO"},
+        {"gsm.sim.state",                   "GSM_SIM_STATE"},
+        {"gsm.sim.state.ril",               "GSM_SIM_STATE"},
         {"ro.build.characteristics",        "BUILD_CHARACTERISTICS"},
         {"persist.sys.timezone",            "PERSIST_TIMEZONE"},
         {"ro.product.cpu.abi",              "CPU_ABI"},
@@ -143,6 +145,8 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.odm.build.fingerprint",        "FINGERPRINT"},
         {"ro.product.build.fingerprint",    "FINGERPRINT"},
         {"ro.system_ext.build.fingerprint", "FINGERPRINT"},
+        {"ro.vendor_dlkm.build.fingerprint", "FINGERPRINT"},
+        {"ro.odm_dlkm.build.fingerprint",   "FINGERPRINT"},
 
         {"ro.product.system.model",         "MODEL"},
         {"ro.product.vendor.model",         "MODEL"},
