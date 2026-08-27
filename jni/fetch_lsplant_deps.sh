@@ -11,9 +11,12 @@
 #
 # Overridable pins (env):
 #   LSPLANT_REPO / LSPLANT_REF   default: LSPosed/LSPlant @ v2.0
-#   DOBBY_REPO   / DOBBY_REF     default: jmpews/Dobby   @ master
-#                                (pin a specific commit for reproducible builds)
+#   DOBBY_REPO   / DOBBY_REF     default: jmpews/Dobby   @ 5dfc854 (pinned commit)
+#                                (override to pin a different reviewed commit)
 #   LSPARSELF_HPP                path to a lsparself.hpp to copy in (see below)
+#                                REQUIRED unless the LSPlant checkout already
+#                                ships one: lsparself has no public repo, so
+#                                there is no default source for this file.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"   # jni/
@@ -22,7 +25,8 @@ EXT="$SCRIPT_DIR/external"
 LSPLANT_REPO="${LSPLANT_REPO:-https://github.com/LSPosed/LSPlant.git}"
 LSPLANT_REF="${LSPLANT_REF:-v2.0}"
 DOBBY_REPO="${DOBBY_REPO:-https://github.com/jmpews/Dobby.git}"
-DOBBY_REF="${DOBBY_REF:-master}"
+# Pin to an exact reviewed commit for reproducible / auditable builds.
+DOBBY_REF="${DOBBY_REF:-5dfc8546954ce3b3198132ab13fddb89ee92cdd7}"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "ERROR: git is required" >&2
@@ -75,9 +79,12 @@ fi
 # --- lsparself.hpp (libart.so symbol resolver used by sbx_lsplant.hpp) -------
 # sbx_lsplant.hpp does:  lsparself::Elf art("/libart.so");
 #                        info.art_symbol_resolver = [&](sv){ art.getSymbAddress(sv); ... }
-# We never substitute a look-alike header (a wrong-API one would only fail to
-# compile later); we reuse an exact match if the LSPlant checkout ships one,
-# else we stop with an actionable message.
+# lsparself is LSPosed's private (not publicly released) libart.so symbol
+# parser — there is no public repo to clone it from, so unlike LSPlant/Dobby
+# this script has NO default source for it. We never substitute a look-alike
+# header (a wrong-API one would only fail to compile later); we reuse an exact
+# match if the LSPlant checkout happens to ship one, else the caller MUST pass
+# LSPARSELF_HPP=/path/to/lsparself.hpp, or we stop with an actionable message.
 mkdir -p "$EXT/lsparself"
 if [ -f "$EXT/lsparself/lsparself.hpp" ]; then
   echo "==> lsparself.hpp already present"

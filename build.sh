@@ -20,7 +20,10 @@ if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then
   echo "==> L3 LSPlant enabled — preparing dependencies + callback DEX"
   # Vendored LSPlant/Dobby/lsparself sources are a HARD requirement: the native
   # build cannot link without them, so let a fetch failure abort (set -e) with
-  # the script's actionable message.
+  # the script's actionable message. Note: lsparself has no public repo, so
+  # fetch_lsplant_deps.sh has no default source for it — pass
+  # LSPARSELF_HPP=/path/to/lsparself.hpp (env) the first time, or it aborts
+  # with instructions.
   bash "$ROOT/jni/fetch_lsplant_deps.sh"
   # The callback DEX (hook_dex.h) is a SOFT requirement: if a JDK/d8 is missing
   # the module still builds and L1/L2 keep working — only the L3 getString hook

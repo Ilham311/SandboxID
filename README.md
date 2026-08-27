@@ -317,6 +317,10 @@ detector still sees:
 
   ```sh
   # 1. vendor LSPlant + Dobby + lsparself into jni/external/ (git-ignored)
+  #    lsparself has no public repo (LSPosed keeps it private), so step 1 has
+  #    no default source for it: supply your own copy the first time via
+  #    LSPARSELF_HPP=/path/to/lsparself.hpp, or the script aborts with
+  #    instructions.
   bash jni/fetch_lsplant_deps.sh
   # 2. compile the callback class -> jni/hook_dex.h  (needs a JDK + SDK build-tools' d8)
   bash jni/tools/gen_hook_dex.sh
