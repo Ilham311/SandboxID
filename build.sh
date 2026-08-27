@@ -5,11 +5,6 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
 : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to your NDK path (r26+)}"
-# Native min API level. Was 33 (Android 13), which built the CLI + Zygisk .so
-# against API-33 libc and left them liable to fail loading on Android 12
-# (API 31) — the module must run universally across Android 12–16. The code
-# only uses long-stable libc (`__system_property_get`, pipe2, sigaction, …),
-# nothing above API 26, so 26 is a safe floor that covers Android 8–16.
 MIN_SDK="${MIN_SDK:-26}"
 VARIANT="${VARIANT:-both}"
 VERSION="$(grep '^version=' module.prop | cut -d= -f2)"
@@ -18,16 +13,7 @@ LSP_CMAKE=""
 if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then
   LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
   echo "==> L3 LSPlant enabled — preparing dependencies + callback DEX"
-  # Vendored LSPlant/Dobby/lsparself sources are a HARD requirement: the native
-  # build cannot link without them, so let a fetch failure abort (set -e) with
-  # the script's actionable message. Note: lsparself has no public repo, so
-  # fetch_lsplant_deps.sh has no default source for it — pass
-  # LSPARSELF_HPP=/path/to/lsparself.hpp (env) the first time, or it aborts
-  # with instructions.
   bash "$ROOT/jni/fetch_lsplant_deps.sh"
-  # The callback DEX (hook_dex.h) is a SOFT requirement: if a JDK/d8 is missing
-  # the module still builds and L1/L2 keep working — only the L3 getString hook
-  # is skipped. Generate it once here so every per-ABI cmake configure reuses it.
   if ! bash "$ROOT/jni/tools/gen_hook_dex.sh"; then
     echo "  WARN: hook_dex.h generation failed — L3 ANDROID_ID hook will be skipped" >&2
     echo "        at runtime (install a JDK + Android SDK build-tools to enable it)" >&2
@@ -112,9 +98,6 @@ build_variant() {
   [ -f autopif.sh ] && cp autopif.sh "$PKG/"
   [ -d webroot ] && cp -R webroot "$PKG/"
 
-  # Opt-in: refresh the PACKAGED persona pool from Google's live Pixel build
-  # data at build time (CI has curl, unlike most devices). Mutates only the
-  # $PKG copy, never the source tree. Enable with AUTOPIF_REFRESH=1.
   if [ "${AUTOPIF_REFRESH:-0}" = "1" ] && [ -f "$PKG/autopif.sh" ]; then
     echo "  ==> refreshing persona pool (autopif, build-time)"
     PERSONAS_FILE="$PKG/personas.tsv" MODDIR="$PKG" sh "$PKG/autopif.sh" || true

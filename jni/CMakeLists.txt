@@ -8,14 +8,12 @@ option(SBX_DEBUG "Enable verbose debug logging (LOGD)" OFF)
 if(SBX_DEBUG)
     message(STATUS "[sandboxid] BUILD VARIANT: DEBUG (verbose LOGD, no strip)")
     add_compile_definitions(SBX_DEBUG=1)
-    # M8: -Wall -Wextra untuk menangkap bug diam (unused/shadow/sign) saat dev.
     set(COMMON "-Os -g -Wall -Wextra -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-Wl,--gc-sections -Wl,--exclude-libs,ALL")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "-Wl,--gc-sections")
 else()
     message(STATUS "[sandboxid] BUILD VARIANT: RELEASE (LOGD compiled out, stripped, LTO)")
-    # M8: -Wall -Wextra + LTO (-flto) untuk kode lebih kecil & inlining lintas-TU.
     set(COMMON "-Os -Wall -Wextra -flto -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE
@@ -39,9 +37,6 @@ if(SBX_ENABLE_LSPLANT)
     set(SBX_EXT     "${CMAKE_SOURCE_DIR}/external")
     set(SBX_LSP_JNI "${SBX_EXT}/lsplant/lsplant/src/main/jni")
 
-    # Third-party sources are vendored (git-ignored) into jni/external/ by
-    # jni/fetch_lsplant_deps.sh. Fail early and loudly if they are absent, so
-    # the user gets a fix instead of a cryptic add_subdirectory() error.
     if(NOT EXISTS "${SBX_LSP_JNI}/CMakeLists.txt"
        OR NOT EXISTS "${SBX_EXT}/dobby/CMakeLists.txt"
        OR NOT EXISTS "${SBX_EXT}/lsparself/lsparself.hpp")
@@ -51,12 +46,6 @@ if(SBX_ENABLE_LSPLANT)
             "  (vendors LSPlant + Dobby + lsparself; see prebuilt/lsplant/README.md)")
     endif()
 
-    # The Java callback (androidx.core.os.EnvCompatState) must be compiled to a
-    # DEX and embedded as jni/hook_dex.h; sbx_lsplant.hpp only arms the hook when
-    # __has_include("hook_dex.h") is true. Generate it here if missing. This is a
-    # soft requirement: without it the module still builds and L1/L2 keep working,
-    # only the L3 getString hook is skipped — so a failed dexgen is a WARNING, not
-    # an error. (build.sh generates it once up front; this covers direct cmake.)
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/hook_dex.h")
         message(STATUS "[sandboxid] generating hook_dex.h (LSPlant callback DEX)")
         execute_process(
