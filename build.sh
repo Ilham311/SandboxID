@@ -15,7 +15,21 @@ VARIANT="${VARIANT:-both}"
 VERSION="$(grep '^version=' module.prop | cut -d= -f2)"
 
 LSP_CMAKE=""
-if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"; fi
+if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then
+  LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
+  echo "==> L3 LSPlant enabled — preparing dependencies + callback DEX"
+  # Vendored LSPlant/Dobby/lsparself sources are a HARD requirement: the native
+  # build cannot link without them, so let a fetch failure abort (set -e) with
+  # the script's actionable message.
+  bash "$ROOT/jni/fetch_lsplant_deps.sh"
+  # The callback DEX (hook_dex.h) is a SOFT requirement: if a JDK/d8 is missing
+  # the module still builds and L1/L2 keep working — only the L3 getString hook
+  # is skipped. Generate it once here so every per-ABI cmake configure reuses it.
+  if ! bash "$ROOT/jni/tools/gen_hook_dex.sh"; then
+    echo "  WARN: hook_dex.h generation failed — L3 ANDROID_ID hook will be skipped" >&2
+    echo "        at runtime (install a JDK + Android SDK build-tools to enable it)" >&2
+  fi
+fi
 OUT="$ROOT/dist"
 
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)

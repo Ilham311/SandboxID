@@ -312,6 +312,22 @@ detector still sees:
   generated `hook_dex.h` is not checked in. Treat per-app `ANDROID_ID` spoofing
   as experimental / not active out of the box.
 
+  To build it in (experimental — verify boot on every target ABI/Android
+  version first):
+
+  ```sh
+  # 1. vendor LSPlant + Dobby + lsparself into jni/external/ (git-ignored)
+  bash jni/fetch_lsplant_deps.sh
+  # 2. compile the callback class -> jni/hook_dex.h  (needs a JDK + SDK build-tools' d8)
+  bash jni/tools/gen_hook_dex.sh
+  # 3. build with the L3 flag on
+  SBX_ENABLE_LSPLANT=ON ./build.sh
+  ```
+
+  `build.sh` runs steps 1–2 automatically when `SBX_ENABLE_LSPLANT=ON`; the hook
+  itself lives in `jni/sbx_lsplant.hpp` and installs per-app in
+  `postAppSpecialize`. See `prebuilt/lsplant/README.md` for the dependency layout.
+
 - **Two layers, two scopes.** The module has a *device-wide* layer (boot-time
   `resetprop` via `apply-boot`, active only when `target.txt` is non-empty) and a
   *per-app* layer (Zygisk hooks + `build.prop` bind-mounted into the target app's
