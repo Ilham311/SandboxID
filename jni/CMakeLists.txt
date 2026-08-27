@@ -8,14 +8,12 @@ option(SBX_DEBUG "Enable verbose debug logging (LOGD)" OFF)
 if(SBX_DEBUG)
     message(STATUS "[sandboxid] BUILD VARIANT: DEBUG (verbose LOGD, no strip)")
     add_compile_definitions(SBX_DEBUG=1)
-    # M8: -Wall -Wextra untuk menangkap bug diam (unused/shadow/sign) saat dev.
     set(COMMON "-Os -g -Wall -Wextra -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-Wl,--gc-sections -Wl,--exclude-libs,ALL")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "-Wl,--gc-sections")
 else()
     message(STATUS "[sandboxid] BUILD VARIANT: RELEASE (LOGD compiled out, stripped, LTO)")
-    # M8: -Wall -Wextra + LTO (-flto) untuk kode lebih kecil & inlining lintas-TU.
     set(COMMON "-Os -Wall -Wextra -flto -fvisibility=hidden -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti")
     set(CMAKE_CXX_FLAGS_RELEASE "${COMMON}")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE
@@ -35,14 +33,43 @@ target_include_directories(sandboxid PRIVATE ${CMAKE_SOURCE_DIR})
 option(SBX_ENABLE_LSPLANT "Enable L3 LSPlant Java-method hooks (experimental, unverified)" OFF)
 if(SBX_ENABLE_LSPLANT)
     message(WARNING "[sandboxid] L3 LSPlant ENABLED — verify boot on EVERY target ABI/Android version before shipping")
+
+    set(SBX_EXT     "${CMAKE_SOURCE_DIR}/external")
+    set(SBX_LSP_JNI "${SBX_EXT}/lsplant/lsplant/src/main/jni")
+
+    if(NOT EXISTS "${SBX_LSP_JNI}/CMakeLists.txt"
+       OR NOT EXISTS "${SBX_EXT}/dobby/CMakeLists.txt"
+       OR NOT EXISTS "${SBX_EXT}/lsparself/lsparself.hpp")
+        message(FATAL_ERROR
+            "[sandboxid] L3 dependencies missing under ${SBX_EXT}.\n"
+            "  Run:  bash ${CMAKE_SOURCE_DIR}/fetch_lsplant_deps.sh\n"
+            "  (vendors LSPlant + Dobby + lsparself; see prebuilt/lsplant/README.md)")
+    endif()
+
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/hook_dex.h")
+        message(STATUS "[sandboxid] generating hook_dex.h (LSPlant callback DEX)")
+        execute_process(
+            COMMAND bash "${CMAKE_SOURCE_DIR}/tools/gen_hook_dex.sh"
+            RESULT_VARIABLE SBX_DEXGEN_RC
+            OUTPUT_VARIABLE SBX_DEXGEN_LOG
+            ERROR_VARIABLE  SBX_DEXGEN_LOG)
+        if(NOT SBX_DEXGEN_RC EQUAL 0)
+            message(WARNING
+                "[sandboxid] hook_dex.h generation failed — the L3 ANDROID_ID hook "
+                "will be SKIPPED at runtime (L1/L2 unaffected). Install a JDK + Android "
+                "SDK build-tools, then run: bash ${CMAKE_SOURCE_DIR}/tools/gen_hook_dex.sh\n"
+                "${SBX_DEXGEN_LOG}")
+        endif()
+    endif()
+
     set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
-    add_subdirectory(external/lsplant/lsplant/src/main/jni lsplant_build)
-    add_subdirectory(external/dobby dobby_build)
+    add_subdirectory("${SBX_LSP_JNI}" lsplant_build)
+    add_subdirectory("${SBX_EXT}/dobby" dobby_build)
     target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby)
     target_include_directories(sandboxid_module PRIVATE
-        external/lsplant/lsplant/src/main/jni/include
-        external/lsparself
-        external/dobby/include)
+        "${SBX_LSP_JNI}/include"
+        "${SBX_EXT}/lsparself"
+        "${SBX_EXT}/dobby/include")
     foreach(t lsplant_static dex_builder_static dobby)
         if(TARGET ${t})
             target_compile_options(${t} PRIVATE -fexceptions -frtti)
