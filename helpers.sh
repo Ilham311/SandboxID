@@ -366,326 +366,25 @@ applog_wipe() {
 }
 
 # ────────────────────────────────────────────────────────────────────────────
-# AppLog ID generator — plausible Snowflake did/iid/ssid + UUID cdid + hex openudid
+# AppLog regenerate — force-stop → wipe → epoch bump (IDs served by the JNI hook)
 # ────────────────────────────────────────────────────────────────────────────
-# Why this exists:
-#   Wiping caches alone forces the SDK to re-register — but the server sees the
-#   registration request come from a *hardware fingerprint we already rotated*,
-#   so it happily mints new did/iid/ssid tied to our fabricated persona. That
-#   works, but two subtle problems remain:
+# The zygisk module (L9) spoofs did/iid/ssid/openudid/clientudid/cdid in-process:
+# every read of shared_prefs/applog*.xml / snssdk_*.xml / bd_device_info.xml is
+# patched via memfd redirect, and the raw bd_setting/* + .cdid files are served
+# synthesized. Values are deterministic in (persona identity, package name,
+# APPLOG_EPOCH from identity.prop) — each ByteDance app gets its own did, like
+# the real per-app SDK registration.
 #
-#   1. Re-registration is a network round-trip. Until it completes, event
-#      queues buffer under the OLD identifiers. If the network is slow (or
-#      absent), the SDK falls back to zero/anon values and events land wrong.
+# Rotation is therefore a two-step affair, both done here:
+#   1. bump APPLOG_EPOCH in identity.prop — the next app start derives new IDs
+#      (stable until the next bump — no zero-value gap in between);
+#   2. wipe the on-disk caches + force-stop, so no stale real did leaks out
+#      through backup files or a warm process.
 #
-#   2. Some builds cache "last known" did in files/bd_setting/device_id and
-#      compare it against the freshly-registered one; a hard reset makes them
-#      log a "device changed" event that itself is fingerprintable.
-#
-#   Solution: pre-seed the caches with fabricated-but-plausible values matching
-#   ByteDance's actual formats (Snowflake 64-bit for did/iid/ssid → 18-19
-#   decimal digits with the top bits set to a recent Unix timestamp; UUID v4
-#   for cdid/clientudid; 16-hex for openudid). The SDK reads them on cold
-#   start, sends them in the header of its first request, and the server
-#   accepts them — because from the server's POV this is just a device it
-#   hasn't heard from in a while, not a "new install". The persona stays
-#   consistent from the first event onward, no zero-value gap.
-#
-# Format references (reverse-engineered from RangersAppLog + arxiv:2504.13279):
-#   did / iid / ssid  → int64 Snowflake, top 32 bits = Unix seconds, remaining
-#                       32 bits carry ms + machine + counter. Total 18-19 decimal
-#                       digits. We synthesize with: (now_seconds << 32) | rand32.
-#   cdid              → RFC 4122 UUID v4 (from /proc/sys/kernel/random/uuid).
-#   clientudid        → RFC 4122 UUID v4 (same source).
-#   openudid          → 16 hex chars (legacy iOS UDID shape, Android SDK reuses).
-#
-# Output: writes 6 key=value lines to stdout (never logs the values themselves —
-# these are treated as sensitive PII by the caller).
-#   DID=<19-digit>
-#   IID=<19-digit>
-#   SSID=<19-digit>
-#   CDID=<uuid>
-#   CLIENTUDID=<uuid>
-#   OPENUDID=<16-hex>
-applog_generate() {
-    _now=$(date +%s 2>/dev/null || echo 1700000000)
-    # Snowflake-ish: top 32 bits = seconds since epoch (matches TikTok format),
-    # low 32 bits = random. Using awk for 64-bit-safe integer math because the
-    # shell $((...)) arithmetic is 32-bit-signed on toybox ash. printf %llu on
-    # the awk result guarantees a decimal string within int64 range.
-    _mk_snow() {
-        # Three independent random 32-bit halves so did/iid/ssid don't collide.
-        _r=$(od -An -N4 -tu4 /dev/urandom 2>/dev/null | tr -d ' \n')
-        [ -n "$_r" ] || _r=$(awk 'BEGIN{srand(); print int(rand()*4294967295)}')
-        awk -v hi="$_now" -v lo="$_r" '
-        # Compose (hi << 32) | lo, but keep top bit zero so it stays a
-        # positive signed int64 (fits in Java long which is what AppLog uses).
-        # awk arithmetic is IEEE-754 double (53-bit mantissa): hi_masked (31
-        # bits) * 2^32 + lo (32 bits) needs up to 63 bits of exact integer
-        # precision, and a plain float multiply/add silently rounds away the
-        # low bits. Do the multiply/add as decimal-string long arithmetic
-        # (single-digit-times-multiplier per step, well under 53 bits) so no
-        # precision is lost.
-        function decmul(dec, mult,   n, i, carry, digit, prod, result) {
-            n = length(dec);
-            carry = 0;
-            result = "";
-            for (i = n; i >= 1; i--) {
-                digit = substr(dec, i, 1) + 0;
-                prod = digit * mult + carry;
-                carry = int(prod / 10);
-                result = (prod % 10) result;
-            }
-            while (carry > 0) {
-                result = (carry % 10) result;
-                carry = int(carry / 10);
-            }
-            sub(/^0+/, "", result);
-            if (result == "") result = "0";
-            return result;
-        }
-        function decadd(a, b,   la, lb, i, carry, sum, da, db, result, tmp) {
-            la = length(a); lb = length(b);
-            if (la < lb) { tmp = a; a = b; b = tmp; tmp = la; la = lb; lb = tmp; }
-            carry = 0;
-            result = "";
-            for (i = 0; i < la; i++) {
-                da = substr(a, la - i, 1) + 0;
-                db = (i < lb) ? substr(b, lb - i, 1) + 0 : 0;
-                sum = da + db + carry;
-                carry = int(sum / 10);
-                result = (sum % 10) result;
-            }
-            if (carry > 0) result = carry result;
-            return result;
-        }
-        BEGIN {
-            hi_masked = hi % 2147483648;   # 31 bits, guarantees sign bit = 0
-            lo_masked = lo % 4294967296;   # 32 bits
-            hi_str = sprintf("%.0f", hi_masked);
-            lo_str = sprintf("%.0f", lo_masked);
-            prod = decmul(hi_str, 4294967296);   # hi_masked * 2^32, exact
-            printf "%s", decadd(prod, lo_str);
-        }'
-    }
-    _mk_uuid() {
-        _u=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
-        if [ -z "$_u" ]; then
-            # Fallback: hand-roll a v4-ish UUID from /dev/urandom
-            _u=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | \
-                awk '{printf "%s-%s-4%s-%s-%s\n", substr($0,1,8), substr($0,9,4), substr($0,14,3), substr($0,17,4), substr($0,21,12)}')
-        fi
-        printf '%s' "$_u"
-    }
-    _mk_hex16() {
-        _h=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
-        [ -n "$_h" ] || _h=$(awk 'BEGIN{srand(); for(i=0;i<16;i++)printf"%x",int(rand()*16)}')
-        printf '%s' "$_h"
-    }
-
-    _did=$(_mk_snow);            [ -n "$_did" ] || return 1
-    _iid=$(_mk_snow);            [ -n "$_iid" ] || return 1
-    _ssid=$(_mk_snow);           [ -n "$_ssid" ] || return 1
-    _cdid=$(_mk_uuid);           [ -n "$_cdid" ] || return 1
-    _clientudid=$(_mk_uuid);     [ -n "$_clientudid" ] || return 1
-    _openudid=$(_mk_hex16);      [ -n "$_openudid" ] || return 1
-
-    printf 'DID=%s\nIID=%s\nSSID=%s\nCDID=%s\nCLIENTUDID=%s\nOPENUDID=%s\n' \
-        "$_did" "$_iid" "$_ssid" "$_cdid" "$_clientudid" "$_openudid"
-    return 0
-}
-
-# ────────────────────────────────────────────────────────────────────────────
-# AppLog seed writer — install fabricated ID cache into an app's data dir
-# ────────────────────────────────────────────────────────────────────────────
-# Called after applog_wipe() has cleared the old caches. Writes:
-#
-#   1. shared_prefs/applog.xml     — did / iid / ssid / openudid / clientudid
-#      as <string> entries, in the exact XML shape Android's SharedPreferences
-#      class writes and reads (matches getString() lookups by AppLog).
-#
-#   2. shared_prefs/snssdk_openudid.xml — mirror of openudid/clientudid for
-#      older SDK code paths that check this file explicitly.
-#
-#   3. shared_prefs/bd_device_info.xml — cdid + device_id blob for the newer
-#      unified "device info" path (RangersAppLog v6+).
-#
-#   4. files/bd_setting/{device_id,openudid,clientudid,install_id} — raw text
-#      files (no XML) read by libbdtracker.so bypassing SharedPreferences. If
-#      we don't seed these, native code will still trigger re-registration.
-#
-#   5. files/.cdid — legacy plain-text UUID cache.
-#
-# Critical detail: ownership. Files under /data/data/<pkg>/ MUST be owned by
-# the package's UID or Android will refuse to read them (SELinux + Linux DAC).
-# We chown to the same owner as the shared_prefs directory itself, which is
-# always <pkg_uid>:<pkg_uid> on stock Android. If chown fails (rare), we log
-# a warning — the seed may still work if SELinux is permissive, but the app
-# might re-generate on next boot. That's acceptable degradation.
-#
-# Usage:
-#   applog_seed com.ss.android.ugc.trill "$(applog_generate)"
-#   applog_seed com.ss.android.ugc.trill    # auto-generate inline
-# Returns: 0 on success (at least one file written), 1 on failure.
-applog_seed() {
-    _pkg="$1"
-    _payload="$2"
-    [ -n "$_pkg" ] || { log_warn "applog_seed: package required"; return 1; }
-
-    if [ -z "$_payload" ]; then
-        _payload=$(applog_generate) || {
-            log_warn "applog_seed: generate failed for $_pkg"; return 1;
-        }
-    fi
-
-    _data_dir=""
-    for _base in /data/data /data/user/0; do
-        [ -d "$_base/$_pkg" ] && { _data_dir="$_base/$_pkg"; break; }
-    done
-    if [ -z "$_data_dir" ]; then
-        log_info "applog_seed: $_pkg not installed — skipped"
-        return 1
-    fi
-
-    _did=$(printf '%s\n' "$_payload"       | awk -F= '$1=="DID"{print $2}')
-    _iid=$(printf '%s\n' "$_payload"       | awk -F= '$1=="IID"{print $2}')
-    _ssid=$(printf '%s\n' "$_payload"      | awk -F= '$1=="SSID"{print $2}')
-    _cdid=$(printf '%s\n' "$_payload"      | awk -F= '$1=="CDID"{print $2}')
-    _clientudid=$(printf '%s\n' "$_payload"| awk -F= '$1=="CLIENTUDID"{print $2}')
-    _openudid=$(printf '%s\n' "$_payload"  | awk -F= '$1=="OPENUDID"{print $2}')
-
-    for _v in "$_did" "$_iid" "$_ssid" "$_cdid" "$_clientudid" "$_openudid"; do
-        [ -n "$_v" ] || { log_warn "applog_seed: incomplete payload for $_pkg"; return 1; }
-    done
-
-    log_step "AppLog seed: $_pkg"
-
-    # SELinux permissive during writes; app processes normally cannot read
-    # files created by root in the "u:object_r:default:s0" domain. We restore
-    # SELinux contexts at the end via restorecon.
-    se_permissive
-    _sp_dir="$_data_dir/shared_prefs"
-    _bd_dir="$_data_dir/files/bd_setting"
-    _files_dir="$_data_dir/files"
-    mkdir -p "$_sp_dir" "$_bd_dir" 2>/dev/null
-
-    # Determine target ownership from the app data dir itself — that's the
-    # canonical package UID/GID assigned at install time.
-    _owner=$(stat -c '%u:%g' "$_data_dir" 2>/dev/null)
-    [ -n "$_owner" ] || _owner=""
-
-    _written=0
-
-    # ── 1. shared_prefs/applog.xml (primary AppLog cache) ─────────────────
-    _f="$_sp_dir/applog.xml"
-    cat > "$_f" <<XMLEOF
-<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
-<map>
-    <string name="device_id">$_did</string>
-    <string name="install_id">$_iid</string>
-    <string name="ssid">$_ssid</string>
-    <string name="openudid">$_openudid</string>
-    <string name="clientudid">$_clientudid</string>
-    <long name="register_time" value="$(date +%s 2>/dev/null || echo 0)000" />
-</map>
-XMLEOF
-    if [ -s "$_f" ]; then
-        chmod 0660 "$_f" 2>/dev/null
-        [ -n "$_owner" ] && chown "$_owner" "$_f" 2>/dev/null
-        _written=$((_written + 1))
-    fi
-
-    # ── 2. shared_prefs/snssdk_openudid.xml (legacy path) ─────────────────
-    _f="$_sp_dir/snssdk_openudid.xml"
-    cat > "$_f" <<XMLEOF
-<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
-<map>
-    <string name="openudid">$_openudid</string>
-    <string name="clientudid">$_clientudid</string>
-</map>
-XMLEOF
-    if [ -s "$_f" ]; then
-        chmod 0660 "$_f" 2>/dev/null
-        [ -n "$_owner" ] && chown "$_owner" "$_f" 2>/dev/null
-        _written=$((_written + 1))
-    fi
-
-    # ── 3. shared_prefs/bd_device_info.xml (RangersAppLog v6+ unified) ───
-    _f="$_sp_dir/bd_device_info.xml"
-    cat > "$_f" <<XMLEOF
-<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
-<map>
-    <string name="cdid">$_cdid</string>
-    <string name="device_id">$_did</string>
-</map>
-XMLEOF
-    if [ -s "$_f" ]; then
-        chmod 0660 "$_f" 2>/dev/null
-        [ -n "$_owner" ] && chown "$_owner" "$_f" 2>/dev/null
-        _written=$((_written + 1))
-    fi
-
-    # ── 4. files/bd_setting/{device_id,openudid,clientudid,install_id} ────
-    # These are RAW text files (no XML wrapper), read by native libbdtracker.
-    # ByteDance uses these to seed the SDK before Java-side SharedPreferences
-    # is even opened; missing them triggers a re-registration flow.
-    printf '%s' "$_did"        > "$_bd_dir/device_id"   2>/dev/null && \
-        chmod 0660 "$_bd_dir/device_id"   2>/dev/null && _written=$((_written + 1))
-    printf '%s' "$_iid"        > "$_bd_dir/install_id"  2>/dev/null && \
-        chmod 0660 "$_bd_dir/install_id"  2>/dev/null && _written=$((_written + 1))
-    printf '%s' "$_openudid"   > "$_bd_dir/openudid"    2>/dev/null && \
-        chmod 0660 "$_bd_dir/openudid"    2>/dev/null && _written=$((_written + 1))
-    printf '%s' "$_clientudid" > "$_bd_dir/clientudid"  2>/dev/null && \
-        chmod 0660 "$_bd_dir/clientudid"  2>/dev/null && _written=$((_written + 1))
-
-    if [ -n "$_owner" ]; then
-        chown -R "$_owner" "$_bd_dir" 2>/dev/null
-    fi
-
-    # ── 5. files/.cdid (legacy plain-text) ────────────────────────────────
-    printf '%s' "$_cdid" > "$_files_dir/.cdid" 2>/dev/null && \
-        chmod 0660 "$_files_dir/.cdid" 2>/dev/null && _written=$((_written + 1))
-    [ -n "$_owner" ] && chown "$_owner" "$_files_dir/.cdid" 2>/dev/null
-
-    # Restore SELinux security context so the app process can actually read
-    # the files we just wrote. Without this, root-created files sit in
-    # `u:object_r:default:s0` and the app is denied by SELinux — even though
-    # DAC permissions are fine.
-    if command -v restorecon >/dev/null 2>&1; then
-        restorecon -R "$_sp_dir" "$_bd_dir" 2>/dev/null
-        restorecon "$_files_dir/.cdid" 2>/dev/null
-    fi
-    se_restore
-
-    if [ "$_written" -gt 0 ]; then
-        log_ok "$_pkg — seeded $_written AppLog cache file(s)"
-        # Fingerprint-only trailer for audit (last 4 chars of did, no full value)
-        _tail=$(printf '%s' "$_did" | tail -c 4)
-        log_info "$_pkg — did …$_tail (values redacted from log)"
-        return 0
-    else
-        log_warn "$_pkg — no AppLog cache file could be written"
-        return 1
-    fi
-}
-
-# ────────────────────────────────────────────────────────────────────────────
-# AppLog regenerate — full cycle: force-stop → wipe → seed → done
-# ────────────────────────────────────────────────────────────────────────────
-# One-shot orchestrator. Handles both single-package and batch (target.txt)
-# modes just like applog_wipe(). This is what action.sh and `rotate_ids.sh
-# all` call — the user never has to reason about wipe-then-seed separately.
-#
-# Ordering matters:
-#   1. force-stop first, so the app's in-memory copy of the old cache is
-#      dropped. If we skip this, the app's next SharedPreferences.commit()
-#      will overwrite our seeded XML with the stale in-memory values.
-#   2. wipe next, to clear anything old (including files we don't rewrite).
-#   3. seed last, so on next cold start the app finds fresh valid values.
-#
-# Batch note: we recurse into applog_regen for each target rather than
-# doing wipe-all-then-seed-all, so a partial failure on one package
-# doesn't leave others in a wipe-without-seed inconsistent state.
+# There is deliberately no disk seeding anymore: writing app data files as root
+# needs setenforce 0 + chown + restorecon and loses to the SDK's own writes.
+# The in-process hook is authoritative — whatever the app writes to disk, the
+# next read gets the persona value.
 applog_regen() {
     _pkg="${1:-}"
     if [ -z "$_pkg" ]; then
@@ -715,19 +414,33 @@ applog_regen() {
         return 1
     fi
 
-    applog_wipe "$_pkg"     || :   # best-effort; missing files are fine
-    applog_seed "$_pkg"     || return 1
+    log_step "AppLog regen: $_pkg"
+
+    # Fresh epoch = fresh did/iid/ssid/openudid/clientudid/cdid on next start.
+    _now_ms="$(date +%s 2>/dev/null || echo 1700000000)000"
+    identity_persist APPLOG_EPOCH "$_now_ms" || {
+        log_warn "applog_regen: gagal bump APPLOG_EPOCH — ID lama dipakai lagi"
+        return 1
+    }
+
+    # force_stop first (applog_wipe does it too, but be explicit about the
+    # ordering contract), then wipe on-disk caches.
+    force_stop "$_pkg" >/dev/null 2>&1
+    applog_wipe "$_pkg" || :   # best-effort; missing files are fine
+    log_ok "$_pkg — epoch bumped + cache wiped (new IDs on next cold start)"
     return 0
 }
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # AppLog probe — read-only status: which cache files currently exist per pkg
 # ────────────────────────────────────────────────────────────────────────────
 # Emits one line per target: "<pkg> <count> <state>" where state is one of
-#   fresh    — 0 cache files exist (post-wipe, pre-seed)
-#   seeded   — our seed files exist (applog.xml + files/bd_setting/device_id)
-#   active   — SDK has re-registered and added its own files on top of ours
+#   fresh    — 0 cache files exist (post-wipe or never registered)
+#   active   — SDK has registered at least once (applog.xml / bd_device_id)
 #   absent   — package not installed
+# The VALUES on disk are not authoritative anymore — the L9 JNI hook patches
+# every read in-process — this probe only reflects on-disk cache presence.
 # Never dumps the identifier values themselves. Used by rotate_ids.sh status
 # and by the WebUI applog card.
 applog_probe() {
@@ -752,12 +465,11 @@ applog_probe() {
         [ -e "$_f" ] && _count=$((_count + 1))
     done
     _state=fresh
-    if [ -f "$_sp/applog.xml" ] && [ -f "$_bd/device_id" ]; then
-        if [ -f "$_sp/applog_stats.xml" ]; then
-            _state=active
-        else
-            _state=seeded
-        fi
+    # applog.xml on disk means the SDK has run at least once. Note the VALUES
+    # in it are irrelevant now — the L9 hook patches them in-process on every
+    # read; the file only proves the SDK has initialized (state=active).
+    if [ -f "$_sp/applog.xml" ] || [ -f "$_bd/device_id" ]; then
+        _state=active
     fi
     printf '%s %d %s\n' "$_pkg" "$_count" "$_state"
     return 0

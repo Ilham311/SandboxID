@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+### ByteDance AppLog IDs: in-process hook (L9) replaces disk seeding
+
+`did` / `iid` / `ssid` / `openudid` / `clientudid` / `cdid` are now spoofed
+in-process by the zygisk module instead of being seeded onto the app's data
+dir. The old seeding needed `setenforce 0`, `chown`, `restorecon` and a
+force-stop, and lost to the SDK's own writes; the hook is authoritative on
+every read.
+
+Formats are grounded in observed `device_register` traffic (real samples:
+`6990234216324986369 >> 22` = 2022-10-24; iid `7137846409338136325` likewise
+decodes to its registration date), not the previously-assumed
+`(unix_seconds << 32)` shape:
+
+- **`did` / `iid` / `ssid`** — int64 snowflake, 19 decimal digits,
+  `(unix_ms << 22) | 22-bit random`, per package (each ByteDance app
+  registers its own did)
+- **`cdid` / `clientudid`** — UUID v4
+- **`openudid`** — 16 hex chars
+- **`APPLOG_EPOCH`** (identity.prop) — new key; all six IDs are
+  deterministic in (persona, package, epoch), so bumping the epoch rotates
+  them. `rotate_ids.sh applog` does exactly that (bump + wipe + force-stop);
+  values stay stable between bumps.
+- **XML patching** — `applog.xml` / `snssdk_*.xml` / `bd_device_info.xml`
+  are read from disk and only identifier-matching entries are patched,
+  preserving the SDK's own key names (`device_id`, `header_device_id`, …
+  vary across versions). Raw `bd_setting/*` + `.cdid` are served
+  synthesized. Known limitation: MMKV-backed stores (read-write mmap) are
+  not covered.
+- **Removed** — `helpers.sh::applog_generate` (incl. ~60 lines of awk
+  decimal long-arithmetic and a bogus `arxiv:2504.13279` citation — that
+  paper is about TikTok post sampling, not ID formats) and
+  `helpers.sh::applog_seed`. `applog_probe` states simplify to
+  fresh/active/absent.
+- **Tests** — `tests/native_read_test.cpp` gains classify/synthesize/patch
+  coverage (262 checks total), including snowflake decode round-trip and
+  idempotence of the XML patcher.
+
+### Review fixes (shell)
+
+- `rotate_ids.sh all/safe` — the optional GAID argument leaked into
+  `sync_device_name` (a UUID could become the device name); only
+  `set_gaid_value` receives it now.
+- `rotate_ids.sh all` — `randomize_wlan_mac` failures now count toward
+  `FAILURES` like BT-MAC already did.
+- `action.sh` — rotation warnings now surface every nonzero rc (rc=1, the
+  common failure code, was explicitly suppressed).
+- `jni/main.cpp` — fixed latent build break from `bool ok =
+  api->hookJniNativeMethods(...)`: the pinned zygisk.hpp API returns void
+  (failure is signalled by `fnPtr == null`).
+
 ### Identity hooking-completeness pass (Phase 4, jni/)
 
 `Build.TIME` was the last un-spoofed `Build` field and the typed

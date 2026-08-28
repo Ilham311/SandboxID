@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 using namespace sbxnr;
@@ -276,6 +277,156 @@ static void test_hide_prop() {
     CHECK(!should_hide_prop("ro.product.brand"), "should_hide leaves normal props");
 }
 
+static void test_applog_classify() {
+    // XML caches — both /data/data and /data/user/0 prefixes, any package.
+    CHECK(classify("/data/data/com.zhiliaoapp.musically/shared_prefs/applog.xml")
+          == APPLOG_XML, "applog.xml classify");
+    CHECK(classify("/data/user/0/com.ss.android.ugc.trill/shared_prefs/applog.xml")
+          == APPLOG_XML, "applog.xml via /data/user/0 classify");
+    CHECK(classify("/data/data/x/shared_prefs/snssdk_openudid.xml")
+          == APPLOG_XML, "snssdk_openudid.xml classify");
+    CHECK(classify("/data/data/x/shared_prefs/snssdk_did.xml")
+          == APPLOG_XML, "snssdk_did.xml classify");
+    CHECK(classify("/data/data/x/shared_prefs/bd_device_info.xml")
+          == APPLOG_XML, "bd_device_info.xml classify");
+
+    // Raw native caches.
+    CHECK(classify("/data/data/x/files/bd_setting/device_id")   == BD_RAW_DID,
+          "bd_setting/device_id classify");
+    CHECK(classify("/data/data/x/files/bd_setting/install_id")  == BD_RAW_IID,
+          "bd_setting/install_id classify");
+    CHECK(classify("/data/data/x/files/bd_setting/openudid")    == BD_RAW_OPENUDID,
+          "bd_setting/openudid classify");
+    CHECK(classify("/data/data/x/files/bd_setting/clientudid")  == BD_RAW_CLIENTUDID,
+          "bd_setting/clientudid classify");
+    CHECK(classify("/data/data/x/files/.cdid")                  == BD_RAW_CDID,
+          "files/.cdid classify");
+
+    // Negatives: near-miss names must NOT match.
+    CHECK(classify("/data/data/x/shared_prefs/applog_other.xml") == NONE,
+          "applog_other.xml not matched");
+    CHECK(classify("/data/data/x/files/other.cdid")             == NONE,
+          "other.cdid not matched");
+    CHECK(classify("/data/data/x/files/bd_setting/other")       == NONE,
+          "bd_setting/other not matched");
+    CHECK(classify("/data/data/x/shared_prefs/user_prefs.xml")  == NONE,
+          "unrelated xml not matched");
+    // An app legitimately named e.g. "applog.xml" must not be caught: the
+    // suffix always includes the /shared_prefs/ or /files/ component.
+    CHECK(classify("/data/data/applog.xml") == NONE, "bare applog.xml not matched");
+    // Existing kinds unaffected.
+    CHECK(classify("/proc/version") == VERSION, "version still classifies");
+    CHECK(classify("/proc/meminfo") == MEMINFO, "meminfo still classifies");
+}
+
+static void test_applog_ids() {
+    // Real observed device_register samples decode as (unix_ms << 22):
+    //   6990234216324986369 >> 22 = 1666601709443 (2022-10-24)
+    //   7137846409338136325 >> 22 = 1701795198759 (2023-12-05)
+    // Our synthesis must reproduce that structure exactly.
+    uint64_t epoch = 1710000000000ULL;  // 2024-03-09T16:00:00Z
+    uint64_t seed  = fnv1a("google/husky/husky:14/AP1A.240505.004/11583682:user/release-keys|com.zhiliaoapp.musically");
+
+    ApplogIds a = make_applog_ids(seed, epoch);
+
+    for (const std::string* id : {&a.did, &a.iid, &a.ssid}) {
+        CHECK(id->size() == 19, "snowflake id is 19 decimal digits");
+        unsigned long long v = std::strtoull(id->c_str(), nullptr, 10);
+        CHECK((v >> 22) == epoch, "snowflake decodes to epoch_ms");
+        CHECK(v < 9223372036854775807ULL, "snowflake fits positive int64 (Java long)");
+        for (char c : *id) CHECK(c >= '0' && c <= '9', "snowflake is decimal digits only");
+    }
+    CHECK(a.did != a.iid && a.did != a.ssid && a.iid != a.ssid,
+          "did/iid/ssid distinct");
+
+    // UUID v4 shape for cdid / clientudid.
+    for (const std::string* u : {&a.cdid, &a.clientudid}) {
+        CHECK(u->size() == 36, "uuid length 36");
+        CHECK((*u)[14] == '4', "uuid version nibble == 4");
+        char var = (*u)[19];
+        CHECK(var == '8' || var == '9' || var == 'a' || var == 'b',
+              "uuid variant nibble in {8,9,a,b}");
+    }
+    CHECK(a.cdid != a.clientudid, "cdid and clientudid distinct");
+
+    // openudid: 16 lowercase hex chars (legacy UDID shape the SDK reuses).
+    CHECK(a.openudid.size() == 16, "openudid is 16 chars");
+    CHECK(is_hexlc(a.openudid), "openudid is lowercase hex");
+
+    // Determinism + sensitivity.
+    ApplogIds a2 = make_applog_ids(seed, epoch);
+    CHECK(a2.did == a.did && a2.iid == a.iid && a2.ssid == a.ssid &&
+          a2.cdid == a.cdid && a2.clientudid == a.clientudid &&
+          a2.openudid == a.openudid, "same (seed, epoch) -> same ids");
+
+    ApplogIds other_pkg = make_applog_ids(fnv1a("fp|serial|aid|com.ss.android.ugc.trill"), epoch);
+    CHECK(other_pkg.did != a.did, "per-package seed -> different did");
+
+    ApplogIds bumped = make_applog_ids(seed, epoch + 86400000ULL);
+    CHECK(bumped.did != a.did, "epoch bump -> different did");
+    CHECK((std::strtoull(bumped.did.c_str(), nullptr, 10) >> 22) == epoch + 86400000ULL,
+          "bumped did decodes to new epoch");
+}
+
+static void test_applog_xml_patch() {
+    uint64_t epoch = 1710000000000ULL;
+    ApplogIds a = make_applog_ids(fnv1a("persona|com.zhiliaoapp.musically"), epoch);
+
+    // Key names vary across SDK versions/apps — the patcher must catch both
+    // the short (device_id) and header-prefixed (header_device_id) spellings,
+    // plus case variations, and leave everything else verbatim.
+    std::string real =
+        "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
+        "<map>\n"
+        "    <string name=\"header_device_id\">6990234216324986369</string>\n"
+        "    <string name=\"install_id\">7137846409338136325</string>\n"
+        "    <string name=\"OpenUDID\">5aeca2e40e7e5cf2</string>\n"
+        "    <string name=\"ab_test\">keep-me-verbatim</string>\n"
+        "    <long name=\"register_time\" value=\"1663094970000\" />\n"
+        "    <string name=\"clientudid\">a041f068-1eb3-41b8-8442-0d92622d4b4d</string>\n"
+        "    <string name=\"cdid\">f8741d6d-78c5-4d95-983c-54ef73e284f7</string>\n"
+        "    <string name=\"ssid\">7123456789012345678</string>\n"
+        "</map>\n";
+
+    std::string out;
+    CHECK(patch_applog_xml(real, a, out), "valid applog xml patched");
+
+    CHECK(out.find(">" + a.did + "<")        != std::string::npos, "did replaced");
+    CHECK(out.find(">" + a.iid + "<")        != std::string::npos, "iid replaced");
+    CHECK(out.find(">" + a.openudid + "<")   != std::string::npos, "openudid replaced");
+    CHECK(out.find(">" + a.clientudid + "<") != std::string::npos, "clientudid replaced");
+    CHECK(out.find(">" + a.cdid + "<")       != std::string::npos, "cdid replaced");
+    CHECK(out.find(">" + a.ssid + "<")       != std::string::npos, "ssid replaced");
+
+    CHECK(out.find("keep-me-verbatim")       != std::string::npos, "unrelated string entry kept");
+    CHECK(out.find("1663094970000")          != std::string::npos, "long entry kept");
+    CHECK(out.find("ab_test")                != std::string::npos, "ab_test key kept");
+    CHECK(out.find("6990234216324986369")    == std::string::npos, "old did gone");
+    CHECK(out.find("7137846409338136325")    == std::string::npos, "old iid gone");
+    CHECK(out.find("5aeca2e40e7e5cf2")       == std::string::npos, "old openudid gone");
+    CHECK(out.find("a041f068-1eb3-41b8-8442-0d92622d4b4d") == std::string::npos,
+          "old clientudid gone");
+    CHECK(out.find("register_time")          != std::string::npos, "register_time key kept");
+    CHECK(out.rfind("</map>", out.size() - 2) != std::string::npos, "closing map intact");
+
+    // Idempotent: patching patched output changes nothing.
+    std::string out2;
+    CHECK(patch_applog_xml(out, a, out2) && out2 == out, "patch is idempotent");
+
+    // Non-XML / non-map input is rejected, not mangled.
+    std::string o;
+    CHECK(!patch_applog_xml("hello world", a, o), "plain text rejected");
+    CHECK(!patch_applog_xml("<html><body>x</body></html>", a, o), "non-map xml rejected");
+    CHECK(!patch_applog_xml("", a, o), "empty input rejected");
+
+    // XML map with no identifier entries passes through unchanged (still true).
+    std::string nokeys =
+        "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
+        "<map>\n    <string name=\"lang\">en</string>\n</map>\n";
+    std::string pk;
+    CHECK(patch_applog_xml(nokeys, a, pk) && pk == nokeys, "no-id map passes through");
+}
+
 static bool vec_has(const std::vector<std::string>& v, const char* s) {
     for (const auto& e : v) if (e == s) return true;
     return false;
@@ -337,6 +488,9 @@ int main() {
     test_hex_from_seed();
     test_selinux();
     test_hide_prop();
+    test_applog_classify();
+    test_applog_ids();
+    test_applog_xml_patch();
     test_mountinfo();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

@@ -264,17 +264,16 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
     // the (JNIEnv*, jclass, …) hook signature is the correct calling
     // convention. Handle-based natives are @CriticalNative and must NOT be
     // hooked with this signature.
-    bool ok = api->hookJniNativeMethods(env, "android/os/SystemProperties", &m, 1);
-    if (!ok || env->ExceptionCheck()) {
+    // hookJniNativeMethods returns void in the pinned zygisk.hpp; failure is
+    // signalled by leaving JNINativeMethod.fnPtr null (no class/method match).
+    api->hookJniNativeMethods(env, "android/os/SystemProperties", &m, 1);
+    if (env->ExceptionCheck())
         env->ExceptionClear();
-        LOGE("L2: native_get hook FAILED (api_rc=%d) — prop spoofing off for this process",
-             (int)ok);
-    }
     orig_native_get = reinterpret_cast<jstring (*)(JNIEnv*, jclass, jstring, jstring)>(m.fnPtr);
-    if (orig_native_get)
-        LOGD("L2 native_get hooked (orig=%p)", reinterpret_cast<void*>(orig_native_get));
+    if (!orig_native_get)
+        LOGE("L2: native_get hook FAILED (fnPtr null) — prop spoofing off for this process");
     else
-        LOGE("L2 native_get hook did not bind (method missing?)");
+        LOGD("L2 native_get hooked (orig=%p)", reinterpret_cast<void*>(orig_native_get));
 }
 
 static jint     (*orig_get_int)(JNIEnv*, jclass, jstring, jint)     = nullptr;
@@ -428,13 +427,14 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
          const_cast<char*>("(Ljava/lang/String;Z)Z"),
          reinterpret_cast<void*>(hook_prop_get_bool)},
     };
-    // Same @FastNative contract as native_get above.
-    bool ok = api->hookJniNativeMethods(env, "android/os/SystemProperties", m, 3);
-    if (!ok || env->ExceptionCheck()) {
+    // Same @FastNative contract as native_get above; void return, failure is
+    // signalled per-method by fnPtr == null.
+    api->hookJniNativeMethods(env, "android/os/SystemProperties", m, 3);
+    if (env->ExceptionCheck())
         env->ExceptionClear();
-        LOGE("L7: leak-sensor hooks FAILED (api_rc=%d) — typed getters unspoofed",
-             (int)ok);
-    }
+    if (!m[0].fnPtr || !m[1].fnPtr || !m[2].fnPtr)
+        LOGE("L7: leak-sensor hooks FAILED (fnPtr null: %d/%d/%d) — typed getters unspoofed",
+             m[0].fnPtr ? 1 : 0, m[1].fnPtr ? 1 : 0, m[2].fnPtr ? 1 : 0);
     orig_get_int  = reinterpret_cast<jint (*)(JNIEnv*, jclass, jstring, jint)>(m[0].fnPtr);
     orig_get_long = reinterpret_cast<jlong (*)(JNIEnv*, jclass, jstring, jlong)>(m[1].fnPtr);
     orig_get_bool = reinterpret_cast<jboolean (*)(JNIEnv*, jclass, jstring, jboolean)>(m[2].fnPtr);
@@ -560,6 +560,10 @@ static std::string g_proc_version;
 static std::string g_cpu_repl;
 static int         g_ram_gb    = 0;
 static int         g_cpu_action = sbxnr::CPU_NONE;
+// AppLog (did/iid/ssid/openudid/clientudid/cdid) — synthesized per package.
+static std::string    g_pkg;
+static sbxnr::ApplogIds g_applog;
+static bool           g_applog_ok = false;
 
 static void sbx_fill_prop(char* value, const std::string& v) {
     size_t n = v.size();
@@ -637,7 +641,7 @@ static std::string sbx_read_real(const char* path) {
     return data;
 }
 
-static bool sbx_build_content(sbxnr::Kind kind, std::string& out) {
+static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& out) {
     switch (kind) {
         case sbxnr::BOOTID:  out = g_boot_id;      out.push_back('\n'); return true;
         case sbxnr::MAC:     out = g_wifi_mac;     out.push_back('\n'); return true;
@@ -658,6 +662,23 @@ static bool sbx_build_content(sbxnr::Kind kind, std::string& out) {
             if (real.empty()) return false;
             return sbxnr::patch_cpuinfo(real, g_cpu_action, g_cpu_repl, out);
         }
+        case sbxnr::APPLOG_XML: {
+            // Patch the app's real cache in place (same read-real → patch →
+            // serve pattern as meminfo/cpuinfo): the SDK's own key names are
+            // preserved, only the identifier values are swapped for the
+            // persona's. A missing/foreign file falls through to the real
+            // open — SharedPreferences stats the file first anyway, so a
+            // redirect would never be consulted for a nonexistent XML.
+            if (!g_applog_ok) return false;
+            std::string real = sbx_read_real(path);
+            if (real.empty()) return false;
+            return sbxnr::patch_applog_xml(real, g_applog, out);
+        }
+        case sbxnr::BD_RAW_DID:        if (g_applog_ok) { out = g_applog.did;        out.push_back('\n'); return true; } return false;
+        case sbxnr::BD_RAW_IID:        if (g_applog_ok) { out = g_applog.iid;        out.push_back('\n'); return true; } return false;
+        case sbxnr::BD_RAW_OPENUDID:   if (g_applog_ok) { out = g_applog.openudid;   out.push_back('\n'); return true; } return false;
+        case sbxnr::BD_RAW_CLIENTUDID: if (g_applog_ok) { out = g_applog.clientudid; out.push_back('\n'); return true; } return false;
+        case sbxnr::BD_RAW_CDID:       if (g_applog_ok) { out = g_applog.cdid;       out.push_back('\n'); return true; } return false;
         default: return false;
     }
 }
@@ -666,7 +687,7 @@ static int sbx_spoof_fd(const char* path) {
     sbxnr::Kind kind = sbxnr::classify(path);
     if (kind == sbxnr::NONE) return -1;
     std::string content;
-    if (!sbx_build_content(kind, content)) return -1;
+    if (!sbx_build_content(kind, path, content)) return -1;
     int fd = sbx_make_memfd(content);
     if (fd >= 0) LOGD("L9 redirect '%s' -> memfd (%zu B)", path, content.size());
     return fd;
@@ -806,6 +827,21 @@ static void install_native_read_hooks(Api* api) {
                                                val("BOARD_PLATFORM"), val("HOST"), seed);
     g_ram_gb     = sbxnr::pixel_ram_gb(val("MODEL"));
     g_cpu_action = sbxnr::cpu_action_for(val("SOC_MANUFACTURER"), val("SOC_MODEL"), g_cpu_repl);
+
+    // AppLog IDs: distinct per app (each ByteDance app registers its own did),
+    // deterministic in the persona identity + APPLOG_EPOCH. Bumping that key
+    // (rotate_ids.sh applog / freshen) rotates all six IDs at once.
+    if (!g_pkg.empty()) {
+        uint64_t epoch_ms = strtoull(val("APPLOG_EPOCH").c_str(), nullptr, 10);
+        if (epoch_ms <= 0) epoch_ms = 1700000000000ULL;  // 2023-11-14, static fallback
+        uint64_t aseed = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
+                                      val("ANDROID_ID") + "|" + g_pkg);
+        g_applog    = sbxnr::make_applog_ids(aseed, epoch_ms);
+        g_applog_ok = true;
+        LOGD("L9 applog: pkg=%s did=…%s (per-pkg, epoch=%llu)",
+             g_pkg.c_str(), g_applog.did.substr(g_applog.did.size() - 4).c_str(),
+             (unsigned long long)epoch_ms);
+    }
 
     int libs = sbx_register_across_libs(api);
     if (libs == 0) {
@@ -1249,6 +1285,7 @@ public:
         install_prop_hook(api_, env_);
         install_leak_sensors(api_, env_);
         install_uptime_hook(api_, env_);
+        g_pkg = pkg_;
         install_native_read_hooks(api_);
 #ifdef SBX_DEBUG
         for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());

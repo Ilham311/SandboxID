@@ -182,8 +182,8 @@ su -c 'sh /data/adb/modules/sandboxid/rotate_ids.sh <cmd>'
 | `wlan-mac [xx:xx:...]` | Set `wlan0` MAC + wipe `WifiConfigStore` | No |
 | `bt-mac [xx:xx:...]` | Set Bluetooth adapter MAC + `bt_config.conf` Address | No (toggle BT) |
 | `device-name [name]` | Sync device/BT name to `identity.prop` MODEL | No |
-| `applog [pkg]` | **Regenerate** ByteDance AppLog cache (wipe old + generate new did/iid/ssid/openudid/clientudid/cdid + seed valid XML) | No |
-| `applog-wipe [pkg]` | Wipe-only escape hatch (no seed; forces SDK to re-register from server) | No |
+| `applog [pkg]` | **Rotate** ByteDance AppLog IDs (bump APPLOG_EPOCH + wipe stale cache + force-stop; the zygisk L9 hook serves the new did/iid/ssid/openudid/clientudid/cdid in-process) | No |
+| `applog-wipe [pkg]` | Wipe-only escape hatch (no rotation; forces SDK to re-register from server) | No |
 | `status` | Read-only snapshot of all identifiers (never dumps AppLog values — privacy) | — |
 | `help` | Print usage | — |
 
@@ -193,16 +193,17 @@ TikTok Global `com.zhiliaoapp.musically`, CapCut, Lark, and any third-party app
 that ships `com.bytedance.applog`) cache a **server-issued** trio of identifiers
 alongside the hardware fingerprint the module already spoofs:
 
-- `device_id` (aka `did` / `bd_did`) — Snowflake 64-bit int (18-19 decimal
-  digits; top 32 bits = Unix seconds of registration, remaining bits carry
-  ms + machine + counter — cf. arxiv:2504.13279), minted by the register
-  endpoint `/service/2/device_register/` and pinned to the app install
+- `device_id` (aka `did` / `bd_did`) — Snowflake 64-bit int (19 decimal
+  digits; decodes as `(unix_ms << 22) | 22-bit random` — verified against
+  real `device_register` samples, e.g. `6990234216324986369 >> 22` =
+  2022-10-24), minted by the register endpoint
+  `/service/2/device_register/` and pinned to the app install
 - `install_id` (aka `iid`) — same Snowflake shape, rotates on reinstall,
   links to the current install
 - `ssid` — server-side ID (same shape) that maps `device_id ↔ user_unique_id`
   even across logout / re-login
-- `cdid` — RFC 4122 UUID v4 (locally generated from
-  `/proc/sys/kernel/random/uuid`), seeds the register call
+- `cdid` — RFC 4122 UUID v4 (locally generated via
+  `UUID.randomUUID()` in the SDK), seeds the register call
 - `clientudid` — RFC 4122 UUID v4
 - `openudid` — 16 hex chars (legacy iOS UDID shape, Android SDK reuses)
 
@@ -212,41 +213,41 @@ openudid, clientudid}`, and `files/.cdid`. Rotating hardware without touching
 them leaves the SDK's server-side identity intact — the backend still
 recognises the device.
 
-`rotate_ids.sh applog` is the **full regen cycle** (wipe → generate → seed):
+SandboxID does **not** seed these files anymore. The zygisk module (L9)
+spoofs them **in-process**: every read of an AppLog cache file is redirected
+to memfd content derived deterministically from the persona identity +
+package name + `APPLOG_EPOCH` from `identity.prop`:
 
-1. **Backup** — the whole AppLog `shared_prefs` set is snapshotted into
-   `backups/applog_<pkg>_<epoch>.tar` (mode 0600, owner-only)
-2. **Wipe** — every known AppLog cache file is removed (XML, `bd_setting/*`,
-   `no_backup/applog_device_id.dat`, `files/.cdid`). User login / prefs /
-   drafts / downloads stay untouched.
-3. **Generate** — six new values are minted locally:
-   - `did`, `iid`, `ssid` — Snowflake 64-bit (top 32 bits = now(), low 32 bits
-     = random) rendered as 18-19 decimal digits via `awk` int64-safe math
-   - `cdid`, `clientudid` — UUID v4 from `/proc/sys/kernel/random/uuid`
-   - `openudid` — 16 hex chars from `/dev/urandom`
-4. **Seed** — the new values are written to:
-   - `shared_prefs/applog.xml` (primary cache: did / iid / ssid / openudid
-     / clientudid / register_time)
-   - `shared_prefs/snssdk_openudid.xml` (legacy path for older SDK builds)
-   - `shared_prefs/bd_device_info.xml` (RangersAppLog v6+ unified path)
-   - `files/bd_setting/{device_id, install_id, openudid, clientudid}` (raw
-     text files read by `libbdtracker.so` bypassing SharedPreferences)
-   - `files/.cdid` (legacy plain-text UUID cache)
+- `shared_prefs/{applog,snssdk_openudid,snssdk_did,bd_device_info}.xml` —
+  the app's **real** XML is read from disk and only the identifier values
+  are patched in (key names vary across SDK versions — `device_id`,
+  `header_device_id`, `iid`, … — so the patcher matches by pattern and
+  preserves every other entry verbatim)
+- `files/bd_setting/{device_id,install_id,openudid,clientudid}` and
+  `files/.cdid` — served fully synthesized (raw text, read natively by
+  `libbdtracker` bypassing SharedPreferences)
 
-   Ownership is `chown`ed to match the package UID (read from the data-dir
-   itself), and `restorecon -R` re-labels every seeded file with the correct
-   SELinux context so the app can actually read them from its own domain.
+Each ByteDance app gets its **own** did (the seed includes the package
+name, matching the real per-app registration), and the six IDs are stable
+until `APPLOG_EPOCH` is bumped — no zero-value "new install" gap in between.
 
-5. **Force-stop** — the target is killed so its in-memory copy of the old
-   cache can't overwrite the seeded XML on next `commit()`.
+`rotate_ids.sh applog` is the rotation command:
 
-Regen is scheduled **last** inside `all` / `safe` so the seed sits on top of
-the fully rotated hardware layer, not the stale one. The wipe-only escape
-hatch (`applog-wipe`) is preserved for forensic scenarios where you want to
-watch the SDK re-register from scratch against the server. `rotate_ids.sh
-applog` with no argument walks every non-comment line in `target.txt`. Runs
-as a no-op (with a friendly hint) if `target.txt` is empty — same "ship
-idle" contract as the rest of the
+1. **Bump** — `APPLOG_EPOCH` in `identity.prop` is set to now (unix ms);
+   the next cold start derives a fresh six-tuple from it
+2. **Wipe** — every known AppLog cache file is removed (tar-backup first:
+   `backups/applog_<pkg>_<epoch>.tar`, mode 0600). User login / prefs /
+   drafts / downloads stay untouched
+3. **Force-stop** — the target is killed so no warm process keeps using the
+   old IDs in memory
+
+Regen is scheduled **last** inside `all` / `safe` so the epoch bump lands on
+top of the fully rotated hardware layer, not the stale one. The wipe-only
+escape hatch (`applog-wipe`) is preserved for forensic scenarios where you
+want to watch the SDK re-register from scratch against the server.
+`rotate_ids.sh applog` with no argument walks every non-comment line in
+`target.txt`. Runs as a no-op (with a friendly hint) if `target.txt` is
+empty — same "ship idle" contract as the rest of the
 module.
 
 ---
@@ -354,14 +355,15 @@ remains MIT.
 - Bind-mount overlay for `build.prop` files + `settings_secure.xml`
 - Companion IPC protocol with hot-reloaded target list
 - Crash watchdog and atomic configuration writes
-- **ByteDance AppLog SDK identifier cache** (`did` / `iid` / `ssid` /
-  `openudid` / `clientudid` / `cdid`) — full **regen cycle** per package:
-  tar-backup old cache → surgical wipe of AppLog files (user data
-  preserved) → generate plausible new values (Snowflake 64-bit did/iid/
-  ssid, UUID v4 cdid/clientudid, 16-hex openudid) → seed valid XML +
-  raw `bd_setting/*` files with correct package UID ownership + SELinux
-  context. On next cold start the app reads the seeded values as if
-  they were its own persistent state (see the `applog` command above)
+- **ByteDance AppLog SDK identifier spoofing** (`did` / `iid` / `ssid` /
+  `openudid` / `clientudid` / `cdid`) — **in-process, per package**: the L9
+  native-read hook patches every read of the AppLog caches (applog.xml /
+  snssdk_*.xml / bd_device_info.xml are patched in place preserving the
+  SDK's own key names; raw `bd_setting/*` + `.cdid` are served
+  synthesized). Values are deterministic from the persona identity +
+  package name + `APPLOG_EPOCH` — each app gets its own did like the real
+  per-app registration, and `rotate_ids.sh applog` rotates all six at once
+  by bumping the epoch (see the `applog` command above)
 
 ### Out of scope
 
@@ -425,24 +427,24 @@ detector still sees:
   with no bind-mount overlay — so its `Build.*` and file-based props can disagree.
   Only listed target apps get a fully consistent persona.
 
-- **`applog` regen is local-only; server-side re-linking still happens.** The
-  `applog` command regenerates AppLog's *local* identifier cache (Snowflake
-  did / iid / ssid, UUID cdid / clientudid, 16-hex openudid — seeded into
-  `applog.xml`, `snssdk_openudid.xml`, `bd_device_info.xml`, `files/bd_setting/*`,
-  `files/.cdid`). On next cold start the app reads our seeded values and
+- **`applog` spoofing is local-only; server-side re-linking still happens.** The
+  L9 hook serves Snowflake `did`/`iid`/`ssid` (decoding as
+  `(unix_ms << 22) | rand`, like real `device_register` values), UUID
+  cdid/clientudid, and 16-hex openudid in-process, per package. The app
   presents them to `/service/2/device_register/` as its own persistent state
-  — the backend accepts them because from its POV this is a device it hasn't
-  heard from in a while, not a "new install". But the ByteDance backend
-  fingerprints the register call itself — same account login, same residential
+  — but the ByteDance backend fingerprints the register call itself — same
+  account login, same residential
   IP, reused sensor / SIM signals, or behavioral patterns (typing cadence,
   video watch order) can still let the server link the new identifiers back
-  to the old device server-side, no matter how clean the local seed was.
+  to the old device server-side, no matter how clean the local values are.
   Rotating hardware persona (`sandboxid freshen`), Google Advertising ID
-  (`rotate_ids.sh gaid`), and MACs alongside the AppLog regen is what makes
-  the seeded values actually *cohere* with a plausible new device — the local
-  regen alone is necessary but not sufficient. Network-layer changes (VPN /
+  (`rotate_ids.sh gaid`), and MACs alongside the AppLog rotation is what makes
+  the values actually *cohere* with a plausible new device — the local
+  rotation alone is necessary but not sufficient. Network-layer changes (VPN /
   residential IP rotation) are out of scope for this module and stay a
-  separate concern.
+  separate concern. Additionally, newer AppLog SDK builds can persist these
+  IDs in **MMKV** (binary mmap, opened read-write) — the L9 hook only
+  redirects pure-read `open`/`fopen`, so MMKV-backed stores are not spoofed.
 
 SandboxID changes only identity strings. It does not modify hardware, the
 framework boot path, or kernel state in ways that risk boot failure.

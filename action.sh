@@ -130,8 +130,7 @@ if [ -r "$MODDIR/helpers.sh" ] && [ -r "$MODDIR/target.txt" ] && \
         printf "%b" "$_applog_summary" | while IFS=' ' read -r _p _n _st; do
             [ -n "$_p" ] || continue
             case "$_st" in
-                seeded) say "   - $_p  ($_n file, seed baru siap dibaca)" ;;
-                active) say "   - $_p  ($_n file, SDK sudah re-register)" ;;
+                active) say "   - $_p  ($_n file, cache SDK ada — nilai di-spoof in-process)" ;;
                 fresh)  say "   - $_p  ($_n file, cache bersih menunggu app dibuka)" ;;
                 absent) say "   - $_p  (tidak terpasang)" ;;
                 *)      say "   - $_p  ($_n file, $_st)" ;;
@@ -166,7 +165,9 @@ else
     say "Gagal menerapkan identitas (rc=$RC). Cek pesan di atas atau tab Log."
 fi
 
-[ "$RC_ROT" != 0 ] && [ "$RC_ROT" != 1 ] && \
+# Any nonzero rc from rotation is worth surfacing — rc=1 is the common
+# failure code and was previously swallowed by an explicit exclusion.
+[ "$RC_ROT" != 0 ] && \
     say "  (catatan: rotasi ID rc=$RC_ROT — sebagian ID mungkin belum berganti; cek tab Log)"
 
 if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then

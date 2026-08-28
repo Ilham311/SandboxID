@@ -360,11 +360,11 @@ const ROT_CARDS = [
   { key: 'device-name', name: 'Nama perangkat', desc: 'device_name = MODEL dari identity.prop',           get: 'MODEL' },
   { key: 'boot-count',  name: 'Boot count',    desc: 'Settings.Global.boot_count = BOOT_COUNT identity.prop', get: 'BOOT_COUNT' },
   // AppLog card: unlike the others it has no scalar value read from
-  // identity.prop — the "value" is per-target state (seeded/active/fresh),
-  // rendered by renderApplogStatus() into the same .val slot after the
-  // initial paint. Kept in ROT_CARDS so the "Rotasi semua" button covers
-  // it and it shows in the same grid the user is already scanning.
-  { key: 'applog',      name: 'AppLog ByteDance', desc: 'did/iid/ssid/openudid/clientudid/cdid untuk TikTok/Douyin — wipe + generate baru + seed', get: null, applog: true },
+  // identity.prop — the "value" is per-target state (active/fresh), rendered
+  // by renderApplogStatus() into the same .val slot after the initial paint.
+  // Kept in ROT_CARDS so the "Rotasi semua" button covers it and it shows in
+  // the same grid the user is already scanning.
+  { key: 'applog',      name: 'AppLog ByteDance', desc: 'did/iid/ssid/openudid/clientudid/cdid untuk TikTok/Douyin — di-spoof in-process oleh hook JNI (L9)', get: null, applog: true },
 ];
 
 async function loadRotate() {
@@ -405,7 +405,7 @@ async function loadRotate() {
 
 // Ask the module to inspect each target's applog cache and paint the result
 // into the AppLog card. Values are never returned — helpers.sh::applog_probe
-// only reports counts + a state token (fresh/seeded/active/absent).
+// only reports counts + a state token (fresh/active/absent).
 async function renderApplogStatus(wrap) {
   const slot = wrap.querySelector('.card[data-key="applog"] [data-slot="val"]');
   if (!slot) return;
@@ -424,11 +424,11 @@ async function renderApplogStatus(wrap) {
     slot.textContent = 'target.txt kosong';
     return;
   }
-  // Compact multi-target: "trill: seeded (8) | musically: fresh (0)"
+  // Compact multi-target: "trill: aktif (8) | musically: bersih (0)"
   const parts = lines.map(line => {
     const [pkg, count, state] = line.split(/\s+/);
     const short = String(pkg || '').split('.').slice(-1)[0] || pkg;
-    const label = { seeded: 'seed', active: 'aktif', fresh: 'bersih', absent: 'nihil' }[state] || state;
+    const label = { active: 'aktif', fresh: 'bersih', absent: 'nihil' }[state] || state;
     return `${short}: ${label} (${count})`;
   });
   slot.textContent = parts.join(' \u00b7 ');

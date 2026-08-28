@@ -183,6 +183,8 @@ struct Identity {
             "BUILD_TIME_UTC","BUILD_DATE",
             // ro.build.flavor — read directly by fingerprint SDKs
             "FLAVOR",
+            // ByteDance AppLog did/iid/ssid snowflake epoch (unix ms)
+            "APPLOG_EPOCH",
         };
         std::string out;
         for (const auto& k : order) {
@@ -479,6 +481,16 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
+
+    // AppLog snowflake epoch (unix ms). Seeds the synthesized did/iid/ssid in
+    // the zygisk L9 AppLog redirect — bumping this key rotates all six AppLog
+    // IDs at once (rotate_ids.sh applog / freshen).
+    {
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch()).count();
+        if (now_ms <= 0) now_ms = 1700000000000LL;
+        id.kv["APPLOG_EPOCH"] = std::to_string(now_ms);
+    }
 
     // Build date — deterministic from the persona patch date. Keeps
     // Build.TIME / ro.build.date.utc consistent with FINGERPRINT.

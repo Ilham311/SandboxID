@@ -91,6 +91,122 @@ inline std::string hex_from_seed(uint64_t seed, size_t nbytes) {
     return s;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// ByteDance AppLog identifier synthesis.
+//
+// Grounded in observed /service/2/device_register/ traffic, not guesswork:
+//   did / iid / ssid — int64 snowflake, 19 decimal digits, decodes as
+//       (unix_ms << 22) | 22-bit random. Verified against real samples:
+//       6990234216324986369 >> 22 = 2022-10-24, 7137846409338136325 >> 22 =
+//       2023-12-05. did/iid are server-issued; we fabricate a plausible one
+//       so the app never surfaces a zero-value "new install" gap.
+//   cdid / clientudid — UUID v4 (UUID.randomUUID().toString() in the SDK).
+//   openudid          — 16 lowercase hex chars.
+//
+// All values are deterministic in (seed, epoch_ms): seed comes from the
+// persona identity + package name (per-app did, like the real SDK), epoch_ms
+// from identity.prop APPLOG_EPOCH — bumping that key rotates every ID.
+// ────────────────────────────────────────────────────────────────────────────
+
+struct ApplogIds {
+    std::string did, iid, ssid, cdid, clientudid, openudid;
+};
+
+inline std::string snowflake_from_seed(uint64_t seed, uint64_t epoch_ms) {
+    // (unix_ms << 22) | rand22 — top bit stays 0 (epoch_ms is well below
+    // 2^41), so the value fits a positive Java long like the real IDs.
+    uint64_t v = (epoch_ms << 22) | (splitmix64(seed) & 0x3FFFFFULL);
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(v));
+    return std::string(buf);
+}
+
+inline ApplogIds make_applog_ids(uint64_t seed, uint64_t epoch_ms) {
+    ApplogIds ids;
+    ids.did        = snowflake_from_seed(seed ^ 0x9E3779B97F4A7C15ULL, epoch_ms);
+    ids.iid        = snowflake_from_seed(seed ^ 0xBF58476D1CE4E5B9ULL, epoch_ms);
+    ids.ssid       = snowflake_from_seed(seed ^ 0x94D049BB133111EBULL, epoch_ms);
+    ids.cdid       = uuid_from_seed(seed ^ 0x2545F4914F6CDD1DULL);
+    ids.clientudid = uuid_from_seed(seed ^ 0x9E3779B97F4A7C15ULL);
+    ids.openudid   = hex_from_seed(seed, 8);
+    return ids;
+}
+
+// Patch the identifier values inside a real SharedPreferences XML map read
+// from disk. Key names vary across AppLog SDK versions and apps (device_id,
+// header_device_id, iid, install_id, …), so match by substring instead of a
+// hardcoded list; every other element is copied through verbatim.
+inline bool patch_applog_xml(const std::string& real, const ApplogIds& ids,
+                             std::string& out) {
+    if (real.find("<map") == std::string::npos ||
+        real.find("<string") == std::string::npos)
+        return false;
+
+    auto subst_contains_ci = [](const std::string& key, const char* needle) {
+        size_t nl = std::strlen(needle);
+        if (key.size() < nl) return false;
+        for (size_t i = 0; i + nl <= key.size(); ++i) {
+            size_t j = 0;
+            while (j < nl) {
+                char a = key[i + j];
+                char b = needle[j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+                if (a != b) break;
+                ++j;
+            }
+            if (j == nl) return true;
+        }
+        return false;
+    };
+
+    size_t pos = 0;
+    while (pos < real.size()) {
+        size_t open = real.find('<', pos);
+        if (open == std::string::npos) { out.append(real, pos, std::string::npos); break; }
+        out.append(real, pos, open - pos);
+
+        size_t close = real.find('>', open);
+        if (close == std::string::npos) { out.append(real, open, std::string::npos); break; }
+        size_t tag_end = close + 1;
+
+        if (real.compare(open, 7, "<string") == 0) {
+            // <string name="KEY">VALUE</string>
+            const std::string* repl = nullptr;
+            size_t nam = real.find("name=\"", open);
+            if (nam != std::string::npos && nam < close) {
+                nam += 6;
+                size_t nam_end = real.find('"', nam);
+                if (nam_end != std::string::npos && nam_end < close) {
+                    std::string key = real.substr(nam, nam_end - nam);
+                    if      (subst_contains_ci(key, "clientudid")) repl = &ids.clientudid;
+                    else if (subst_contains_ci(key, "openudid"))   repl = &ids.openudid;
+                    else if (subst_contains_ci(key, "install_id")) repl = &ids.iid;
+                    else if (subst_contains_ci(key, "device_id"))  repl = &ids.did;
+                    else if (subst_contains_ci(key, "cdid"))       repl = &ids.cdid;
+                    else if (subst_contains_ci(key, "ssid"))       repl = &ids.ssid;
+                    else if (subst_contains_ci(key, "did"))        repl = &ids.did;
+                    else if (subst_contains_ci(key, "iid"))        repl = &ids.iid;
+                }
+            }
+            if (repl) {
+                out.append(real, open, tag_end - open);
+                out.append(*repl);
+                size_t vend = real.find("</string>", tag_end);
+                if (vend == std::string::npos) return false;
+                // Continue after the closing tag: other <string> entries in
+                // the same map may also carry identifier values.
+                size_t vtend = vend + 9;
+                out.append(real, vend, vtend - vend);
+                pos = vtend;
+                continue;
+            }
+        }
+        out.append(real, open, tag_end - open);
+        pos = tag_end;
+    }
+    return true;
+}
+
 inline int release_major(const std::string& release) {
     return std::atoi(release.c_str());
 }
@@ -283,7 +399,21 @@ inline bool patch_cpuinfo(const std::string& real, int action,
     return true;
 }
 
-enum Kind { NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE };
+enum Kind {
+    NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE,
+    // ByteDance AppLog caches (per-app data dir, matched by path suffix).
+    APPLOG_XML,          // shared_prefs/{applog,snssdk_*,bd_device_info}.xml
+    BD_RAW_DID,          // files/bd_setting/device_id
+    BD_RAW_IID,          // files/bd_setting/install_id
+    BD_RAW_OPENUDID,     // files/bd_setting/openudid
+    BD_RAW_CLIENTUDID,   // files/bd_setting/clientudid
+    BD_RAW_CDID,         // files/.cdid
+};
+
+inline bool ends_with(const std::string& s, const char* suffix) {
+    size_t sl = std::strlen(suffix);
+    return s.size() >= sl && s.compare(s.size() - sl, sl, suffix) == 0;
+}
 
 inline Kind classify(const char* path) {
     if (!path) return NONE;
@@ -306,6 +436,21 @@ inline Kind classify(const char* path) {
                 return MAC;
         }
     }
+
+    // AppLog caches live at /data/data/<pkg>/... — match by suffix so every
+    // target package (and /data/user/0 equivalently) is covered.
+    std::string p(path);
+    if (ends_with(p, "/shared_prefs/applog.xml") ||
+        ends_with(p, "/shared_prefs/snssdk_openudid.xml") ||
+        ends_with(p, "/shared_prefs/snssdk_did.xml") ||
+        ends_with(p, "/shared_prefs/bd_device_info.xml"))
+        return APPLOG_XML;
+    if (ends_with(p, "/files/bd_setting/device_id"))   return BD_RAW_DID;
+    if (ends_with(p, "/files/bd_setting/install_id"))  return BD_RAW_IID;
+    if (ends_with(p, "/files/bd_setting/openudid"))    return BD_RAW_OPENUDID;
+    if (ends_with(p, "/files/bd_setting/clientudid"))  return BD_RAW_CLIENTUDID;
+    if (ends_with(p, "/files/.cdid"))                  return BD_RAW_CDID;
+
     return NONE;
 }
 
