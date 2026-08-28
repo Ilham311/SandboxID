@@ -322,13 +322,17 @@ EOF
 )
   # BUILD_TIME_UTC / BUILD_DATE only when derivation succeeded (validated
   # SECPATCH); an absent key leaves the field unspoofed rather than wrong.
+  # NOTE: $(cat <<EOF) strips the heredoc's trailing newline, so each append
+  # MUST start with its own \n — without it the first key glues onto the last
+  # heredoc line (seen in the wild: "FLAVOR=caiman-userBUILD_TIME_UTC=…",
+  # which corrupts FLAVOR and drops BUILD_TIME_UTC in one shot).
   if [ -n "$BUILD_UTC" ]; then
-    IDENTITY_KV="${IDENTITY_KV}BUILD_TIME_UTC=$BUILD_UTC
-"
+    IDENTITY_KV="${IDENTITY_KV}
+BUILD_TIME_UTC=$BUILD_UTC"
   fi
   if [ -n "$BUILD_DATE_STR" ]; then
-    IDENTITY_KV="${IDENTITY_KV}BUILD_DATE=$BUILD_DATE_STR
-"
+    IDENTITY_KV="${IDENTITY_KV}
+BUILD_DATE=$BUILD_DATE_STR"
   fi
   return 0
 }

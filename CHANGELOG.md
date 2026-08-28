@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### Fix: ROOT CAUSE aplikasi target blank putih — wrapper L9 beracun saat pltHookCommit gagal parsial
+
+Diagnosis uptime pada entry sebelumnya **salah** — log v2.1.6 (UPTIME_SECONDS=0,
+`no_uptime` aktif) masih menunjukkan app hang di layar putih dengan UI thread
+hidup dan tanpa crash signature apa pun. Penyebab sebenarnya:
+
+1. `install_native_read_hooks()` mendaftarkan 7 simbol (open/openat/fopen +
+   `__system_property_get/read/read_callback`) ke SEMUA .so yang ter-map —
+   di app target MIUI itu 373 library.
+2. `pltHookCommit()` mengembalikan **false** di setiap spawn (terlihat di log:
+   "L9: pltHookCommit gagal (373 libs registered)").
+3. Semantik lsplt (LSPosed/LSPlt `lsplt.cc`, `DoHook`): commit diterapkan
+   **per-library dan TIDAK di-rollback** — `false` berarti "sebagian gagal",
+   sementara ratusan entry PLT library lain SUDAH dipatch ke wrapper kita.
+4. Fail-closed fce81a6 lalu me-reset semua `orig_*` ke nullptr → wrapper yang
+   masih terpasang di PLT berubah jadi stub racun: `sbx_spg` mengembalikan
+   string kosong untuk SETIAP property lookup native, `sbx_spr` return -1,
+   `sbx_sprcb` tidak pernah memanggil callback caller-nya.
+5. Pembaca property native (libcutils `property_get` → `__system_property_
+   read_callback`, dipakai libhwui/EGL/renderer init) melihat `ro.hardware.egl`,
+   `debug.hwui.*` dkk kosong → RenderThread gagal init → surface tidak pernah
+   digambar → blank putih tanpa crash. UI thread tetap hidup (poll
+   `debug.force_rtl` via L2/JNI terus berjalan) — persis signature di log.
+
+Fix:
+
+- **jni/main.cpp** — `orig_*` di-resolve via `dlsym(RTLD_DEFAULT, ...)` SEBELUM
+  registrasi hook, sehingga wrapper selalu punya fungsi asli untuk ditelepon
+  baik commit sukses penuh, parsial, maupun gagal total. Reset `orig_*` saat
+  commit gagal DICABUT (itu justru racunnya). `g_nr_active` kini aktif selama
+  orig resolvable: lib yang ter-hook dispoof, sisanya transparan lihat nilai
+  asli — partial commit berubah dari "merusak app" jadi "best-effort".
+- **jni/main.cpp (L8)** — hazard kembar dihapus: saat commit uptime gagal,
+  offset di-nol-kan (bukan orig yang di-null-kan) supaya reader yang kebetulan
+  sudah ter-hook melihat jam asli — menghilangkan divergence
+  hooked-vs-unhooked yang jadi dugaan hang sebelumnya. `orig_clock_gettime`
+  juga di-pre-resolve via dlsym.
+- **autopif.sh** — bug newline heredoc: `$(cat <<EOF)` membuang trailing
+  newline, jadi append `BUILD_TIME_UTC=` menempel ke baris terakhir heredoc →
+  blob identitas nyata berisi `FLAVOR=caiman-userBUILD_TIME_UTC=1727839200`
+  (FLAVOR rusak + key BUILD_TIME_UTC hilang, terlihat di log user). Append
+  kini mulai dengan newline-nya sendiri.
+- **validate.sh** — regression test baru: generate artifact autopif asli dan
+  assert setiap baris tepat satu pasangan KEY=VALUE + `BUILD_TIME_UTC` jadi
+  key tersendiri (test ini gagal pada kode lama, lolos pada fix).
+
 ### Fix: aplikasi target blank putih (hang di loading screen) — uptime spoof kembali opt-in
 
 Kambuhan masalah yang sudah pernah didiagnosis tuntas di `c67ae88`: aplikasi

@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
+#include <dlfcn.h>
 #include <android/log.h>
 #include <string>
 #include <map>
@@ -507,6 +508,11 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
     };
     int registered = 0;
     int found      = 0;
+    // Pre-resolve the real clock_gettime (same rationale as L9: lsplt never
+    // rolls back a partial commit, so the wrapper must always be callable).
+    if (!orig_clock_gettime)
+        orig_clock_gettime = reinterpret_cast<int (*)(clockid_t, timespec*)>(
+            dlsym(RTLD_DEFAULT, "clock_gettime"));
     for (size_t i = 0; i < sizeof(kLibs) / sizeof(kLibs[0]); ++i) {
         dev_t dev = 0; ino_t ino = 0;
         if (!sbx_lib_dev_inode(kLibs[i], &dev, &ino)) continue;
@@ -517,19 +523,29 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
         ++registered;
     }
     if (registered == 0) {
+        g_boot_off_sec = 0;
         LOGW("L8: chokepoint lib tak ketemu (scanned %zu) — uptime tak dispoof",
              sizeof(kLibs) / sizeof(kLibs[0]));
         return;
     }
     if (!api->pltHookCommit()) {
-        orig_clock_gettime = nullptr;
-        LOGW("L8: pltHookCommit gagal (%d/%zu libs registered) — uptime tak dispoof (jam asli)",
+        // Partial commit leaves some libs' PLT patched to our wrapper for the
+        // life of the process. The wrapper already ran with the offset set, so
+        // zeroing g_boot_off_sec is the only safe disable: every reader,
+        // hooked or not, then sees the real clock. Keeping the offset on a
+        // partially-hooked process re-creates the hooked-vs-unhooked clock
+        // divergence that hangs target apps (c67ae88 / fce81a6).
+        g_boot_off_sec = 0;
+        LOGW("L8: pltHookCommit gagal (%d/%zu libs registered) — offset dinolkan, "
+             "semua reader lihat jam asli (divergensi hang dihindari)",
              registered, sizeof(kLibs) / sizeof(kLibs[0]));
         return;
     }
     if (orig_clock_gettime == nullptr) {
-        LOGW("L8: commit OK tapi clock_gettime tak ter-hook (orig=null, %d libs) — uptime tak dispoof",
-             registered);
+        // dlsym failed too — nothing to call through to. Zero the offset so a
+        // wrapper that somehow still gets invoked (partial commit) forwards
+        // the real clock unchanged.
+        g_boot_off_sec = 0;
         return;
     }
     LOGD("L8 boottime PLT hook aktif (+%llds, %d/%d lib mapped, %zu scanned) orig=%p",
@@ -846,35 +862,46 @@ static void install_native_read_hooks(Api* api) {
              (unsigned long long)epoch_ms);
     }
 
+    // Resolve the REAL implementations up front, before any hook exists.
+    // lsplt's CommitHook (LSPosed/LSPlt lsplt.cc, DoHook) applies hooks
+    // per-library and does NOT roll back the ones that succeeded when it
+    // returns false — a partial commit leaves PLT entries patched to our
+    // wrappers while the backup pointers may not all have been written.
+    // With orig_* pre-resolved via dlsym, every wrapper always has a valid
+    // real function to fall through to, whether commit fully succeeded,
+    // partially applied, or failed outright. Nulling the pointers instead
+    // (fce81a6) turned the live wrappers into stubs: __system_property_get
+    // returned an empty value for every lookup and __system_property_read_
+    // callback never invoked its caller's callback, so native readers
+    // (libcutils/hwui) saw empty ro.* props and the app froze on a white
+    // surface. dlsym(RTLD_DEFAULT, ...) resolves the real libc symbol — our
+    // hook is a GOT patch, not symbol interposition, so lookup is unaffected.
+    if (!orig_spg)    orig_spg    = reinterpret_cast<sbx_spg_fn>(dlsym(RTLD_DEFAULT, "__system_property_get"));
+    if (!orig_spr)    orig_spr    = reinterpret_cast<sbx_spr_fn>(dlsym(RTLD_DEFAULT, "__system_property_read"));
+    if (!orig_sprcb)  orig_sprcb  = reinterpret_cast<sbx_sprcb_fn>(dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
+    if (!orig_open)   orig_open   = reinterpret_cast<sbx_open_fn>(dlsym(RTLD_DEFAULT, "open"));
+    if (!orig_openat) orig_openat = reinterpret_cast<sbx_openat_fn>(dlsym(RTLD_DEFAULT, "openat"));
+    if (!orig_fopen)  orig_fopen  = reinterpret_cast<sbx_fopen_fn>(dlsym(RTLD_DEFAULT, "fopen"));
+
     int libs = sbx_register_across_libs(api);
     if (libs == 0) {
         LOGW("L9: no mapped .so to hook — native reads not spoofed (kill-switch keeps flag off)");
         return;
     }
     if (!api->pltHookCommit()) {
-        // Hard-reset every orig_* pointer that pltHookRegister may have populated but
-        // that Zygisk failed to actually commit. Leaving them set to garbage would make
-        // our wrappers call random addresses on the next syscall.
-        orig_open   = nullptr;
-        orig_openat = nullptr;
-        orig_fopen  = nullptr;
-        orig_spg    = nullptr;
-        orig_spr    = nullptr;
-        orig_sprcb  = nullptr;
-        g_nr_active = false;
-        LOGW("L9: pltHookCommit gagal (%d libs registered) — native reads tak dispoof "
-             "(orig_* direset, wrapper akan bypass, nilai asli terlihat)", libs);
+        // Partial commit: the libraries whose hooks DID land stay patched for
+        // the life of the process (lsplt has no unregister/rollback). Keep the
+        // wrappers live and fully functional — hooked libs get spoofed, the
+        // rest transparently see real values. Never null orig_* here.
+        LOGW("L9: pltHookCommit gagal sebagian (%d libs registered) — coverage "
+             "mungkin parsial, wrapper tetap aman (orig_* via dlsym)", libs);
+    }
+    g_nr_active = orig_spg || orig_spr || orig_sprcb ||
+                  orig_open || orig_openat || orig_fopen;
+    if (!g_nr_active) {
+        LOGW("L9: no real implementation resolvable — native reads not spoofed");
         return;
     }
-    // Sanity check: at least one PLT slot must have been resolved. If every orig_* is
-    // null, our wrappers become no-ops that can't call the real implementation. Fail
-    // closed rather than crash the target process on first spoofed read.
-    if (!orig_open && !orig_openat && !orig_fopen && !orig_spg && !orig_spr && !orig_sprcb) {
-        g_nr_active = false;
-        LOGW("L9: commit OK but zero PLT slots resolved (%d libs) — fail-closed", libs);
-        return;
-    }
-    g_nr_active = true;
     LOGD("L9 aktif (%d lib): boot_id=%s mac=%s ram=%dGB cpu=%d "
          "[open=%p openat=%p fopen=%p spg=%p spr=%p sprcb=%p]",
          libs, g_boot_id.c_str(), g_wifi_mac.c_str(), g_ram_gb, g_cpu_action,

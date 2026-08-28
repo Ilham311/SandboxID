@@ -37,6 +37,26 @@ else
   echo "FAIL: native_read_test"; rc=1
 fi
 
+echo "=== 3b/4 autopif artifact well-formedness ==="
+# Regression test for the heredoc newline bug: $(cat <<EOF) strips the trailing
+# newline, so keys appended after the heredoc used to glue onto the last line
+# ("FLAVOR=caiman-userBUILD_TIME_UTC=1727839200" — corrupted FLAVOR, lost
+# BUILD_TIME_UTC). Every emitted line must be exactly one KEY=VALUE pair.
+SBX_ART=/tmp/sbx_autopif_identity
+if MODDIR="$PWD" AUTOPIF_ARTIFACT="$SBX_ART" sh autopif.sh device >/dev/null 2>&1 \
+   && [ -s "$SBX_ART" ]; then
+  bad=$(grep -vc '^[A-Za-z_][A-Za-z0-9_]*=[^=]*$' "$SBX_ART")
+  glue=$(grep -c '^FLAVOR=.*=' "$SBX_ART")
+  btu=$(grep -c '^BUILD_TIME_UTC=[0-9]*$' "$SBX_ART")
+  if [ "$bad" = "0" ] && [ "$glue" = "0" ] && [ "$btu" -ge 1 ]; then
+    echo "OK: autopif artifact well-formed ($(grep -c '=' "$SBX_ART") keys, no glued lines)"
+  else
+    echo "FAIL: autopif artifact malformed (bad-lines=$bad glued-FLAVOR=$glue BUILD_TIME_UTC-keys=$btu)"; rc=1
+  fi
+else
+  echo "FAIL: autopif.sh device produced no artifact"; rc=1
+fi
+
 echo "=== 4/4 shellcheck (advisory) ==="
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -S warning build.sh autopif.sh selftest.sh && echo "OK: shellcheck clean"
