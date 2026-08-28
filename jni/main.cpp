@@ -493,14 +493,17 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
     //   - AOSP system/libbase/chrono_utils.cpp               (libbase / boot_clock)
     //   - AOSP system/core/libcutils/                        (libcutils android_get_uptime)
     //   - frameworks/base/core/jni/android_os_SystemClock.cpp (libandroid_runtime)
-    // Adding libbase.so + libcutils.so closes gaps where system apps link them directly
-    // and bypass libutils/libandroid_runtime. Missing libs are silently skipped by
-    // sbx_lib_dev_inode() returning false.
+    // NOTE (2026-08-28): libbase.so + libcutils.so were TRIED in Phase 3 and
+    // reverted — hooking them too re-created the hooked-vs-unhooked clock
+    // divergence that hangs target apps on a white loading screen (see
+    // c67ae88): more readers saw the offset while vDSO / kernel-side timed
+    // waits stayed real, so loading deadlines seeded from a hooked absolute
+    // never fired. Keep this list exactly libutils + libandroid_runtime.
+    // The spoof itself is opt-in as of 2026-08-28: autopif emits
+    // UPTIME_SECONDS=0 unless $MODDIR/enable_uptime exists.
     static const char* const kLibs[] = {
         "/libutils.so",
         "/libandroid_runtime.so",
-        "/libbase.so",     // Added Phase 3 — android::base::boot_clock
-        "/libcutils.so",   // Added Phase 3 — android_get_uptime()
     };
     int registered = 0;
     int found      = 0;

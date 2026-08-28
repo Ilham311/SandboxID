@@ -259,12 +259,13 @@ property name — none of AOSP's code is copied.
 
 - **AOSP chokepoint libraries for `clock_gettime` PLT hook** (Apache-2.0):
   - `frameworks/native/libs/utils/SystemClock.cpp` — `libutils`.
-  - `system/libbase/chrono_utils.cpp` — `libbase` `boot_clock`.
-  - `system/core/libcutils/` — `libcutils` `android_get_uptime()`.
   - `frameworks/base/core/jni/android_os_SystemClock.cpp` — `libandroid_runtime`.
   These filenames are **facts** used to justify which shared libraries the L8
-  hook now registers PLT overrides against. No code from any of them is copied
-  into this repo.
+  hook registers PLT overrides against. `libbase` (`boot_clock`) and
+  `libcutils` (`android_get_uptime()`) were also evaluated but deliberately
+  excluded — hooking them too re-created the hooked-vs-unhooked clock
+  divergence that hangs target apps on a white loading screen (see CHANGELOG
+  2026-08-28 and `c67ae88`). No code from any of them is copied into this repo.
 
 ---
 

@@ -269,8 +269,14 @@ assemble_identity() {
   # still ships on production builds and is read by fingerprint SDKs.
   FLAVOR_STR="$PRODUCT-user"
 
-  _uptime_emit=$UPTIME_S
-  [ -f "$MODDIR/no_uptime" ] && _uptime_emit=0
+  # Uptime spoof is OPT-IN (enable_uptime). It hung target apps on a white
+  # loading screen twice: first via the Java hook (c67ae88), then again via
+  # the extended PLT chokepoint list (fce81a6 hooked libbase/libcutils too,
+  # so more clock readers got the offset while vDSO/kernel-side waits stayed
+  # real — hooked-vs-unhooked divergence froze loading deadlines). Keep the
+  # internal UPTIME_S valid so validate_lifecycle still passes.
+  _uptime_emit=0
+  { [ -f "$MODDIR/enable_uptime" ] && [ ! -f "$MODDIR/no_uptime" ]; } && _uptime_emit=$UPTIME_S
 
   IDENTITY_KV=$(cat <<EOF
 BRAND=$BRAND
@@ -340,8 +346,10 @@ display_profile() {
   printf '  %-12s %s\n'        "Boot count"  "$BOOT_COUNT"
   if [ -f "$MODDIR/no_uptime" ]; then
     printf '  %-12s %s\n'      "Uptime"      "asli (spoof off)"
+  elif [ -f "$MODDIR/enable_uptime" ]; then
+    printf '  %-12s %s\n'      "Uptime"      "$(fmt_dur "$UPTIME_S") (spoof on)"
   else
-    printf '  %-12s %s\n'      "Uptime"      "$(fmt_dur "$UPTIME_S")"
+    printf '  %-12s %s\n'      "Uptime"      "asli (spoof off, touch enable_uptime utk on)"
   fi
   printf '  %-12s %s\n'        "Status"      "$( [ "$RESET" -eq 1 ] && echo 'fresh (baru direset)' || echo 'fresh (baru dipasang)' )"
   printf '  %-12s %s\n'        "Serial"      "$SERIAL"

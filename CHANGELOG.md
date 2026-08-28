@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Fix: aplikasi target blank putih (hang di loading screen) — uptime spoof kembali opt-in
+
+Kambuhan masalah yang sudah pernah didiagnosis tuntas di `c67ae88`: aplikasi
+target hang di layar loading putih setiap kali `UPTIME_SECONDS > 0`. Penyebab
+**bukan Build.TIME** — itu derivasi tanggal build persona (1–6 hari sebelum
+bulletin security patch), tidak berinteraksi dengan clock runtime.
+
+Rantai kejadian:
+
+1. `c67ae88` mematikan uptime spoof (default OFF) karena Java-side hook hang
+   app. `115e799` menyalakannya lagi via PLT-hook `clock_gettime` di
+   libutils + libandroid_runtime — terbukti stabil selama itu satu-satunya
+   chokepoint.
+2. `fce81a6` (Phase 3, v2.1.3+) **memperluas chokepoint ke `libbase.so` +
+   `libcutils.so`** → makin banyak pembaca clock mendapat offset, sementara
+   jalur lain (vDSO `clock_gettime`, kernel-side timed-waits) tetap real →
+   divergence hooked-vs-unhooked kembali muncul → deadline loading/animasi
+   yang di-seed dari nilai hooked tak pernah tercapai → blank putih.
+3. Kenapa baru kambuh di v2.1.5: action.sh selama ini gagal rc=127 (symlink
+   `bin/sandboxid` hilang) sehingga `identity.prop` lama terpakai — kemungkinan
+   dengan `UPTIME_SECONDS=0` dari era opt-in-off. Setelah fix rc=127, action
+   pertama kali berhasil apply identitas baru dengan uptime positif → hook
+   L8 yang diperluas aktif untuk pertama kalinya → hang.
+
+Fix:
+
+- **autopif.sh** — `UPTIME_SECONDS=0` default; hanya emit nilai asli jika
+  `$MODDIR/enable_uptime` ada DAN `no_uptime` tidak ada (kill switch tetap
+  menang). `UPTIME_S` internal tetap valid untuk `validate_lifecycle`.
+- **jni/main.cpp** — daftar chokepoint L8 dikembalikan ke libutils +
+  libandroid_runtime saja (libbase/libcutils dicabut dengan alasan
+  terdokumentasi). Tanpa reflash pun fix sudah efektif karena nilai default
+  sekarang 0 → hook no-op.
+- Mitigasi instan tanpa reflash: `touch /data/adb/modules/sandboxid/no_uptime`
+  (companion memaksa UPTIME_SECONDS=0 per-spawn, live sejak v2.1.3).
+
 ### ByteDance AppLog IDs: in-process hook (L9) replaces disk seeding
 
 `did` / `iid` / `ssid` / `openudid` / `clientudid` / `cdid` are now spoofed
