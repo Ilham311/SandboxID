@@ -1,4 +1,24 @@
 #!/usr/bin/env bash
+# ------------------------------------------------------------------------------
+# SandboxID — Magisk / Zygisk module build script
+#
+# Strict mode: -e (exit on error), -u (unset variables are errors), pipefail
+# (a pipeline fails if any command in it fails). This gives us fail-fast on any
+# NDK/CMake/zip regression instead of silently producing a broken ZIP.
+#
+# External references (validated 2026-08):
+#   - Zygisk sample repo (public Zygisk API contract):
+#       https://github.com/topjohnwu/zygisk-module-sample
+#     zygisk.hpp is pinned by commit SHA + SHA256 below to prevent silent
+#     API drift when upstream retags.
+#   - Magisk (parent framework):
+#       https://github.com/topjohnwu/Magisk
+#   - LSPlant (optional L3 Java-method hooker):
+#       https://github.com/LSPosed/LSPlant  (fetched at build time when
+#       SBX_ENABLE_LSPLANT=ON, pinned by fetch_lsplant_deps.sh)
+#   - Android NDK build/cmake toolchain:
+#       https://developer.android.com/ndk/guides/cmake
+# ------------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -7,12 +27,27 @@ cd "$ROOT"
 : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to your NDK path (r26+)}"
 MIN_SDK="${MIN_SDK:-26}"
 VARIANT="${VARIANT:-both}"
-VERSION="$(grep '^version=' module.prop | cut -d= -f2)"
+
+if [ ! -f module.prop ]; then
+  echo "ERROR: module.prop not found in $ROOT — refusing to build" >&2
+  exit 1
+fi
+VERSION="$(grep '^version=' module.prop | cut -d= -f2 || true)"
+if [ -z "${VERSION:-}" ]; then
+  echo "ERROR: version= line missing in module.prop" >&2
+  exit 1
+fi
 
 LSP_CMAKE=""
+LSP_STATUS="disabled (set SBX_ENABLE_LSPLANT=ON to enable L3)"
 if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then
   LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
-  echo "==> L3 LSPlant enabled — preparing dependencies + callback DEX"
+  # Extract the pinned LSPlant + Dobby revisions from fetch_lsplant_deps.sh so
+  # the build banner shows exactly what will be linked in — helps release notes.
+  LSP_REV="$(grep -E '^LSPLANT_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
+  DOBBY_REV="$(grep -E '^DOBBY_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
+  LSP_STATUS="enabled [LSPlant=${LSP_REV:-?} Dobby=${DOBBY_REV:-?}]"
+  echo "==> L3 LSPlant $LSP_STATUS — preparing dependencies + callback DEX"
   bash "$ROOT/jni/fetch_lsplant_deps.sh"
   if ! bash "$ROOT/jni/tools/gen_hook_dex.sh"; then
     echo "  WARN: hook_dex.h generation failed — L3 ANDROID_ID hook will be skipped" >&2
@@ -24,11 +59,16 @@ OUT="$ROOT/dist"
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
 
 echo "==> SandboxID $VERSION"
-echo "==> NDK: $ANDROID_NDK_HOME"
+echo "==> NDK:        $ANDROID_NDK_HOME"
+echo "==> MIN_SDK:    $MIN_SDK"
 echo "==> Variant(s): $VARIANT"
+echo "==> LSPlant:    $LSP_STATUS"
 
 
 
+# Pinned Zygisk API sample commit — the SHA256 fence prevents an upstream force-push
+# from silently changing the API contract our hooks are compiled against.
+# Ref: https://github.com/topjohnwu/zygisk-module-sample/commits/master
 ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
 ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
 if [ ! -f jni/zygisk.hpp ]; then

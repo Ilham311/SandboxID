@@ -120,11 +120,14 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"gsm.sim.state.ril",               "GSM_SIM_STATE"},
         {"ro.build.characteristics",        "BUILD_CHARACTERISTICS"},
         {"persist.sys.timezone",            "PERSIST_TIMEZONE"},
+        // ABI props — route to the same identity keys L1 Build.* hook uses,
+        // so native getprop() and Java Build.SUPPORTED_ABIS both see the same
+        // CSV value (identity keys populated by sandboxid::derive_identity()).
         {"ro.product.cpu.abi",              "CPU_ABI"},
         {"ro.product.cpu.abi2",             "CPU_ABI2"},
-        {"ro.product.cpu.abilist",          "CPU_ABILIST"},
-        {"ro.product.cpu.abilist64",        "CPU_ABILIST64"},
-        {"ro.product.cpu.abilist32",        "CPU_ABILIST32"},
+        {"ro.product.cpu.abilist",          "SUPPORTED_ABIS"},
+        {"ro.product.cpu.abilist64",        "SUPPORTED_64_BIT_ABIS"},
+        {"ro.product.cpu.abilist32",        "SUPPORTED_32_BIT_ABIS"},
         {"dalvik.vm.heapgrowthlimit",       "DALVIK_HEAPGROWTHLIMIT"},
         {"ro.mediacodec.min_sample_rate",   "MEDIACODEC_MIN_RATE"},
         {"ro.mediacodec.max_sample_rate",   "MEDIACODEC_MAX_RATE"},
@@ -175,6 +178,17 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.product.odm.name",             "PRODUCT"},
         {"ro.product.product.name",         "PRODUCT"},
         {"ro.product.system_ext.name",      "PRODUCT"},
+
+        // Phase 3 additions (validated 2026-08 against AOSP Build.java main):
+        //   Build.SKU, Build.ODM_SKU, Build.VERSION.BASE_OS,
+        //   Build.VERSION.PREVIEW_SDK_INT, Build.VERSION.MEDIA_PERFORMANCE_CLASS
+        // All read via SystemProperties.get / getInt at Build class init.
+        {"ro.boot.hardware.sku",                     "SKU"},
+        {"ro.boot.product.hardware.sku",             "ODM_SKU"},
+        {"ro.build.version.base_os",                 "BASE_OS"},
+        {"ro.build.version.preview_sdk",             "PREVIEW_SDK_INT"},
+        {"ro.build.version.preview_sdk_fingerprint", "PREVIEW_SDK_FINGERPRINT"},
+        {"ro.odm.build.media_performance_class",     "MEDIA_PERFORMANCE_CLASS"},
     };
     return m;
 }
@@ -282,6 +296,12 @@ static const std::map<std::string, jint>& sbx_int_spoof() {
         {"debug.am.run_gc_trim_level",            2147483647},
         {"debug.am.run_mallopt_trim_level",       2147483647},
         {"debug.adservices.binder_timeout",       10000},
+
+        // Phase 3 (2026-08): pin production values so native_get_int() returns
+        // the canonical Pixel-stable values even when Build.VERSION.PREVIEW_SDK_INT
+        // is read directly via SystemProperties.getInt (bypassing L1 field spoof).
+        //   ref: AOSP Build.java main branch (getInt call sites)
+        {"ro.build.version.preview_sdk",          0},
     };
     return m;
 }
@@ -408,28 +428,51 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
     if (end == us.c_str() || secs <= 0) return;
     g_boot_off_sec = (int64_t)secs;
 
-    static const char* const kLibs[] = { "/libutils.so", "/libandroid_runtime.so" };
+    // Chokepoint libraries known to call clock_gettime(CLOCK_BOOTTIME) directly.
+    // References:
+    //   - AOSP frameworks/native/libs/utils/SystemClock.cpp  (libutils)
+    //   - AOSP system/libbase/chrono_utils.cpp               (libbase / boot_clock)
+    //   - AOSP system/core/libcutils/                        (libcutils android_get_uptime)
+    //   - frameworks/base/core/jni/android_os_SystemClock.cpp (libandroid_runtime)
+    // Adding libbase.so + libcutils.so closes gaps where system apps link them directly
+    // and bypass libutils/libandroid_runtime. Missing libs are silently skipped by
+    // sbx_lib_dev_inode() returning false.
+    static const char* const kLibs[] = {
+        "/libutils.so",
+        "/libandroid_runtime.so",
+        "/libbase.so",     // Added Phase 3 — android::base::boot_clock
+        "/libcutils.so",   // Added Phase 3 — android_get_uptime()
+    };
     int registered = 0;
+    int found      = 0;
     for (size_t i = 0; i < sizeof(kLibs) / sizeof(kLibs[0]); ++i) {
         dev_t dev = 0; ino_t ino = 0;
         if (!sbx_lib_dev_inode(kLibs[i], &dev, &ino)) continue;
+        ++found;
         api->pltHookRegister(dev, ino, "clock_gettime",
                              reinterpret_cast<void*>(sbx_hooked_clock_gettime),
                              reinterpret_cast<void**>(&orig_clock_gettime));
         ++registered;
     }
-    if (registered == 0) { LOGW("L8: chokepoint lib tak ketemu — uptime tak dispoof"); return; }
+    if (registered == 0) {
+        LOGW("L8: chokepoint lib tak ketemu (scanned %zu) — uptime tak dispoof",
+             sizeof(kLibs) / sizeof(kLibs[0]));
+        return;
+    }
     if (!api->pltHookCommit()) {
         orig_clock_gettime = nullptr;
-        LOGW("L8: pltHookCommit gagal — uptime tak dispoof (jam asli)");
+        LOGW("L8: pltHookCommit gagal (%d/%zu libs registered) — uptime tak dispoof (jam asli)",
+             registered, sizeof(kLibs) / sizeof(kLibs[0]));
         return;
     }
     if (orig_clock_gettime == nullptr) {
-        LOGW("L8: commit OK tapi clock_gettime tak ter-hook (orig=null) — uptime tak dispoof");
+        LOGW("L8: commit OK tapi clock_gettime tak ter-hook (orig=null, %d libs) — uptime tak dispoof",
+             registered);
         return;
     }
-    LOGD("L8 boottime PLT hook aktif (+%llds, %d lib) orig=%p",
-         (long long)secs, registered, reinterpret_cast<void*>(orig_clock_gettime));
+    LOGD("L8 boottime PLT hook aktif (+%llds, %d/%d lib mapped, %zu scanned) orig=%p",
+         (long long)secs, registered, found, sizeof(kLibs) / sizeof(kLibs[0]),
+         reinterpret_cast<void*>(orig_clock_gettime));
 }
 
 #ifndef O_TMPFILE
@@ -684,15 +727,40 @@ static void install_native_read_hooks(Api* api) {
     g_cpu_action = sbxnr::cpu_action_for(val("SOC_MANUFACTURER"), val("SOC_MODEL"), g_cpu_repl);
 
     int libs = sbx_register_across_libs(api);
-    if (libs == 0) { LOGW("L9: no mapped .so to hook — native reads not spoofed"); return; }
+    if (libs == 0) {
+        LOGW("L9: no mapped .so to hook — native reads not spoofed (kill-switch keeps flag off)");
+        return;
+    }
     if (!api->pltHookCommit()) {
-
-        LOGW("L9: pltHookCommit gagal — native reads tak dispoof (nilai asli)");
+        // Hard-reset every orig_* pointer that pltHookRegister may have populated but
+        // that Zygisk failed to actually commit. Leaving them set to garbage would make
+        // our wrappers call random addresses on the next syscall.
+        orig_open   = nullptr;
+        orig_openat = nullptr;
+        orig_fopen  = nullptr;
+        orig_spg    = nullptr;
+        orig_spr    = nullptr;
+        orig_sprcb  = nullptr;
+        g_nr_active = false;
+        LOGW("L9: pltHookCommit gagal (%d libs registered) — native reads tak dispoof "
+             "(orig_* direset, wrapper akan bypass, nilai asli terlihat)", libs);
+        return;
+    }
+    // Sanity check: at least one PLT slot must have been resolved. If every orig_* is
+    // null, our wrappers become no-ops that can't call the real implementation. Fail
+    // closed rather than crash the target process on first spoofed read.
+    if (!orig_open && !orig_openat && !orig_fopen && !orig_spg && !orig_spr && !orig_sprcb) {
+        g_nr_active = false;
+        LOGW("L9: commit OK but zero PLT slots resolved (%d libs) — fail-closed", libs);
         return;
     }
     g_nr_active = true;
-    LOGD("L9 aktif (%d lib): boot_id=%s mac=%s ram=%dGB cpu=%d",
-         libs, g_boot_id.c_str(), g_wifi_mac.c_str(), g_ram_gb, g_cpu_action);
+    LOGD("L9 aktif (%d lib): boot_id=%s mac=%s ram=%dGB cpu=%d "
+         "[open=%p openat=%p fopen=%p spg=%p spr=%p sprcb=%p]",
+         libs, g_boot_id.c_str(), g_wifi_mac.c_str(), g_ram_gb, g_cpu_action,
+         reinterpret_cast<void*>(orig_open),   reinterpret_cast<void*>(orig_openat),
+         reinterpret_cast<void*>(orig_fopen),  reinterpret_cast<void*>(orig_spg),
+         reinterpret_cast<void*>(orig_spr),    reinterpret_cast<void*>(orig_sprcb));
 }
 
 struct SbxCrashRec {
@@ -814,6 +882,28 @@ static void install_crash_watchdog(const std::string& pkg) {
     LOGD("crash watchdog armed for %s (ABRT/FPE/ILL, limit=%d)", pkg.c_str(), CRASH_LIMIT);
 }
 
+// -----------------------------------------------------------------------------
+// L1: Java-side Build.* static field spoofing (SetStaticObjectField / SetStaticIntField)
+//
+// References (validated 2026-08):
+//   - AOSP frameworks/base core/java/android/os/Build.java (main branch)
+//     https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/os/Build.java
+//   - Zygisk API sample (topjohnwu/zygisk-module-sample @ master)
+//     https://github.com/topjohnwu/zygisk-module-sample/blob/master/module/jni/zygisk.hpp
+//
+// Field-type map (from Build.java main):
+//   String       : BRAND, MANUFACTURER, MODEL, DEVICE, PRODUCT, BOARD, HARDWARE,
+//                  SOC_MANUFACTURER, SOC_MODEL, FINGERPRINT, ID, DISPLAY,
+//                  BOOTLOADER, HOST, USER, TYPE, TAGS, RADIO, SERIAL, SKU, ODM_SKU,
+//                  CPU_ABI (deprecated), CPU_ABI2 (deprecated),
+//                  VERSION.RELEASE, VERSION.CODENAME, VERSION.INCREMENTAL,
+//                  VERSION.SECURITY_PATCH, VERSION.BASE_OS,
+//                  VERSION.RELEASE_OR_CODENAME (@NonNull), VERSION.RELEASE_OR_PREVIEW_DISPLAY (@NonNull),
+//                  VERSION.PREVIEW_SDK_FINGERPRINT (@NonNull, default "REL")
+//   String[]     : SUPPORTED_ABIS, SUPPORTED_32_BIT_ABIS, SUPPORTED_64_BIT_ABIS
+//   int          : VERSION.SDK_INT, VERSION.PREVIEW_SDK_INT, VERSION.MEDIA_PERFORMANCE_CLASS
+// -----------------------------------------------------------------------------
+
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
     jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
@@ -832,10 +922,66 @@ static void set_int(JNIEnv* env, jclass c, const char* f, int v) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
+// Split "a,b,c" -> ["a","b","c"] with whitespace trimming. Empty tokens dropped.
+static std::vector<std::string> split_csv(const std::string& s) {
+    std::vector<std::string> out;
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        size_t j = s.find(',', i);
+        if (j == std::string::npos) j = n;
+        // trim
+        size_t a = i;
+        while (a < j && (s[a] == ' ' || s[a] == '\t')) ++a;
+        size_t b = j;
+        while (b > a && (s[b-1] == ' ' || s[b-1] == '\t')) --b;
+        if (b > a) out.emplace_back(s.data() + a, b - a);
+        i = j + 1;
+    }
+    return out;
+}
+
+// Set a static String[] field. Silently no-ops if `v` is empty (preserves original value).
+static void set_str_array(JNIEnv* env, jclass c, const char* f, const std::string& v) {
+    if (v.empty()) return;
+    std::vector<std::string> parts = split_csv(v);
+    if (parts.empty()) return;
+
+    jfieldID id = env->GetStaticFieldID(c, f, "[Ljava/lang/String;");
+    if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    jclass str_cls = env->FindClass("java/lang/String");
+    if (!str_cls || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    jobjectArray arr = env->NewObjectArray(static_cast<jsize>(parts.size()), str_cls, nullptr);
+    if (!arr || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(str_cls);
+        return;
+    }
+    for (size_t i = 0; i < parts.size(); ++i) {
+        jstring j = env->NewStringUTF(parts[i].c_str());
+        if (!j || env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+        env->SetObjectArrayElement(arr, static_cast<jsize>(i), j);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(j);
+    }
+    env->SetStaticObjectField(c, id, arr);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    env->DeleteLocalRef(arr);
+    env->DeleteLocalRef(str_cls);
+}
+
 static void install_build_hook(JNIEnv* env) {
     jclass build = env->FindClass("android/os/Build");
     if (build && !env->ExceptionCheck()) {
 
+        // Plain String fields
+        // NOTE: SERIAL is initialized in AOSP from getString("no.such.thing") — literally "unknown"
+        // by default. AppLog SDK still reads Build.SERIAL and hashes it, so we spoof it if
+        // the identity blob provides one. SKU / ODM_SKU came in Android 12 (API 31) and read
+        // ro.boot.hardware.sku / ro.boot.product.hardware.sku respectively. Adding them
+        // is safe on older releases: GetStaticFieldID returns null → set_str no-ops.
         static const std::pair<const char*, const char*> f[] = {
             {"BRAND","BRAND"}, {"MANUFACTURER","MANUFACTURER"},
             {"MODEL","MODEL"}, {"DEVICE","DEVICE"}, {"PRODUCT","PRODUCT"},
@@ -845,8 +991,24 @@ static void install_build_hook(JNIEnv* env) {
             {"DISPLAY","DISPLAY"}, {"BOOTLOADER","BOOTLOADER"},
             {"HOST","HOST"}, {"USER","USER"}, {"TYPE","TYPE"},
             {"TAGS","TAGS"}, {"RADIO","RADIO"},
+            // Added Phase 3 (2026-08):
+            {"SERIAL","SERIAL"},
+            {"SKU","SKU"},                   // Android 12+ (API 31)
+            {"ODM_SKU","ODM_SKU"},           // Android 12+ (API 31)
+            {"CPU_ABI","CPU_ABI"},           // Deprecated (API 21) but still read by SDKs
+            {"CPU_ABI2","CPU_ABI2"},         // Deprecated (API 21) but still read by SDKs
         };
         for (const auto& [fn, k] : f) set_str(env, build, fn, val(k));
+
+        // String[] array fields — SUPPORTED_ABIS family. AppLog & AntiCheat SDKs often
+        // read these to fingerprint 32/64-bit capability. Values are CSV in identity blob:
+        //   SUPPORTED_ABIS       = "arm64-v8a,armeabi-v7a,armeabi"
+        //   SUPPORTED_64_BIT_ABIS= "arm64-v8a"
+        //   SUPPORTED_32_BIT_ABIS= "armeabi-v7a,armeabi"
+        set_str_array(env, build, "SUPPORTED_ABIS",        val("SUPPORTED_ABIS"));
+        set_str_array(env, build, "SUPPORTED_32_BIT_ABIS", val("SUPPORTED_32_BIT_ABIS"));
+        set_str_array(env, build, "SUPPORTED_64_BIT_ABIS", val("SUPPORTED_64_BIT_ABIS"));
+
         env->DeleteLocalRef(build);
     } else env->ExceptionClear();
 
@@ -857,11 +1019,41 @@ static void install_build_hook(JNIEnv* env) {
         set_str(env, ver, "CODENAME",       std::string("REL"));
         set_str(env, ver, "INCREMENTAL",    val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", val("SECURITY_PATCH"));
+
+        // Added Phase 3: BASE_OS (String, API 23+) reads ro.build.version.base_os.
+        // Empty by default on stock builds; but some fingerprint SDKs sniff it for OTAs.
+        set_str(env, ver, "BASE_OS",        val("BASE_OS"));
+
+        // Non-null String fields (API 30+/31+): defensively spoof to plain RELEASE.
+        // GetStaticFieldID silently no-ops on older APIs.
+        const std::string& rel = val("RELEASE");
+        if (!rel.empty()) {
+            set_str(env, ver, "RELEASE_OR_CODENAME",        rel);  // API 30
+            set_str(env, ver, "RELEASE_OR_PREVIEW_DISPLAY", rel);  // API 31
+        }
+
+        // PREVIEW_SDK_FINGERPRINT: on production it's the literal "REL". Force it,
+        // because Google internal & canary builds leak build-time hashes here.
+        set_str(env, ver, "PREVIEW_SDK_FINGERPRINT", std::string("REL"));
+
         const std::string& s = val("SDK_INT");
         if (!s.empty()) {
             int sdk = std::atoi(s.c_str());
             if (sdk > 0) set_int(env, ver, "SDK_INT", sdk);
         }
+
+        // Added Phase 3: PREVIEW_SDK_INT (int, API 23+) — should be 0 on production
+        // builds. Setting to 0 explicitly matches all Pixel personas we ship.
+        set_int(env, ver, "PREVIEW_SDK_INT", 0);
+
+        // Added Phase 3: MEDIA_PERFORMANCE_CLASS (int, API 31+). Only spoof if
+        // identity provides an explicit value (Pixel 6+ = 31, Pixel 8 = 33, etc).
+        const std::string& mpc = val("MEDIA_PERFORMANCE_CLASS");
+        if (!mpc.empty()) {
+            int v = std::atoi(mpc.c_str());
+            if (v >= 0) set_int(env, ver, "MEDIA_PERFORMANCE_CLASS", v);
+        }
+
         env->DeleteLocalRef(ver);
     } else env->ExceptionClear();
 }
