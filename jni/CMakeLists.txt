@@ -30,6 +30,22 @@ target_link_libraries(sandboxid_module PRIVATE log)
 add_executable(sandboxid sandboxid.cpp)
 target_include_directories(sandboxid PRIVATE ${CMAKE_SOURCE_DIR})
 
+# Host unit tests for the header-only pure logic (carrier parsing, native-read
+# synthesis, mountinfo selection). The tests are self-contained C++ with their
+# own main(); build & run on a host toolchain with:
+#   cmake -S jni -B build-tests -DSBX_BUILD_TESTS=ON && cmake --build build-tests && ctest --test-dir build-tests
+option(SBX_BUILD_TESTS "Build host unit tests (tests/*.cpp)" OFF)
+if(SBX_BUILD_TESTS)
+    if(CMAKE_CROSSCOMPILING)
+        message(WARNING "[sandboxid] SBX_BUILD_TESTS=ON while cross-compiling — tests will be built but cannot run on the host")
+    endif()
+    enable_testing()
+    add_executable(sbx_carrier_test ${CMAKE_SOURCE_DIR}/../tests/carrier_test.cpp)
+    add_executable(sbx_native_read_test ${CMAKE_SOURCE_DIR}/../tests/native_read_test.cpp)
+    add_test(NAME carrier_test     COMMAND sbx_carrier_test)
+    add_test(NAME native_read_test COMMAND sbx_native_read_test)
+endif()
+
 option(SBX_ENABLE_LSPLANT "Enable L3 LSPlant Java-method hooks (experimental, unverified)" OFF)
 if(SBX_ENABLE_LSPLANT)
     message(WARNING "[sandboxid] L3 LSPlant ENABLED — verify boot on EVERY target ABI/Android version before shipping")

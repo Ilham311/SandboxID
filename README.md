@@ -343,7 +343,8 @@ remains MIT.
 
 ### Covered
 
-- Device fingerprint (`Build.*`, `SystemProperties.native_get*` typed variants)
+- Device fingerprint (`Build.*` incl. `Build.TIME`, `SystemProperties.native_get*`
+  typed variants, `ro.build.flavor` / `ro.build.date*` / codename props)
 - Per-app `ANDROID_ID` / SSAID override — **requires the experimental L3 hook**
   (disabled by default; see [Known limitations](#known-limitations))
 - Google Advertising ID (`Settings.Global.advertising_id` + GMS `adid_settings.xml`)

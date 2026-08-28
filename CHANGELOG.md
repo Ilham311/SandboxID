@@ -2,6 +2,74 @@
 
 ## Unreleased
 
+### Identity hooking-completeness pass (Phase 4, jni/)
+
+`Build.TIME` was the last un-spoofed `Build` field and the typed
+`SystemProperties.getInt/getLong` getters could still return the *real* device
+value for keys the persona overrides. Both gaps are closed, and the autopif
+(the primary `action.sh` path) now emits the same extended key set the C++
+`freshen` path does, so all persona surfaces stay mutually consistent.
+
+- **`Build.TIME` / `ro.build.date.utc` / `ro.build.date`** — identity now
+  carries `BUILD_TIME_UTC` + `BUILD_DATE`, derived deterministically from the
+  persona's security-patch bulletin date (builds are stamped 1–6 days before
+  the bulletin, mirroring real Pixel build cadence). L1 sets the `TIME` static
+  long field; L2 maps both props; `apply_native()` + `generate_mount_files()`
+  + `autopif.sh` emit them.
+- **Typed-getter identity consistency (L7)** — `native_get_int` /
+  `native_get_long` now consult the identity map first: any spoofed prop whose
+  value parses strictly as an integer returns the persona value, so
+  `SystemProperties.getInt("ro.build.version.sdk")`,
+  `getInt("ro.build.version.preview_sdk")`,
+  `getInt("ro.odm.build.media_performance_class")` and
+  `getLong("ro.build.date.utc")` no longer leak the real device values
+  (previously only the String `native_get` path was spoofed).
+- **`ro.build.flavor`** — new identity key `FLAVOR` (`<product>-<type>`, e.g.
+  `oriole-user`). `Build.FLAVOR` is gone from the SDK but the property still
+  ships on production builds and is read directly by fingerprint SDKs.
+- **`ro.build.version.codename` / `all_codenames`** — pinned to `REL`
+  (production value) in `STATIC_PROP_DEFAULTS`, `apply_native()` and the
+  mount-overlay `build.prop` files.
+- **`ro.product.{system,odm,product}.marketname`** — added to the L2 identity
+  map, matching the per-part fallback chain the other product fields already
+  had.
+- **autopif.sh** — generated identity now also includes `VBMETA_DIGEST`,
+  `FLAVOR`, `BUILD_TIME_UTC`, `BUILD_DATE` (was C++-`freshen`-only before;
+  the primary path leaked the real build date and vbmeta digest).
+- **`selftest.sh`** — new coherence checks #6 (`FLAVOR` == `PRODUCT-TYPE`) and
+  #7 (`BUILD_TIME_UTC` numeric, within 2009→now) catch a broken persona before
+  a target app sees it.
+
+### Robustness
+
+- **`main.cpp` L9 `fopen` fallback** — if the `fopen` PLT slot fails to
+  resolve but `open`/`openat` hooks are live, `fopen()` is now served through
+  `orig_openat` + `fdopen` with a proper mode→flags mapping. Previously the
+  fallback path returned `ENOSYS`, which could break apps doing legitimate
+  read *and write* `fopen()` calls after a partial hook commit.
+- **`main.cpp` L2/L7 hook installation** — `hookJniNativeMethods()` return
+  value is now checked (bool) in addition to the pending-exception check;
+  failures are logged with layer tags instead of passing silently.
+- **`companion.cpp`** — `target.txt` hot-reload now compares mtime with
+  nanosecond resolution (`st_mtim.tv_sec/tv_nsec`); same-second edits are no
+  longer missed by the seconds-only comparison.
+- **Removed dead config `NO_TELEPHONY`** (`config.hpp`) — the constant and its
+  comment described a TelephonyManager binder hook that was never implemented;
+  nothing read it. Removing it prevents future confusion. GSM/SIM identity
+  remains covered at the property layer (`gsm.*` spoof map + carrier merge).
+- **`build.sh`** — fail-fast pre-flight for `cmake`/`zip`/`curl` (clear error
+  instead of a mid-build crash), explicit error + hint on `zygisk.hpp` fetch
+  failure, and `LICENSE` + `CREDITS.md` are now shipped inside every module
+  zip for attribution transparency.
+- **`jni/CMakeLists.txt`** — new `SBX_BUILD_TESTS` option wires the previously
+  orphaned `tests/carrier_test.cpp` / `tests/native_read_test.cpp` into
+  CTest for host builds.
+- All jni sources verified against `@FastNative` vs `@CriticalNative` calling
+  conventions in AOSP `SystemProperties.java` (string-keyed getters are
+  `@FastNative`, so the `(JNIEnv*, jclass, …)` hook signatures are correct;
+  handle-based overloads are `@CriticalNative` and deliberately not hooked) —
+  documented in `CREDITS.md`.
+
 Dynamic persona pool: the compiled Pixel table is replaced by a runtime data
 file, with an optional live refresh from Google's canary build data. Persona
 selection, SoC/RADIO derivation, and SDK-matching are all preserved — behavior

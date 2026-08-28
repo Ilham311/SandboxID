@@ -28,6 +28,21 @@ cd "$ROOT"
 MIN_SDK="${MIN_SDK:-26}"
 VARIANT="${VARIANT:-both}"
 
+# Fail fast on missing tooling instead of dying mid-build with a cryptic
+# cmake/zip error (or worse, producing an incomplete zip silently).
+# curl is only needed when zygisk.hpp is not already cached in jni/.
+for _tool in cmake zip; do
+  if ! command -v "$_tool" >/dev/null 2>&1; then
+    echo "ERROR: required tool '$_tool' not found in PATH" >&2
+    exit 1
+  fi
+done
+if [ ! -f jni/zygisk.hpp ] && ! command -v curl >/dev/null 2>&1; then
+  echo "ERROR: curl not found in PATH and jni/zygisk.hpp is not cached" >&2
+  echo "  (curl is required to fetch the pinned Zygisk API header)" >&2
+  exit 1
+fi
+
 if [ ! -f module.prop ]; then
   echo "ERROR: module.prop not found in $ROOT — refusing to build" >&2
   exit 1
@@ -73,8 +88,12 @@ ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
 ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
 if [ ! -f jni/zygisk.hpp ]; then
   echo "==> Fetching zygisk.hpp @ ${ZYGISK_HPP_COMMIT}"
-  curl -fsSL -o jni/zygisk.hpp \
-    "https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/${ZYGISK_HPP_COMMIT}/module/jni/zygisk.hpp"
+  if ! curl -fsSL -o jni/zygisk.hpp \
+      "https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/${ZYGISK_HPP_COMMIT}/module/jni/zygisk.hpp"; then
+    echo "ERROR: failed to fetch zygisk.hpp from pinned commit ${ZYGISK_HPP_COMMIT}" >&2
+    echo "  check network access to raw.githubusercontent.com" >&2
+    exit 1
+  fi
 fi
 if command -v sha256sum >/dev/null 2>&1; then
   GOT_HPP="$(sha256sum jni/zygisk.hpp | cut -d' ' -f1)"
@@ -114,6 +133,7 @@ build_variant() {
     local BUILD="build/$V/$ABI"
     rm -rf "$BUILD"
     mkdir -p "$BUILD"
+    # shellcheck disable=SC2086 # DBG_FLAG / LSP_CMAKE are intentional single-word flags
     cmake -S jni -B "$BUILD" \
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$ABI" \
@@ -126,6 +146,9 @@ build_variant() {
   rm -rf "$PKG"
   mkdir -p "$PKG/zygisk" "$PKG/bin"
   cp module.prop action.sh service.sh customize.sh "$PKG/"
+  # Ship license + attribution with every artifact (transparency requirement).
+  [ -f LICENSE ]   && cp LICENSE "$PKG/"
+  [ -f CREDITS.md ] && cp CREDITS.md "$PKG/"
   [ -f summarize.sh ] && cp summarize.sh "$PKG/"
   [ -f post-fs-data.sh ] && cp post-fs-data.sh "$PKG/"
   [ -f target.txt ] && cp target.txt "$PKG/"

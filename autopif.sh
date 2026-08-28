@@ -245,6 +245,30 @@ assemble_identity() {
   GAID=$(rand_uuid)
   HOSTN="$(printf '%s' "$BRAND" | tr '[:upper:]' '[:lower:]')-build-$(rand_range 100 999)"
 
+  # Build date: derived from the security-patch bulletin date (builds are
+  # stamped a few days before the bulletin). Keeps Build.TIME /
+  # ro.build.date.utc consistent with the persona fingerprint instead of
+  # leaking the real device build date. Mirrors build_utc_from_patch() in
+  # jni/sandboxid.cpp.
+  BUILD_UTC=""; BUILD_DATE_STR=""
+  case "$SECPATCH" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+      _digits=0
+      _rest="$INCREMENTAL"
+      while [ -n "$_rest" ]; do
+        _c="${_rest%"${_rest#?}"}"
+        _rest="${_rest#?}"
+        case "$_c" in [0-9]) _digits=$(( _digits + _c )) ;; esac
+      done
+      _shift=$(( 1 + ( _digits % 6 ) ))
+      BUILD_UTC=$(( $(ymd_to_epoch "$SECPATCH") - _shift * 86400 + 3 * 3600 + ( _digits % 60 ) * 60 ))
+      BUILD_DATE_STR=$(date -u -d "@$BUILD_UTC" '+%a %b %e %H:%M:%S UTC %Y' 2>/dev/null || :)
+      ;;
+  esac
+  # ro.build.flavor — Build.FLAVOR is gone from the SDK but the property
+  # still ships on production builds and is read by fingerprint SDKs.
+  FLAVOR_STR="$PRODUCT-user"
+
   _uptime_emit=$UPTIME_S
   [ -f "$MODDIR/no_uptime" ] && _uptime_emit=0
 
@@ -286,8 +310,20 @@ FIRST_BOOT=$FIRST_BOOT
 LAST_BOOT=$(epoch_to_ymd "$LAST_BOOT_EP")
 USAGE_PROFILE=$PROFILE
 FRESH=$FRESH
+VBMETA_DIGEST=$(rand_hex 32)
+FLAVOR=$FLAVOR_STR
 EOF
 )
+  # BUILD_TIME_UTC / BUILD_DATE only when derivation succeeded (validated
+  # SECPATCH); an absent key leaves the field unspoofed rather than wrong.
+  if [ -n "$BUILD_UTC" ]; then
+    IDENTITY_KV="${IDENTITY_KV}BUILD_TIME_UTC=$BUILD_UTC
+"
+  fi
+  if [ -n "$BUILD_DATE_STR" ]; then
+    IDENTITY_KV="${IDENTITY_KV}BUILD_DATE=$BUILD_DATE_STR
+"
+  fi
   return 0
 }
 

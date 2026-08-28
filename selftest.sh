@@ -144,6 +144,34 @@ if [ -n "$_fp" ]; then
             fi
             ;;
     esac
+
+    # 6. FLAVOR must equal PRODUCT-TYPE ("oriole-user"); detectors compare it
+    #    against the fingerprint tail.
+    _flavor="$(id_get FLAVOR)"
+    if [ -n "$_flavor" ]; then
+        if [ "$_flavor" = "${_product}-${_type}" ]; then
+            emit koherensi PASS "FLAVOR konsisten ($_flavor)"
+        else
+            emit koherensi FAIL "FLAVOR='$_flavor' != PRODUCT-TYPE (${_product}-${_type})"
+        fi
+    fi
+
+    # 7. BUILD_TIME_UTC (Build.TIME / ro.build.date.utc) — numeric and within
+    #    a plausible window: after 2009-01-01, before now.
+    _butc="$(id_get BUILD_TIME_UTC)"
+    _nowts="$(date +%s 2>/dev/null)"
+    case "$_butc" in
+        '') emit koherensi WARN "BUILD_TIME_UTC kosong — Build.Time tidak dispoof (persona lama?)" ;;
+        *[!0-9]*)
+            emit koherensi FAIL "BUILD_TIME_UTC bukan angka ($_butc)" ;;
+        *)
+            if [ -n "$_nowts" ] && [ "$_butc" -ge 1230768000 ] && [ "$_butc" -le "$_nowts" ]; then
+                emit koherensi PASS "BUILD_TIME_UTC masuk rentang wajar ($_butc)"
+            else
+                emit koherensi FAIL "BUILD_TIME_UTC di luar rentang wajar ($_butc)"
+            fi
+            ;;
+    esac
 fi
 
 # --- verified boot / VBMeta (device-wide, set by apply_native) ------------

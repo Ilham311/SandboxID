@@ -226,9 +226,9 @@ property name — none of AOSP's code is copied.
 - **AOSP `frameworks/base/core/java/android/os/Build.java`** (main branch,
   Apache-2.0):
   <https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/os/Build.java>
-  Consulted for the exact field type (`String` / `String[]` / `int`) and the
-  system property each field is initialized from — necessary to know that
-  `SUPPORTED_ABIS` is `String[]` (not `String`), that `SKU` reads
+  Consulted for the exact field type (`String` / `String[]` / `int` / `long`)
+  and the system property each field is initialized from — necessary to know
+  that `SUPPORTED_ABIS` is `String[]` (not `String`), that `SKU` reads
   `ro.boot.hardware.sku`, that `VERSION.PREVIEW_SDK_INT` is `int`, etc. Result
   of the audit: `install_build_hook()` now spoofs `SERIAL`, `SUPPORTED_ABIS`,
   `SUPPORTED_32_BIT_ABIS`, `SUPPORTED_64_BIT_ABIS`, `CPU_ABI`, `CPU_ABI2`,
@@ -236,6 +236,19 @@ property name — none of AOSP's code is copied.
   `PREVIEW_SDK_FINGERPRINT`, `VERSION.BASE_OS`, `VERSION.PREVIEW_SDK_INT`,
   `VERSION.MEDIA_PERFORMANCE_CLASS`, and matching sysprops are written by
   `apply_native()` + `generate_mount_files()`.
+  Follow-up audit (2026-08, Phase 4) additionally verified `Build.TIME =
+  getLong("ro.build.date.utc") * 1000` and `VERSION.CODENAME`/`all_codenames`
+  ("REL" on production builds), closing the last un-spoofed `Build` fields.
+
+- **AOSP `frameworks/base/core/java/android/os/SystemProperties.java`** (main
+  branch, Apache-2.0):
+  <https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/os/SystemProperties.java>
+  Consulted to confirm the string-keyed `native_get` / `native_get_int` /
+  `native_get_long` / `native_get_boolean` are `@FastNative` (so the
+  `(JNIEnv*, jclass, …)` hook signature in `install_prop_hook()` /
+  `install_leak_sensors()` is the correct calling convention), while the
+  long-handle `native_get_*` overloads used by `SystemProperties.Handle` are
+  `@CriticalNative` and deliberately **not** hooked.
 
 - **Zygisk sample repo (public API contract)**:
   <https://github.com/topjohnwu/zygisk-module-sample/blob/master/module/jni/zygisk.hpp>

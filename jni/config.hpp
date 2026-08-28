@@ -25,12 +25,6 @@ inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetpr
 
 inline constexpr char ENABLE_HIDE[]   = "/data/adb/modules/sandboxid/enable_hide";
 
-// L3 telephony hook (LSPlant) kill switch. Present => companion injects
-// SBX_NO_TEL=1 into the served blob, main.cpp skips installing the
-// TelephonyManager binder-value hooks. Absent => hooks run (only when the
-// build was compiled with SBX_ENABLE_LSPLANT, which is OFF by default).
-inline constexpr char NO_TELEPHONY[]  = "/data/adb/modules/sandboxid/no_telephony";
-
 enum Cmd : uint8_t {
     CMD_GET_IDENTITY = 2,
     CMD_DO_MOUNTS    = 3,
@@ -93,6 +87,10 @@ inline constexpr KV STATIC_PROP_DEFAULTS[] = {
     {"dalvik.vm.isa.arm.features",   "default"},
     {"dalvik.vm.heapsize",           "512m"},
     {"ro.build.version.preview_sdk", "0"},
+    // Production builds always report REL codenames (AOSP Build.java main:
+    // VERSION.CODENAME / all_codenames fall back to "REL" once released).
+    {"ro.build.version.codename",       "REL"},
+    {"ro.build.version.all_codenames",  "REL"},
 
     {"ro.boot.verifiedbootstate",       "green"},
     {"ro.boot.vbmeta.device_state",     "locked"},

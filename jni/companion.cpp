@@ -46,7 +46,8 @@ static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 static void watch_target_death(uint32_t pid, int client_fd);
 
 static std::vector<std::string> g_targets;
-static time_t                   g_targets_mtime = 0;
+static time_t                   g_targets_mtime_sec = 0;
+static long                     g_targets_mtime_nsec = 0;
 static std::recursive_mutex     g_targets_mtx;
 
 static void reload_targets_if_changed() {
@@ -54,7 +55,12 @@ static void reload_targets_if_changed() {
     struct stat st{};
     bool have = (::stat(sandboxid::TARGET_FILE, &st) == 0);
     if (!have) return;
-    if (!g_targets.empty() && st.st_mtime == g_targets_mtime) return;
+    // Compare with nanosecond resolution — seconds-only mtime misses edits
+    // that land within the same second as the previous read.
+    if (!g_targets.empty() &&
+        st.st_mtim.tv_sec == g_targets_mtime_sec &&
+        st.st_mtim.tv_nsec == g_targets_mtime_nsec)
+        return;
 
     std::ifstream f(sandboxid::TARGET_FILE);
     std::vector<std::string> next;
@@ -75,15 +81,16 @@ static void reload_targets_if_changed() {
     if (next.empty()) {
 
         LOGW("target.txt has 0 valid entries; keeping previous list (%zu pkgs)", g_targets.size());
-        g_targets_mtime = st.st_mtime;
-        return;
-    }
-    g_targets       = std::move(next);
-    g_targets_mtime = st.st_mtime;
-    LOGI("target.txt loaded: %zu pkg(s) mtime=%ld", g_targets.size(), (long)st.st_mtime);
+    } else {
+        g_targets = std::move(next);
+        LOGI("target.txt loaded: %zu pkg(s) mtime=%ld.%09ld", g_targets.size(),
+             (long)st.st_mtim.tv_sec, (long)st.st_mtim.tv_nsec);
 #ifdef SBX_DEBUG
-    for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
+        for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
 #endif
+    }
+    g_targets_mtime_sec  = st.st_mtim.tv_sec;
+    g_targets_mtime_nsec = st.st_mtim.tv_nsec;
 }
 
 static bool is_target(const std::string& pkg) {

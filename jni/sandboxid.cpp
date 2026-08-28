@@ -179,6 +179,10 @@ struct Identity {
             "SUPPORTED_ABIS","SUPPORTED_64_BIT_ABIS","SUPPORTED_32_BIT_ABIS",
             "CPU_ABI","CPU_ABI2","SKU","ODM_SKU","BASE_OS",
             "MEDIA_PERFORMANCE_CLASS","PREVIEW_SDK_INT","PREVIEW_SDK_FINGERPRINT",
+            // Build-date keys (Build.TIME / ro.build.date.utc + ro.build.date)
+            "BUILD_TIME_UTC","BUILD_DATE",
+            // ro.build.flavor — read directly by fingerprint SDKs
+            "FLAVOR",
         };
         std::string out;
         for (const auto& k : order) {
@@ -235,6 +239,47 @@ struct PixelEntry {
 static bool is_tensor_platform(const std::string& plat) {
     return plat == "gs101" || plat == "gs201" || plat == "zuma" ||
            plat == "zumapro" || plat == "laguna";
+}
+
+// Build date derived from the persona's security-patch bulletin date: Pixel
+// builds are stamped a few days before the bulletin lands. Deterministic from
+// the incremental string so a given persona always yields the same date.
+// AOSP consumes this as:
+//   Build.TIME = getLong("ro.build.date.utc") * 1000   (Build.java main)
+static long long build_utc_from_patch(const std::string& patch,
+                                      const std::string& incremental) {
+    if (patch.size() < 10 || patch[4] != '-' || patch[7] != '-') return 0;
+    const int y = atoi(patch.substr(0, 4).c_str());
+    const int m = atoi(patch.substr(5, 2).c_str());
+    const int d = atoi(patch.substr(8, 2).c_str());
+    if (y < 2008 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return 0;
+
+    int digits = 0;
+    for (char c : incremental) if (c >= '0' && c <= '9') digits += c - '0';
+
+    struct tm tmv{};
+    tmv.tm_year = y - 1900;
+    tmv.tm_mon  = m - 1;
+    tmv.tm_mday = d;
+    tmv.tm_hour = 3;   // AOSP build stamps are early-morning UTC
+    time_t t = timegm(&tmv);
+    if (t == (time_t)-1) return 0;
+    // 1..6 days before the bulletin + a deterministic minute/second skew.
+    t -= (time_t)(1 + digits % 6) * 86400;
+    t += (time_t)(digits % 60) * 60 + (time_t)(digits % 37);
+    return (long long)t;
+}
+
+// "Mon Sep  2 03:41:07 UTC 2024" — asctime-style, matching what `date`
+// stamps into ro.build.date on real builds (space-padded day of month).
+static std::string build_date_string(long long utc) {
+    if (utc <= 0) return "";
+    time_t t = (time_t)utc;
+    struct tm tmv{};
+    if (!gmtime_r(&t, &tmv)) return "";
+    char buf[64];
+    if (strftime(buf, sizeof(buf), "%a %b %e %H:%M:%S UTC %Y", &tmv) == 0) return "";
+    return buf;
 }
 
 static std::vector<PixelEntry> builtin_personas() {
@@ -399,6 +444,10 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["USER"]            = "android-build";
     id.kv["TYPE"]            = "user";
     id.kv["TAGS"]            = "release-keys";
+    // FLAVOR — ro.build.flavor ("<product>-<type>"). Build.FLAVOR was removed
+    // from the public SDK, but the property still ships on production builds
+    // and is read directly by fingerprint SDKs.
+    id.kv["FLAVOR"]          = p.product + "-" + id.kv["TYPE"];
 
     char fp[512];
     snprintf(fp, sizeof(fp), "%s/%s/%s:%s/%s/%s:user/release-keys",
@@ -430,6 +479,16 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["SERIAL"]     = random_hex(8, true);
     id.kv["ANDROID_ID"] = random_hex(8, false);
     id.kv["GOOGLE_AID"] = uuid_v4();
+
+    // Build date — deterministic from the persona patch date. Keeps
+    // Build.TIME / ro.build.date.utc consistent with FINGERPRINT.
+    {
+        long long utc = build_utc_from_patch(p.security_patch, p.incremental);
+        if (utc > 0) {
+            id.kv["BUILD_TIME_UTC"] = std::to_string(utc);
+            id.kv["BUILD_DATE"]     = build_date_string(utc);
+        }
+    }
 
     id.kv["VBMETA_DIGEST"] =
         sbxnr::hex_from_seed(sbxnr::fnv1a(id.kv["FINGERPRINT"] + "|" + id.kv["SERIAL"]), 32);
@@ -565,6 +624,12 @@ static void apply_native(const Identity& id) {
     const std::string BASE_OS    = get("BASE_OS");
     const std::string MPC        = get("MEDIA_PERFORMANCE_CLASS");
 
+    // Build-date + flavor keys populated by derive_identity() (Build.TIME /
+    // ro.build.date.utc / ro.build.date / ro.build.flavor).
+    const std::string FLAVOR     = get("FLAVOR");
+    const std::string BUILD_UTC  = get("BUILD_TIME_UTC");
+    const std::string BUILD_DATE = get("BUILD_DATE");
+
     std::vector<Rp> rp = {
         {"ro.serialno",                        SERIAL},
         {"ro.boot.serialno",                   SERIAL},
@@ -636,6 +701,12 @@ static void apply_native(const Identity& id) {
         {"ro.build.type",                      TYPE},
         {"ro.build.user",                      USER_},
         {"ro.build.host",                      HOST},
+        {"ro.build.flavor",                    FLAVOR},
+        {"ro.build.date.utc",                  BUILD_UTC},
+        {"ro.build.date",                      BUILD_DATE},
+        // Production builds always report REL codenames (AOSP Build.java main).
+        {"ro.build.version.codename",          std::string("REL")},
+        {"ro.build.version.all_codenames",     std::string("REL")},
 
         {"ro.build.version.release",           RELEASE},
         {"ro.build.version.release_or_codename", RELEASE},
@@ -839,6 +910,11 @@ static void generate_mount_files(const Identity& id) {
     add("ro.build.type",                      TYPE);
     add("ro.build.user",                      USER_);
     add("ro.build.host",                      HOST);
+    add("ro.build.flavor",                    g("FLAVOR"));
+    add("ro.build.date.utc",                  g("BUILD_TIME_UTC"));
+    add("ro.build.date",                      g("BUILD_DATE"));
+    add("ro.build.version.codename",          std::string("REL"));
+    add("ro.build.version.all_codenames",     std::string("REL"));
     add("ro.build.version.release",           RELEASE);
     add("ro.build.version.release_or_codename", RELEASE);
     add("ro.build.version.sdk",               SDK);

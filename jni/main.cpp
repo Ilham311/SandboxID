@@ -94,6 +94,11 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.product.name",                 "PRODUCT"},
         {"ro.product.marketname",           "MARKETNAME"},
         {"ro.product.vendor.marketname",    "MARKETNAME"},
+        // Marketname prefixed variants — Build.java reads ro.product.marketname
+        // through the same per-part fallback chain as model/brand (AOSP main).
+        {"ro.product.system.marketname",    "MARKETNAME"},
+        {"ro.product.odm.marketname",       "MARKETNAME"},
+        {"ro.product.product.marketname",   "MARKETNAME"},
         {"ro.product.board",                "BOARD"},
         {"ro.hardware",                     "HARDWARE"},
         {"ro.board.platform",               "BOARD_PLATFORM"},
@@ -135,6 +140,15 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.build.host",                   "HOST"},
         {"ro.build.tags",                   "TAGS"},
         {"ro.build.type",                   "TYPE"},
+        // Build date — Build.TIME = getLong("ro.build.date.utc") * 1000
+        // (AOSP Build.java main). Fingerprint SDKs cross-check these against
+        // the persona fingerprint; real device values would leak.
+        {"ro.build.date.utc",               "BUILD_TIME_UTC"},
+        {"ro.build.date",                   "BUILD_DATE"},
+        // ro.build.flavor ("<product>-<type>") — Build.FLAVOR was removed from
+        // the SDK but the property still exists on production builds and is
+        // read directly by fingerprint SDKs.
+        {"ro.build.flavor",                 "FLAVOR"},
 
         {"ro.boot.vbmeta.digest",           "VBMETA_DIGEST"},
         {"ro.build.product",                     "DEVICE"},
@@ -246,10 +260,15 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
         const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
         reinterpret_cast<void*>(hook_prop_get),
     };
-    api->hookJniNativeMethods(env, "android/os/SystemProperties", &m, 1);
-    if (env->ExceptionCheck()) {
+    // String-keyed SystemProperties natives are @FastNative (AOSP main), so
+    // the (JNIEnv*, jclass, …) hook signature is the correct calling
+    // convention. Handle-based natives are @CriticalNative and must NOT be
+    // hooked with this signature.
+    bool ok = api->hookJniNativeMethods(env, "android/os/SystemProperties", &m, 1);
+    if (!ok || env->ExceptionCheck()) {
         env->ExceptionClear();
-        LOGE("L2: JNI exception saat memasang native_get hook");
+        LOGE("L2: native_get hook FAILED (api_rc=%d) — prop spoofing off for this process",
+             (int)ok);
     }
     orig_native_get = reinterpret_cast<jstring (*)(JNIEnv*, jclass, jstring, jstring)>(m.fnPtr);
     if (orig_native_get)
@@ -322,12 +341,41 @@ static bool sbx_should_suppress_key(const std::string& k) {
     return false;
 }
 
+// Strict base-10 integer parse of an identity value ("34" yes, "34x"/"" no).
+// Used so keys that AOSP initializes via SystemProperties.getInt/getLong
+// (ro.build.version.sdk, ro.build.version.preview_sdk,
+// ro.odm.build.media_performance_class, ro.build.date.utc) return the persona
+// value through the typed getters too — not just the String native_get path.
+static bool sbx_parse_ll(const std::string& v, long long& out) {
+    if (v.empty()) return false;
+    errno = 0;
+    const char* s = v.c_str();
+    // Skip a single leading +/- sign.
+    if (*s == '+' || *s == '-') ++s;
+    if (!*s) return false;
+    char* end = nullptr;
+    long long n = std::strtoll(v.c_str(), &end, 10);
+    if (end == v.c_str() || *end != '\0' || errno == ERANGE) return false;
+    out = n;
+    return true;
+}
+
 static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def) {
     if (!j_key) return def;
     const char* r = env->GetStringUTFChars(j_key, nullptr);
     if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
     std::string k(r);
     env->ReleaseStringUTFChars(j_key, r);
+
+    // Identity-first: the persona value must win over the real device value
+    // even when the caller uses the typed getter. Non-numeric identity values
+    // (model, fingerprint, …) fail the parse and fall through unharmed.
+    std::string v;
+    if (spoof_prop_value(k, v)) {
+        long long n = 0;
+        if (sbx_parse_ll(v, n)) { LOGD("L7 SPI(id) '%s' -> %d", k.c_str(), (int)n); return (jint)n; }
+    }
+
     const auto& m = sbx_int_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPI '%s' -> %d", k.c_str(), it->second); return it->second; }
@@ -340,6 +388,15 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong 
     if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
     std::string k(r);
     env->ReleaseStringUTFChars(j_key, r);
+
+    // Identity-first (same rationale as hook_prop_get_int). ro.build.date.utc
+    // lands here and keeps Build.TIME consistent with the persona fingerprint.
+    std::string v;
+    if (spoof_prop_value(k, v)) {
+        long long n = 0;
+        if (sbx_parse_ll(v, n)) { LOGD("L7 SPL(id) '%s' -> %lld", k.c_str(), (long long)n); return (jlong)n; }
+    }
+
     const auto& m = sbx_long_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPL '%s' -> %lld", k.c_str(), (long long)it->second); return it->second; }
@@ -371,10 +428,12 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
          const_cast<char*>("(Ljava/lang/String;Z)Z"),
          reinterpret_cast<void*>(hook_prop_get_bool)},
     };
-    api->hookJniNativeMethods(env, "android/os/SystemProperties", m, 3);
-    if (env->ExceptionCheck()) {
+    // Same @FastNative contract as native_get above.
+    bool ok = api->hookJniNativeMethods(env, "android/os/SystemProperties", m, 3);
+    if (!ok || env->ExceptionCheck()) {
         env->ExceptionClear();
-        LOGE("L7: JNI exception saat memasang leak sensors");
+        LOGE("L7: leak-sensor hooks FAILED (api_rc=%d) — typed getters unspoofed",
+             (int)ok);
     }
     orig_get_int  = reinterpret_cast<jint (*)(JNIEnv*, jclass, jstring, jint)>(m[0].fnPtr);
     orig_get_long = reinterpret_cast<jlong (*)(JNIEnv*, jclass, jstring, jlong)>(m[1].fnPtr);
@@ -649,6 +708,16 @@ static int sbx_open(const char* pathname, int flags, ...) {
     return (int)syscall(__NR_openat, AT_FDCWD, pathname, flags, mode);
 }
 
+// Minimal fopen(3) mode -> open(2) flags mapping for the sbx_fopen fallback.
+static int sbx_fopen_flags(const char* mode) {
+    bool plus = mode && std::strchr(mode, '+');
+    switch (mode ? mode[0] : 'r') {
+        case 'w': return (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC;
+        case 'a': return (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND;
+        default:  return plus ? O_RDWR : O_RDONLY;   // 'r' and anything unknown
+    }
+}
+
 static FILE* sbx_fopen(const char* path, const char* mode) {
 
     if (g_nr_active && path && mode && mode[0] == 'r' && !strchr(mode, '+')) {
@@ -660,8 +729,20 @@ static FILE* sbx_fopen(const char* path, const char* mode) {
         }
     }
     if (orig_fopen) return orig_fopen(path, mode);
-    errno = ENOSYS;
-    return nullptr;
+
+    // Fallback: the fopen PLT slot was not resolved for this process (partial
+    // L9 commit) but open/openat may be. Route through them + fdopen instead
+    // of failing with ENOSYS — apps legitimately use fopen() for reads AND
+    // writes, and a hard failure here would break them.
+    int fl = sbx_fopen_flags(mode);
+    int fd = -1;
+    if (orig_openat)      fd = orig_openat(AT_FDCWD, path, fl, 0666);
+    else if (orig_open)   fd = orig_open(path, fl, 0666);
+    else                  fd = (int)syscall(__NR_openat, AT_FDCWD, path, fl, 0666);
+    if (fd < 0) return nullptr;
+    FILE* fp = fdopen(fd, mode);
+    if (!fp) { ::close(fd); return nullptr; }
+    return fp;
 }
 
 static void sbx_reg_lib(Api* api, dev_t dev, ino_t ino) {
@@ -902,6 +983,7 @@ static void install_crash_watchdog(const std::string& pkg) {
 //                  VERSION.PREVIEW_SDK_FINGERPRINT (@NonNull, default "REL")
 //   String[]     : SUPPORTED_ABIS, SUPPORTED_32_BIT_ABIS, SUPPORTED_64_BIT_ABIS
 //   int          : VERSION.SDK_INT, VERSION.PREVIEW_SDK_INT, VERSION.MEDIA_PERFORMANCE_CLASS
+//   long         : TIME (= getLong("ro.build.date.utc") * 1000)
 // -----------------------------------------------------------------------------
 
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
@@ -919,6 +1001,13 @@ static void set_int(JNIEnv* env, jclass c, const char* f, int v) {
     jfieldID id = env->GetStaticFieldID(c, f, "I");
     if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
     env->SetStaticIntField(c, id, v);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static void set_long(JNIEnv* env, jclass c, const char* f, jlong v) {
+    jfieldID id = env->GetStaticFieldID(c, f, "J");
+    if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    env->SetStaticLongField(c, id, v);
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
@@ -999,6 +1088,16 @@ static void install_build_hook(JNIEnv* env) {
             {"CPU_ABI2","CPU_ABI2"},         // Deprecated (API 21) but still read by SDKs
         };
         for (const auto& [fn, k] : f) set_str(env, build, fn, val(k));
+
+        // Build.TIME (long) = getLong("ro.build.date.utc") * 1000
+        // (AOSP Build.java main). Spoof from identity so the build date
+        // matches the persona fingerprint instead of the real device.
+        const std::string& butc = val("BUILD_TIME_UTC");
+        if (!butc.empty()) {
+            long long t = 0;
+            if (sbx_parse_ll(butc, t) && t > 0)
+                set_long(env, build, "TIME", (jlong)t * 1000);
+        }
 
         // String[] array fields — SUPPORTED_ABIS family. AppLog & AntiCheat SDKs often
         // read these to fingerprint 32/64-bit capability. Values are CSV in identity blob:
