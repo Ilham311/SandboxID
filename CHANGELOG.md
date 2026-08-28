@@ -52,6 +52,29 @@ decodes to its registration date), not the previously-assumed
   api->hookJniNativeMethods(...)`: the pinned zygisk.hpp API returns void
   (failure is signalled by `fnPtr == null`).
 
+### Fix: `action.sh` fails with rc=127 "binary native tidak bisa dijalankan"
+
+`bin/sandboxid` does not exist in the zip — it is an install-time symlink
+that `customize.sh` creates per ABI (`ln -sf sandboxid-arm64 …`). Installs
+whose module dir was updated without a full re-flash (or that predate the
+`ternak-tt` → `sandboxid` rename) can be missing it, which made
+`action.sh` abort with rc=127 before applying any identity. All consumers
+now fall back to the ABI-named binaries (`bin/sandboxid-{arm64,arm,x86_64,x}`
+selected via `ro.product.cpu.abi`, `uname -m` as backup):
+
+- `helpers.sh` gains `sbx_bin()` (also tries legacy `ternak-tt-<abi>` names);
+  `action.sh` re-resolves `BIN` through it after sourcing helpers.
+- `service.sh` and `post-fs-data.sh` resolve inline (they run standalone,
+  before helpers.sh is sourced); the arm64-only fallback in
+  `post-fs-data.sh` covered 32-bit devices incorrectly.
+- `jni/companion.cpp` `try_seed_ondemand()` tries `bin/sandboxid` then the
+  compile-time-ABI binary, with a clearer error when neither is runnable.
+- `action.sh`'s failure message now lists what it looked for instead of a
+  bare path, and warns early (before autopif) when no native binary is
+  runnable at all.
+- `webroot/app.js` — removed the unused `BIN` constant (dead code; the
+  WebUI always goes through `action.sh`/`rotate_ids.sh`).
+
 ### Identity hooking-completeness pass (Phase 4, jni/)
 
 `Build.TIME` was the last un-spoofed `Build` field and the typed

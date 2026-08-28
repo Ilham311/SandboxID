@@ -1,7 +1,6 @@
 'use strict';
 
 const MODDIR = '/data/adb/modules/sandboxid';
-const BIN = `${MODDIR}/bin/sandboxid`;
 const ROTATE_SH = `${MODDIR}/rotate_ids.sh`;
 const IDENTITY = `${MODDIR}/identity.prop`;
 const TARGETS = `${MODDIR}/target.txt`;

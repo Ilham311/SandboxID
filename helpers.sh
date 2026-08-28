@@ -139,6 +139,44 @@ rp_set() {
 # stops every process associated with the package; `killall <pkg>` is a
 # best-effort sweep for the main process, a technique referenced from
 # PlayIntegrityFork's killpi.sh (osm0sis, GPL-3.0). See CREDITS.md.
+# Resolve the native CLI binary. customize.sh creates bin/sandboxid as an
+# install-time symlink to the ABI-named binary (bin/sandboxid-arm64 etc.); the
+# symlink does not exist in the zip itself. Installs that were updated without
+# a full re-flash (files copied over an existing module dir) or leftovers from
+# the pre-rename ternak-tt era can be missing it — fall back to the ABI-named
+# binaries, selected via ro.product.cpu.abi with a uname -m fallback.
+sbx_bin() {
+    _d="${MODDIR:-/data/adb/modules/sandboxid}/bin"
+    if [ -x "$_d/sandboxid" ]; then
+        printf '%s\n' "$_d/sandboxid"
+        return 0
+    fi
+    _abi="$(getprop ro.product.cpu.abi 2>/dev/null)"
+    case "$_abi" in
+        arm64-v8a)   _abi=arm64 ;;
+        armeabi-v7a) _abi=arm ;;
+        x86_64)      _abi=x86_64 ;;
+        x86)         _abi=x86 ;;
+        *)
+            case "$(uname -m 2>/dev/null)" in
+                aarch64)       _abi=arm64 ;;
+                armv7l|armv8l) _abi=arm ;;
+                x86_64)        _abi=x86_64 ;;
+                i686|i386)     _abi=x86 ;;
+                *)             _abi="" ;;
+            esac
+            ;;
+    esac
+    [ -n "$_abi" ] || return 1
+    for _n in "sandboxid-$_abi" "ternak-tt-$_abi"; do
+        if [ -x "$_d/$_n" ]; then
+            printf '%s\n' "$_d/$_n"
+            return 0
+        fi
+    done
+    return 1
+}
+
 force_stop() {
     pkg="$1"
     command -v am >/dev/null 2>&1 || return 1

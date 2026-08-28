@@ -21,6 +21,15 @@ command -v identity_get >/dev/null 2>&1 || identity_get() {
     awk -F= -v k="$1" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$IDENTITY" 2>/dev/null
 }
 
+# helpers.sh (if sourced) provides sbx_bin(), which falls back to the ABI-named
+# binaries when the install-time bin/sandboxid symlink is missing.
+if command -v sbx_bin >/dev/null 2>&1; then
+    BIN="$(sbx_bin)"
+else
+    [ -x "$BIN" ] || BIN=""
+fi
+[ -n "$BIN" ] || printf '%s\n' "Peringatan: binary native tidak ditemukan di $MODDIR/bin/ (sandboxid, sandboxid-arm64/-arm/-x86_64/-x). Re-flash module untuk memperbaiki."
+
 tee2() { tee -a "$LOGFILE" "$ACTION_LOG"; }
 say()  { printf '%s\n' "$*" | tee2; }
 
@@ -73,7 +82,9 @@ if [ -z "$APPLIED" ]; then
         "$BIN" lock >/dev/null 2>&1 || true
         [ "$RC" = 0 ] && APPLIED="freshen"
     else
-        say "Gagal: $BIN tidak bisa dijalankan — identitas native tidak dipasang."
+        say "Gagal: binary native tidak bisa dijalankan (BIN='$BIN')."
+        say "       Cek isi $MODDIR/bin/ — harus ada sandboxid atau sandboxid-{arm64,arm,x86_64,x}."
+        say "       Re-flash module zip untuk memperbaiki pemasangan."
         RC=127
     fi
 fi

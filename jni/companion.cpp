@@ -351,10 +351,33 @@ static void watch_target_death(uint32_t pid, int client_fd) {
 }
 
 static bool try_seed_ondemand() {
-    std::string bin = std::string(sandboxid::MODDIR) + "/bin/sandboxid";
+    // bin/sandboxid is an install-time symlink created by customize.sh; fall
+    // back to the ABI-named binaries when it is missing (module dir updated
+    // without a re-flash).
+    std::string base = std::string(sandboxid::MODDIR) + "/bin";
+    std::string bin = base + "/sandboxid";
     if (::access(bin.c_str(), X_OK) != 0) {
-        LOGE("seed on-demand: binary not found at %s", bin.c_str());
-        return false;
+#if defined(__aarch64__)
+        const char* abi = "arm64";
+#elif defined(__arm__)
+        const char* abi = "arm";
+#elif defined(__x86_64__)
+        const char* abi = "x86_64";
+#elif defined(__i386__)
+        const char* abi = "x86";
+#else
+        const char* abi = nullptr;
+#endif
+        if (abi == nullptr) {
+            LOGE("seed on-demand: no runnable binary in %s (unknown ABI)", base.c_str());
+            return false;
+        }
+        bin = base + "/sandboxid-" + abi;
+        if (::access(bin.c_str(), X_OK) != 0) {
+            LOGE("seed on-demand: binary not found at %s or %s",
+                 (base + "/sandboxid").c_str(), bin.c_str());
+            return false;
+        }
     }
 
     pid_t s = ::fork();
