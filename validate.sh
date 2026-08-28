@@ -2,7 +2,7 @@
 # One-shot validation for the Phase-4 edits: C++ syntax (debug+release),
 # shell syntax, host unit tests, shellcheck. Read-only; writes only /tmp.
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 rc=0
 
 echo "=== 1/4 clang++ -fsyntax-only (debug + release) ==="
