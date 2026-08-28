@@ -177,6 +177,58 @@ rotate_bluetooth_mac() {
     return 0
 }
 
+# Regenerate ByteDance AppLog SDK identifier caches (did / iid / ssid /
+# openudid / clientudid / cdid) for one or all packages in target.txt. Full
+# cycle: wipe old cache → generate plausible new values (Snowflake did/iid/
+# ssid + UUID cdid/clientudid + 16-hex openudid) → seed them into applog.xml,
+# snssdk_openudid.xml, bd_device_info.xml, files/bd_setting/*, files/.cdid
+# with correct ownership + SELinux context so the app reads them on next
+# cold start as if they were its own persistent state.
+#
+# Heavy lifting is in helpers.sh::applog_regen; this wrapper handles arg
+# dispatch and the "no target.txt / no arg" edge case (which is a user
+# workflow issue, not a failure — exit clean with a hint).
+#
+# Historical alias 'wipe_applog' → still works via case dispatch below;
+# it always meant "regenerate", never "just wipe" (wipe alone would leave
+# the app in a zero-value gap until it re-registered with the server).
+regen_applog() {
+    _arg="${1:-}"
+    log_step "Regenerate ByteDance AppLog IDs${_arg:+ ($_arg)}"
+
+    if [ -n "$_arg" ]; then
+        applog_regen "$_arg"
+        return $?
+    fi
+
+    # No package given → walk target.txt. applog_regen handles the read itself
+    # but returns 1 if the file is empty; surface that as a friendly hint.
+    if ! grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
+        log_info "target.txt kosong — tidak ada aplikasi ByteDance yang diregenerasi"
+        log_info "Hint: 'rotate_ids.sh applog <package>' atau isi target.txt dulu"
+        return 0
+    fi
+    applog_regen
+}
+
+# Escape hatch: wipe-only, no seed. Used by `rotate_ids.sh applog-wipe` for
+# forensic scenarios (you want to see how the app re-registers from scratch
+# with the server) or for apps that break when they find our seeded values.
+# Regular users should stick with `regen_applog` above.
+wipe_applog_only() {
+    _arg="${1:-}"
+    log_step "Wipe-only (no seed) ByteDance AppLog cache${_arg:+ ($_arg)}"
+    if [ -n "$_arg" ]; then
+        applog_wipe "$_arg"
+        return $?
+    fi
+    if ! grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
+        log_info "target.txt kosong — tidak ada yang di-wipe"
+        return 0
+    fi
+    applog_wipe
+}
+
 sync_boot_count() {
     # Terapkan BOOT_COUNT dari identity.prop ke Settings.Global.boot_count. Apps
     # yang baca Settings.Global.BOOT_COUNT (indikator "device sering reboot?")
@@ -388,6 +440,28 @@ cmd_status() {
             log_info "  user $u SSAID xml = absent"
         fi
     done
+
+    # AppLog snapshot — for each active target, show whether the SDK cache
+    # files exist and the state (fresh/seeded/active/absent). We deliberately
+    # DON'T dump the contents: did/iid/ssid are user-linkable identifiers and
+    # this log ends up in /cache/*.log. See helpers.sh::applog_probe.
+    if grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
+        log_info "AppLog cache (per target):"
+        while IFS= read -r _t || [ -n "$_t" ]; do
+            _t=${_t%%#*}
+            _t=$(printf '%s' "$_t" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            [ -n "$_t" ] || continue
+            _probe=$(applog_probe "$_t" 2>/dev/null)
+            if [ -n "$_probe" ]; then
+                # probe format: "<pkg> <count> <state>"
+                _n=$(printf '%s' "$_probe" | awk '{print $2}')
+                _st=$(printf '%s' "$_probe" | awk '{print $3}')
+                log_info "  $_t = $_n file(s), state=$_st"
+            else
+                log_info "  $_t = (probe unavailable)"
+            fi
+        done < "$MODDIR/target.txt"
+    fi
 }
 
 cmd="${1:-all}"
@@ -403,12 +477,21 @@ case "$cmd" in
         rotate_bluetooth_mac || FAILURES=$((FAILURES + 1))
         sync_device_name "$@" || FAILURES=$((FAILURES + 1))
         sync_boot_count      || :
+        # AppLog SDK regen runs LAST on purpose: force_stop inside applog_regen
+        # kicks the target app so it re-reads the seeded did/iid/ssid on next
+        # open, and by this point every hardware-layer identifier the SDK
+        # would sample (Build.*, MAC, ANDROID_ID, GAID) has already been
+        # rotated. If regen ran first, the app could be relaunched by the
+        # user before the other rotations landed and re-register with the
+        # stale hardware fingerprint on top of our fresh AppLog IDs.
+        regen_applog         || :
         ;;
     safe)
         set_gaid_value "$@"    || FAILURES=$((FAILURES + 1))
         rotate_bluetooth_mac   || FAILURES=$((FAILURES + 1))
         sync_device_name "$@"  || :
         sync_boot_count        || :
+        regen_applog           || :
         ;;
     ssaid)                wipe_ssaid              || FAILURES=$((FAILURES + 1)) ;;
     gaid)                 set_gaid_value "$@"     || FAILURES=$((FAILURES + 1)) ;;
@@ -417,12 +500,18 @@ case "$cmd" in
     device-name|name)     sync_device_name "$@"   || FAILURES=$((FAILURES + 1)) ;;
     boot-count|bootcount) sync_boot_count         || FAILURES=$((FAILURES + 1)) ;;
     carrier|sim)          set_carrier "$@"        || FAILURES=$((FAILURES + 1)) ;;
+    # 'applog' = full regen (wipe+generate+seed). 'applog-wipe' preserved as
+    # an escape hatch: wipe-only for forensic-scenarios or unusual apps where
+    # you want the SDK to re-register from scratch against the server rather
+    # than reading our seeded values.
+    applog|bytedance|regen-applog) regen_applog "$@"       || FAILURES=$((FAILURES + 1)) ;;
+    applog-wipe|wipe-applog)       wipe_applog_only "$@"   || FAILURES=$((FAILURES + 1)) ;;
     status)               cmd_status ;;
     -h|--help|help)
         cat <<USAGE
 Usage: rotate_ids.sh <cmd> [args]
-  all                        - SSAID + GAID + wlan-MAC + BT-MAC + device-name + boot-count (default)
-  safe                       - GAID + BT-MAC + device-name + boot-count (no reboot, no wifi reset)
+  all                        - SSAID + GAID + wlan-MAC + BT-MAC + device-name + boot-count + applog (default)
+  safe                       - GAID + BT-MAC + device-name + boot-count + applog (no reboot, no wifi reset)
   ssaid                      - wipe settings_ssaid.xml (needs reboot)
   gaid [uuid]                - set Google Advertising ID
   wlan-mac [xx:xx:..]        - set wlan0 MAC
@@ -430,6 +519,10 @@ Usage: rotate_ids.sh <cmd> [args]
   device-name [name]         - sync device_name/BT to persona (identity.prop MODEL)
   boot-count                 - write Settings.Global.boot_count from identity.prop BOOT_COUNT
   carrier <spec>|off|status  - pick SIM/operator; spec = "MCC|MNC|NAME|ISO|PHANTOM|CARRIER_ID"
+  applog [pkg]               - regenerate ByteDance AppLog cache (wipe old + generate + seed new
+                               did/iid/ssid/openudid/clientudid/cdid) for one package, or every
+                               package in target.txt
+  applog-wipe [pkg]          - wipe only (no seed) — forces SDK to re-register from server
   status                     - show current values (read-only)
 USAGE
         exit 0 ;;

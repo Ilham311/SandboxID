@@ -7,7 +7,89 @@ file, with an optional live refresh from Google's canary build data. Persona
 selection, SoC/RADIO derivation, and SDK-matching are all preserved — behavior
 offline is identical to before.
 
+ByteDance AppLog SDK **full regen** (wipe → generate → seed): the SDK's
+server-issued identifier trio (`did` / `iid` / `ssid`) plus `openudid` /
+`clientudid` / `cdid` is now not merely wiped but replaced end-to-end. A
+locally-generated plausible cache lands on disk so the app reads the seeded
+values on next cold start as if they were its own persistent state — no
+zero-value gap, no "device changed" telemetry event on re-registration.
+Format matches ByteDance's actual shapes (arxiv:2504.13279 + reverse-engineered
+RangersAppLog paths): Snowflake 64-bit int64 (18-19 decimal digits, top 32
+bits = Unix seconds) for did/iid/ssid; UUID v4 for cdid/clientudid; 16-hex
+for openudid. Wires into the 1-click flow (`action.sh` → `rotate_ids.sh all`)
+so a single tap in the WebUI or the Action button produces a fully-fresh
+hardware + AppLog persona ready to use, with no user input. Ship-idle
+contract preserved: no-op with a friendly hint when `target.txt` is empty.
+
 ### Added
+
+- `helpers.sh::applog_generate` — plausible 6-tuple generator. Produces a
+  Snowflake-shaped 64-bit int64 for did/iid/ssid using awk int64-safe math
+  `(now_seconds << 32) | rand32` (three independent random halves so the
+  three IDs never collide), a UUID v4 for cdid/clientudid from
+  `/proc/sys/kernel/random/uuid` (with a `/dev/urandom` hand-rolled fallback
+  when the kernel path is unavailable — musl/older kernels), and 16 hex
+  chars from `/dev/urandom` for openudid. Values are printed to stdout as
+  `KEY=value` lines; the caller is expected to redact them from logs (the
+  helper itself never logs them).
+- `helpers.sh::applog_seed [pkg] [payload]` — writes the fabricated cache
+  into the target app's data dir. Emits five files: `shared_prefs/applog.xml`
+  (primary cache: did/iid/ssid/openudid/clientudid/register_time),
+  `shared_prefs/snssdk_openudid.xml` (legacy SDK path for openudid/clientudid),
+  `shared_prefs/bd_device_info.xml` (RangersAppLog v6+ unified path for
+  cdid/device_id), `files/bd_setting/{device_id, install_id, openudid,
+  clientudid}` (raw text files read by native `libbdtracker.so` bypassing
+  SharedPreferences), and `files/.cdid` (legacy plain-text UUID). Ownership
+  chowned to the package UID (sourced from the data-dir itself), permissions
+  set to 0660, and `restorecon -R` re-labels every seeded file so the app's
+  SELinux domain can actually read them.
+- `helpers.sh::applog_regen [pkg]` — the orchestrator: force-stop → wipe old
+  cache (via applog_wipe) → generate new values → seed valid caches. Handles
+  both single-package and `target.txt` batch modes. Per-target recursion so
+  a partial failure on one package doesn't leave others in an inconsistent
+  wipe-without-seed state.
+- `helpers.sh::applog_probe [pkg]` — read-only status: emits one line
+  `<pkg> <count> <state>` where state ∈ {fresh, seeded, active, absent}.
+  Never dumps identifier values. Consumed by `rotate_ids.sh status`, by
+  `action.sh` for the post-run summary, and by the WebUI applog card.
+- `rotate_ids.sh applog [pkg]` (aliases `bytedance`, `regen-applog`) — front
+  end for `applog_regen`. Full regen cycle by default.
+- `rotate_ids.sh applog-wipe [pkg]` (alias `wipe-applog`) — escape hatch:
+  wipe-only, no seed. Kept for forensic scenarios where you want to observe
+  the SDK re-register from scratch against the server.
+- WebUI: new "AppLog ByteDance" card in the Rotasi tab. Renders per-target
+  state (seeded / aktif / bersih / nihil) plus file count, populated
+  asynchronously via `applog_probe` so it never blocks the initial paint.
+  Included in "Rotasi semua". Values are never surfaced — the card only
+  shows counts and state tokens.
+- README `applog` section rewritten with exact ID formats (Snowflake bit
+  layout referencing arxiv:2504.13279, UUID v4 sources, 16-hex openudid),
+  the five seeded files with per-file purpose, and the ownership + SELinux
+  restorecon steps. Covered-scope entry upgraded from "cache wipe" to
+  "full regen cycle".
+
+### Changed
+
+- `rotate_ids.sh all` and `rotate_ids.sh safe` now call `regen_applog`
+  (was `wipe_applog`) as the **last** step. Ordering matters: force-stop
+  inside applog_regen kicks each target so on next cold start it reads
+  the seeded did/iid/ssid — and by that point every hardware-layer
+  identifier it would sample (Build.*, MAC, ANDROID_ID, GAID) has already
+  been rotated. If regen ran first, a stray user-initiated relaunch
+  before the other rotations landed would burn our seeded IDs on top of
+  the stale hardware fingerprint.
+- `action.sh` now emits a post-run "Status AppLog per aplikasi target"
+  block summarising each target's applog cache state (seeded / aktif /
+  bersih / nihil) plus file count. Privacy-safe: never dumps identifier
+  values.
+- WebUI "Acak perangkat baru" button (freshenBtn) now reloads the Rotasi
+  tab if it's currently active, so the AppLog card refreshes to show
+  the seeded state immediately without a manual tab switch. Its inline
+  comment now documents step 5 of the action.sh flow (AppLog wipe +
+  generate + seed).
+- `rotate_ids.sh status` per-target AppLog line now shows both file count
+  AND state token (was file count only), sourced from applog_probe.
+
 
 - `personas.tsv` (repo root, shipped to `/data/adb/modules/sandboxid/`) — the
   curated **stable** Pixel pool (the same 14 entries that were compiled into

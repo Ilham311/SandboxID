@@ -103,12 +103,41 @@ fi
 
 if [ -r "$ROTATE" ]; then
     say ""
-    say "==> Rotasi ID lain (SSAID, GAID, WiFi/BT MAC, nama, boot count)"
+    say "==> Rotasi ID lain (SSAID, GAID, WiFi/BT MAC, nama, boot count, AppLog)"
     ROT_OUT="$MODDIR/debug/.rotate.$$"
     MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all </dev/null >"$ROT_OUT" 2>&1; RC_ROT=$?
     tee2 < "$ROT_OUT"; rm -f "$ROT_OUT" 2>/dev/null
 else
     say "==> Rotasi ID dilewati (rotate_ids.sh tidak ada)."
+fi
+
+# Ringkas status AppLog per-target (privacy-safe: count + state, no values).
+# rotate_ids.sh all sudah menjalankan applog regen; ini hanya konfirmasi post
+# hoc untuk user — apakah seed berhasil landing di setiap target.
+if [ -r "$MODDIR/helpers.sh" ] && [ -r "$MODDIR/target.txt" ] && \
+   grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
+    _applog_summary=""
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line=${_line%%#*}
+        _line=$(printf '%s' "$_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        [ -n "$_line" ] || continue
+        _probe=$(applog_probe "$_line" 2>/dev/null)
+        [ -n "$_probe" ] && _applog_summary="${_applog_summary}${_probe}\n"
+    done < "$MODDIR/target.txt"
+    if [ -n "$_applog_summary" ]; then
+        say ""
+        say "==> Status AppLog per aplikasi target:"
+        printf "%b" "$_applog_summary" | while IFS=' ' read -r _p _n _st; do
+            [ -n "$_p" ] || continue
+            case "$_st" in
+                seeded) say "   - $_p  ($_n file, seed baru siap dibaca)" ;;
+                active) say "   - $_p  ($_n file, SDK sudah re-register)" ;;
+                fresh)  say "   - $_p  ($_n file, cache bersih menunggu app dibuka)" ;;
+                absent) say "   - $_p  (tidak terpasang)" ;;
+                *)      say "   - $_p  ($_n file, $_st)" ;;
+            esac
+        done
+    fi
 fi
 
 say ""
