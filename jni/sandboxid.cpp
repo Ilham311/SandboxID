@@ -175,6 +175,10 @@ struct Identity {
             "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
             "GSM_OPERATOR_NUMERIC","GSM_OPERATOR_ALPHA","GSM_OPERATOR_ISO","GSM_SIM_STATE",
             "VBMETA_DIGEST",
+            // Phase 3 keys read by L1/L2
+            "SUPPORTED_ABIS","SUPPORTED_64_BIT_ABIS","SUPPORTED_32_BIT_ABIS",
+            "CPU_ABI","CPU_ABI2","SKU","ODM_SKU","BASE_OS",
+            "MEDIA_PERFORMANCE_CLASS","PREVIEW_SDK_INT","PREVIEW_SDK_FINGERPRINT",
         };
         std::string out;
         for (const auto& k : order) {
@@ -429,6 +433,56 @@ static Identity derive_identity(const PixelEntry& p) {
 
     id.kv["VBMETA_DIGEST"] =
         sbxnr::hex_from_seed(sbxnr::fnv1a(id.kv["FINGERPRINT"] + "|" + id.kv["SERIAL"]), 32);
+
+    // -------------------------------------------------------------------------
+    // Phase 3 (2026-08): additional Build.* identity keys the L1 hook now reads.
+    // References:
+    //   - AOSP Build.java main branch (getStringList / SystemProperties.get / getInt)
+    //     https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/os/Build.java
+    //
+    // All Pixel Tensor & Snapdragon devices we ship as personas are 64-bit AArch64.
+    // The CSV order is authoritative — Build.CPU_ABI is initialized from the first
+    // element of SUPPORTED_64_BIT_ABIS at class init.
+    // -------------------------------------------------------------------------
+    id.kv["SUPPORTED_ABIS"]        = "arm64-v8a,armeabi-v7a,armeabi";
+    id.kv["SUPPORTED_64_BIT_ABIS"] = "arm64-v8a";
+    id.kv["SUPPORTED_32_BIT_ABIS"] = "armeabi-v7a,armeabi";
+    id.kv["CPU_ABI"]               = "arm64-v8a";
+    id.kv["CPU_ABI2"]              = "";
+
+    // BASE_OS: empty on stock Pixel canary/stable builds; fingerprint SDKs treat
+    // any non-empty value as evidence of an OTA overlay. Force empty.
+    id.kv["BASE_OS"] = "";
+
+    // MEDIA_PERFORMANCE_CLASS: mapped from Pixel model. Values from Google's
+    // published Media Performance Class attestations (SDK_INT of the year the
+    // device shipped, since Google always ships MPC=SDK on flagship Pixels).
+    //   Pixel 6/6 Pro/6a  → 31 (Android 12, VERSION_CODES.S)
+    //   Pixel 7/7 Pro/7a  → 33 (Android 13, VERSION_CODES.TIRAMISU)
+    //   Pixel 8/8 Pro/8a  → 34 (Android 14, VERSION_CODES.UPSIDE_DOWN_CAKE)
+    //   Pixel 9/9 Pro/9a  → 35 (Android 15, VERSION_CODES.VANILLA_ICE_CREAM)
+    // Snapdragon Pixels (P5 and earlier) predate MPC — leave empty.
+    auto mpc_for_model = [](const std::string& m) -> const char* {
+        if (m.rfind("Pixel 9", 0) == 0)  return "35";
+        if (m.rfind("Pixel 8", 0) == 0)  return "34";
+        if (m.rfind("Pixel 7", 0) == 0)  return "33";
+        if (m.rfind("Pixel 6", 0) == 0)  return "31";
+        return "";
+    };
+    id.kv["MEDIA_PERFORMANCE_CLASS"] = mpc_for_model(p.model);
+
+    // SKU / ODM_SKU: bootloader-supplied device variant hints (Android 12+).
+    // Pixel devices report empty for both by default; leave empty so the field
+    // spoofs to "" and Build.SKU reads as "unknown" (getString fallback).
+    id.kv["SKU"]     = "";
+    id.kv["ODM_SKU"] = "";
+
+    // PREVIEW_SDK_INT / PREVIEW_SDK_FINGERPRINT — production Pixels always report
+    // 0 / "REL". Force explicit values so the L2 native_get hook has something to
+    // return when a fingerprint SDK queries the sysprops directly (bypassing L1).
+    id.kv["PREVIEW_SDK_INT"]         = "0";
+    id.kv["PREVIEW_SDK_FINGERPRINT"] = "REL";
+
     return id;
 }
 
@@ -490,6 +544,26 @@ static void apply_native(const Identity& id) {
     const std::string SOC_MANUF    = get("SOC_MANUFACTURER");
     const std::string SOC_MODEL    = get("SOC_MODEL");
     const std::string MARKETNAME   = get("MARKETNAME");
+
+    // Phase 3 additions — read the new identity keys populated by derive_identity().
+    // AOSP Build.java reads these props at class-init:
+    //   SUPPORTED_ABIS        -> ro.product.cpu.abilist       (CSV)
+    //   SUPPORTED_32_BIT_ABIS -> ro.product.cpu.abilist32     (CSV)
+    //   SUPPORTED_64_BIT_ABIS -> ro.product.cpu.abilist64     (CSV)
+    //   SKU                   -> ro.boot.hardware.sku         (String)
+    //   ODM_SKU               -> ro.boot.product.hardware.sku (String)
+    //   VERSION.BASE_OS       -> ro.build.version.base_os     (String)
+    //   VERSION.PREVIEW_SDK_INT -> ro.build.version.preview_sdk (int, always 0 on prod)
+    //   VERSION.MEDIA_PERFORMANCE_CLASS -> ro.odm.build.media_performance_class (int)
+    const std::string ABILIST    = get("SUPPORTED_ABIS");
+    const std::string ABILIST32  = get("SUPPORTED_32_BIT_ABIS");
+    const std::string ABILIST64  = get("SUPPORTED_64_BIT_ABIS");
+    const std::string ABI_PRIM   = get("CPU_ABI");
+    const std::string ABI_SEC    = get("CPU_ABI2");
+    const std::string SKU        = get("SKU");
+    const std::string ODM_SKU    = get("ODM_SKU");
+    const std::string BASE_OS    = get("BASE_OS");
+    const std::string MPC        = get("MEDIA_PERFORMANCE_CLASS");
 
     std::vector<Rp> rp = {
         {"ro.serialno",                        SERIAL},
@@ -588,6 +662,28 @@ static void apply_native(const Identity& id) {
         {"ro.build.selinux",                   std::string("1")},
 
         {"sys.oem_unlock_allowed",             std::string("0")},
+
+        // -------------------------------------------------------------------
+        // Phase 3 additions (validated 2026-08 against AOSP Build.java main)
+        //   https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/os/Build.java
+        // Empty values are skipped by the loop below (`del_if_empty=false`
+        // default). Legacy CPU_ABI / CPU_ABI2 props are still honoured by
+        // some Xamarin/Unity JNI shims that pre-cache them.
+        // -------------------------------------------------------------------
+        {"ro.product.cpu.abilist",             ABILIST},
+        {"ro.product.cpu.abilist32",           ABILIST32},
+        {"ro.product.cpu.abilist64",           ABILIST64},
+        {"ro.product.cpu.abi",                 ABI_PRIM},   // deprecated (API 21) but still read
+        {"ro.product.cpu.abi2",                ABI_SEC},    // deprecated (API 21) but still read
+
+        {"ro.boot.hardware.sku",               SKU},        // Build.SKU     (API 31+)
+        {"ro.boot.product.hardware.sku",       ODM_SKU},    // Build.ODM_SKU (API 31+)
+
+        {"ro.build.version.base_os",           BASE_OS},    // Build.VERSION.BASE_OS (API 23+)
+        {"ro.build.version.preview_sdk",       std::string("0")}, // production always 0
+        {"ro.build.version.preview_sdk_fingerprint", std::string("REL")},
+
+        {"ro.odm.build.media_performance_class", MPC},      // Build.VERSION.MEDIA_PERFORMANCE_CLASS
     };
 
     bool have_bundled = (::access(RESETPROP, X_OK) == 0);
@@ -637,10 +733,29 @@ static void apply_native(const Identity& id) {
             if (rc == 0) sok++; else sfail++;
         }
         if (!MODEL.empty()) {
-            int rc = run_framework("/system/bin/settings",
+            // Android reads device name from BOTH `global` and `system` namespaces
+            // depending on OEM & Android version:
+            //   - AOSP core:   Settings.Global.DEVICE_NAME    (added API 25)
+            //   - Samsung/OneUI: Settings.System.device_name  (system namespace fallback)
+            //   - Xiaomi HyperOS same as system namespace since 2023
+            // Both writes are idempotent; failure on unsupported keys is expected on
+            // stock AOSP (system table has no device_name row) and treated as noise.
+            int rc1 = run_framework("/system/bin/settings",
                     {"settings", "put", "--user", "0", "global", "device_name", MODEL.c_str()},
                     "settings put global device_name");
-            if (rc == 0) sok++; else sfail++;
+            if (rc1 == 0) sok++; else sfail++;
+
+            int rc2 = run_framework("/system/bin/settings",
+                    {"settings", "put", "--user", "0", "system", "device_name", MODEL.c_str()},
+                    "settings put system device_name");
+            // The `system` namespace write is best-effort — many AOSP builds reject
+            // unknown keys with exit code 255. Log-only, not counted against sfail
+            // if the global write already succeeded (avoids false red in the summary).
+            if (rc2 == 0) {
+                sok++;
+            } else if (rc1 != 0) {
+                sfail++;
+            }
         }
         printf("  Settings put: %d ok, %d gagal\n", sok, sfail);
     }
@@ -729,6 +844,20 @@ static void generate_mount_files(const Identity& id) {
     add("ro.build.version.sdk",               SDK);
     add("ro.build.version.security_patch",    SECPATCH);
     add("ro.build.version.incremental",       INCREMENTAL);
+    // Phase 3: BASE_OS / PREVIEW_SDK / MPC in build.prop so app-namespace reads match.
+    add("ro.build.version.base_os",           g("BASE_OS"));
+    add("ro.build.version.preview_sdk",       std::string("0"));
+    add("ro.build.version.preview_sdk_fingerprint", std::string("REL"));
+    add("ro.odm.build.media_performance_class", g("MEDIA_PERFORMANCE_CLASS"));
+    // Phase 3: ABI list + SKU (Build.SUPPORTED_ABIS, Build.SKU, Build.ODM_SKU).
+    add("ro.product.cpu.abilist",             g("SUPPORTED_ABIS"));
+    add("ro.product.cpu.abilist32",           g("SUPPORTED_32_BIT_ABIS"));
+    add("ro.product.cpu.abilist64",           g("SUPPORTED_64_BIT_ABIS"));
+    add("ro.product.cpu.abi",                 g("CPU_ABI"));
+    add("ro.product.cpu.abi2",                g("CPU_ABI2"));
+    add("ro.boot.hardware.sku",               g("SKU"));
+    add("ro.boot.product.hardware.sku",       g("ODM_SKU"));
+
     add("ro.bootloader",                      std::string("unknown"));
     add("ro.boot.bootloader",                 std::string("unknown"));
     add("ro.build.product",                   DEVICE);

@@ -175,15 +175,79 @@ su -c 'sh /data/adb/modules/sandboxid/rotate_ids.sh <cmd>'
 
 | Command | Applies | Needs reboot? |
 |---------|---------|---------------|
-| `all` | SSAID + GAID + wlan MAC + BT MAC + device name (default) | Yes (SSAID) |
-| `safe` | GAID + BT MAC + device name (skips SSAID + wlan) | No |
+| `all` | SSAID + GAID + wlan MAC + BT MAC + device name + applog (default) | Yes (SSAID) |
+| `safe` | GAID + BT MAC + device name + applog (skips SSAID + wlan) | No |
 | `ssaid` | Delete `settings_ssaid.xml` per user | Yes |
 | `gaid [uuid]` | Set Google Advertising ID | No |
 | `wlan-mac [xx:xx:...]` | Set `wlan0` MAC + wipe `WifiConfigStore` | No |
 | `bt-mac [xx:xx:...]` | Set Bluetooth adapter MAC + `bt_config.conf` Address | No (toggle BT) |
 | `device-name [name]` | Sync device/BT name to `identity.prop` MODEL | No |
-| `status` | Read-only snapshot of all identifiers | — |
+| `applog [pkg]` | **Regenerate** ByteDance AppLog cache (wipe old + generate new did/iid/ssid/openudid/clientudid/cdid + seed valid XML) | No |
+| `applog-wipe [pkg]` | Wipe-only escape hatch (no seed; forces SDK to re-register from server) | No |
+| `status` | Read-only snapshot of all identifiers (never dumps AppLog values — privacy) | — |
 | `help` | Print usage | — |
+
+**`applog` in detail.** Apps built on the ByteDance **AppLog / RangersAppLog**
+SDK (TikTok `com.ss.android.ugc.trill`, Douyin `com.ss.android.ugc.aweme`,
+TikTok Global `com.zhiliaoapp.musically`, CapCut, Lark, and any third-party app
+that ships `com.bytedance.applog`) cache a **server-issued** trio of identifiers
+alongside the hardware fingerprint the module already spoofs:
+
+- `device_id` (aka `did` / `bd_did`) — Snowflake 64-bit int (18-19 decimal
+  digits; top 32 bits = Unix seconds of registration, remaining bits carry
+  ms + machine + counter — cf. arxiv:2504.13279), minted by the register
+  endpoint `/service/2/device_register/` and pinned to the app install
+- `install_id` (aka `iid`) — same Snowflake shape, rotates on reinstall,
+  links to the current install
+- `ssid` — server-side ID (same shape) that maps `device_id ↔ user_unique_id`
+  even across logout / re-login
+- `cdid` — RFC 4122 UUID v4 (locally generated from
+  `/proc/sys/kernel/random/uuid`), seeds the register call
+- `clientudid` — RFC 4122 UUID v4
+- `openudid` — 16 hex chars (legacy iOS UDID shape, Android SDK reuses)
+
+These live in `shared_prefs/applog.xml`, `shared_prefs/snssdk_openudid.xml`,
+`shared_prefs/bd_device_info.xml`, `files/bd_setting/{device_id, install_id,
+openudid, clientudid}`, and `files/.cdid`. Rotating hardware without touching
+them leaves the SDK's server-side identity intact — the backend still
+recognises the device.
+
+`rotate_ids.sh applog` is the **full regen cycle** (wipe → generate → seed):
+
+1. **Backup** — the whole AppLog `shared_prefs` set is snapshotted into
+   `backups/applog_<pkg>_<epoch>.tar` (mode 0600, owner-only)
+2. **Wipe** — every known AppLog cache file is removed (XML, `bd_setting/*`,
+   `no_backup/applog_device_id.dat`, `files/.cdid`). User login / prefs /
+   drafts / downloads stay untouched.
+3. **Generate** — six new values are minted locally:
+   - `did`, `iid`, `ssid` — Snowflake 64-bit (top 32 bits = now(), low 32 bits
+     = random) rendered as 18-19 decimal digits via `awk` int64-safe math
+   - `cdid`, `clientudid` — UUID v4 from `/proc/sys/kernel/random/uuid`
+   - `openudid` — 16 hex chars from `/dev/urandom`
+4. **Seed** — the new values are written to:
+   - `shared_prefs/applog.xml` (primary cache: did / iid / ssid / openudid
+     / clientudid / register_time)
+   - `shared_prefs/snssdk_openudid.xml` (legacy path for older SDK builds)
+   - `shared_prefs/bd_device_info.xml` (RangersAppLog v6+ unified path)
+   - `files/bd_setting/{device_id, install_id, openudid, clientudid}` (raw
+     text files read by `libbdtracker.so` bypassing SharedPreferences)
+   - `files/.cdid` (legacy plain-text UUID cache)
+
+   Ownership is `chown`ed to match the package UID (read from the data-dir
+   itself), and `restorecon -R` re-labels every seeded file with the correct
+   SELinux context so the app can actually read them from its own domain.
+
+5. **Force-stop** — the target is killed so its in-memory copy of the old
+   cache can't overwrite the seeded XML on next `commit()`.
+
+Regen is scheduled **last** inside `all` / `safe` so the seed sits on top of
+the fully rotated hardware layer, not the stale one. The wipe-only escape
+hatch (`applog-wipe`) is preserved for forensic scenarios where you want to
+watch the SDK re-register from scratch against the server. `rotate_ids.sh
+applog` with no argument walks every non-comment line in `target.txt`. Runs
+as a no-op (with a friendly hint) if `target.txt` is empty — same "ship
+idle" contract as the rest of the
+module.
 
 ---
 
@@ -289,6 +353,14 @@ remains MIT.
 - Bind-mount overlay for `build.prop` files + `settings_secure.xml`
 - Companion IPC protocol with hot-reloaded target list
 - Crash watchdog and atomic configuration writes
+- **ByteDance AppLog SDK identifier cache** (`did` / `iid` / `ssid` /
+  `openudid` / `clientudid` / `cdid`) — full **regen cycle** per package:
+  tar-backup old cache → surgical wipe of AppLog files (user data
+  preserved) → generate plausible new values (Snowflake 64-bit did/iid/
+  ssid, UUID v4 cdid/clientudid, 16-hex openudid) → seed valid XML +
+  raw `bd_setting/*` files with correct package UID ownership + SELinux
+  context. On next cold start the app reads the seeded values as if
+  they were its own persistent state (see the `applog` command above)
 
 ### Out of scope
 
@@ -351,6 +423,25 @@ detector still sees:
   props gets whatever the device-wide layer set (or the real values when idle)
   with no bind-mount overlay — so its `Build.*` and file-based props can disagree.
   Only listed target apps get a fully consistent persona.
+
+- **`applog` regen is local-only; server-side re-linking still happens.** The
+  `applog` command regenerates AppLog's *local* identifier cache (Snowflake
+  did / iid / ssid, UUID cdid / clientudid, 16-hex openudid — seeded into
+  `applog.xml`, `snssdk_openudid.xml`, `bd_device_info.xml`, `files/bd_setting/*`,
+  `files/.cdid`). On next cold start the app reads our seeded values and
+  presents them to `/service/2/device_register/` as its own persistent state
+  — the backend accepts them because from its POV this is a device it hasn't
+  heard from in a while, not a "new install". But the ByteDance backend
+  fingerprints the register call itself — same account login, same residential
+  IP, reused sensor / SIM signals, or behavioral patterns (typing cadence,
+  video watch order) can still let the server link the new identifiers back
+  to the old device server-side, no matter how clean the local seed was.
+  Rotating hardware persona (`sandboxid freshen`), Google Advertising ID
+  (`rotate_ids.sh gaid`), and MACs alongside the AppLog regen is what makes
+  the seeded values actually *cohere* with a plausible new device — the local
+  regen alone is necessary but not sufficient. Network-layer changes (VPN /
+  residential IP rotation) are out of scope for this module and stay a
+  separate concern.
 
 SandboxID changes only identity strings. It does not modify hardware, the
 framework boot path, or kernel state in ways that risk boot failure.

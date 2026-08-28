@@ -216,6 +216,45 @@ the exact slug before redistribution.
 
 ---
 
+## Phase 3 hooking-completeness audit (2026-08)
+
+The Phase 3 review of `jni/` audited every `android.os.Build[.VERSION]` field
+against the AOSP source to catch identifiers the SDK reads that our L1 hook did
+not previously spoof. These are **factual references** — API type + system
+property name — none of AOSP's code is copied.
+
+- **AOSP `frameworks/base/core/java/android/os/Build.java`** (main branch,
+  Apache-2.0):
+  <https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/os/Build.java>
+  Consulted for the exact field type (`String` / `String[]` / `int`) and the
+  system property each field is initialized from — necessary to know that
+  `SUPPORTED_ABIS` is `String[]` (not `String`), that `SKU` reads
+  `ro.boot.hardware.sku`, that `VERSION.PREVIEW_SDK_INT` is `int`, etc. Result
+  of the audit: `install_build_hook()` now spoofs `SERIAL`, `SUPPORTED_ABIS`,
+  `SUPPORTED_32_BIT_ABIS`, `SUPPORTED_64_BIT_ABIS`, `CPU_ABI`, `CPU_ABI2`,
+  `SKU`, `ODM_SKU`, `RELEASE_OR_CODENAME`, `RELEASE_OR_PREVIEW_DISPLAY`,
+  `PREVIEW_SDK_FINGERPRINT`, `VERSION.BASE_OS`, `VERSION.PREVIEW_SDK_INT`,
+  `VERSION.MEDIA_PERFORMANCE_CLASS`, and matching sysprops are written by
+  `apply_native()` + `generate_mount_files()`.
+
+- **Zygisk sample repo (public API contract)**:
+  <https://github.com/topjohnwu/zygisk-module-sample/blob/master/module/jni/zygisk.hpp>
+  Referenced only to confirm `hookJniNativeMethods`, `pltHookRegister`, and
+  `pltHookCommit` semantics for the hardened L8/L9 error handling. Our copy of
+  the header is fetched at build time and pinned by commit SHA + SHA256 in
+  `build.sh` (see the header block there for the exact revision).
+
+- **AOSP chokepoint libraries for `clock_gettime` PLT hook** (Apache-2.0):
+  - `frameworks/native/libs/utils/SystemClock.cpp` — `libutils`.
+  - `system/libbase/chrono_utils.cpp` — `libbase` `boot_clock`.
+  - `system/core/libcutils/` — `libcutils` `android_get_uptime()`.
+  - `frameworks/base/core/jni/android_os_SystemClock.cpp` — `libandroid_runtime`.
+  These filenames are **facts** used to justify which shared libraries the L8
+  hook now registers PLT overrides against. No code from any of them is copied
+  into this repo.
+
+---
+
 ## Licensing note
 
 SandboxID stays [MIT](./LICENSE). GPL/AGPL-licensed projects (e.g.

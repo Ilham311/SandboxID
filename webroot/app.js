@@ -333,14 +333,23 @@ async function loadPersona() {
 
 document.getElementById('refreshBtn').addEventListener('click', loadPersona);
 document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
-  // Jalankan action.sh: undi 1 device acak multi-brand -> apply-boot -> reset
-  // app target -> rotasi ID (SSAID/GAID/MAC/nama/boot-count). Persis tombol
-  // Action fisik di KSU/APatch, jadi hasil dari web = hasil dari tombol.
+  // Jalankan action.sh: 1-click end-to-end.
+  //   1. Undi 1 device acak multi-brand dari devices.tsv (autopif.sh)
+  //   2. Apply-boot -> resetprop semua Build.* + Settings.Secure
+  //   3. Reset app target: force-stop + pm clear
+  //   4. Rotasi ID (SSAID/GAID/WiFi-MAC/BT-MAC/nama/boot-count)
+  //   5. AppLog ByteDance: wipe cache did/iid/ssid + generate baru + seed
+  //      applog.xml, snssdk_openudid.xml, bd_device_info.xml, dan
+  //      files/bd_setting/{device_id,install_id,openudid,clientudid,.cdid}
+  //      dengan ownership app UID + restorecon SELinux
+  // Persis tombol Action fisik di KSU/APatch — hasil dari web = hasil dari tombol.
   const cmd = `${ENV} && sh ${shq(MODDIR)}/action.sh 2>&1`;
   const r = await run(cmd);
   if (!r.ok) toast(trimTitle(r.err.message || 'Gagal mengacak perangkat'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
   else { const s = summarizeAction(r.out); toast(s.title, { kind: s.kind, detail: s.detail }); }
   loadPersona();
+  // Muat ulang tab Rotasi supaya status AppLog terbaru muncul kalau user pindah tab
+  if (document.getElementById('rotate').classList.contains('active')) loadRotate();
 }));
 
 const ROT_CARDS = [
@@ -350,6 +359,12 @@ const ROT_CARDS = [
   { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'MAC adapter BT + Address di bt_config.conf',        get: 'BLUETOOTH_ADDR' },
   { key: 'device-name', name: 'Nama perangkat', desc: 'device_name = MODEL dari identity.prop',           get: 'MODEL' },
   { key: 'boot-count',  name: 'Boot count',    desc: 'Settings.Global.boot_count = BOOT_COUNT identity.prop', get: 'BOOT_COUNT' },
+  // AppLog card: unlike the others it has no scalar value read from
+  // identity.prop — the "value" is per-target state (seeded/active/fresh),
+  // rendered by renderApplogStatus() into the same .val slot after the
+  // initial paint. Kept in ROT_CARDS so the "Rotasi semua" button covers
+  // it and it shows in the same grid the user is already scanning.
+  { key: 'applog',      name: 'AppLog ByteDance', desc: 'did/iid/ssid/openudid/clientudid/cdid untuk TikTok/Douyin — wipe + generate baru + seed', get: null, applog: true },
 ];
 
 async function loadRotate() {
@@ -374,8 +389,50 @@ async function loadRotate() {
     const slot = wrap.querySelector(`.card[data-key="${c.key}"] [data-slot="val"]`);
     if (!slot) continue;
     slot.classList.remove('sk', 'sk-line');
-    slot.textContent = (c.get && kv[c.get]) ? kv[c.get] : '\u2014';
+    if (c.applog) {
+      // Populated async below; leave the placeholder in place until the
+      // probe returns so the card doesn't flash "—" and then update.
+      slot.textContent = '\u2026';
+    } else {
+      slot.textContent = (c.get && kv[c.get]) ? kv[c.get] : '\u2014';
+    }
   }
+  // AppLog probe runs after the base render so the rest of the grid never
+  // blocks on it. Runs once per target listed in target.txt; count and state
+  // are joined into one short line per app.
+  renderApplogStatus(wrap);
+}
+
+// Ask the module to inspect each target's applog cache and paint the result
+// into the AppLog card. Values are never returned — helpers.sh::applog_probe
+// only reports counts + a state token (fresh/seeded/active/absent).
+async function renderApplogStatus(wrap) {
+  const slot = wrap.querySelector('.card[data-key="applog"] [data-slot="val"]');
+  if (!slot) return;
+  const cmd = `${ENV} && . ${shq(MODDIR + '/helpers.sh')} 2>/dev/null && ` +
+    `if [ -r ${shq(TARGETS)} ]; then ` +
+    `  while IFS= read -r _l || [ -n "$_l" ]; do ` +
+    `    _l=$(printf '%s' "$_l" | sed -e "s/#.*//" -e "s/^[[:space:]]*//" -e "s/[[:space:]]*$//"); ` +
+    `    [ -n "$_l" ] || continue; ` +
+    `    applog_probe "$_l"; ` +
+    `  done < ${shq(TARGETS)}; ` +
+    `fi`;
+  const r = await run(cmd);
+  if (!r.ok) { slot.textContent = '\u2014'; return; }
+  const lines = String(r.out || '').split('\n').map(x => x.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    slot.textContent = 'target.txt kosong';
+    return;
+  }
+  // Compact multi-target: "trill: seeded (8) | musically: fresh (0)"
+  const parts = lines.map(line => {
+    const [pkg, count, state] = line.split(/\s+/);
+    const short = String(pkg || '').split('.').slice(-1)[0] || pkg;
+    const label = { seeded: 'seed', active: 'aktif', fresh: 'bersih', absent: 'nihil' }[state] || state;
+    return `${short}: ${label} (${count})`;
+  });
+  slot.textContent = parts.join(' \u00b7 ');
+  slot.title = lines.join('\n');
 }
 
 function rotateCmd(key) {
