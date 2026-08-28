@@ -175,6 +175,10 @@ struct Identity {
             "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
             "GSM_OPERATOR_NUMERIC","GSM_OPERATOR_ALPHA","GSM_OPERATOR_ISO","GSM_SIM_STATE",
             "VBMETA_DIGEST",
+            // Phase 3 keys read by L1/L2
+            "SUPPORTED_ABIS","SUPPORTED_64_BIT_ABIS","SUPPORTED_32_BIT_ABIS",
+            "CPU_ABI","CPU_ABI2","SKU","ODM_SKU","BASE_OS",
+            "MEDIA_PERFORMANCE_CLASS","PREVIEW_SDK_INT","PREVIEW_SDK_FINGERPRINT",
         };
         std::string out;
         for (const auto& k : order) {

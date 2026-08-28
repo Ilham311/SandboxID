@@ -417,12 +417,55 @@ applog_generate() {
         # Three independent random 32-bit halves so did/iid/ssid don't collide.
         _r=$(od -An -N4 -tu4 /dev/urandom 2>/dev/null | tr -d ' \n')
         [ -n "$_r" ] || _r=$(awk 'BEGIN{srand(); print int(rand()*4294967295)}')
-        awk -v hi="$_now" -v lo="$_r" 'BEGIN {
-            # Compose (hi << 32) | lo, but keep top bit zero so it stays a
-            # positive signed int64 (fits in Java long which is what AppLog uses).
+        awk -v hi="$_now" -v lo="$_r" '
+        # Compose (hi << 32) | lo, but keep top bit zero so it stays a
+        # positive signed int64 (fits in Java long which is what AppLog uses).
+        # awk arithmetic is IEEE-754 double (53-bit mantissa): hi_masked (31
+        # bits) * 2^32 + lo (32 bits) needs up to 63 bits of exact integer
+        # precision, and a plain float multiply/add silently rounds away the
+        # low bits. Do the multiply/add as decimal-string long arithmetic
+        # (single-digit-times-multiplier per step, well under 53 bits) so no
+        # precision is lost.
+        function decmul(dec, mult,   n, i, carry, digit, prod, result) {
+            n = length(dec);
+            carry = 0;
+            result = "";
+            for (i = n; i >= 1; i--) {
+                digit = substr(dec, i, 1) + 0;
+                prod = digit * mult + carry;
+                carry = int(prod / 10);
+                result = (prod % 10) result;
+            }
+            while (carry > 0) {
+                result = (carry % 10) result;
+                carry = int(carry / 10);
+            }
+            sub(/^0+/, "", result);
+            if (result == "") result = "0";
+            return result;
+        }
+        function decadd(a, b,   la, lb, i, carry, sum, da, db, result, tmp) {
+            la = length(a); lb = length(b);
+            if (la < lb) { tmp = a; a = b; b = tmp; tmp = la; la = lb; lb = tmp; }
+            carry = 0;
+            result = "";
+            for (i = 0; i < la; i++) {
+                da = substr(a, la - i, 1) + 0;
+                db = (i < lb) ? substr(b, lb - i, 1) + 0 : 0;
+                sum = da + db + carry;
+                carry = int(sum / 10);
+                result = (sum % 10) result;
+            }
+            if (carry > 0) result = carry result;
+            return result;
+        }
+        BEGIN {
             hi_masked = hi % 2147483648;   # 31 bits, guarantees sign bit = 0
-            v = hi_masked * 4294967296 + (lo % 4294967296);
-            printf "%.0f", v;
+            lo_masked = lo % 4294967296;   # 32 bits
+            hi_str = sprintf("%.0f", hi_masked);
+            lo_str = sprintf("%.0f", lo_masked);
+            prod = decmul(hi_str, 4294967296);   # hi_masked * 2^32, exact
+            printf "%s", decadd(prod, lo_str);
         }'
     }
     _mk_uuid() {
