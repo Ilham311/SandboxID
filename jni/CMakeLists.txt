@@ -76,13 +76,20 @@ if(SBX_ENABLE_LSPLANT)
 
     set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
     add_subdirectory("${SBX_LSP_JNI}" lsplant_build)
-    add_subdirectory("${SBX_EXT}/dobby" dobby_build)
-    target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby)
+    add_subdirectory("${SBX_EXT}/dobby" dobby_build EXCLUDE_FROM_ALL)
+    # The pinned Dobby CMakeLists always defines a `dobby` SHARED target (it
+    # does not honor DOBBY_GENERATE_SHARED); its arm64 closure-bridge asm object
+    # is not built with PIC, so linking libdobby.so fails under LLD with
+    # "relocation R_AARCH64_ADR_PREL_PG_HI21 ... recompile with -fPIC". We only
+    # need the static lib, so link against `dobby_static` and keep the SHARED
+    # target excluded from the default build (EXCLUDE_FROM_ALL above) so it is
+    # never compiled/linked.
+    target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby_static)
     target_include_directories(sandboxid_module PRIVATE
         "${SBX_LSP_JNI}/include"
         "${SBX_EXT}/lsparself"
         "${SBX_EXT}/dobby/include")
-    foreach(t lsplant_static dex_builder_static dobby)
+    foreach(t lsplant_static dex_builder_static dobby_static)
         if(TARGET ${t})
             target_compile_options(${t} PRIVATE -fexceptions -frtti)
         endif()
