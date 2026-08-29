@@ -507,16 +507,12 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
         "/libandroid_runtime.so",
     };
     int registered = 0;
-    int found      = 0;
-    // Pre-resolve the real clock_gettime (same rationale as L9: lsplt never
-    // rolls back a partial commit, so the wrapper must always be callable).
     if (!orig_clock_gettime)
         orig_clock_gettime = reinterpret_cast<int (*)(clockid_t, timespec*)>(
             dlsym(RTLD_DEFAULT, "clock_gettime"));
     for (size_t i = 0; i < sizeof(kLibs) / sizeof(kLibs[0]); ++i) {
         dev_t dev = 0; ino_t ino = 0;
         if (!sbx_lib_dev_inode(kLibs[i], &dev, &ino)) continue;
-        ++found;
         api->pltHookRegister(dev, ino, "clock_gettime",
                              reinterpret_cast<void*>(sbx_hooked_clock_gettime),
                              reinterpret_cast<void**>(&orig_clock_gettime));
@@ -548,8 +544,8 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
         g_boot_off_sec = 0;
         return;
     }
-    LOGD("L8 boottime PLT hook aktif (+%llds, %d/%d lib mapped, %zu scanned) orig=%p",
-         (long long)secs, registered, found, sizeof(kLibs) / sizeof(kLibs[0]),
+    LOGD("L8 boottime PLT hook aktif (+%llds, %d/%zu lib mapped) orig=%p",
+         (long long)secs, registered, sizeof(kLibs) / sizeof(kLibs[0]),
          reinterpret_cast<void*>(orig_clock_gettime));
 }
 
@@ -591,8 +587,12 @@ static void sbx_fill_prop(char* value, const std::string& v) {
     value[n] = '\0';
 }
 
+static inline bool sbx_nr_spoofable(const char* name) {
+    return g_nr_active && name && !sbxnr::is_native_unsafe_prop(name);
+}
+
 static int sbx_spg(const char* name, char* value) {
-    if (g_nr_active && name && value) {
+    if (sbx_nr_spoofable(name) && value) {
         if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
         std::string v;
         if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
@@ -604,7 +604,7 @@ static int sbx_spg(const char* name, char* value) {
 
 static int sbx_spr(const void* pi, char* name, char* value) {
     int r = orig_spr ? orig_spr(pi, name, value) : -1;
-    if (r >= 0 && g_nr_active && name && value) {
+    if (r >= 0 && sbx_nr_spoofable(name) && value) {
         if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
         std::string v;
         if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
@@ -616,9 +616,9 @@ struct SbxCbCtx { sbx_prop_cb cb; void* cookie; };
 static void sbx_cb_tramp(void* cookie, const char* name, const char* value, uint32_t serial) {
     SbxCbCtx* c = static_cast<SbxCbCtx*>(cookie);
     std::string v;
-    if (g_nr_active && name && sbx_prop_hidden(name))
+    if (sbx_nr_spoofable(name) && sbx_prop_hidden(name))
         return;
-    else if (g_nr_active && name && spoof_prop_value(name, v))
+    else if (sbx_nr_spoofable(name) && spoof_prop_value(name, v))
         c->cb(c->cookie, name, v.c_str(), serial);
     else
         c->cb(c->cookie, name, value, serial);
@@ -862,20 +862,6 @@ static void install_native_read_hooks(Api* api) {
              (unsigned long long)epoch_ms);
     }
 
-    // Resolve the REAL implementations up front, before any hook exists.
-    // lsplt's CommitHook (LSPosed/LSPlt lsplt.cc, DoHook) applies hooks
-    // per-library and does NOT roll back the ones that succeeded when it
-    // returns false — a partial commit leaves PLT entries patched to our
-    // wrappers while the backup pointers may not all have been written.
-    // With orig_* pre-resolved via dlsym, every wrapper always has a valid
-    // real function to fall through to, whether commit fully succeeded,
-    // partially applied, or failed outright. Nulling the pointers instead
-    // (fce81a6) turned the live wrappers into stubs: __system_property_get
-    // returned an empty value for every lookup and __system_property_read_
-    // callback never invoked its caller's callback, so native readers
-    // (libcutils/hwui) saw empty ro.* props and the app froze on a white
-    // surface. dlsym(RTLD_DEFAULT, ...) resolves the real libc symbol — our
-    // hook is a GOT patch, not symbol interposition, so lookup is unaffected.
     if (!orig_spg)    orig_spg    = reinterpret_cast<sbx_spg_fn>(dlsym(RTLD_DEFAULT, "__system_property_get"));
     if (!orig_spr)    orig_spr    = reinterpret_cast<sbx_spr_fn>(dlsym(RTLD_DEFAULT, "__system_property_read"));
     if (!orig_sprcb)  orig_sprcb  = reinterpret_cast<sbx_sprcb_fn>(dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
@@ -889,10 +875,6 @@ static void install_native_read_hooks(Api* api) {
         return;
     }
     if (!api->pltHookCommit()) {
-        // Partial commit: the libraries whose hooks DID land stay patched for
-        // the life of the process (lsplt has no unregister/rollback). Keep the
-        // wrappers live and fully functional — hooked libs get spoofed, the
-        // rest transparently see real values. Never null orig_* here.
         LOGW("L9: pltHookCommit gagal sebagian (%d libs registered) — coverage "
              "mungkin parsial, wrapper tetap aman (orig_* via dlsym)", libs);
     }

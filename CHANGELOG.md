@@ -2,6 +2,95 @@
 
 ## Unreleased
 
+### Fix: blank putih v2.1.7 — L9 spoof `ro.hardware` / `ro.board.platform` / `ro.product.board` memutus resolusi driver grafis
+
+Entry v2.1.7 sebelumnya benar soal wrapper beracun, tapi fix-nya membuka bug
+kedua yang lebih dalam. Kronologi lengkap dari v2.1.2 ke v2.1.7:
+
+- **v2.1.2 (aman, dan ini alasannya):** `install_native_read_hooks()` melakukan
+  `return` LEBIH DULU sebelum `g_nr_active = true` ketika `pltHookCommit()`
+  gagal. Karena commit memang selalu gagal di app target (373 library), L9
+  praktis **mati total** — semua wrapper yang sudah terpasang di PLT jadi
+  pass-through murni lewat `orig_*` yang ditulis lsplt. App jalan normal karena
+  tidak ada spoofing native sama sekali.
+- **v2.1.5 / v2.1.6:** fce81a6 menambah reset fail-closed yang me-null-kan
+  `orig_*` → wrapper live berubah jadi stub racun → blank putih.
+- **v2.1.7:** a84d6c9 mencabut reset itu dan menyetel
+  `g_nr_active = orig_spg || ...` → **untuk pertama kalinya L9 benar-benar
+  AKTIF** di proses yang commit-nya parsial. Spoofing property native menyala,
+  dan tiga key di `prop_to_identity_map()` ternyata adalah key pemilih file
+  driver:
+
+  | property | identity key | dipakai untuk |
+  |---|---|---|
+  | `ro.hardware` | `HARDWARE` | `variant_keys[0]` libhardware |
+  | `ro.product.board` | `BOARD` | `variant_keys[1]` libhardware |
+  | `ro.board.platform` | `BOARD_PLATFORM` | `variant_keys[2]` libhardware + `HAL_SUBNAME_KEY_PROPERTIES[2]` EGL |
+
+Rantai kegagalannya, terverifikasi langsung dari sumber AOSP:
+
+1. `hardware/libhardware/hardware.c` — `variant_keys[] = {"ro.hardware",
+   "ro.product.board", "ro.board.platform", "ro.arch"}`, lalu
+   `hw_module_exists()` menyusun `"%s/%s.%s.so"` → `gralloc.<nilai>.so`,
+   `hwcomposer.<nilai>.so` di `/odm`, `/vendor`, `/system`. Nilai persona
+   (mis. `gs201`/`zuma` milik Pixel) di HP Snapdragon/MediaTek → `access()`
+   gagal di semua kandidat → HAL gralloc/mapper tidak ketemu.
+2. `frameworks/native/opengl/libs/EGL/Loader.cpp` —
+   `HAL_SUBNAME_KEY_PROPERTIES = {persist.graphics.egl, ro.hardware.egl,
+   ro.board.platform}` dibaca via `base::GetProperty()`, yaitu
+   `__system_property_read_callback` — **tepat simbol yang kita hook**. Loader
+   mencoba `libEGL_<nilai>.so` / `libGLESv2_<nilai>.so`, gagal, lalu
+   `failToLoadFromDriverSuffixProperty = true` dan **`break`** ("the value must
+   be set correctly with the first property that has a value").
+3. Fallback nama eksis (`libEGL.so` tanpa suffix) tidak ada di device vendor
+   Qualcomm/MediaTek (mereka ship `libEGL_adreno.so` / `libGLES_mali.so`), dan
+   fallback wildcard yang seharusnya menyelamatkan **di-gate oleh
+   `!failToLoadFromDriverSuffixProperty`** — jadi dilewati.
+4. `hnd == nullptr` → `LOG_ALWAYS_FATAL_IF(!hnd, "couldn't find an OpenGL ES
+   implementation...")` di RenderThread. Pada app ByteDance, native crash
+   handler (NPTH) menelan SIGABRT-nya → proses hidup, UI thread hidup,
+   RenderThread mati, surface tidak pernah digambar → **blank putih tanpa crash
+   signature**, persis gejala yang dilaporkan.
+
+Fix:
+
+- **jni/sbx_native_read.hpp** — `is_native_unsafe_prop()`: daftar property yang
+  nilainya dipakai native code untuk memilih file/ABI yang dimuat, jadi tidak
+  boleh pernah dipalsukan in-process — `ro.hardware`, prefix `ro.hardware.*`
+  (egl, vulkan, gralloc, hwcomposer, camera, …), `ro.product.board`,
+  `ro.board.platform`, `ro.arch`, `ro.zygote`, `ro.vendor.api_level`,
+  `persist.graphics.egl`, `ro.product.cpu.abi{,2,list,list32,list64}`, prefix
+  `ro.dalvik.vm.isa.*` / `dalvik.vm.isa.*`.
+- **jni/main.cpp** — gate baru `sbx_nr_spoofable()` dipakai `sbx_spg()`,
+  `sbx_spr()`, dan `sbx_cb_tramp()`: key native-unsafe diteruskan ke
+  implementasi asli tanpa diubah dan tanpa disembunyikan. Spoof L1 (`Build.*`)
+  dan L2 (`SystemProperties.get`) **tidak berubah** — `Build.BOARD`,
+  `Build.HARDWARE`, `Build.SUPPORTED_ABIS` tetap bernilai persona, karena di
+  layer Java nilai itu inert (tidak ada yang memuat driver dari string Java).
+  Yang dikembalikan ke nilai asli hanya pembacaan native.
+- **jni/sbx_native_read.hpp** — `classify()` tidak lagi mengalokasi
+  `std::string p(path)` di setiap panggilan. Sejak `g_nr_active` benar-benar
+  aktif, fungsi ini jalan di **setiap** `open`/`openat`/`fopen` di seluruh
+  proses (termasuk linker saat memegang loader lock, RenderThread, dan thread
+  GC ART); `malloc` di jalur itu adalah hazard reentrancy. Sekarang murni
+  `strlen` + `memcmp` lewat overload `ends_with(const char*, size_t, const
+  char*)`.
+- **jni/main.cpp (L8)** — variabel `found` yang redundan (selalu sama dengan
+  `registered`) dihapus; menghilangkan warning
+  `-Wunused-but-set-variable` di build release.
+- **tests/native_read_test.cpp** — `test_native_unsafe_prop()` (19 key unsafe,
+  17 key yang harus TETAP bisa dispoof termasuk `ro.soc.model`, `ro.hardwaremodel`,
+  `ro.arch2` sebagai penjaga prefix) dan `test_classify_no_alloc_paths()`.
+  Total 305 check, 0 gagal; `validate.sh` PASS.
+
+Kill switch tetap tersedia: `SBX_NATIVE_READ=0` di identity blob mematikan L9
+seluruhnya.
+
+Catatan yang sengaja dibiarkan: `ro.build.version.sdk` masih dispoof di layer
+native. Key itu tidak memilih file apa pun, dan `SDK_INT` sisi Java adalah jalur
+deteksi utama. Kalau nanti persona dipakai lintas versi Android, key ini
+kandidat pertama untuk ikut masuk daftar native-unsafe.
+
 ### Fix: ROOT CAUSE aplikasi target blank putih — wrapper L9 beracun saat pltHookCommit gagal parsial
 
 Diagnosis uptime pada entry sebelumnya **salah** — log v2.1.6 (UPTIME_SECONDS=0,

@@ -410,9 +410,13 @@ enum Kind {
     BD_RAW_CDID,         // files/.cdid
 };
 
+inline bool ends_with(const char* s, size_t sl, const char* suffix) {
+    size_t xl = std::strlen(suffix);
+    return sl >= xl && std::memcmp(s + sl - xl, suffix, xl) == 0;
+}
+
 inline bool ends_with(const std::string& s, const char* suffix) {
-    size_t sl = std::strlen(suffix);
-    return s.size() >= sl && s.compare(s.size() - sl, sl, suffix) == 0;
+    return ends_with(s.c_str(), s.size(), suffix);
 }
 
 inline Kind classify(const char* path) {
@@ -437,19 +441,17 @@ inline Kind classify(const char* path) {
         }
     }
 
-    // AppLog caches live at /data/data/<pkg>/... — match by suffix so every
-    // target package (and /data/user/0 equivalently) is covered.
-    std::string p(path);
-    if (ends_with(p, "/shared_prefs/applog.xml") ||
-        ends_with(p, "/shared_prefs/snssdk_openudid.xml") ||
-        ends_with(p, "/shared_prefs/snssdk_did.xml") ||
-        ends_with(p, "/shared_prefs/bd_device_info.xml"))
+    const size_t pl2 = std::strlen(path);
+    if (ends_with(path, pl2, "/shared_prefs/applog.xml") ||
+        ends_with(path, pl2, "/shared_prefs/snssdk_openudid.xml") ||
+        ends_with(path, pl2, "/shared_prefs/snssdk_did.xml") ||
+        ends_with(path, pl2, "/shared_prefs/bd_device_info.xml"))
         return APPLOG_XML;
-    if (ends_with(p, "/files/bd_setting/device_id"))   return BD_RAW_DID;
-    if (ends_with(p, "/files/bd_setting/install_id"))  return BD_RAW_IID;
-    if (ends_with(p, "/files/bd_setting/openudid"))    return BD_RAW_OPENUDID;
-    if (ends_with(p, "/files/bd_setting/clientudid"))  return BD_RAW_CLIENTUDID;
-    if (ends_with(p, "/files/.cdid"))                  return BD_RAW_CDID;
+    if (ends_with(path, pl2, "/files/bd_setting/device_id"))   return BD_RAW_DID;
+    if (ends_with(path, pl2, "/files/bd_setting/install_id"))  return BD_RAW_IID;
+    if (ends_with(path, pl2, "/files/bd_setting/openudid"))    return BD_RAW_OPENUDID;
+    if (ends_with(path, pl2, "/files/bd_setting/clientudid"))  return BD_RAW_CLIENTUDID;
+    if (ends_with(path, pl2, "/files/.cdid"))                  return BD_RAW_CDID;
 
     return NONE;
 }
@@ -497,6 +499,31 @@ inline bool is_custom_rom_prop(const char* name) {
 
 inline bool should_hide_prop(const char* name) {
     return is_emulator_prop(name) || is_custom_rom_prop(name);
+}
+
+inline bool is_native_unsafe_prop(const char* name) {
+    if (!name) return false;
+
+    static const char* const exact[] = {
+        "ro.hardware",
+        "ro.product.board",
+        "ro.board.platform",
+        "ro.arch",
+        "ro.zygote",
+        "ro.vendor.api_level",
+        "persist.graphics.egl",
+        "ro.product.cpu.abi",
+        "ro.product.cpu.abi2",
+        "ro.product.cpu.abilist",
+        "ro.product.cpu.abilist32",
+        "ro.product.cpu.abilist64",
+    };
+    for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
+
+    if (std::strncmp(name, "ro.hardware.", 12) == 0)      return true;
+    if (std::strncmp(name, "ro.dalvik.vm.isa.", 17) == 0) return true;
+    if (std::strncmp(name, "dalvik.vm.isa.", 14) == 0)    return true;
+    return false;
 }
 
 }
