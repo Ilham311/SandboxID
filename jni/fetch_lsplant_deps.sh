@@ -148,6 +148,19 @@ patch_dobby() {
       echo "==> patched Dobby ProcessRuntime.cc (added missing <cinttypes> for PRIxPTR)"
     fi
   fi
+
+  # (5) code-patch-tool-posix.cc (source/Backend/UserMode/ExecMemory) includes
+  #     "core/arch/Cpu.h", which does not exist anywhere in the pinned Dobby
+  #     ref -> "fatal error: 'core/arch/Cpu.h' file not found". The file only
+  #     calls ClearCache(), which is already declared via the
+  #     dobby/dobby_internal.h -> PlatformUnifiedInterface/ExecMemory/
+  #     ClearCacheTool.h include chain, so the Cpu.h include is dead weight.
+  #     Drop it.
+  local codepatch="$EXT/dobby/source/Backend/UserMode/ExecMemory/code-patch-tool-posix.cc"
+  if [ -f "$codepatch" ] && grep -q '#include "core/arch/Cpu.h"' "$codepatch"; then
+    sed -i '/#include "core\/arch\/Cpu\.h"/d' "$codepatch"
+    echo "==> patched Dobby code-patch-tool-posix.cc (dropped missing core/arch/Cpu.h include)"
+  fi
 }
 patch_dobby
 
