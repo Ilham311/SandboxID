@@ -74,8 +74,9 @@ inline bool init(JNIEnv* env) {
         .inline_unhooker = sbx_inline_unhooker,
         .art_symbol_resolver =
             [](std::string_view s) -> void* { return reinterpret_cast<void*>(art.getSymbAddress(s)); },
-        .art_symbol_prefix_resolver =
-            [](std::string_view s) -> void* { return reinterpret_cast<void*>(art.getSymbPrefixFirstAddress(s)); },
+        // NOTE: LSPlant v2.0 (the pinned LSPLANT_REF) has no art_symbol_prefix_resolver;
+        // it was added post-v2.0. v2.0 resolves ART symbols fine without it, so we don't
+        // wire lsparself::getSymbPrefixFirstAddress here. Re-add if LSPLANT_REF is bumped.
     };
     info.generated_class_name  = kCls;
     info.generated_source_name = kSrc;

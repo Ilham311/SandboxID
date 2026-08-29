@@ -44,7 +44,7 @@ jni/external/
 
 ## Generated callback DEX
 
-The Java hook callback (`jni/SandboxIDHook.java` → class
+The Java hook callback (`jni/EnvCompatState.java` → class
 `androidx.core.os.EnvCompatState`) must be compiled to a DEX and embedded as a C
 header (`jni/hook_dex.h`, also git-ignored). Generate it with:
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 JNI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-JAVA_SRC="$JNI_DIR/SandboxIDHook.java"
+JAVA_SRC="$JNI_DIR/EnvCompatState.java"
 OUT_HEADER="$JNI_DIR/hook_dex.h"
 
 if [ ! -f "$JAVA_SRC" ]; then

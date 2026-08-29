@@ -53,6 +53,48 @@ if [ ! -f "$EXT/dobby/include/dobby.h" ]; then
   exit 1
 fi
 
+# ---- patch vendored Dobby so it builds for ELF/Android arm64 with clang ----
+# The pinned Dobby commit has two Android/arm64 build breakers. Fix them in the
+# clone (we vendor by clone, not by fork). Both guards make this idempotent, so
+# re-running against an already-present clone is a no-op.
+patch_dobby() {
+  local plat="$EXT/dobby/source/PlatformUnifiedInterface/platform.h"
+  local casm="$EXT/dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
+
+  # (1) Break the platform.h <-> dobby/common.h #include cycle. Under #pragma once,
+  #     when platform.h is the entry TU the nested common/os_arch_features.h is
+  #     reached before platform.h finishes, so its make_memory_readable() sees an
+  #     as-yet-undeclared OSMemory -> "use of undeclared identifier 'OSMemory'".
+  #     platform.h itself only needs the standard size/int/va_list types, so pull
+  #     those directly instead of the umbrella header; the cycle then disappears.
+  if [ -f "$plat" ] && grep -q '#include "dobby/common.h"' "$plat"; then
+    sed -i 's|#include "dobby/common.h"|#include <cstddef>\n#include <cstdint>\n#include <cstdarg>|' "$plat"
+    echo "==> patched Dobby platform.h (broke common.h include cycle -> OSMemory visible)"
+  fi
+
+  # (2) The arm64 closure-bridge trampoline emits Mach-O @PAGE/@PAGEOFF relocation
+  #     syntax unconditionally; the ELF assembler rejects it and needs bare adrp +
+  #     :lo12:. Keep the Apple form under __APPLE__, use the ELF form otherwise.
+  if [ -f "$casm" ] && ! grep -q ':lo12:cdecl(common_closure_bridge_handler)' "$casm"; then
+    awk '
+      /adrp TMP_REG_0, cdecl\(common_closure_bridge_handler\)@PAGE/ {
+        print "#if defined(__APPLE__)"
+        print "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE"
+        print "add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF"
+        print "#else"
+        print "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)"
+        print "add TMP_REG_0, TMP_REG_0, :lo12:cdecl(common_closure_bridge_handler)"
+        print "#endif"
+        skip = 1; next
+      }
+      skip == 1 { skip = 0; next }
+      { print }
+    ' "$casm" > "$casm.sbxtmp" && mv "$casm.sbxtmp" "$casm"
+    echo "==> patched Dobby closure_bridge_arm64.asm (@PAGE/@PAGEOFF -> ELF adrp + :lo12:)"
+  fi
+}
+patch_dobby
+
 mkdir -p "$EXT/lsparself"
 if [ -f "$EXT/lsparself/lsparself.hpp" ]; then
   echo "==> lsparself.hpp already present"
