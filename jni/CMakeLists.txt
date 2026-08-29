@@ -42,7 +42,7 @@ if(SBX_BUILD_TESTS)
     add_test(NAME native_read_test COMMAND sbx_native_read_test)
 endif()
 
-option(SBX_ENABLE_LSPLANT "Enable L3 LSPlant Java-method hooks (experimental, unverified)" OFF)
+option(SBX_ENABLE_LSPLANT "Enable L3 LSPlant Java-method hooks (ON by default; set -DSBX_ENABLE_LSPLANT=OFF to disable)" ON)
 if(SBX_ENABLE_LSPLANT)
     message(WARNING "[sandboxid] L3 LSPlant ENABLED — verify boot on EVERY target ABI/Android version before shipping")
 

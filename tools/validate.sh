@@ -41,6 +41,11 @@ if clang++ -std=c++20 -o /tmp/sbx_native_read_test tests/native_read_test.cpp 2>
 else
   echo "FAIL: native_read_test"; rc=1
 fi
+if clang++ -std=c++20 -o /tmp/sbx_ident_synth_test tests/ident_synth_test.cpp 2>&1 && /tmp/sbx_ident_synth_test; then
+  echo "OK: ident_synth_test"
+else
+  echo "FAIL: ident_synth_test"; rc=1
+fi
 
 echo "=== 3b/4 autopif artifact well-formedness ==="
 SBX_ART=/tmp/sbx_autopif_identity

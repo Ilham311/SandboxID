@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <ctime>
 #include <thread>
+#include <atomic>
 #include "zygisk.hpp"
 #include "config.hpp"
 #include "sbx_lsplant.hpp"
@@ -431,10 +432,15 @@ static int sbx_hooked_clock_gettime(clockid_t clk, struct timespec* ts) {
 static bool sbx_find_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return false;
-    char line[512];
+    // getline() grows its buffer to fit the whole line: a fixed char[512] would
+    // truncate long /proc/self/maps paths and split one map across two iterations,
+    // making a library's dev/inode impossible to match (Bug #4).
+    char*  line = nullptr;
+    size_t cap  = 0;
+    ssize_t n;
     size_t sl = strlen(suffix);
     bool found = false;
-    while (fgets(line, sizeof(line), f)) {
+    while ((n = getline(&line, &cap, f)) != -1) {
         char* path = strchr(line, '/');
         if (!path) continue;
         size_t pl = strlen(path);
@@ -445,6 +451,7 @@ static bool sbx_find_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* ou
             break;
         }
     }
+    free(line);
     fclose(f);
     return found;
 }
@@ -516,7 +523,7 @@ static sbx_sysprop_get_fn    orig_sysprop_get    = nullptr;
 static sbx_sysprop_read_fn    orig_sysprop_read    = nullptr;
 static sbx_sysprop_read_cb_fn  orig_sysprop_read_cb  = nullptr;
 
-static bool        g_native_read_active    = false;
+static std::atomic<bool> g_native_read_active{false};
 static std::string g_boot_id;
 static std::string g_wifi_mac;
 static std::string g_proc_version;
@@ -528,11 +535,12 @@ static std::string    g_pkg;
 static sbxnr::ApplogIds g_applog;
 static bool           g_applog_ok = false;
 
-static void sbx_fill_prop(char* value, const std::string& v) {
+static int sbx_fill_prop(char* value, const std::string& v) {
     size_t n = v.size();
     if (n > PROP_VALUE_MAX - 1) n = PROP_VALUE_MAX - 1;
     memcpy(value, v.data(), n);
     value[n] = '\0';
+    return (int)n;   // bytes actually written (excl NUL) — matches __system_property_get contract
 }
 
 static inline bool sbx_nr_spoofable(const char* name) {
@@ -543,7 +551,7 @@ static int sbx_sysprop_get(const char* name, char* value) {
     if (sbx_nr_spoofable(name) && value) {
         if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
         std::string v;
-        if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
+        if (spoof_prop_value(name, v)) { return sbx_fill_prop(value, v); }
     }
     if (orig_sysprop_get) return orig_sysprop_get(name, value);
     if (value) value[0] = '\0';
@@ -555,7 +563,7 @@ static int sbx_sysprop_read(const void* pi, char* name, char* value) {
     if (r >= 0 && sbx_nr_spoofable(name) && value) {
         if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
         std::string v;
-        if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
+        if (spoof_prop_value(name, v)) { return sbx_fill_prop(value, v); }
     }
     return r;
 }
@@ -747,8 +755,10 @@ static int sbx_register_across_libs(Api* api) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return 0;
     std::vector<std::pair<dev_t, ino_t>> seen;
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
+    char*  line = nullptr;   // getline: grow to fit; char[512] would split long maps lines (Bug #4)
+    size_t cap  = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, f)) != -1) {
         char* path = strchr(line, '/');
         if (!path) continue;
         size_t pl = strlen(path);
@@ -764,6 +774,7 @@ static int sbx_register_across_libs(Api* api) {
         seen.push_back(std::make_pair(st.st_dev, st.st_ino));
         sbx_register_lib_hooks(api, st.st_dev, st.st_ino);
     }
+    free(line);
     fclose(f);
     return (int)seen.size();
 }
@@ -842,7 +853,7 @@ static int         g_crash_pipe[2] = {-1, -1};
 static char        g_watchdog_pkg_buf[128] = {0};
 static int64_t     g_load_time_ms = 0;
 static struct sigaction g_prev_sig[NSIG];
-static volatile sig_atomic_t g_crash_count[NSIG] = {0};
+static std::atomic<int>      g_crash_count[NSIG];
 static const int   CRASH_LIMIT = 3;
 
 static int64_t sbx_now_ms() {
@@ -876,8 +887,7 @@ static void sbx_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
     if (sig >= 0 && sig < NSIG) {
 
-        n = g_crash_count[sig] + 1;
-        g_crash_count[sig] = n;
+        n = g_crash_count[sig].fetch_add(1, std::memory_order_relaxed) + 1;
     }
 
     if (n <= CRASH_LIMIT && g_crash_pipe[1] >= 0) {
@@ -1190,11 +1200,22 @@ public:
         install_crash_watchdog(pkg_);
 
 #ifdef SBX_ENABLE_LSPLANT
-        if (sbxlsp::init(env_)) {
-            if (!sbxlsp::hook_android_id(env_, val("ANDROID_ID")))
-                LOGE("L3 ANDROID_ID hook not installed (continuing with L1/L2)");
-        } else {
-            LOGE("L3 LSPlant init failed (continuing with L1/L2)");
+        {
+            // L3 spoofs identifiers that arrive over Binder (telephony/DRM) and so are
+            // out of reach of the property layers. Values come from the identity blob;
+            // IMEI/IMSI/ICCID/MEID/Widevine are synthesized from the same persona seed
+            // used by L9, so they rotate together on every action.sh run.
+            sbxlsp::HookValues hv;
+            hv.android_id = val("ANDROID_ID");
+            hv.serial     = val("SERIAL");
+            hv.wifi_mac   = val("WIFI_MAC");
+            hv.op_num     = val("GSM_OPERATOR_NUMERIC");
+            hv.op_alpha   = val("GSM_OPERATOR_ALPHA");
+            hv.op_iso     = val("GSM_OPERATOR_ISO");
+            hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
+                                         val("ANDROID_ID"));
+            if (!sbxlsp::install_all(env_, hv))
+                LOGE("L3 hooks not installed (continuing with L1/L2/L9)");
         }
 #endif
 

@@ -136,10 +136,15 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
         ::close(pipefd[0]);
         MountResult r;
 
+        // NOTE: this runs in a fork()ed child of the multithreaded companion, so only
+        // async-signal-safe calls are permitted until _exit. snprintf()/open() are safe;
+        // std::string concatenation (heap alloc) is NOT — build the path on the stack.
         std::array<int, sandboxid::BIND_ENTRIES_N> src_fds{};
         for (size_t i = 0; i < sandboxid::BIND_ENTRIES_N; ++i) {
-            std::string src = std::string(sandboxid::MOUNTDIR) + "/" + sandboxid::BIND_ENTRIES[i].src_rel;
-            src_fds[i] = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
+            char src[512];
+            ::snprintf(src, sizeof(src), "%s/%s",
+                       sandboxid::MOUNTDIR, sandboxid::BIND_ENTRIES[i].src_rel);
+            src_fds[i] = ::open(src, O_RDONLY | O_CLOEXEC);
         }
 
         char path[64];
@@ -228,89 +233,162 @@ struct HideResult {
     int32_t  first_fail_errno = 0;
 };
 
-static uint32_t do_hide_via_fork(uint32_t target_pid) {
+// Bug #1b: the original single child ran std::ifstream (read_file) and
+// sbxmnt::select_umount_targets — both allocate — INSIDE a fork() of the
+// multithreaded companion, where only async-signal-safe calls are legal (a
+// heap lock held by another thread at fork time would deadlock the child).
+//
+// Split into two async-signal-safe children with all allocation kept in the
+// parent, reusing the audited selection logic unchanged:
+//   child A: setns(target) -> raw read(/proc/self/mountinfo) -> pipe to parent
+//   parent : select_umount_targets(raw)  (normal context: malloc ok)
+//   child B: setns(target) -> MS_SLAVE -> umount2() each selected path
+static bool sbx_hide_read_mountinfo(uint32_t target_pid, std::string& out,
+                                    int32_t& ns_open_errno, int32_t& setns_errno,
+                                    int32_t& read_errno) {
+    struct MiHdr { int32_t ns_open_errno, setns_errno, read_errno; uint32_t len; };
+    static char mibuf[256 * 1024];          // static: present at fork, no child malloc
+
     int pipefd[2];
-    if (::pipe(pipefd) != 0) {
-        LOGE("hide: pipe failed errno=%d", errno);
-        return 0;
-    }
+    if (::pipe(pipefd) != 0) { read_errno = errno; return false; }
 
     pid_t child = ::fork();
-    if (child < 0) {
-        LOGE("hide: fork failed errno=%d", errno);
-        ::close(pipefd[0]); ::close(pipefd[1]);
-        return 0;
-    }
+    if (child < 0) { read_errno = errno; ::close(pipefd[0]); ::close(pipefd[1]); return false; }
 
-    if (child == 0) {
-
+    if (child == 0) {                        // ---- child A (async-signal-safe only) ----
         ::close(pipefd[0]);
-        HideResult r;
-
+        MiHdr h{0, 0, 0, 0};
         char path[64];
         ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
-        int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
-        if (tgt_ns < 0) {
-            r.ns_open_errno = errno;
-        } else if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
-            r.setns_errno = errno;
-            ::close(tgt_ns);
+        int ns = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (ns < 0) {
+            h.ns_open_errno = errno;
+        } else if (::setns(ns, CLONE_NEWNS) != 0) {
+            h.setns_errno = errno; ::close(ns);
         } else {
-
-            if (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) != 0)
-                r.slave_errno = errno;
-
-            std::string mi = read_file("/proc/self/mountinfo");
-            if (mi.empty()) {
-                r.mountinfo_errno = errno ? errno : ENOENT;
+            int mf = ::open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
+            if (mf < 0) {
+                h.read_errno = errno ? errno : ENOENT;
             } else {
-                std::vector<std::string> targets = sbxmnt::select_umount_targets(mi);
-                r.candidates = (uint32_t)targets.size();
-
-                for (const auto& mp : targets) {
-                    if (::umount2(mp.c_str(), MNT_DETACH) == 0) {
-                        r.detached++;
-                    } else {
-                        if (!r.first_fail_errno) r.first_fail_errno = errno;
-                        r.fail++;
-                    }
+                uint32_t off = 0;
+                while (off < sizeof(mibuf)) {
+                    ssize_t k = ::read(mf, mibuf + off, sizeof(mibuf) - off);
+                    if (k < 0) { if (errno == EINTR) continue; h.read_errno = errno; break; }
+                    if (k == 0) break;
+                    off += (uint32_t)k;
                 }
+                h.len = off;
+                ::close(mf);
             }
-            ::close(tgt_ns);
+            ::close(ns);
         }
-
-        sandboxid::write_full(pipefd[1], &r, sizeof(r));
+        sandboxid::write_full(pipefd[1], &h, sizeof(h));
+        if (h.len) sandboxid::write_full(pipefd[1], mibuf, h.len);
         ::close(pipefd[1]);
         ::_exit(0);
     }
 
-    ::close(pipefd[1]);
-    HideResult r;
+    ::close(pipefd[1]);                       // ---- parent ----
+    MiHdr h{};
+    bool got = sandboxid::read_full(pipefd[0], &h, sizeof(h));
+    if (got && h.len > 0 && h.len <= sizeof(mibuf))
+        got = sandboxid::read_full(pipefd[0], mibuf, h.len);
+    ::close(pipefd[0]);
+    ::waitpid(child, nullptr, 0);
+
+    ns_open_errno = h.ns_open_errno;
+    setns_errno   = h.setns_errno;
+    read_errno    = h.read_errno;
+    if (!got) { if (!read_errno) read_errno = EIO; return false; }
+    if (h.ns_open_errno || h.setns_errno || h.read_errno) return false;
+    out.assign(mibuf, h.len);
+    return true;
+}
+
+// child B: apply the umounts the parent selected. `targets` lives in parent memory
+// and is inherited read-only by the fork — the child only reads it and calls
+// setns/mount/umount2 (all async-signal-safe).
+static bool sbx_hide_apply_umounts(uint32_t target_pid,
+                                   const std::vector<std::string>& targets, HideResult& r) {
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) { r.first_fail_errno = errno; return false; }
+
+    pid_t child = ::fork();
+    if (child < 0) { r.first_fail_errno = errno; ::close(pipefd[0]); ::close(pipefd[1]); return false; }
+
+    if (child == 0) {                         // ---- child B (async-signal-safe only) ----
+        ::close(pipefd[0]);
+        HideResult cr;
+        cr.candidates = (uint32_t)targets.size();
+        char path[64];
+        ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
+        int ns = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (ns < 0) {
+            cr.ns_open_errno = errno;
+        } else if (::setns(ns, CLONE_NEWNS) != 0) {
+            cr.setns_errno = errno; ::close(ns);
+        } else {
+            if (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) != 0)
+                cr.slave_errno = errno;
+            for (const auto& mp : targets) {  // read-only iteration: no alloc
+                if (::umount2(mp.c_str(), MNT_DETACH) == 0) {
+                    cr.detached++;
+                } else {
+                    if (!cr.first_fail_errno) cr.first_fail_errno = errno;
+                    cr.fail++;
+                }
+            }
+            ::close(ns);
+        }
+        sandboxid::write_full(pipefd[1], &cr, sizeof(cr));
+        ::close(pipefd[1]);
+        ::_exit(0);
+    }
+
+    ::close(pipefd[1]);                        // ---- parent ----
     bool got = sandboxid::read_full(pipefd[0], &r, sizeof(r));
     ::close(pipefd[0]);
+    ::waitpid(child, nullptr, 0);
+    return got;
+}
 
-    int status = 0;
-    ::waitpid(child, &status, 0);
+static uint32_t do_hide_via_fork(uint32_t target_pid) {
+    HideResult r;
 
-    if (!got) {
+    std::string mi;
+    if (!sbx_hide_read_mountinfo(target_pid, mi, r.ns_open_errno, r.setns_errno, r.mountinfo_errno)) {
+        if (r.ns_open_errno)
+            LOGE("hide pid=%u: open /proc/%u/ns/mnt failed errno=%d", target_pid, target_pid, r.ns_open_errno);
+        else if (r.setns_errno)
+            LOGE("hide pid=%u: setns failed errno=%d", target_pid, r.setns_errno);
+        else
+            LOGE("hide pid=%u: baca /proc/self/mountinfo gagal errno=%d", target_pid, r.mountinfo_errno);
+        return 0;
+    }
+
+    // Parent-side selection (malloc is safe here): reuse the audited matcher.
+    std::vector<std::string> targets = sbxmnt::select_umount_targets(mi);
+    r.candidates = (uint32_t)targets.size();
+    if (targets.empty()) {
+        LOGI("hide pid=%u: 0 candidate(s) [%s]", target_pid, SBX_VARIANT_TAG);
+        return 0;
+    }
+
+    if (!sbx_hide_apply_umounts(target_pid, targets, r)) {
         LOGE("hide child for pid=%u produced no result (crashed?)", target_pid);
         return 0;
     }
     if (r.ns_open_errno) {
-        LOGE("hide pid=%u: open /proc/%u/ns/mnt failed errno=%d", target_pid, target_pid, r.ns_open_errno);
+        LOGE("hide pid=%u: open /proc/%u/ns/mnt failed errno=%d (phase 2)", target_pid, target_pid, r.ns_open_errno);
         return 0;
     }
     if (r.setns_errno) {
-        LOGE("hide pid=%u: setns failed errno=%d", target_pid, r.setns_errno);
+        LOGE("hide pid=%u: setns failed errno=%d (phase 2)", target_pid, r.setns_errno);
         return 0;
     }
     if (r.slave_errno) {
         LOGW("hide pid=%u: MS_SLAVE gagal errno=%d — detach bisa bocor ke host ns!",
              target_pid, r.slave_errno);
-    }
-    if (r.mountinfo_errno) {
-        LOGE("hide pid=%u: baca /proc/self/mountinfo gagal errno=%d", target_pid, r.mountinfo_errno);
-        return 0;
     }
     if (r.fail) {
         LOGW("hide pid=%u: %u detach GAGAL (first errno=%d) dari %u kandidat [%s]",
@@ -333,20 +411,23 @@ static void watch_target_death(uint32_t pid, int client_fd) {
 
     if (::fork() > 0) ::_exit(0);
 
+    // Bug #1c: this detached grandchild was forked out of the multithreaded
+    // companion, so it may only call async-signal-safe functions. Replace
+    // std::this_thread::sleep_for with ::nanosleep, and drop the android_log
+    // calls entirely — __android_log_print takes an internal lock (and may
+    // allocate), which would deadlock if another thread held it at fork time.
+    // The watcher's sole job is to reap itself once the target exits; it does
+    // that silently now.
     ::close(client_fd);
 
-    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (int i = 0; i < 3600; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const struct timespec nap = { 0, 500L * 1000L * 1000L };  // 500 ms
+    for (int i = 0; i < 3600; ++i) {                          // ~30 min ceiling
+        ::nanosleep(&nap, nullptr);
         if (::kill((pid_t)pid, 0) == 0) continue;
         if (errno != ESRCH) continue;
-        struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-        long ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
-        LOGI("DEATH target pid=%u disappeared after %ldms [%s]", pid, ms, SBX_VARIANT_TAG);
-        ::_exit(0);
+        ::_exit(0);                                           // target gone: done
     }
-    LOGD("death watcher for pid=%u timed out after 30min", pid);
-    ::_exit(0);
+    ::_exit(0);                                               // timed out
 }
 
 static bool try_seed_ondemand() {

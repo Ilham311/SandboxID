@@ -31,8 +31,8 @@ if [ -z "${VERSION:-}" ]; then
 fi
 
 LSP_CMAKE=""
-LSP_STATUS="disabled (set SBX_ENABLE_LSPLANT=ON to enable L3)"
-if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then
+LSP_STATUS="disabled (SBX_ENABLE_LSPLANT=OFF requested)"
+if [ "${SBX_ENABLE_LSPLANT:-ON}" = "ON" ]; then
   LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
   LSP_REV="$(grep -E '^LSPLANT_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
   DOBBY_REV="$(grep -E '^DOBBY_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
@@ -147,6 +147,25 @@ build_variant() {
 
   # WebUI (disalin utuh)
   [ -d webroot ] && cp -R webroot "$PKG/"
+
+  # Shim PATH: `su -c sandboxid ...` gagal karena bin/ tak ada di PATH. Berkas di
+  # system/bin/ di-magic-mount ke /system/bin (universal Magisk/KSU/APatch), lalu
+  # meng-exec binary per-ABI di bin/. Memperbaiki "su -c sandboxid tidak berkerja".
+  mkdir -p "$PKG/system/bin"
+  cat > "$PKG/system/bin/sandboxid" <<'WRAP'
+#!/system/bin/sh
+d=/data/adb/modules/sandboxid/bin
+if [ -x "$d/sandboxid" ]; then exec "$d/sandboxid" "$@"; fi
+case "$(getprop ro.product.cpu.abi)" in
+  arm64*)   exec "$d/sandboxid-arm64"  "$@" ;;
+  armeabi*) exec "$d/sandboxid-arm"    "$@" ;;
+  x86_64)   exec "$d/sandboxid-x86_64" "$@" ;;
+  x86)      exec "$d/sandboxid-x86"    "$@" ;;
+esac
+echo "sandboxid: tak ada binary untuk ABI $(getprop ro.product.cpu.abi)" >&2
+exit 127
+WRAP
+  chmod 0755 "$PKG/system/bin/sandboxid"
 
   if [ "${AUTOPIF_REFRESH:-0}" = "1" ] && [ -f "$PKG/autopif.sh" ]; then
     echo "  ==> refreshing persona pool (autopif, build-time)"
