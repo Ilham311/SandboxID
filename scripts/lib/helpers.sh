@@ -142,12 +142,10 @@ sbx_bin() {
             ;;
     esac
     [ -n "$_abi" ] || return 1
-    for _n in "sandboxid-$_abi" "ternak-tt-$_abi"; do
-        if [ -x "$_d/$_n" ]; then
-            printf '%s\n' "$_d/$_n"
-            return 0
-        fi
-    done
+    if [ -x "$_d/sandboxid-$_abi" ]; then
+        printf '%s\n' "$_d/sandboxid-$_abi"
+        return 0
+    fi
     return 1
 }
 

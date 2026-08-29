@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -u
-cd "$(dirname "$0")" || exit 1
+# validate.sh berada di tools/, jadi naik satu tingkat ke root repo agar semua
+# path relatif di bawah (jni/, tests/, scripts/, data/) tetap konsisten.
+cd "$(dirname "$0")/.." || exit 1
 rc=0
 
 echo "=== 1/4 clang++ -fsyntax-only (debug + release) ==="
@@ -39,10 +41,16 @@ if clang++ -std=c++20 -o /tmp/sbx_native_read_test tests/native_read_test.cpp 2>
 else
   echo "FAIL: native_read_test"; rc=1
 fi
+if clang++ -std=c++20 -o /tmp/sbx_ident_synth_test tests/ident_synth_test.cpp 2>&1 && /tmp/sbx_ident_synth_test; then
+  echo "OK: ident_synth_test"
+else
+  echo "FAIL: ident_synth_test"; rc=1
+fi
 
 echo "=== 3b/4 autopif artifact well-formedness ==="
 SBX_ART=/tmp/sbx_autopif_identity
-if MODDIR="$PWD" AUTOPIF_ARTIFACT="$SBX_ART" sh autopif.sh device >/dev/null 2>&1 \
+if MODDIR="$PWD" AUTOPIF_DEVICES="$PWD/data/devices.tsv" AUTOPIF_ARTIFACT="$SBX_ART" \
+     sh scripts/identity/autopif.sh device >/dev/null 2>&1 \
    && [ -s "$SBX_ART" ]; then
   bad=$(grep -vc '^[A-Za-z_][A-Za-z0-9_]*=[^=]*$' "$SBX_ART")
   glue=$(grep -c '^FLAVOR=.*=' "$SBX_ART")

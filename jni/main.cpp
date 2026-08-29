@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <ctime>
 #include <thread>
+#include <atomic>
 #include "zygisk.hpp"
 #include "config.hpp"
 #include "sbx_lsplant.hpp"
@@ -63,12 +64,12 @@ using zygisk::ServerSpecializeArgs;
 
 static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 
-static std::map<std::string, std::string> g_id;
+static std::map<std::string, std::string> g_identity;
 
 static const std::string& val(const std::string& k) {
     static const std::string empty;
-    auto it = g_id.find(k);
-    if (it != g_id.end() && !it->second.empty()) return it->second;
+    auto it = g_identity.find(k);
+    if (it != g_identity.end() && !it->second.empty()) return it->second;
 
     static const std::map<std::string, std::string> defaults = [] {
         std::map<std::string, std::string> m;
@@ -321,7 +322,7 @@ static bool sbx_should_suppress_key(const std::string& k) {
     return false;
 }
 
-static bool sbx_parse_ll(const std::string& v, long long& out) {
+static bool sbx_parse_longlong(const std::string& v, long long& out) {
     if (v.empty()) return false;
     errno = 0;
     const char* s = v.c_str();
@@ -345,7 +346,7 @@ static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
-        if (sbx_parse_ll(v, n)) { LOGD("L7 SPI(id) '%s' -> %d", k.c_str(), (int)n); return (jint)n; }
+        if (sbx_parse_longlong(v, n)) { LOGD("L7 SPI(id) '%s' -> %d", k.c_str(), (int)n); return (jint)n; }
     }
 
     const auto& m = sbx_int_spoof();
@@ -364,7 +365,7 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong 
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
-        if (sbx_parse_ll(v, n)) { LOGD("L7 SPL(id) '%s' -> %lld", k.c_str(), (long long)n); return (jlong)n; }
+        if (sbx_parse_longlong(v, n)) { LOGD("L7 SPL(id) '%s' -> %lld", k.c_str(), (long long)n); return (jlong)n; }
     }
 
     const auto& m = sbx_long_spoof();
@@ -428,13 +429,18 @@ static int sbx_hooked_clock_gettime(clockid_t clk, struct timespec* ts) {
     return r;
 }
 
-static bool sbx_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino) {
+static bool sbx_find_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return false;
-    char line[512];
+    // getline() grows its buffer to fit the whole line: a fixed char[512] would
+    // truncate long /proc/self/maps paths and split one map across two iterations,
+    // making a library's dev/inode impossible to match (Bug #4).
+    char*  line = nullptr;
+    size_t cap  = 0;
+    ssize_t n;
     size_t sl = strlen(suffix);
     bool found = false;
-    while (fgets(line, sizeof(line), f)) {
+    while ((n = getline(&line, &cap, f)) != -1) {
         char* path = strchr(line, '/');
         if (!path) continue;
         size_t pl = strlen(path);
@@ -445,6 +451,7 @@ static bool sbx_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino
             break;
         }
     }
+    free(line);
     fclose(f);
     return found;
 }
@@ -467,7 +474,7 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
             dlsym(RTLD_DEFAULT, "clock_gettime"));
     for (size_t i = 0; i < sizeof(kLibs) / sizeof(kLibs[0]); ++i) {
         dev_t dev = 0; ino_t ino = 0;
-        if (!sbx_lib_dev_inode(kLibs[i], &dev, &ino)) continue;
+        if (!sbx_find_lib_dev_inode(kLibs[i], &dev, &ino)) continue;
         api->pltHookRegister(dev, ino, "clock_gettime",
                              reinterpret_cast<void*>(sbx_hooked_clock_gettime),
                              reinterpret_cast<void**>(&orig_clock_gettime));
@@ -504,19 +511,19 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
 typedef int   (*sbx_open_fn)(const char*, int, ...);
 typedef int   (*sbx_openat_fn)(int, const char*, int, ...);
 typedef FILE* (*sbx_fopen_fn)(const char*, const char*);
-typedef int   (*sbx_spg_fn)(const char*, char*);
-typedef int   (*sbx_spr_fn)(const void*, char*, char*);
-typedef void  (*sbx_prop_cb)(void*, const char*, const char*, uint32_t);
-typedef void  (*sbx_sprcb_fn)(const void*, sbx_prop_cb, void*);
+typedef int   (*sbx_sysprop_get_fn)(const char*, char*);
+typedef int   (*sbx_sysprop_read_fn)(const void*, char*, char*);
+typedef void  (*sbx_sysprop_cb)(void*, const char*, const char*, uint32_t);
+typedef void  (*sbx_sysprop_read_cb_fn)(const void*, sbx_sysprop_cb, void*);
 
 static sbx_open_fn   orig_open   = nullptr;
 static sbx_openat_fn orig_openat = nullptr;
 static sbx_fopen_fn  orig_fopen  = nullptr;
-static sbx_spg_fn    orig_spg    = nullptr;
-static sbx_spr_fn    orig_spr    = nullptr;
-static sbx_sprcb_fn  orig_sprcb  = nullptr;
+static sbx_sysprop_get_fn    orig_sysprop_get    = nullptr;
+static sbx_sysprop_read_fn    orig_sysprop_read    = nullptr;
+static sbx_sysprop_read_cb_fn  orig_sysprop_read_cb  = nullptr;
 
-static bool        g_nr_active    = false;
+static std::atomic<bool> g_native_read_active{false};
 static std::string g_boot_id;
 static std::string g_wifi_mac;
 static std::string g_proc_version;
@@ -528,41 +535,42 @@ static std::string    g_pkg;
 static sbxnr::ApplogIds g_applog;
 static bool           g_applog_ok = false;
 
-static void sbx_fill_prop(char* value, const std::string& v) {
+static int sbx_fill_prop(char* value, const std::string& v) {
     size_t n = v.size();
     if (n > PROP_VALUE_MAX - 1) n = PROP_VALUE_MAX - 1;
     memcpy(value, v.data(), n);
     value[n] = '\0';
+    return (int)n;   // bytes actually written (excl NUL) — matches __system_property_get contract
 }
 
 static inline bool sbx_nr_spoofable(const char* name) {
-    return g_nr_active && name && !sbxnr::is_native_unsafe_prop(name);
+    return g_native_read_active && name && !sbxnr::is_native_unsafe_prop(name);
 }
 
-static int sbx_spg(const char* name, char* value) {
+static int sbx_sysprop_get(const char* name, char* value) {
     if (sbx_nr_spoofable(name) && value) {
         if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
         std::string v;
-        if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
+        if (spoof_prop_value(name, v)) { return sbx_fill_prop(value, v); }
     }
-    if (orig_spg) return orig_spg(name, value);
+    if (orig_sysprop_get) return orig_sysprop_get(name, value);
     if (value) value[0] = '\0';
     return 0;
 }
 
-static int sbx_spr(const void* pi, char* name, char* value) {
-    int r = orig_spr ? orig_spr(pi, name, value) : -1;
+static int sbx_sysprop_read(const void* pi, char* name, char* value) {
+    int r = orig_sysprop_read ? orig_sysprop_read(pi, name, value) : -1;
     if (r >= 0 && sbx_nr_spoofable(name) && value) {
         if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
         std::string v;
-        if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
+        if (spoof_prop_value(name, v)) { return sbx_fill_prop(value, v); }
     }
     return r;
 }
 
-struct SbxCbCtx { sbx_prop_cb cb; void* cookie; };
-static void sbx_cb_tramp(void* cookie, const char* name, const char* value, uint32_t serial) {
-    SbxCbCtx* c = static_cast<SbxCbCtx*>(cookie);
+struct SbxSyspropCbCtx { sbx_sysprop_cb cb; void* cookie; };
+static void sbx_sysprop_cb_trampoline(void* cookie, const char* name, const char* value, uint32_t serial) {
+    SbxSyspropCbCtx* c = static_cast<SbxSyspropCbCtx*>(cookie);
     std::string v;
     if (sbx_nr_spoofable(name) && sbx_prop_hidden(name))
         return;
@@ -571,11 +579,11 @@ static void sbx_cb_tramp(void* cookie, const char* name, const char* value, uint
     else
         c->cb(c->cookie, name, value, serial);
 }
-static void sbx_sprcb(const void* pi, sbx_prop_cb cb, void* cookie) {
-    if (!orig_sprcb) return;
-    if (!cb) { orig_sprcb(pi, cb, cookie); return; }
-    SbxCbCtx ctx{cb, cookie};
-    orig_sprcb(pi, sbx_cb_tramp, &ctx);
+static void sbx_sysprop_read_cb(const void* pi, sbx_sysprop_cb cb, void* cookie) {
+    if (!orig_sysprop_read_cb) return;
+    if (!cb) { orig_sysprop_read_cb(pi, cb, cookie); return; }
+    SbxSyspropCbCtx ctx{cb, cookie};
+    orig_sysprop_read_cb(pi, sbx_sysprop_cb_trampoline, &ctx);
 }
 
 static int sbx_make_memfd(const std::string& content) {
@@ -663,7 +671,7 @@ static int sbx_openat(int dirfd, const char* pathname, int flags, ...) {
     bool has_mode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (has_mode) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
 
-    if (g_nr_active && pathname && sbx_is_pure_read(flags)) {
+    if (g_native_read_active && pathname && sbx_is_pure_read(flags)) {
         int fd = sbx_spoof_fd(pathname);
         if (fd >= 0) return fd;
     }
@@ -678,7 +686,7 @@ static int sbx_open(const char* pathname, int flags, ...) {
     bool has_mode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (has_mode) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
 
-    if (g_nr_active && pathname && sbx_is_pure_read(flags)) {
+    if (g_native_read_active && pathname && sbx_is_pure_read(flags)) {
         int fd = sbx_spoof_fd(pathname);
         if (fd >= 0) return fd;
     }
@@ -701,7 +709,7 @@ static int sbx_fopen_flags(const char* mode) {
 
 static FILE* sbx_fopen(const char* path, const char* mode) {
 
-    if (g_nr_active && path && mode && mode[0] == 'r' && !strchr(mode, '+')) {
+    if (g_native_read_active && path && mode && mode[0] == 'r' && !strchr(mode, '+')) {
         int fd = sbx_spoof_fd(path);
         if (fd >= 0) {
             FILE* fp = fdopen(fd, "r");
@@ -722,13 +730,13 @@ static FILE* sbx_fopen(const char* path, const char* mode) {
     return fp;
 }
 
-static void sbx_reg_lib(Api* api, dev_t dev, ino_t ino) {
+static void sbx_register_lib_hooks(Api* api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "__system_property_get",
-                         reinterpret_cast<void*>(sbx_spg),  reinterpret_cast<void**>(&orig_spg));
+                         reinterpret_cast<void*>(sbx_sysprop_get),  reinterpret_cast<void**>(&orig_sysprop_get));
     api->pltHookRegister(dev, ino, "__system_property_read",
-                         reinterpret_cast<void*>(sbx_spr),  reinterpret_cast<void**>(&orig_spr));
+                         reinterpret_cast<void*>(sbx_sysprop_read),  reinterpret_cast<void**>(&orig_sysprop_read));
     api->pltHookRegister(dev, ino, "__system_property_read_callback",
-                         reinterpret_cast<void*>(sbx_sprcb), reinterpret_cast<void**>(&orig_sprcb));
+                         reinterpret_cast<void*>(sbx_sysprop_read_cb), reinterpret_cast<void**>(&orig_sysprop_read_cb));
     api->pltHookRegister(dev, ino, "open",
                          reinterpret_cast<void*>(sbx_open),   reinterpret_cast<void**>(&orig_open));
     api->pltHookRegister(dev, ino, "openat",
@@ -747,8 +755,10 @@ static int sbx_register_across_libs(Api* api) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return 0;
     std::vector<std::pair<dev_t, ino_t>> seen;
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
+    char*  line = nullptr;   // getline: grow to fit; char[512] would split long maps lines (Bug #4)
+    size_t cap  = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, f)) != -1) {
         char* path = strchr(line, '/');
         if (!path) continue;
         size_t pl = strlen(path);
@@ -762,8 +772,9 @@ static int sbx_register_across_libs(Api* api) {
             if (p.first == st.st_dev && p.second == st.st_ino) { dup = true; break; }
         if (dup) continue;
         seen.push_back(std::make_pair(st.st_dev, st.st_ino));
-        sbx_reg_lib(api, st.st_dev, st.st_ino);
+        sbx_register_lib_hooks(api, st.st_dev, st.st_ino);
     }
+    free(line);
     fclose(f);
     return (int)seen.size();
 }
@@ -796,9 +807,9 @@ static void install_native_read_hooks(Api* api) {
              (unsigned long long)epoch_ms);
     }
 
-    if (!orig_spg)    orig_spg    = reinterpret_cast<sbx_spg_fn>(dlsym(RTLD_DEFAULT, "__system_property_get"));
-    if (!orig_spr)    orig_spr    = reinterpret_cast<sbx_spr_fn>(dlsym(RTLD_DEFAULT, "__system_property_read"));
-    if (!orig_sprcb)  orig_sprcb  = reinterpret_cast<sbx_sprcb_fn>(dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
+    if (!orig_sysprop_get)    orig_sysprop_get    = reinterpret_cast<sbx_sysprop_get_fn>(dlsym(RTLD_DEFAULT, "__system_property_get"));
+    if (!orig_sysprop_read)    orig_sysprop_read    = reinterpret_cast<sbx_sysprop_read_fn>(dlsym(RTLD_DEFAULT, "__system_property_read"));
+    if (!orig_sysprop_read_cb)  orig_sysprop_read_cb  = reinterpret_cast<sbx_sysprop_read_cb_fn>(dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
     if (!orig_open)   orig_open   = reinterpret_cast<sbx_open_fn>(dlsym(RTLD_DEFAULT, "open"));
     if (!orig_openat) orig_openat = reinterpret_cast<sbx_openat_fn>(dlsym(RTLD_DEFAULT, "openat"));
     if (!orig_fopen)  orig_fopen  = reinterpret_cast<sbx_fopen_fn>(dlsym(RTLD_DEFAULT, "fopen"));
@@ -812,18 +823,18 @@ static void install_native_read_hooks(Api* api) {
         LOGW("L9: pltHookCommit gagal sebagian (%d libs registered) — coverage "
              "mungkin parsial, wrapper tetap aman (orig_* via dlsym)", libs);
     }
-    g_nr_active = orig_spg || orig_spr || orig_sprcb ||
+    g_native_read_active = orig_sysprop_get || orig_sysprop_read || orig_sysprop_read_cb ||
                   orig_open || orig_openat || orig_fopen;
-    if (!g_nr_active) {
+    if (!g_native_read_active) {
         LOGW("L9: no real implementation resolvable — native reads not spoofed");
         return;
     }
     LOGD("L9 aktif (%d lib): boot_id=%s mac=%s ram=%dGB cpu=%d "
-         "[open=%p openat=%p fopen=%p spg=%p spr=%p sprcb=%p]",
+         "[open=%p openat=%p fopen=%p sysprop_get=%p sysprop_read=%p sysprop_read_cb=%p]",
          libs, g_boot_id.c_str(), g_wifi_mac.c_str(), g_ram_gb, g_cpu_action,
          reinterpret_cast<void*>(orig_open),   reinterpret_cast<void*>(orig_openat),
-         reinterpret_cast<void*>(orig_fopen),  reinterpret_cast<void*>(orig_spg),
-         reinterpret_cast<void*>(orig_spr),    reinterpret_cast<void*>(orig_sprcb));
+         reinterpret_cast<void*>(orig_fopen),  reinterpret_cast<void*>(orig_sysprop_get),
+         reinterpret_cast<void*>(orig_sysprop_read),    reinterpret_cast<void*>(orig_sysprop_read_cb));
 }
 
 struct SbxCrashRec {
@@ -842,7 +853,7 @@ static int         g_crash_pipe[2] = {-1, -1};
 static char        g_watchdog_pkg_buf[128] = {0};
 static int64_t     g_load_time_ms = 0;
 static struct sigaction g_prev_sig[NSIG];
-static volatile sig_atomic_t g_crash_count[NSIG] = {0};
+static std::atomic<int>      g_crash_count[NSIG];
 static const int   CRASH_LIMIT = 3;
 
 static int64_t sbx_now_ms() {
@@ -876,8 +887,7 @@ static void sbx_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
     if (sig >= 0 && sig < NSIG) {
 
-        n = g_crash_count[sig] + 1;
-        g_crash_count[sig] = n;
+        n = g_crash_count[sig].fetch_add(1, std::memory_order_relaxed) + 1;
     }
 
     if (n <= CRASH_LIMIT && g_crash_pipe[1] >= 0) {
@@ -1043,7 +1053,7 @@ static void install_build_hook(JNIEnv* env) {
         const std::string& butc = val("BUILD_TIME_UTC");
         if (!butc.empty()) {
             long long t = 0;
-            if (sbx_parse_ll(butc, t) && t > 0)
+            if (sbx_parse_longlong(butc, t) && t > 0)
                 set_long(env, build, "TIME", (jlong)t * 1000);
         }
 
@@ -1176,7 +1186,7 @@ public:
         if (!active_) return;
 
         parse_blob();
-        LOGD("parse_blob: %zu identity keys", g_id.size());
+        LOGD("parse_blob: %zu identity keys", g_identity.size());
 
         install_build_hook(env_);
         install_prop_hook(api_, env_);
@@ -1185,16 +1195,27 @@ public:
         g_pkg = pkg_;
         install_native_read_hooks(api_);
 #ifdef SBX_DEBUG
-        for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
+        for (auto& kv : g_identity) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
         install_crash_watchdog(pkg_);
 
 #ifdef SBX_ENABLE_LSPLANT
-        if (sbxlsp::init(env_)) {
-            if (!sbxlsp::hook_android_id(env_, val("ANDROID_ID")))
-                LOGE("L3 ANDROID_ID hook not installed (continuing with L1/L2)");
-        } else {
-            LOGE("L3 LSPlant init failed (continuing with L1/L2)");
+        {
+            // L3 spoofs identifiers that arrive over Binder (telephony/DRM) and so are
+            // out of reach of the property layers. Values come from the identity blob;
+            // IMEI/IMSI/ICCID/MEID/Widevine are synthesized from the same persona seed
+            // used by L9, so they rotate together on every action.sh run.
+            sbxlsp::HookValues hv;
+            hv.android_id = val("ANDROID_ID");
+            hv.serial     = val("SERIAL");
+            hv.wifi_mac   = val("WIFI_MAC");
+            hv.op_num     = val("GSM_OPERATOR_NUMERIC");
+            hv.op_alpha   = val("GSM_OPERATOR_ALPHA");
+            hv.op_iso     = val("GSM_OPERATOR_ISO");
+            hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
+                                         val("ANDROID_ID"));
+            if (!sbxlsp::install_all(env_, hv))
+                LOGE("L3 hooks not installed (continuing with L1/L2/L9)");
         }
 #endif
 
@@ -1233,7 +1254,7 @@ private:
             std::string v = line.substr(eq + 1);
             while (!v.empty() && (v.back()=='\r' || v.back()=='\n' || v.back()==' '))
                 v.pop_back();
-            if (!k.empty()) g_id[k] = v;
+            if (!k.empty()) g_identity[k] = v;
         }
     }
 };

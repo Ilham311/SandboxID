@@ -61,6 +61,9 @@ SandboxID combines three cooperating layers:
 The architecture is deliberately split so the Java hook layer and the shell
 layer always report the same values for a given persona.
 
+For the full component data flow, repository layout, and the 1-click Action
+sequence, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ---
 
 ## Requirements
