@@ -177,24 +177,6 @@ rotate_bluetooth_mac() {
     return 0
 }
 
-# Regenerate ByteDance AppLog SDK identifiers (did / iid / ssid / openudid /
-# clientudid / cdid) for one or all packages in target.txt.
-#
-# The zygisk module (L9) serves these in-process — every read of the SDK's
-# caches (shared_prefs/applog*.xml, snssdk_*.xml, bd_device_info.xml,
-# files/bd_setting/*, files/.cdid) is redirected to memfd content derived
-# deterministically from the persona identity + package name + APPLOG_EPOCH.
-# There is no on-disk seeding anymore; this command rotates by bumping
-# APPLOG_EPOCH in identity.prop (new IDs on the app's next cold start) and
-# wiping the stale real caches so nothing old leaks out via disk.
-#
-# Heavy lifting is in helpers.sh::applog_regen; this wrapper handles arg
-# dispatch and the "no target.txt / no arg" edge case (which is a user
-# workflow issue, not a failure — exit clean with a hint).
-#
-# Historical alias 'wipe_applog' → still works via case dispatch below;
-# it always meant "regenerate", never "just wipe" (wipe alone would leave
-# the app in a zero-value gap until it re-registered with the server).
 regen_applog() {
     _arg="${1:-}"
     log_step "Regenerate ByteDance AppLog IDs${_arg:+ ($_arg)}"
@@ -204,8 +186,6 @@ regen_applog() {
         return $?
     fi
 
-    # No package given → walk target.txt. applog_regen handles the read itself
-    # but returns 1 if the file is empty; surface that as a friendly hint.
     if ! grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
         log_info "target.txt kosong — tidak ada aplikasi ByteDance yang diregenerasi"
         log_info "Hint: 'rotate_ids.sh applog <package>' atau isi target.txt dulu"
@@ -214,11 +194,6 @@ regen_applog() {
     applog_regen
 }
 
-# Escape hatch: wipe-only, no epoch bump. Used by `rotate_ids.sh applog-wipe`
-# for forensic scenarios (you want to see how the app re-registers from
-# scratch with the server) or when you want the SDK's own server-issued IDs
-# on disk untouched by a wipe+rotate cycle.
-# Regular users should stick with `regen_applog` above.
 wipe_applog_only() {
     _arg="${1:-}"
     log_step "Wipe-only (no seed) ByteDance AppLog cache${_arg:+ ($_arg)}"
@@ -234,10 +209,6 @@ wipe_applog_only() {
 }
 
 sync_boot_count() {
-    # Terapkan BOOT_COUNT dari identity.prop ke Settings.Global.boot_count. Apps
-    # yang baca Settings.Global.BOOT_COUNT (indikator "device sering reboot?")
-    # jadi lihat angka persona kita, bukan angka device asli. Ini yang bikin
-    # "boot count" beneran kepakai (dulu cuma metadata yang nggak pernah ditulis).
     bc="$(identity_get BOOT_COUNT 2>/dev/null || true)"
     case "$bc" in
         ''|*[!0-9]*)
@@ -301,15 +272,6 @@ sync_device_name() {
     return 0
 }
 
-# Pilih operator/kartu SIM. Menulis carrier.conf (bertahan lintas rotasi persona,
-# di-merge ulang oleh `sandboxid freshen`) DAN langsung menuliskan key GSM_* ke
-# identity.prop supava efektif pada spawn app berikutnya tanpa freshen penuh.
-#   set_carrier "MCC|MNC|NAMA|ISO|PHANTOM|CARRIER_ID"  -> pilih operator (ISO/PHANTOM/CARRIER_ID opsional)
-#   set_carrier off                          -> hapus pilihan (kembali ke bawaan)
-#   set_carrier status                       -> tampilkan pilihan sekarang
-# PHANTOM=1 memaksa gsm.sim.state=LOADED: slot kosong ikut melaporkan SIM ada.
-# CARRIER_ID = id carrier Android (getSimCarrierId). Bila kosong pada spec, diambil
-# dari carriers.tsv sesuai MCC+MNC; tetap kosong bila operator tak ada di daftar.
 _carrier_clear_keys() {
     identity_del GSM_OPERATOR_NUMERIC
     identity_del GSM_OPERATOR_ALPHA
@@ -318,8 +280,6 @@ _carrier_clear_keys() {
     identity_del GSM_SIM_STATE
 }
 
-# Cari carrier_id (kolom ke-5 carriers.tsv) untuk baris MCC+MNC yang cocok.
-# Kosong bila tak ada di daftar — di perangkat nyata getSimCarrierId() = -1 (UNKNOWN).
 _carrier_lookup_id() {
     _lk_mcc="$1"; _lk_mnc="$2"
     [ -r "$CARRIERS_FILE" ] || return 0
@@ -374,9 +334,7 @@ set_carrier() {
     if [ "${#mnc}" -lt 2 ] || [ "${#mnc}" -gt 3 ]; then log_err "carrier: MNC harus 2-3 digit (dapat '$mnc')"; return 2; fi
     if [ -z "$name" ]; then log_err "carrier: nama operator kosong"; return 2; fi
 
-    # carrier_id: pakai yang di spec; bila kosong, coba ambil dari carriers.tsv.
     [ -z "$cid" ] && cid="$(_carrier_lookup_id "$mcc" "$mnc" | tr -d ' \t\r')"
-    # Validasi: kosong ATAU integer (boleh -1 UNKNOWN). Nilai aneh diabaikan (jangan tebak).
     case "$cid" in
         ''|-1) : ;;
         -[0-9]*|[0-9]*) case "${cid#-}" in *[!0-9]*) log_warn "carrier: CARRIER_ID '$cid' bukan angka — diabaikan"; cid="" ;; esac ;;
@@ -401,7 +359,6 @@ set_carrier() {
     chmod 0644 "$CARRIER_CONF" 2>/dev/null
     umask 022
 
-    # Terapkan langsung ke identity.prop (efektif pada spawn app berikutnya).
     identity_persist GSM_OPERATOR_NUMERIC "$mcc$mnc" || log_warn "carrier: gagal tulis GSM_OPERATOR_NUMERIC"
     identity_persist GSM_OPERATOR_ALPHA   "$name"    || log_warn "carrier: gagal tulis GSM_OPERATOR_ALPHA"
     if [ -n "$iso" ]; then identity_persist GSM_OPERATOR_ISO "$iso"; else identity_del GSM_OPERATOR_ISO; fi
@@ -445,10 +402,6 @@ cmd_status() {
         fi
     done
 
-    # AppLog snapshot — for each active target, show whether the SDK cache
-    # files exist and the state (fresh/active/absent). We deliberately
-    # DON'T dump the contents: did/iid/ssid are user-linkable identifiers and
-    # this log ends up in /cache/*.log. See helpers.sh::applog_probe.
     if grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
         log_info "AppLog cache (per target):"
         while IFS= read -r _t || [ -n "$_t" ]; do
@@ -457,7 +410,6 @@ cmd_status() {
             [ -n "$_t" ] || continue
             _probe=$(applog_probe "$_t" 2>/dev/null)
             if [ -n "$_probe" ]; then
-                # probe format: "<pkg> <count> <state>"
                 _n=$(printf '%s' "$_probe" | awk '{print $2}')
                 _st=$(printf '%s' "$_probe" | awk '{print $3}')
                 log_info "  $_t = $_n file(s), state=$_st"
@@ -475,20 +427,12 @@ log_step "rotate_ids.sh cmd=$cmd (module $MODVER)"
 
 case "$cmd" in
     all)
-        # Only set_gaid_value takes a positional override ("all <uuid>"); the
-        # same arg used to leak into sync_device_name and rename the device
-        # to a UUID string.
         wipe_ssaid                    || FAILURES=$((FAILURES + 1))
         set_gaid_value "$@"           || FAILURES=$((FAILURES + 1))
         randomize_wlan_mac            || FAILURES=$((FAILURES + 1))
         rotate_bluetooth_mac          || FAILURES=$((FAILURES + 1))
         sync_device_name              || FAILURES=$((FAILURES + 1))
         sync_boot_count               || :
-        # AppLog regen runs LAST on purpose: force_stop inside applog_regen
-        # kicks the target app so it derives the new did/iid/ssid from the
-        # bumped APPLOG_EPOCH on next open, and by this point every
-        # hardware-layer identifier the SDK would sample (Build.*, MAC,
-        # ANDROID_ID, GAID) has already been rotated.
         regen_applog                  || :
         ;;
     safe)
@@ -505,10 +449,6 @@ case "$cmd" in
     device-name|name)     sync_device_name "$@"   || FAILURES=$((FAILURES + 1)) ;;
     boot-count|bootcount) sync_boot_count         || FAILURES=$((FAILURES + 1)) ;;
     carrier|sim)          set_carrier "$@"        || FAILURES=$((FAILURES + 1)) ;;
-    # 'applog' = full regen (wipe+generate+seed). 'applog-wipe' preserved as
-    # an escape hatch: wipe-only for forensic-scenarios or unusual apps where
-    # you want the SDK to re-register from scratch against the server rather
-    # than keeping the current AppLog epoch.
     applog|bytedance|regen-applog) regen_applog "$@"       || FAILURES=$((FAILURES + 1)) ;;
     applog-wipe|wipe-applog)       wipe_applog_only "$@"   || FAILURES=$((FAILURES + 1)) ;;
     status)               cmd_status ;;

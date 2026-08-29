@@ -44,22 +44,18 @@ static void test_parse_full() {
     CHECK(get(kv, "GSM_SIM_STATE") == "LOADED", "phantom -> LOADED");
 }
 
-// carrier_id is optional: present sets GSM_CARRIER_ID, absent/blank erases it
-// (mirrors ISO handling). Blank is the truthful value for operators not in
-// Google's carrier DB (a real device reports UNKNOWN_CARRIER_ID = -1 there).
 static void test_carrier_id_optional() {
-    // Telkomsel with its real AOSP carrier id 787.
+
     CarrierSel s = parse_carrier_conf("NAME=Telkomsel\nMCC=510\nMNC=10\nISO=id\nCARRIER_ID=787\nPHANTOM=0\n");
     CHECK(s.carrier_id == "787", "telkomsel carrier_id 787 parsed");
     std::map<std::string, std::string> kv;
     apply_carrier(kv, s);
     CHECK(get(kv, "GSM_CARRIER_ID") == "787", "telkomsel GSM_CARRIER_ID = 787");
 
-    // No CARRIER_ID line -> key absent.
     CarrierSel none = parse_carrier_conf("NAME=Smartfren\nMCC=510\nMNC=09\nISO=id\nPHANTOM=0\n");
     CHECK(none.carrier_id.empty(), "missing carrier_id -> empty");
     std::map<std::string, std::string> kv2;
-    kv2["GSM_CARRIER_ID"] = "999";  // stale
+    kv2["GSM_CARRIER_ID"] = "999";
     apply_carrier(kv2, none);
     CHECK(!has(kv2, "GSM_CARRIER_ID"), "blank carrier_id erases the key");
 }

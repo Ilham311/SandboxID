@@ -95,8 +95,7 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.product.name",                 "PRODUCT"},
         {"ro.product.marketname",           "MARKETNAME"},
         {"ro.product.vendor.marketname",    "MARKETNAME"},
-        // Marketname prefixed variants — Build.java reads ro.product.marketname
-        // through the same per-part fallback chain as model/brand (AOSP main).
+
         {"ro.product.system.marketname",    "MARKETNAME"},
         {"ro.product.odm.marketname",       "MARKETNAME"},
         {"ro.product.product.marketname",   "MARKETNAME"},
@@ -126,9 +125,7 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"gsm.sim.state.ril",               "GSM_SIM_STATE"},
         {"ro.build.characteristics",        "BUILD_CHARACTERISTICS"},
         {"persist.sys.timezone",            "PERSIST_TIMEZONE"},
-        // ABI props — route to the same identity keys L1 Build.* hook uses,
-        // so native getprop() and Java Build.SUPPORTED_ABIS both see the same
-        // CSV value (identity keys populated by sandboxid::derive_identity()).
+
         {"ro.product.cpu.abi",              "CPU_ABI"},
         {"ro.product.cpu.abi2",             "CPU_ABI2"},
         {"ro.product.cpu.abilist",          "SUPPORTED_ABIS"},
@@ -141,14 +138,10 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.build.host",                   "HOST"},
         {"ro.build.tags",                   "TAGS"},
         {"ro.build.type",                   "TYPE"},
-        // Build date — Build.TIME = getLong("ro.build.date.utc") * 1000
-        // (AOSP Build.java main). Fingerprint SDKs cross-check these against
-        // the persona fingerprint; real device values would leak.
+
         {"ro.build.date.utc",               "BUILD_TIME_UTC"},
         {"ro.build.date",                   "BUILD_DATE"},
-        // ro.build.flavor ("<product>-<type>") — Build.FLAVOR was removed from
-        // the SDK but the property still exists on production builds and is
-        // read directly by fingerprint SDKs.
+
         {"ro.build.flavor",                 "FLAVOR"},
 
         {"ro.boot.vbmeta.digest",           "VBMETA_DIGEST"},
@@ -194,10 +187,6 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.product.product.name",         "PRODUCT"},
         {"ro.product.system_ext.name",      "PRODUCT"},
 
-        // Phase 3 additions (validated 2026-08 against AOSP Build.java main):
-        //   Build.SKU, Build.ODM_SKU, Build.VERSION.BASE_OS,
-        //   Build.VERSION.PREVIEW_SDK_INT, Build.VERSION.MEDIA_PERFORMANCE_CLASS
-        // All read via SystemProperties.get / getInt at Build class init.
         {"ro.boot.hardware.sku",                     "SKU"},
         {"ro.boot.product.hardware.sku",             "ODM_SKU"},
         {"ro.build.version.base_os",                 "BASE_OS"},
@@ -261,12 +250,7 @@ static void install_prop_hook(Api* api, JNIEnv* env) {
         const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
         reinterpret_cast<void*>(hook_prop_get),
     };
-    // String-keyed SystemProperties natives are @FastNative (AOSP main), so
-    // the (JNIEnv*, jclass, …) hook signature is the correct calling
-    // convention. Handle-based natives are @CriticalNative and must NOT be
-    // hooked with this signature.
-    // hookJniNativeMethods returns void in the pinned zygisk.hpp; failure is
-    // signalled by leaving JNINativeMethod.fnPtr null (no class/method match).
+
     api->hookJniNativeMethods(env, "android/os/SystemProperties", &m, 1);
     if (env->ExceptionCheck())
         env->ExceptionClear();
@@ -316,10 +300,6 @@ static const std::map<std::string, jint>& sbx_int_spoof() {
         {"debug.am.run_mallopt_trim_level",       2147483647},
         {"debug.adservices.binder_timeout",       10000},
 
-        // Phase 3 (2026-08): pin production values so native_get_int() returns
-        // the canonical Pixel-stable values even when Build.VERSION.PREVIEW_SDK_INT
-        // is read directly via SystemProperties.getInt (bypassing L1 field spoof).
-        //   ref: AOSP Build.java main branch (getInt call sites)
         {"ro.build.version.preview_sdk",          0},
     };
     return m;
@@ -341,16 +321,11 @@ static bool sbx_should_suppress_key(const std::string& k) {
     return false;
 }
 
-// Strict base-10 integer parse of an identity value ("34" yes, "34x"/"" no).
-// Used so keys that AOSP initializes via SystemProperties.getInt/getLong
-// (ro.build.version.sdk, ro.build.version.preview_sdk,
-// ro.odm.build.media_performance_class, ro.build.date.utc) return the persona
-// value through the typed getters too — not just the String native_get path.
 static bool sbx_parse_ll(const std::string& v, long long& out) {
     if (v.empty()) return false;
     errno = 0;
     const char* s = v.c_str();
-    // Skip a single leading +/- sign.
+
     if (*s == '+' || *s == '-') ++s;
     if (!*s) return false;
     char* end = nullptr;
@@ -367,9 +342,6 @@ static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def
     std::string k(r);
     env->ReleaseStringUTFChars(j_key, r);
 
-    // Identity-first: the persona value must win over the real device value
-    // even when the caller uses the typed getter. Non-numeric identity values
-    // (model, fingerprint, …) fail the parse and fall through unharmed.
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
@@ -389,8 +361,6 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong 
     std::string k(r);
     env->ReleaseStringUTFChars(j_key, r);
 
-    // Identity-first (same rationale as hook_prop_get_int). ro.build.date.utc
-    // lands here and keeps Build.TIME consistent with the persona fingerprint.
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
@@ -428,8 +398,7 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
          const_cast<char*>("(Ljava/lang/String;Z)Z"),
          reinterpret_cast<void*>(hook_prop_get_bool)},
     };
-    // Same @FastNative contract as native_get above; void return, failure is
-    // signalled per-method by fnPtr == null.
+
     api->hookJniNativeMethods(env, "android/os/SystemProperties", m, 3);
     if (env->ExceptionCheck())
         env->ExceptionClear();
@@ -488,20 +457,6 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
     if (end == us.c_str() || secs <= 0) return;
     g_boot_off_sec = (int64_t)secs;
 
-    // Chokepoint libraries known to call clock_gettime(CLOCK_BOOTTIME) directly.
-    // References:
-    //   - AOSP frameworks/native/libs/utils/SystemClock.cpp  (libutils)
-    //   - AOSP system/libbase/chrono_utils.cpp               (libbase / boot_clock)
-    //   - AOSP system/core/libcutils/                        (libcutils android_get_uptime)
-    //   - frameworks/base/core/jni/android_os_SystemClock.cpp (libandroid_runtime)
-    // NOTE (2026-08-28): libbase.so + libcutils.so were TRIED in Phase 3 and
-    // reverted — hooking them too re-created the hooked-vs-unhooked clock
-    // divergence that hangs target apps on a white loading screen (see
-    // c67ae88): more readers saw the offset while vDSO / kernel-side timed
-    // waits stayed real, so loading deadlines seeded from a hooked absolute
-    // never fired. Keep this list exactly libutils + libandroid_runtime.
-    // The spoof itself is opt-in as of 2026-08-28: autopif emits
-    // UPTIME_SECONDS=0 unless $MODDIR/enable_uptime exists.
     static const char* const kLibs[] = {
         "/libutils.so",
         "/libandroid_runtime.so",
@@ -525,12 +480,7 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
         return;
     }
     if (!api->pltHookCommit()) {
-        // Partial commit leaves some libs' PLT patched to our wrapper for the
-        // life of the process. The wrapper already ran with the offset set, so
-        // zeroing g_boot_off_sec is the only safe disable: every reader,
-        // hooked or not, then sees the real clock. Keeping the offset on a
-        // partially-hooked process re-creates the hooked-vs-unhooked clock
-        // divergence that hangs target apps (c67ae88 / fce81a6).
+
         g_boot_off_sec = 0;
         LOGW("L8: pltHookCommit gagal (%d/%zu libs registered) — offset dinolkan, "
              "semua reader lihat jam asli (divergensi hang dihindari)",
@@ -538,9 +488,7 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
         return;
     }
     if (orig_clock_gettime == nullptr) {
-        // dlsym failed too — nothing to call through to. Zero the offset so a
-        // wrapper that somehow still gets invoked (partial commit) forwards
-        // the real clock unchanged.
+
         g_boot_off_sec = 0;
         return;
     }
@@ -575,7 +523,7 @@ static std::string g_proc_version;
 static std::string g_cpu_repl;
 static int         g_ram_gb    = 0;
 static int         g_cpu_action = sbxnr::CPU_NONE;
-// AppLog (did/iid/ssid/openudid/clientudid/cdid) — synthesized per package.
+
 static std::string    g_pkg;
 static sbxnr::ApplogIds g_applog;
 static bool           g_applog_ok = false;
@@ -682,15 +630,9 @@ static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& o
             return sbxnr::patch_cpuinfo(real, g_cpu_action, g_cpu_repl, out);
         }
         case sbxnr::APPLOG_XML: {
-            // Patch the app's real cache in place (same read-real → patch →
-            // serve pattern as meminfo/cpuinfo): the SDK's own key names are
-            // preserved, only the identifier values are swapped for the
-            // persona's. A missing/foreign file falls through to the real
-            // open — SharedPreferences stats the file first anyway, so a
-            // redirect would never be consulted for a nonexistent XML.
             if (!g_applog_ok) return false;
             std::string real = sbx_read_real(path);
-            if (real.empty()) return false;
+            if (real.empty()) { out = sbxnr::applog_xml_synth(g_applog); return true; }
             return sbxnr::patch_applog_xml(real, g_applog, out);
         }
         case sbxnr::BD_RAW_DID:        if (g_applog_ok) { out = g_applog.did;        out.push_back('\n'); return true; } return false;
@@ -748,13 +690,12 @@ static int sbx_open(const char* pathname, int flags, ...) {
     return (int)syscall(__NR_openat, AT_FDCWD, pathname, flags, mode);
 }
 
-// Minimal fopen(3) mode -> open(2) flags mapping for the sbx_fopen fallback.
 static int sbx_fopen_flags(const char* mode) {
     bool plus = mode && std::strchr(mode, '+');
     switch (mode ? mode[0] : 'r') {
         case 'w': return (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC;
         case 'a': return (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND;
-        default:  return plus ? O_RDWR : O_RDONLY;   // 'r' and anything unknown
+        default:  return plus ? O_RDWR : O_RDONLY;
     }
 }
 
@@ -770,10 +711,6 @@ static FILE* sbx_fopen(const char* path, const char* mode) {
     }
     if (orig_fopen) return orig_fopen(path, mode);
 
-    // Fallback: the fopen PLT slot was not resolved for this process (partial
-    // L9 commit) but open/openat may be. Route through them + fdopen instead
-    // of failing with ENOSYS — apps legitimately use fopen() for reads AND
-    // writes, and a hard failure here would break them.
     int fl = sbx_fopen_flags(mode);
     int fd = -1;
     if (orig_openat)      fd = orig_openat(AT_FDCWD, path, fl, 0666);
@@ -847,12 +784,9 @@ static void install_native_read_hooks(Api* api) {
     g_ram_gb     = sbxnr::pixel_ram_gb(val("MODEL"));
     g_cpu_action = sbxnr::cpu_action_for(val("SOC_MANUFACTURER"), val("SOC_MODEL"), g_cpu_repl);
 
-    // AppLog IDs: distinct per app (each ByteDance app registers its own did),
-    // deterministic in the persona identity + APPLOG_EPOCH. Bumping that key
-    // (rotate_ids.sh applog / freshen) rotates all six IDs at once.
     if (!g_pkg.empty()) {
         uint64_t epoch_ms = strtoull(val("APPLOG_EPOCH").c_str(), nullptr, 10);
-        if (epoch_ms <= 0) epoch_ms = 1700000000000ULL;  // 2023-11-14, static fallback
+        if (epoch_ms <= 0) epoch_ms = 1700000000000ULL;
         uint64_t aseed = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                       val("ANDROID_ID") + "|" + g_pkg);
         g_applog    = sbxnr::make_applog_ids(aseed, epoch_ms);
@@ -1011,29 +945,6 @@ static void install_crash_watchdog(const std::string& pkg) {
     LOGD("crash watchdog armed for %s (ABRT/FPE/ILL, limit=%d)", pkg.c_str(), CRASH_LIMIT);
 }
 
-// -----------------------------------------------------------------------------
-// L1: Java-side Build.* static field spoofing (SetStaticObjectField / SetStaticIntField)
-//
-// References (validated 2026-08):
-//   - AOSP frameworks/base core/java/android/os/Build.java (main branch)
-//     https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/os/Build.java
-//   - Zygisk API sample (topjohnwu/zygisk-module-sample @ master)
-//     https://github.com/topjohnwu/zygisk-module-sample/blob/master/module/jni/zygisk.hpp
-//
-// Field-type map (from Build.java main):
-//   String       : BRAND, MANUFACTURER, MODEL, DEVICE, PRODUCT, BOARD, HARDWARE,
-//                  SOC_MANUFACTURER, SOC_MODEL, FINGERPRINT, ID, DISPLAY,
-//                  BOOTLOADER, HOST, USER, TYPE, TAGS, RADIO, SERIAL, SKU, ODM_SKU,
-//                  CPU_ABI (deprecated), CPU_ABI2 (deprecated),
-//                  VERSION.RELEASE, VERSION.CODENAME, VERSION.INCREMENTAL,
-//                  VERSION.SECURITY_PATCH, VERSION.BASE_OS,
-//                  VERSION.RELEASE_OR_CODENAME (@NonNull), VERSION.RELEASE_OR_PREVIEW_DISPLAY (@NonNull),
-//                  VERSION.PREVIEW_SDK_FINGERPRINT (@NonNull, default "REL")
-//   String[]     : SUPPORTED_ABIS, SUPPORTED_32_BIT_ABIS, SUPPORTED_64_BIT_ABIS
-//   int          : VERSION.SDK_INT, VERSION.PREVIEW_SDK_INT, VERSION.MEDIA_PERFORMANCE_CLASS
-//   long         : TIME (= getLong("ro.build.date.utc") * 1000)
-// -----------------------------------------------------------------------------
-
 static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
     jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
@@ -1059,14 +970,13 @@ static void set_long(JNIEnv* env, jclass c, const char* f, jlong v) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
-// Split "a,b,c" -> ["a","b","c"] with whitespace trimming. Empty tokens dropped.
 static std::vector<std::string> split_csv(const std::string& s) {
     std::vector<std::string> out;
     size_t i = 0, n = s.size();
     while (i < n) {
         size_t j = s.find(',', i);
         if (j == std::string::npos) j = n;
-        // trim
+
         size_t a = i;
         while (a < j && (s[a] == ' ' || s[a] == '\t')) ++a;
         size_t b = j;
@@ -1077,7 +987,6 @@ static std::vector<std::string> split_csv(const std::string& s) {
     return out;
 }
 
-// Set a static String[] field. Silently no-ops if `v` is empty (preserves original value).
 static void set_str_array(JNIEnv* env, jclass c, const char* f, const std::string& v) {
     if (v.empty()) return;
     std::vector<std::string> parts = split_csv(v);
@@ -1113,12 +1022,6 @@ static void install_build_hook(JNIEnv* env) {
     jclass build = env->FindClass("android/os/Build");
     if (build && !env->ExceptionCheck()) {
 
-        // Plain String fields
-        // NOTE: SERIAL is initialized in AOSP from getString("no.such.thing") — literally "unknown"
-        // by default. AppLog SDK still reads Build.SERIAL and hashes it, so we spoof it if
-        // the identity blob provides one. SKU / ODM_SKU came in Android 12 (API 31) and read
-        // ro.boot.hardware.sku / ro.boot.product.hardware.sku respectively. Adding them
-        // is safe on older releases: GetStaticFieldID returns null → set_str no-ops.
         static const std::pair<const char*, const char*> f[] = {
             {"BRAND","BRAND"}, {"MANUFACTURER","MANUFACTURER"},
             {"MODEL","MODEL"}, {"DEVICE","DEVICE"}, {"PRODUCT","PRODUCT"},
@@ -1128,18 +1031,15 @@ static void install_build_hook(JNIEnv* env) {
             {"DISPLAY","DISPLAY"}, {"BOOTLOADER","BOOTLOADER"},
             {"HOST","HOST"}, {"USER","USER"}, {"TYPE","TYPE"},
             {"TAGS","TAGS"}, {"RADIO","RADIO"},
-            // Added Phase 3 (2026-08):
+
             {"SERIAL","SERIAL"},
-            {"SKU","SKU"},                   // Android 12+ (API 31)
-            {"ODM_SKU","ODM_SKU"},           // Android 12+ (API 31)
-            {"CPU_ABI","CPU_ABI"},           // Deprecated (API 21) but still read by SDKs
-            {"CPU_ABI2","CPU_ABI2"},         // Deprecated (API 21) but still read by SDKs
+            {"SKU","SKU"},
+            {"ODM_SKU","ODM_SKU"},
+            {"CPU_ABI","CPU_ABI"},
+            {"CPU_ABI2","CPU_ABI2"},
         };
         for (const auto& [fn, k] : f) set_str(env, build, fn, val(k));
 
-        // Build.TIME (long) = getLong("ro.build.date.utc") * 1000
-        // (AOSP Build.java main). Spoof from identity so the build date
-        // matches the persona fingerprint instead of the real device.
         const std::string& butc = val("BUILD_TIME_UTC");
         if (!butc.empty()) {
             long long t = 0;
@@ -1147,11 +1047,6 @@ static void install_build_hook(JNIEnv* env) {
                 set_long(env, build, "TIME", (jlong)t * 1000);
         }
 
-        // String[] array fields — SUPPORTED_ABIS family. AppLog & AntiCheat SDKs often
-        // read these to fingerprint 32/64-bit capability. Values are CSV in identity blob:
-        //   SUPPORTED_ABIS       = "arm64-v8a,armeabi-v7a,armeabi"
-        //   SUPPORTED_64_BIT_ABIS= "arm64-v8a"
-        //   SUPPORTED_32_BIT_ABIS= "armeabi-v7a,armeabi"
         set_str_array(env, build, "SUPPORTED_ABIS",        val("SUPPORTED_ABIS"));
         set_str_array(env, build, "SUPPORTED_32_BIT_ABIS", val("SUPPORTED_32_BIT_ABIS"));
         set_str_array(env, build, "SUPPORTED_64_BIT_ABIS", val("SUPPORTED_64_BIT_ABIS"));
@@ -1167,20 +1062,14 @@ static void install_build_hook(JNIEnv* env) {
         set_str(env, ver, "INCREMENTAL",    val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", val("SECURITY_PATCH"));
 
-        // Added Phase 3: BASE_OS (String, API 23+) reads ro.build.version.base_os.
-        // Empty by default on stock builds; but some fingerprint SDKs sniff it for OTAs.
         set_str(env, ver, "BASE_OS",        val("BASE_OS"));
 
-        // Non-null String fields (API 30+/31+): defensively spoof to plain RELEASE.
-        // GetStaticFieldID silently no-ops on older APIs.
         const std::string& rel = val("RELEASE");
         if (!rel.empty()) {
-            set_str(env, ver, "RELEASE_OR_CODENAME",        rel);  // API 30
-            set_str(env, ver, "RELEASE_OR_PREVIEW_DISPLAY", rel);  // API 31
+            set_str(env, ver, "RELEASE_OR_CODENAME",        rel);
+            set_str(env, ver, "RELEASE_OR_PREVIEW_DISPLAY", rel);
         }
 
-        // PREVIEW_SDK_FINGERPRINT: on production it's the literal "REL". Force it,
-        // because Google internal & canary builds leak build-time hashes here.
         set_str(env, ver, "PREVIEW_SDK_FINGERPRINT", std::string("REL"));
 
         const std::string& s = val("SDK_INT");
@@ -1189,12 +1078,8 @@ static void install_build_hook(JNIEnv* env) {
             if (sdk > 0) set_int(env, ver, "SDK_INT", sdk);
         }
 
-        // Added Phase 3: PREVIEW_SDK_INT (int, API 23+) — should be 0 on production
-        // builds. Setting to 0 explicitly matches all Pixel personas we ship.
         set_int(env, ver, "PREVIEW_SDK_INT", 0);
 
-        // Added Phase 3: MEDIA_PERFORMANCE_CLASS (int, API 31+). Only spoof if
-        // identity provides an explicit value (Pixel 6+ = 31, Pixel 8 = 33, etc).
         const std::string& mpc = val("MEDIA_PERFORMANCE_CLASS");
         if (!mpc.empty()) {
             int v = std::atoi(mpc.c_str());

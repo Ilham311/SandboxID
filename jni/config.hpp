@@ -87,8 +87,7 @@ inline constexpr KV STATIC_PROP_DEFAULTS[] = {
     {"dalvik.vm.isa.arm.features",   "default"},
     {"dalvik.vm.heapsize",           "512m"},
     {"ro.build.version.preview_sdk", "0"},
-    // Production builds always report REL codenames (AOSP Build.java main:
-    // VERSION.CODENAME / all_codenames fall back to "REL" once released).
+
     {"ro.build.version.codename",       "REL"},
     {"ro.build.version.all_codenames",  "REL"},
 

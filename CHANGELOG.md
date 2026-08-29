@@ -2,6 +2,147 @@
 
 ## Unreleased
 
+### Fix: `applog_seed` fail-closed + skema per-file (hasil code review)
+
+- **helpers.sh** — uid app wajib terbaca. `stat -c '%u'` yang gagal/kosong kini
+  membatalkan seed sebelum satu file pun ditulis, bukan melanjutkan tanpa
+  `chown`. Sebelumnya file berakhir milik root (tidak terbaca uid app) tapi tetap
+  dihitung sukses dan dilaporkan `[OK]`.
+- **helpers.sh** — `_applog_own()` mengembalikan 1 kalau `chown` gagal, dan
+  `_applog_put()` menghapus file yang gagal di-chown alih-alih meninggalkannya
+  root-owned. Direktori (`shared_prefs`, `files`, `files/bd_setting`) yang gagal
+  di-chown membatalkan seluruh seed. Hitungan ok/gagal dilaporkan terpisah;
+  seed parsial mengembalikan 1.
+- **helpers.sh** — `applog_regen` membedakan pesan sukses dan seed-gagal, jadi
+  operator tidak lagi melihat `[OK]` untuk seed yang tidak mendarat.
+- **helpers.sh** — skema per-file, bukan satu template dipakai bertiga.
+  `applog.xml` hanya `device_id`/`install_id`/`ssid`/`cdid`; `snssdk_openudid.xml`
+  hanya `openudid`/`clientudid`. `bd_device_info.xml` **tidak lagi di-seed** —
+  di perangkat nyata isinya blob fingerprint dengan skema berbeda, jadi
+  memalsukannya dengan map applog justru tidak autentik; file itu dibiarkan
+  absen dan hook L9 menyintesis nilainya untuk pembaca native.
+- Diuji di host: happy path 7 file dengan skema benar; `stat` gagal → 0 file
+  ditulis, rc=1; `chown` gagal per-file → file tersebut dihapus, rc=1, laporan
+  "3 ok, 4 gagal".
+
+### Fix: penyebab UTAMA blank putih — `apply-boot` resetprop key driver grafis ke SELURUH sistem
+
+Fix sebelumnya menutup jalur L9 (per-app, in-process). Ternyata ada jalur kedua
+yang lebih besar dan **global**, dan inilah yang benar-benar memicu blank putih:
+
+`sandboxid apply-boot` (dijalankan `action.sh` tiap kali user tekan Action)
+memanggil `apply_native()`, yang menjalankan `resetprop -n` untuk daftar panjang
+property — termasuk:
+
+```
+resetprop -n ro.hardware        <persona>
+resetprop -n ro.product.board   <persona>
+resetprop -n ro.board.platform  <persona>
+resetprop -n ro.product.cpu.abi{,2,list,list32,list64} <persona>
+```
+
+`resetprop -n` menulis langsung ke property area yang dipakai **semua proses**,
+bukan per-app. Nilainya berasal dari `autopif.sh`:
+
+```
+BOARD=$(col "$_row" 7)
+HARDWARE=$BOARD
+BOARD_PLATFORM=$BOARD
+```
+
+yaitu kolom 7 `devices.tsv` — `mt6789`, `mt6893`, `mt6895`, `pineapple`, dst.
+Jadi setiap kali Action ditekan, seluruh sistem bisa saja dapat
+`ro.board.platform=mt6789` **di HP Snapdragon**, atau `pineapple` di HP MediaTek.
+Setelah itu setiap proses yang baru start:
+
+1. `frameworks/native/opengl/libs/EGL/Loader.cpp` — `HAL_SUBNAME_KEY_PROPERTIES`
+   (`persist.graphics.egl`, `ro.hardware.egl`, `ro.board.platform`) dibaca via
+   `base::GetProperty()`. Loader coba `libEGL_mt6789.so`, gagal, set
+   `failToLoadFromDriverSuffixProperty = true`, lalu `break`. Fallback tanpa
+   suffix tidak ada di vendor Qualcomm/MediaTek, fallback wildcard di-gate
+   `!failToLoadFromDriverSuffixProperty` → dilewati → `hnd == nullptr` →
+   `LOG_ALWAYS_FATAL_IF` di RenderThread.
+2. `hardware/libhardware/hardware.c` — `variant_keys[] = {"ro.hardware",
+   "ro.product.board", "ro.board.platform", "ro.arch"}`; `hw_module_exists()`
+   `access()`-cek `gralloc.<nilai>.so` / `hwcomposer.<nilai>.so` di `/odm`,
+   `/vendor`, `/system` → meleset semua.
+3. `ro.product.cpu.abilist*` global memutus pemilihan ABI
+   `System.loadLibrary` / `nativeloader` bila persona beda ABI dari perangkat.
+
+Ini juga menjelaskan kenapa gejalanya **acak**: kalau roll persona kebetulan
+dapat platform yang sama dengan HP asli, app jalan normal; roll vendor lain →
+blank putih. Dan menjelaskan catatan di entry v2.1.6 ("hang baru muncul setelah
+fix rc=127 mendarat") — sebelum `b44f5f8`, `action.sh` gagal rc=127 sehingga
+`apply-boot` **tidak pernah jalan**. Begitu resolusi binary diperbaiki,
+`apply-boot` mulai jalan dan resetprop global inilah yang meracuni sistem.
+Diagnosis uptime dan diagnosis wrapper L9 keduanya hilir dari sini.
+
+Fix:
+
+- **jni/sandboxid.cpp** — `ro.hardware`, `ro.product.board`, `ro.board.platform`
+  dan `ro.product.cpu.abi{,2,list,list32,list64}` dicabut dari daftar resetprop
+  global `apply_native()`. Key yang nilainya memilih file driver / ABI untuk
+  dimuat tidak boleh pernah ditulis system-wide. Key itu tetap dispoof di L1
+  (`Build.BOARD`/`HARDWARE`/`SUPPORTED_ABIS`), L2 (`SystemProperties.get`), dan
+  tetap ada di build.prop bind-mount per-app (`generate_mount_files`) — yang
+  aman karena build.prop hanya dibaca sebagai file, bukan sumber property area.
+
+### Fix: AppLog rotate bukan cuma print — seed disk + synth XML
+
+Temuan saat review: `rotate_ids.sh applog` (dan `all`) memang menulis, tapi
+hasilnya tidak pernah sampai ke app:
+
+1. `applog_regen` **menghapus** `shared_prefs/applog.xml` dkk.
+2. Redirect L9 `APPLOG_XML` butuh file aslinya ada — `sbx_read_real()` kosong →
+   `return false` → jatuh ke open asli.
+3. `SharedPreferencesImpl.loadFromDisk()` memanggil `mFile.canRead()`
+   (yaitu `access(2)`) **sebelum** `open(2)`. `access`/`stat` TIDAK di-hook, jadi
+   file yang sudah dihapus dianggap tidak ada dan `open` tidak pernah dipanggil.
+
+Hasil bersihnya: setelah rotate, tidak ada satu pun ID yang dispoof sampai SDK
+mendaftar ulang ke server dan menulis file baru. Persis "print doang".
+
+Fix:
+
+- **jni/sandboxid.cpp** — subcommand baru `sandboxid applog-ids <pkg>` mencetak
+  did/iid/ssid/openudid/clientudid/cdid yang **sama persis** dengan yang
+  disajikan hook L9 (`fnv1a(FINGERPRINT|SERIAL|ANDROID_ID|pkg)` + `APPLOG_EPOCH`,
+  lewat `sbxnr::make_applog_ids`). Satu sumber kebenaran untuk layer shell.
+- **helpers.sh** — `applog_seed()` menulis `applog.xml`, `snssdk_openudid.xml`,
+  `bd_device_info.xml`, `files/bd_setting/{device_id,install_id,openudid,
+  clientudid}` dan `files/.cdid` dengan nilai dari `applog-ids`, lalu
+  `chown` ke uid app, `chmod` 0660/0600, dan `chcon` mengikuti context data dir
+  (pola yang sudah terbukti di `set_gaid_value`). `applog_regen` sekarang
+  wipe → seed, jadi `canRead()` true dan setiap pembacaan berikutnya dipatch
+  hook.
+- **jni/main.cpp** — `sbx_build_content(APPLOG_XML)` menyajikan map hasil
+  sintesis ketika file asli kosong/absen, bukan `return false`. Pembaca native
+  (libbdtracker) tetap dapat nilai persona meski seed disk gagal.
+- **jni/sbx_native_read.hpp** — `applog_xml_synth()`; outputnya sengaja
+  dibuat bisa diproses `patch_applog_xml()` lagi (idempoten, diuji).
+
+### Fix: output `rotate_ids.sh` tidak pernah terlihat
+
+`_log()` di helpers.sh memakai `tee -a "$LOGFILE" >/dev/null` — stdout dibuang.
+`action.sh` menangkap stdout `rotate_ids.sh` ke file lalu men-tee-nya, jadi yang
+tampil di WebUI hanya header "==> Rotasi ID lain ..." lalu **kosong**, padahal
+semua langkahnya berjalan. Inilah yang membuat rotasi terlihat seperti gimmick.
+
+- **helpers.sh** — `_log()` menulis ke stdout DAN logfile.
+- **action.sh** — output rotasi di-append ke `debug/action.log` saja
+  (`tee_action`), supaya tidak dobel di `$LOGFILE` yang sudah ditulis `_log`.
+
+### Chore: hapus seluruh komentar dari kode
+
+Semua komentar dibuang dari `*.sh`, `jni/*.cpp`, `jni/*.hpp`, `jni/CMakeLists.txt`,
+`tests/*.cpp`, dan `webroot/app.js` (−719 baris). Header kolom `*.tsv`,
+`.gitignore` dan dokumen `*.md` dibiarkan: itu dokumentasi format data
+positional yang dipakai `col "$_row" N`, bukan komentar kode.
+
+- **tests/native_read_test.cpp** — `test_applog_xml_synth()`: synth memuat enam
+  ID, bisa dipatch ulang, patch kedua no-op. Total 319 check, 0 gagal;
+  `validate.sh` PASS.
+
 ### Fix: blank putih v2.1.7 — L9 spoof `ro.hardware` / `ro.board.platform` / `ro.product.board` memutus resolusi driver grafis
 
 Entry v2.1.7 sebelumnya benar soal wrapper beracun, tapi fix-nya membuka bug

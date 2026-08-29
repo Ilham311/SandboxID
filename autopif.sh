@@ -162,11 +162,9 @@ gen_lifecycle() {
   [ "$_age_days" -lt 1 ] && _age_days=$(rand_range 1 30)
   [ "$_age_days" -gt 1825 ] && _age_days=1825
 
-  # Selalu "fresh": device baru dipasang / baru factory-reset, dipakai sebentar.
   _owned_days=$(rand_range 1 30)
   [ "$_owned_days" -gt "$_age_days" ] && _owned_days=$_age_days
 
-  # Boot count rendah & wajar: beberapa boot setup + sesekali reboot, dijaga 1..30.
   _setup_boots=$(rand_range 2 4)
   _extra_cap=$_owned_days
   [ "$_extra_cap" -gt 26 ] && _extra_cap=26
@@ -174,7 +172,6 @@ gen_lifecycle() {
   [ "$_boot_count" -lt 1 ] && _boot_count=1
   [ "$_boot_count" -gt 30 ] && _boot_count=30
 
-  # Uptime: beberapa menit s/d maksimal ~1 jam (tidak pernah lebih).
   _uptime_s=$(rand_range 180 3600)
   _owned_s=$(( _owned_days * 86400 ))
   [ "$_uptime_s" -gt "$_owned_s" ] && _uptime_s=$_owned_s
@@ -182,7 +179,6 @@ gen_lifecycle() {
   _first_boot_ep=$(( _now - _owned_days * 86400 ))
   _last_boot_ep=$(( _now - _uptime_s ))
 
-  # ~40% device fresh itu hasil factory-reset, sisanya baru dipasang.
   _reset=0
   [ "$(rand_below 100)" -lt 40 ] && _reset=1
   _fresh="yes"; _profile="fresh"
@@ -245,11 +241,6 @@ assemble_identity() {
   GAID=$(rand_uuid)
   HOSTN="$(printf '%s' "$BRAND" | tr '[:upper:]' '[:lower:]')-build-$(rand_range 100 999)"
 
-  # Build date: derived from the security-patch bulletin date (builds are
-  # stamped a few days before the bulletin). Keeps Build.TIME /
-  # ro.build.date.utc consistent with the persona fingerprint instead of
-  # leaking the real device build date. Mirrors build_utc_from_patch() in
-  # jni/sandboxid.cpp.
   BUILD_UTC=""; BUILD_DATE_STR=""
   case "$SECPATCH" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
@@ -265,16 +256,8 @@ assemble_identity() {
       BUILD_DATE_STR=$(date -u -d "@$BUILD_UTC" '+%a %b %e %H:%M:%S UTC %Y' 2>/dev/null || :)
       ;;
   esac
-  # ro.build.flavor — Build.FLAVOR is gone from the SDK but the property
-  # still ships on production builds and is read by fingerprint SDKs.
   FLAVOR_STR="$PRODUCT-user"
 
-  # Uptime spoof is OPT-IN (enable_uptime). It hung target apps on a white
-  # loading screen twice: first via the Java hook (c67ae88), then again via
-  # the extended PLT chokepoint list (fce81a6 hooked libbase/libcutils too,
-  # so more clock readers got the offset while vDSO/kernel-side waits stayed
-  # real — hooked-vs-unhooked divergence froze loading deadlines). Keep the
-  # internal UPTIME_S valid so validate_lifecycle still passes.
   _uptime_emit=0
   { [ -f "$MODDIR/enable_uptime" ] && [ ! -f "$MODDIR/no_uptime" ]; } && _uptime_emit=$UPTIME_S
 
@@ -320,12 +303,6 @@ VBMETA_DIGEST=$(rand_hex 32)
 FLAVOR=$FLAVOR_STR
 EOF
 )
-  # BUILD_TIME_UTC / BUILD_DATE only when derivation succeeded (validated
-  # SECPATCH); an absent key leaves the field unspoofed rather than wrong.
-  # NOTE: $(cat <<EOF) strips the heredoc's trailing newline, so each append
-  # MUST start with its own \n — without it the first key glues onto the last
-  # heredoc line (seen in the wild: "FLAVOR=caiman-userBUILD_TIME_UTC=…",
-  # which corrupts FLAVOR and drops BUILD_TIME_UTC in one shot).
   if [ -n "$BUILD_UTC" ]; then
     IDENTITY_KV="${IDENTITY_KV}
 BUILD_TIME_UTC=$BUILD_UTC"

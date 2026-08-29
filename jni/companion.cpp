@@ -55,8 +55,7 @@ static void reload_targets_if_changed() {
     struct stat st{};
     bool have = (::stat(sandboxid::TARGET_FILE, &st) == 0);
     if (!have) return;
-    // Compare with nanosecond resolution — seconds-only mtime misses edits
-    // that land within the same second as the previous read.
+
     if (!g_targets.empty() &&
         st.st_mtim.tv_sec == g_targets_mtime_sec &&
         st.st_mtim.tv_nsec == g_targets_mtime_nsec)
@@ -351,9 +350,7 @@ static void watch_target_death(uint32_t pid, int client_fd) {
 }
 
 static bool try_seed_ondemand() {
-    // bin/sandboxid is an install-time symlink created by customize.sh; fall
-    // back to the ABI-named binaries when it is missing (module dir updated
-    // without a re-flash).
+
     std::string base = std::string(sandboxid::MODDIR) + "/bin";
     std::string bin = base + "/sandboxid";
     if (::access(bin.c_str(), X_OK) != 0) {

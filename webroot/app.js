@@ -15,10 +15,6 @@ function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
 const ENV = `cd ${shq(MODDIR)} && export MODDIR=${shq(MODDIR)} && export PATH=${shq(MODDIR + '/bin')}:\"$PATH\"`;
 
-// Titik warna brand (dot 8px pada chip hero, via .brandchip::before). Hanya
-// penanda kecil — tema utama (aksen, teks, latar) tetap konsisten dan tidak ikut
-// berubah per-brand. Nilai di-set lewat CSSOM setProperty karena atribut style
-// inline diblok CSP (style-src 'self'); penulisan CSSOM tidak tunduk pada CSP.
 const BRAND_DOT = {
   google: '#4285f4', samsung: '#2e6be6', xiaomi: '#ff6900', redmi: '#ff453a',
   poco: '#ffcc00', oppo: '#10b981', vivo: '#3aa0ff', infinix: '#00c2a8',
@@ -170,14 +166,12 @@ function renderLogHtml(text) {
 
 function summarizeAction(out) {
   const text = String(out || '');
-  // jalur multibrand baru (action.sh)
   if (/^OK - persona baru aktif/m.test(text)) {
     const b = (text.match(/^\s*BRAND\s*:\s*(.+)$/m) || [])[1];
     const md = (text.match(/^\s*MODEL\s*:\s*(.+)$/m) || [])[1];
     const label = [b && b.trim(), md && md.trim()].filter(Boolean).join(' \u00b7 ');
     return { kind: 'ok', title: label ? `Perangkat baru \u00b7 ${label}` : 'Perangkat baru aktif', detail: text };
   }
-  // jalur cadangan freshen (Pixel bawaan)
   if (/^OK - fresh/m.test(text)) {
     const md = (text.match(/^\s*MODEL\s*:\s*(.+)$/m) || [])[1];
     return { kind: 'ok', title: md ? `Perangkat baru \u00b7 ${md.trim()}` : 'Perangkat baru siap', detail: text };
@@ -258,7 +252,6 @@ function skKv(n) {
   return s;
 }
 
-// grid detail (di bawah hero + tiles). label ramah, key = kosakata identity.prop.
 const DETAIL_KEYS = [
   ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'], ['BOARD', 'Board'],
   ['SOC_MANUFACTURER', 'SoC vendor'], ['SOC_MODEL', 'SoC'],
@@ -319,7 +312,6 @@ async function loadPersona() {
   setBrand(kv.BRAND);
   hero.innerHTML = renderHero(kv);
   tiles.innerHTML = renderTiles(kv);
-  // stagger animasi tile via CSSOM (--i), aman terhadap CSP.
   tiles.querySelectorAll('.tile').forEach((elt, i) => elt.style.setProperty('--i', i));
   const html = DETAIL_KEYS.map(([k, label]) => {
     const v = kv[k];
@@ -332,22 +324,11 @@ async function loadPersona() {
 
 document.getElementById('refreshBtn').addEventListener('click', loadPersona);
 document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
-  // Jalankan action.sh: 1-click end-to-end.
-  //   1. Undi 1 device acak multi-brand dari devices.tsv (autopif.sh)
-  //   2. Apply-boot -> resetprop semua Build.* + Settings.Secure
-  //   3. Reset app target: force-stop + pm clear
-  //   4. Rotasi ID (SSAID/GAID/WiFi-MAC/BT-MAC/nama/boot-count)
-  //   5. AppLog ByteDance: wipe cache did/iid/ssid + generate baru + seed
-  //      applog.xml, snssdk_openudid.xml, bd_device_info.xml, dan
-  //      files/bd_setting/{device_id,install_id,openudid,clientudid,.cdid}
-  //      dengan ownership app UID + restorecon SELinux
-  // Persis tombol Action fisik di KSU/APatch — hasil dari web = hasil dari tombol.
   const cmd = `${ENV} && sh ${shq(MODDIR)}/action.sh 2>&1`;
   const r = await run(cmd);
   if (!r.ok) toast(trimTitle(r.err.message || 'Gagal mengacak perangkat'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
   else { const s = summarizeAction(r.out); toast(s.title, { kind: s.kind, detail: s.detail }); }
   loadPersona();
-  // Muat ulang tab Rotasi supaya status AppLog terbaru muncul kalau user pindah tab
   if (document.getElementById('rotate').classList.contains('active')) loadRotate();
 }));
 
@@ -358,11 +339,6 @@ const ROT_CARDS = [
   { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'MAC adapter BT + Address di bt_config.conf',        get: 'BLUETOOTH_ADDR' },
   { key: 'device-name', name: 'Nama perangkat', desc: 'device_name = MODEL dari identity.prop',           get: 'MODEL' },
   { key: 'boot-count',  name: 'Boot count',    desc: 'Settings.Global.boot_count = BOOT_COUNT identity.prop', get: 'BOOT_COUNT' },
-  // AppLog card: unlike the others it has no scalar value read from
-  // identity.prop — the "value" is per-target state (active/fresh), rendered
-  // by renderApplogStatus() into the same .val slot after the initial paint.
-  // Kept in ROT_CARDS so the "Rotasi semua" button covers it and it shows in
-  // the same grid the user is already scanning.
   { key: 'applog',      name: 'AppLog ByteDance', desc: 'did/iid/ssid/openudid/clientudid/cdid untuk TikTok/Douyin — di-spoof in-process oleh hook JNI (L9)', get: null, applog: true },
 ];
 
@@ -375,9 +351,6 @@ async function loadRotate() {
       <div class="val sk sk-line" data-slot="val"></div>
       <div class="actions"><button class="sm" data-rot="${c.key}">Rotasi</button></div>
     </div>`).join('');
-  // M9/CSP: index stagger di-set lewat CSSOM (.style.setProperty), bukan atribut
-  // inline style="--i:.." — atribut inline diblok oleh style-src 'self' tanpa
-  // 'unsafe-inline'. CSSOM write tidak tunduk CSP, jadi animasi tetap jalan.
   wrap.querySelectorAll('.card').forEach((el, i) => el.style.setProperty('--i', i));
   wrap.querySelectorAll('button[data-rot]').forEach(b => {
     b.addEventListener('click', () => rotateOne(b.dataset.rot, b));
@@ -389,22 +362,14 @@ async function loadRotate() {
     if (!slot) continue;
     slot.classList.remove('sk', 'sk-line');
     if (c.applog) {
-      // Populated async below; leave the placeholder in place until the
-      // probe returns so the card doesn't flash "—" and then update.
       slot.textContent = '\u2026';
     } else {
       slot.textContent = (c.get && kv[c.get]) ? kv[c.get] : '\u2014';
     }
   }
-  // AppLog probe runs after the base render so the rest of the grid never
-  // blocks on it. Runs once per target listed in target.txt; count and state
-  // are joined into one short line per app.
   renderApplogStatus(wrap);
 }
 
-// Ask the module to inspect each target's applog cache and paint the result
-// into the AppLog card. Values are never returned — helpers.sh::applog_probe
-// only reports counts + a state token (fresh/active/absent).
 async function renderApplogStatus(wrap) {
   const slot = wrap.querySelector('.card[data-key="applog"] [data-slot="val"]');
   if (!slot) return;
@@ -423,7 +388,6 @@ async function renderApplogStatus(wrap) {
     slot.textContent = 'target.txt kosong';
     return;
   }
-  // Compact multi-target: "trill: aktif (8) | musically: bersih (0)"
   const parts = lines.map(line => {
     const [pkg, count, state] = line.split(/\s+/);
     const short = String(pkg || '').split('.').slice(-1)[0] || pkg;
@@ -459,12 +423,6 @@ document.getElementById('rotAll').addEventListener('click', (ev) => withLoading(
   finishRotate(r, 'Rotasi semua');
 }));
 
-// ---- Tab SIM / operator ---------------------------------------------------
-// carriers.tsv (name<TAB>mcc<TAB>mnc<TAB>iso[<TAB>carrier_id]) -> dua dropdown
-// (negara, operator). "Terapkan" memanggil
-// `rotate_ids.sh carrier "MCC|MNC|NAMA|ISO|PHANTOM|CARRIER_ID"`, yang menulis
-// carrier.conf + key GSM_* di identity.prop (berlaku saat app dibuka lagi).
-// CARRIER_ID opsional (id carrier Android / getSimCarrierId); kosong = -1/UNKNOWN.
 let SIM_DB = null;
 
 function parseCarriersTsv(text) {
@@ -601,10 +559,6 @@ document.getElementById('tgtSave').addEventListener('click', (ev) => withLoading
   }
 }));
 
-// ---- Uji (detection self-check) -------------------------------------------
-// Parse-token contract with selftest.sh (see .gitar/documents/parse-token-safelist.md):
-//   SELFTEST <category> <PASS|WARN|FAIL|INFO> <detail...>
-//   SELFTEST SUMMARY pass=N warn=M fail=K info=J
 const ST_CAT = {
   identitas: 'Identitas', koherensi: 'Koherensi', vbmeta: 'Verified boot', build: 'Build',
   selinux: 'SELinux', rom: 'Emulator / ROM', root: 'Root', mount: 'Mount', hosts: 'Hosts',
@@ -706,14 +660,6 @@ function escapeHtml(s) {
   }[c]));
 }
 
-// ---- Tema terang/gelap ----------------------------------------------------
-// Default: ikut tema sistem (diatur lewat prefers-color-scheme di style.css).
-// Pilihan manual sudah diterapkan lebih dulu oleh theme-init.js (dimuat di
-// <head> sebelum style.css) agar tidak ada kedipan tema salah saat halaman
-// dibuka. Di sini kita hanya memasang handler tombol tema, yang menulis
-// data-theme di <html> dan menyimpan pilihan manual ke localStorage, jadi
-// pilihan tetap bertahan antar sesi dan menang atas tema sistem. Tanpa
-// data-theme, cascade CSS kembali mengikuti sistem.
 function applyTheme(mode) {
   const root = document.documentElement;
   if (mode === 'light' || mode === 'dark') root.setAttribute('data-theme', mode);
@@ -743,7 +689,6 @@ function initTheme() {
   nav.addEventListener('scroll', moveIndicator);
   window.addEventListener('resize', moveIndicator);
   window.addEventListener('load', moveIndicator);
-  // live dot: hijau kalau root bridge terbaca, merah kalau tidak.
   const bridge = (typeof ksu !== 'undefined' && !!ksu.exec);
   const live = document.getElementById('live');
   if (live) {

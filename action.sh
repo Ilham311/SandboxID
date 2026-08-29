@@ -21,8 +21,6 @@ command -v identity_get >/dev/null 2>&1 || identity_get() {
     awk -F= -v k="$1" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$IDENTITY" 2>/dev/null
 }
 
-# helpers.sh (if sourced) provides sbx_bin(), which falls back to the ABI-named
-# binaries when the install-time bin/sandboxid symlink is missing.
 if command -v sbx_bin >/dev/null 2>&1; then
     BIN="$(sbx_bin)"
 else
@@ -31,6 +29,7 @@ fi
 [ -n "$BIN" ] || printf '%s\n' "Peringatan: binary native tidak ditemukan di $MODDIR/bin/ (sandboxid, sandboxid-arm64/-arm/-x86_64/-x). Re-flash module untuk memperbaiki."
 
 tee2() { tee -a "$LOGFILE" "$ACTION_LOG"; }
+tee_action() { tee -a "$ACTION_LOG"; }
 say()  { printf '%s\n' "$*" | tee2; }
 
 {
@@ -117,14 +116,11 @@ if [ -r "$ROTATE" ]; then
     say "==> Rotasi ID lain (SSAID, GAID, WiFi/BT MAC, nama, boot count, AppLog)"
     ROT_OUT="$MODDIR/debug/.rotate.$$"
     MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all </dev/null >"$ROT_OUT" 2>&1; RC_ROT=$?
-    tee2 < "$ROT_OUT"; rm -f "$ROT_OUT" 2>/dev/null
+    tee_action < "$ROT_OUT"; rm -f "$ROT_OUT" 2>/dev/null
 else
     say "==> Rotasi ID dilewati (rotate_ids.sh tidak ada)."
 fi
 
-# Ringkas status AppLog per-target (privacy-safe: count + state, no values).
-# rotate_ids.sh all sudah menjalankan applog regen; ini hanya konfirmasi post
-# hoc untuk user — apakah seed berhasil landing di setiap target.
 if [ -r "$MODDIR/helpers.sh" ] && [ -r "$MODDIR/target.txt" ] && \
    grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
     _applog_summary=""
@@ -176,8 +172,6 @@ else
     say "Gagal menerapkan identitas (rc=$RC). Cek pesan di atas atau tab Log."
 fi
 
-# Any nonzero rc from rotation is worth surfacing — rc=1 is the common
-# failure code and was previously swallowed by an explicit exclusion.
 [ "$RC_ROT" != 0 ] && \
     say "  (catatan: rotasi ID rc=$RC_ROT — sebagian ID mungkin belum berganti; cek tab Log)"
 
