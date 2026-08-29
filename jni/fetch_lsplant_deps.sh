@@ -65,11 +65,14 @@ patch_dobby() {
   #     when platform.h is the entry TU the nested common/os_arch_features.h is
   #     reached before platform.h finishes, so its make_memory_readable() sees an
   #     as-yet-undeclared OSMemory -> "use of undeclared identifier 'OSMemory'".
-  #     platform.h itself only needs the standard size/int/va_list types, so pull
-  #     those directly instead of the umbrella header; the cycle then disappears.
+  #     platform.h itself only needs the standard size/int/va_list types, plus
+  #     dobby.h (addr_t) and dobby/platform_features.h (the TINYSTL "stl" alias
+  #     used pervasively by ProcessRuntime.* / dobby_symbol_resolver.cc) — pull
+  #     those directly instead of the umbrella header; the cycle then disappears
+  #     while addr_t/stl stay visible.
   if [ -f "$plat" ] && grep -q '#include "dobby/common.h"' "$plat"; then
-    sed -i 's|#include "dobby/common.h"|#include <cstddef>\n#include <cstdint>\n#include <cstdarg>|' "$plat"
-    echo "==> patched Dobby platform.h (broke common.h include cycle -> OSMemory visible)"
+    sed -i 's|#include "dobby/common.h"|#include <cstddef>\n#include <cstdint>\n#include <cstdarg>\n#include "dobby.h"\n#include "dobby/platform_features.h"|' "$plat"
+    echo "==> patched Dobby platform.h (broke common.h include cycle -> OSMemory/addr_t/stl visible)"
   fi
 
   # (2) The arm64 closure-bridge trampoline emits Mach-O @PAGE/@PAGEOFF relocation
@@ -78,19 +81,38 @@ patch_dobby() {
   if [ -f "$casm" ] && ! grep -q ':lo12:cdecl(common_closure_bridge_handler)' "$casm"; then
     awk '
       /adrp TMP_REG_0, cdecl\(common_closure_bridge_handler\)@PAGE/ {
-        print "#if defined(__APPLE__)"
-        print "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE"
-        print "add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF"
-        print "#else"
-        print "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)"
-        print "add TMP_REG_0, TMP_REG_0, :lo12:cdecl(common_closure_bridge_handler)"
-        print "#endif"
-        skip = 1; next
+        pending = 1; next
       }
-      skip == 1 { skip = 0; next }
+      pending == 1 {
+        pending = 0
+        if ($0 ~ /add TMP_REG_0, TMP_REG_0, cdecl\(common_closure_bridge_handler\)@PAGEOFF/) {
+          print "#if defined(__APPLE__)"
+          print "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE"
+          print "add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF"
+          print "#else"
+          print "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)"
+          print "add TMP_REG_0, TMP_REG_0, :lo12:cdecl(common_closure_bridge_handler)"
+          print "#endif"
+          next
+        } else {
+          print "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE"
+          print
+          next
+        }
+      }
       { print }
     ' "$casm" > "$casm.sbxtmp" && mv "$casm.sbxtmp" "$casm"
     echo "==> patched Dobby closure_bridge_arm64.asm (@PAGE/@PAGEOFF -> ELF adrp + :lo12:)"
+  fi
+
+  # (3) dobby_symbol_resolver.cc references module.load_address, but
+  #     RuntimeModule (source/PlatformUtil/ProcessRuntime.h) only declares a
+  #     `base` field -> "no member named 'load_address' in 'RuntimeModule'".
+  #     Use the field that actually exists.
+  local resolver="$EXT/dobby/builtin-plugin/SymbolResolver/elf/dobby_symbol_resolver.cc"
+  if [ -f "$resolver" ] && grep -q 'module\.load_address' "$resolver"; then
+    sed -i 's/module\.load_address/module.base/g' "$resolver"
+    echo "==> patched Dobby dobby_symbol_resolver.cc (module.load_address -> module.base)"
   fi
 }
 patch_dobby
