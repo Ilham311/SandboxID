@@ -246,8 +246,14 @@ struct HideResult {
 static bool sbx_hide_read_mountinfo(uint32_t target_pid, std::string& out,
                                     int32_t& ns_open_errno, int32_t& setns_errno,
                                     int32_t& read_errno) {
-    struct MiHdr { int32_t ns_open_errno, setns_errno, read_errno; uint32_t len; };
-    static char mibuf[256 * 1024];          // static: present at fork, no child malloc
+    struct MiHdr { int32_t ns_open_errno, setns_errno, read_errno; };
+    // Chunk buffer only: NOT static, so concurrent companion threads/forks never
+    // alias the same storage. It is stack-local and present at fork (no child
+    // malloc); the child streams mountinfo to the parent in fixed-size chunks
+    // instead of capping into one fixed-size buffer, so no truncation can occur
+    // regardless of mountinfo size.
+    constexpr uint32_t kChunk = 64 * 1024;
+    char chunk[kChunk];
 
     int pipefd[2];
     if (::pipe(pipefd) != 0) { read_errno = errno; return false; }
@@ -257,7 +263,8 @@ static bool sbx_hide_read_mountinfo(uint32_t target_pid, std::string& out,
 
     if (child == 0) {                        // ---- child A (async-signal-safe only) ----
         ::close(pipefd[0]);
-        MiHdr h{0, 0, 0, 0};
+        MiHdr h{0, 0, 0};
+        int mf = -1;
         char path[64];
         ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
         int ns = ::open(path, O_RDONLY | O_CLOEXEC);
@@ -266,24 +273,22 @@ static bool sbx_hide_read_mountinfo(uint32_t target_pid, std::string& out,
         } else if (::setns(ns, CLONE_NEWNS) != 0) {
             h.setns_errno = errno; ::close(ns);
         } else {
-            int mf = ::open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
-            if (mf < 0) {
-                h.read_errno = errno ? errno : ENOENT;
-            } else {
-                uint32_t off = 0;
-                while (off < sizeof(mibuf)) {
-                    ssize_t k = ::read(mf, mibuf + off, sizeof(mibuf) - off);
-                    if (k < 0) { if (errno == EINTR) continue; h.read_errno = errno; break; }
-                    if (k == 0) break;
-                    off += (uint32_t)k;
-                }
-                h.len = off;
-                ::close(mf);
-            }
+            mf = ::open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
+            if (mf < 0) h.read_errno = errno ? errno : ENOENT;
             ::close(ns);
         }
         sandboxid::write_full(pipefd[1], &h, sizeof(h));
-        if (h.len) sandboxid::write_full(pipefd[1], mibuf, h.len);
+        if (mf >= 0) {
+            for (;;) {
+                ssize_t k = ::read(mf, chunk, kChunk);
+                if (k < 0) { if (errno == EINTR) continue; break; }
+                uint32_t clen = (uint32_t)k;
+                if (!sandboxid::write_full(pipefd[1], &clen, sizeof(clen))) break;
+                if (clen == 0) break;                 // EOF marker
+                if (!sandboxid::write_full(pipefd[1], chunk, clen)) break;
+            }
+            ::close(mf);
+        }
         ::close(pipefd[1]);
         ::_exit(0);
     }
@@ -291,8 +296,16 @@ static bool sbx_hide_read_mountinfo(uint32_t target_pid, std::string& out,
     ::close(pipefd[1]);                       // ---- parent ----
     MiHdr h{};
     bool got = sandboxid::read_full(pipefd[0], &h, sizeof(h));
-    if (got && h.len > 0 && h.len <= sizeof(mibuf))
-        got = sandboxid::read_full(pipefd[0], mibuf, h.len);
+    out.clear();
+    if (got && !h.ns_open_errno && !h.setns_errno && !h.read_errno) {
+        for (;;) {
+            uint32_t clen = 0;
+            if (!sandboxid::read_full(pipefd[0], &clen, sizeof(clen))) { got = false; break; }
+            if (clen == 0) break;                          // EOF marker
+            out.append(clen, '\0');
+            if (!sandboxid::read_full(pipefd[0], &out[out.size() - clen], clen)) { got = false; break; }
+        }
+    }
     ::close(pipefd[0]);
     ::waitpid(child, nullptr, 0);
 
@@ -301,7 +314,6 @@ static bool sbx_hide_read_mountinfo(uint32_t target_pid, std::string& out,
     read_errno    = h.read_errno;
     if (!got) { if (!read_errno) read_errno = EIO; return false; }
     if (h.ns_open_errno || h.setns_errno || h.read_errno) return false;
-    out.assign(mibuf, h.len);
     return true;
 }
 
