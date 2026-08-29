@@ -114,6 +114,40 @@ patch_dobby() {
     sed -i 's/module\.load_address/module.base/g' "$resolver"
     echo "==> patched Dobby dobby_symbol_resolver.cc (module.load_address -> module.base)"
   fi
+
+  # (4) ProcessRuntime.cc (source/Backend/UserMode/PlatformUtil/Linux) has the
+  #     same load_address/RuntimeModule mismatch as (3), plus two build breakers
+  #     of its own under the NDK clang toolchain:
+  #       - memory_region_comparator compares `a.start`/`b.start`, but MemRange
+  #         only declares `start()` as a method (see MemoryAllocator.h) -> "ref
+  #         to non-static member function must be called".
+  #       - the /proc/self/maps sscanf format string uses PRIxPTR without ever
+  #         including <cinttypes>/<inttypes.h>, so the macro is left
+  #         unexpanded and the adjacent string literals fail to concatenate ->
+  #         "expected ')'".
+  #     Fix the member reference, add the missing header, and reuse the
+  #     module.base rename from (3).
+  local runtime="$EXT/dobby/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc"
+  if [ -f "$runtime" ]; then
+    if grep -q 'module\.load_address' "$runtime"; then
+      sed -i 's/module\.load_address/module.base/g' "$runtime"
+      echo "==> patched Dobby ProcessRuntime.cc (module.load_address -> module.base)"
+    fi
+    if grep -q 'return (a\.start < b\.start);' "$runtime"; then
+      sed -i 's/return (a\.start < b\.start);/return (a.start() < b.start());/' "$runtime"
+      echo "==> patched Dobby ProcessRuntime.cc (a.start/b.start -> a.start()/b.start() calls)"
+    fi
+    if ! grep -q '#include <cinttypes>' "$runtime"; then
+      awk '
+        !done && /^#include <elf\.h>$/ {
+          print "#include <cinttypes>"
+          done = 1
+        }
+        { print }
+      ' "$runtime" > "$runtime.sbxtmp" && mv "$runtime.sbxtmp" "$runtime"
+      echo "==> patched Dobby ProcessRuntime.cc (added missing <cinttypes> for PRIxPTR)"
+    fi
+  fi
 }
 patch_dobby
 
