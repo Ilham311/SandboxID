@@ -5,6 +5,10 @@ on:
     branches:
       - main
       - master
+      # TEMPORARY: build this fix branch in CI to verify the Dobby/LSPlant build.
+      # Remove this line before merging to main (release steps below are gated to
+      # main/master, so a branch build only lints + compiles + uploads artifacts).
+      - fix/dobby-arm64-build
     tags:
       - 'v*'
   workflow_dispatch:
@@ -276,6 +280,7 @@ jobs:
           exit 0
 
       - name: Create tag if missing
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         run: |
           set -eu
           NV="${{ steps.version.outputs.new_version }}"
@@ -310,7 +315,8 @@ jobs:
           if-no-files-found: warn
 
       - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: ${{ steps.version.outputs.new_version }}
           name: SandboxID ${{ steps.version.outputs.new_version }}
