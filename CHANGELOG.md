@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Fix: CI shellcheck merah — direktif `# shellcheck disable=` ikut terhapus saat purge komentar
+
+Purge komentar menghapus dua baris yang tampak seperti komentar tapi sebenarnya
+**direktif fungsional** untuk shellcheck, sehingga CI gagal:
+
+```
+customize.sh:2  SC2034 (warning): SKIPUNZIP appears unused
+```
+
+`SKIPUNZIP` dibaca installer Magisk (eksternal), bukan oleh script itu, jadi
+`# shellcheck disable=SC2034` di atasnya wajib ada. Hal yang sama untuk
+`# shellcheck disable=SC2086` di `build.sh` (`$DBG_FLAG ${LSP_CMAKE:-}` memang
+sengaja tidak dikutip).
+
+- **customize.sh**, **build.sh** — kedua direktif dipulihkan (tanpa prosa
+  penjelasnya, hanya baris direktifnya).
+- Seluruh tree revisi pra-purge disisir ulang untuk pola direktif lain
+  (`shellcheck`, `SPDX`, `NOLINT`, `clang-format`, `eslint`, `@ts-`, `noqa`,
+  `NOSONAR`, dll) — hanya dua itu yang ada, keduanya sudah kembali.
+- **validate.sh** — akar masalahnya: stage lint lokal hanya memeriksa
+  `build.sh autopif.sh selftest.sh` sementara CI memeriksa `git ls-files '*.sh'`,
+  jadi `customize.sh` lolos secara lokal. Stage 2 dan 4 sekarang meniru CI:
+  semua `*.sh` terlacak, `bash -n`/`sh -n` sesuai shebang, `shellcheck
+  -S warning` atas set yang sama. Stage 4 juga tidak lagi "advisory" — kegagalan
+  shellcheck kini men-set rc=1 seperti CI (13 file, bersih).
+
 ### Fix: `applog_seed` fail-closed + skema per-file (hasil code review)
 
 - **helpers.sh** — uid app wajib terbaca. `stat -c '%u'` yang gagal/kosong kini
