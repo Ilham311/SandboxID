@@ -17,11 +17,16 @@ for f in jni/main.cpp jni/companion.cpp jni/sandboxid.cpp; do
   fi
 done
 
-echo "=== 2/4 shell syntax ==="
-for s in autopif.sh selftest.sh; do
-  if sh -n "$s" 2>&1; then echo "OK: sh -n $s"; else echo "FAIL: sh -n $s"; rc=1; fi
+echo "=== 2/4 shell syntax (semua *.sh terlacak, ikut shebang) ==="
+SBX_SH=$(git ls-files '*.sh' 2>/dev/null)
+[ -n "$SBX_SH" ] || SBX_SH=$(find . -name '*.sh' -not -path './.git/*' -not -path './build/*' -not -path './out/*' -not -path './node_modules/*' -not -path './vendor/*' -not -path './third_party/*' | sed 's|^\./||')
+for s in $SBX_SH; do
+  if head -1 "$s" | grep -q bash; then
+    if bash -n "$s" 2>&1; then echo "OK: bash -n $s"; else echo "FAIL: bash -n $s"; rc=1; fi
+  else
+    if sh -n "$s" 2>&1; then echo "OK: sh -n $s"; else echo "FAIL: sh -n $s"; rc=1; fi
+  fi
 done
-if bash -n build.sh 2>&1; then echo "OK: bash -n build.sh"; else echo "FAIL: bash -n build.sh"; rc=1; fi
 
 echo "=== 3/4 host unit tests ==="
 if clang++ -std=c++20 -o /tmp/sbx_carrier_test tests/carrier_test.cpp 2>&1 && /tmp/sbx_carrier_test; then
@@ -51,9 +56,14 @@ else
   echo "FAIL: autopif.sh device produced no artifact"; rc=1
 fi
 
-echo "=== 4/4 shellcheck (advisory) ==="
+echo "=== 4/4 shellcheck (severity>=warning, semua *.sh — sama seperti CI) ==="
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -S warning build.sh autopif.sh selftest.sh && echo "OK: shellcheck clean"
+  shellcheck --version | head -2
+  if shellcheck -S warning $SBX_SH; then
+    echo "OK: shellcheck clean"
+  else
+    echo "FAIL: shellcheck"; rc=1
+  fi
 else
   echo "SKIP: shellcheck not installed"
 fi

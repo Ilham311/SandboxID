@@ -103,6 +103,7 @@ build_variant() {
     local BUILD="build/$V/$ABI"
     rm -rf "$BUILD"
     mkdir -p "$BUILD"
+    # shellcheck disable=SC2086
     cmake -S jni -B "$BUILD" \
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$ABI" \

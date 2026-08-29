@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# shellcheck disable=SC2034
 SKIPUNZIP=0
 
 SBX_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
