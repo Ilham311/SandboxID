@@ -15,6 +15,18 @@
 #define SBX_LSP_LOGD(...) ((void)0)
 #endif
 
+#ifdef SBX_ENABLE_LSPLANT
+// ============================ LSPlant-enabled build ============================
+#include <dobby.h>
+#include <lsplant.hpp>
+#include <lsparself.hpp>
+#include "sbx_ident_synth.hpp"   // sbxid::synth_all + sbxnr:: primitives (top-level namespaces)
+#if __has_include("hook_dex.h")
+#include "hook_dex.h"
+#define SBX_HAVE_HOOK_DEX 1
+#endif
+#endif // SBX_ENABLE_LSPLANT
+
 namespace sbxlsp {
 
 // Values the module feeds to the L3 hooks. main.cpp fills these from the identity
@@ -38,15 +50,6 @@ inline bool init(JNIEnv*)                            { return false; }
 inline bool install_all(JNIEnv*, const HookValues&)  { return false; }
 
 #else
-// ============================ LSPlant-enabled build ============================
-#include <dobby.h>
-#include <lsplant.hpp>
-#include <lsparself.hpp>
-#include "sbx_ident_synth.hpp"   // sbxid::synth_all + sbxnr:: primitives
-#if __has_include("hook_dex.h")
-#include "hook_dex.h"
-#define SBX_HAVE_HOOK_DEX 1
-#endif
 
 inline bool available() { return true; }
 
