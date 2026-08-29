@@ -64,12 +64,15 @@ else
   if [ -n "$found" ]; then
     cp "$found" "$EXT/lsparself/lsparself.hpp"
     echo "==> reused $found"
+  elif [ -f "$SCRIPT_DIR/lsparself.hpp" ]; then
+    cp "$SCRIPT_DIR/lsparself.hpp" "$EXT/lsparself/lsparself.hpp"
+    echo "==> copied lsparself.hpp locally from $SCRIPT_DIR/lsparself.hpp"
   else
     {
       echo "ERROR: lsparself.hpp not found."
       echo "  jni/sbx_lsplant.hpp needs <lsparself.hpp> providing lsparself::Elf with"
       echo "  getSymbAddress()/getSymbPrefixFirstAddress() to resolve libart.so symbols."
-      echo "  Supply it once with:"
+      echo "  Supply it by placing it in the jni/ folder or with:"
       echo "      LSPARSELF_HPP=/path/to/lsparself.hpp $0"
       echo "  (it is then cached at $EXT/lsparself/lsparself.hpp)."
     } >&2
