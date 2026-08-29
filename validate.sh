@@ -19,7 +19,7 @@ done
 
 echo "=== 2/4 shell syntax (semua *.sh terlacak, ikut shebang) ==="
 SBX_SH=$(git ls-files '*.sh' 2>/dev/null)
-[ -n "$SBX_SH" ] || SBX_SH=$(find . -name '*.sh' -not -path './.git/*' | sed 's|^\./||')
+[ -n "$SBX_SH" ] || SBX_SH=$(find . -name '*.sh' -not -path './.git/*' -not -path './build/*' -not -path './out/*' -not -path './node_modules/*' -not -path './vendor/*' -not -path './third_party/*' | sed 's|^\./||')
 for s in $SBX_SH; do
   if head -1 "$s" | grep -q bash; then
     if bash -n "$s" 2>&1; then echo "OK: bash -n $s"; else echo "FAIL: bash -n $s"; rc=1; fi
