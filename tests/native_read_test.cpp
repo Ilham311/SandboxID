@@ -477,6 +477,44 @@ static void test_mountinfo() {
     CHECK(select_umount_targets("").empty(), "empty mountinfo -> no targets");
 }
 
+static void test_native_unsafe_prop() {
+    const char* unsafe[] = {
+        "ro.hardware", "ro.product.board", "ro.board.platform", "ro.arch",
+        "ro.zygote", "ro.vendor.api_level", "persist.graphics.egl",
+        "ro.product.cpu.abi", "ro.product.cpu.abi2", "ro.product.cpu.abilist",
+        "ro.product.cpu.abilist32", "ro.product.cpu.abilist64",
+        "ro.hardware.egl", "ro.hardware.vulkan", "ro.hardware.gralloc",
+        "ro.hardware.hwcomposer", "ro.hardware.camera",
+        "ro.dalvik.vm.isa.arm", "dalvik.vm.isa.arm.features",
+    };
+    for (const char* p : unsafe)
+        CHECK(is_native_unsafe_prop(p), p);
+
+    const char* spoofable[] = {
+        "ro.product.model", "ro.product.brand", "ro.product.manufacturer",
+        "ro.product.device", "ro.product.name", "ro.build.fingerprint",
+        "ro.build.id", "ro.build.version.release", "ro.build.version.sdk",
+        "ro.soc.manufacturer", "ro.soc.model", "ro.serialno",
+        "gsm.operator.numeric", "persist.sys.timezone",
+        "dalvik.vm.heapgrowthlimit", "ro.hardwaremodel", "ro.arch2",
+    };
+    for (const char* p : spoofable)
+        CHECK(!is_native_unsafe_prop(p), p);
+
+    CHECK(!is_native_unsafe_prop(nullptr), "null prop name is not unsafe");
+    CHECK(!is_native_unsafe_prop(""), "empty prop name is not unsafe");
+}
+
+static void test_classify_no_alloc_paths() {
+    CHECK(classify("/data/data/com.ss.android.ugc.trill/shared_prefs/applog.xml") == APPLOG_XML,
+          "applog.xml classified");
+    CHECK(classify("/data/user/0/com.zhiliaoapp.musically/files/bd_setting/device_id") == BD_RAW_DID,
+          "bd_setting/device_id classified");
+    CHECK(classify("applog.xml") == NONE, "bare applog.xml not classified");
+    CHECK(classify("/x") == NONE, "short path not classified");
+    CHECK(classify("") == NONE, "empty path not classified");
+}
+
 int main() {
     test_uuid();
     test_mac();
@@ -488,6 +526,8 @@ int main() {
     test_hex_from_seed();
     test_selinux();
     test_hide_prop();
+    test_native_unsafe_prop();
+    test_classify_no_alloc_paths();
     test_applog_classify();
     test_applog_ids();
     test_applog_xml_patch();
