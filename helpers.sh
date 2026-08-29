@@ -312,10 +312,36 @@ applog_wipe() {
 _applog_own() {
     _t="$1"; _uid="$2"; _mode="$3"; _refctx="$4"
     [ -e "$_t" ] || return 1
-    [ -n "$_uid" ] && chown "${_uid}:${_uid}" "$_t" 2>/dev/null
+    [ -n "$_uid" ] || return 1
+    chown "${_uid}:${_uid}" "$_t" 2>/dev/null || return 1
     chmod "$_mode" "$_t" 2>/dev/null
     [ -n "$_refctx" ] && command -v chcon >/dev/null 2>&1 && chcon "$_refctx" "$_t" 2>/dev/null
     return 0
+}
+
+_applog_map() {
+    printf "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n"
+    while [ "$#" -ge 2 ]; do
+        [ -n "$2" ] && printf '    <string name="%s">%s</string>\n' "$1" "$2"
+        shift 2
+    done
+    printf '</map>\n'
+}
+
+_applog_put() {
+    _dst="$1"; _mode="$2"; _uid="$3"; _refctx="$4"; _body="$5"
+    _tmp="${_dst%/*}/.sbxseed.$$"
+    if ! printf '%s\n' "$_body" > "$_tmp" 2>/dev/null || [ ! -s "$_tmp" ]; then
+        rm -f "$_tmp" 2>/dev/null
+        return 1
+    fi
+    if ! mv -f "$_tmp" "$_dst" 2>/dev/null; then
+        rm -f "$_tmp" 2>/dev/null
+        return 1
+    fi
+    _applog_own "$_dst" "$_uid" "$_mode" "$_refctx" && return 0
+    rm -f "$_dst" 2>/dev/null
+    return 1
 }
 
 applog_seed() {
@@ -344,12 +370,18 @@ applog_seed() {
     _openudid=$(printf '%s\n' "$_ids"   | awk -F= '$1=="OPENUDID"{print $2;exit}')
     _clientudid=$(printf '%s\n' "$_ids" | awk -F= '$1=="CLIENTUDID"{print $2;exit}')
     _cdid=$(printf '%s\n' "$_ids"       | awk -F= '$1=="CDID"{print $2;exit}')
-    if [ -z "$_did" ] || [ -z "$_iid" ] || [ -z "$_cdid" ]; then
+    if [ -z "$_did" ] || [ -z "$_iid" ] || [ -z "$_ssid" ] || [ -z "$_cdid" ] || \
+       [ -z "$_openudid" ] || [ -z "$_clientudid" ]; then
         log_warn "applog_seed: output applog-ids tidak lengkap untuk $_pkg"
         return 1
     fi
 
     _uid=$(stat -c '%u' "$_data_dir" 2>/dev/null)
+    case "$_uid" in
+        ''|*[!0-9]*)
+            log_warn "applog_seed: uid $_pkg tidak terbaca (stat '$_data_dir') — seed dibatalkan, file root-owned tidak ditinggalkan"
+            return 1 ;;
+    esac
     _sp="$_data_dir/shared_prefs"
     _bd="$_data_dir/files/bd_setting"
 
@@ -357,47 +389,44 @@ applog_seed() {
     mkdir -p "$_sp" "$_bd" 2>/dev/null
     _spctx=$(ls -Zd "$_data_dir" 2>/dev/null | awk '{print $1}')
     case "$_spctx" in u:object_r:*) : ;; *) _spctx="" ;; esac
-    _applog_own "$_sp" "$_uid" 0771 "$_spctx"
-    _applog_own "$_data_dir/files" "$_uid" 0771 "$_spctx"
-    _applog_own "$_bd" "$_uid" 0771 "$_spctx"
+    for _d in "$_sp" "$_data_dir/files" "$_bd"; do
+        [ -d "$_d" ] || continue
+        if ! _applog_own "$_d" "$_uid" 0771 "$_spctx"; then
+            se_restore
+            log_warn "applog_seed: gagal chown $_d ke uid $_uid — seed dibatalkan"
+            return 1
+        fi
+    done
 
     _seeded=0
-    for _x in applog.xml snssdk_openudid.xml bd_device_info.xml; do
-        _tmp="$_sp/.$_x.sbx.$$"
-        cat > "$_tmp" <<XMLEOF
-<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
-<map>
-    <string name="device_id">$_did</string>
-    <string name="install_id">$_iid</string>
-    <string name="ssid">$_ssid</string>
-    <string name="openudid">$_openudid</string>
-    <string name="clientudid">$_clientudid</string>
-    <string name="cdid">$_cdid</string>
-</map>
-XMLEOF
-        if [ -s "$_tmp" ] && mv -f "$_tmp" "$_sp/$_x" 2>/dev/null; then
-            _applog_own "$_sp/$_x" "$_uid" 0660 "$_spctx"
-            _seeded=$((_seeded + 1))
-        else
-            rm -f "$_tmp" 2>/dev/null
-        fi
-    done
+    _failed=0
+    _applog_put "$_sp/applog.xml" 0660 "$_uid" "$_spctx" \
+        "$(_applog_map device_id "$_did" install_id "$_iid" ssid "$_ssid" cdid "$_cdid")" \
+        && _seeded=$((_seeded + 1)) || _failed=$((_failed + 1))
+    _applog_put "$_sp/snssdk_openudid.xml" 0660 "$_uid" "$_spctx" \
+        "$(_applog_map openudid "$_openudid" clientudid "$_clientudid")" \
+        && _seeded=$((_seeded + 1)) || _failed=$((_failed + 1))
 
     for _pair in "device_id=$_did" "install_id=$_iid" "openudid=$_openudid" \
-                 "clientudid=$_clientudid"; do
+                 "clientudid=$_clientudid" ".cdid=$_cdid"; do
         _n=${_pair%%=*}; _v=${_pair#*=}
         [ -n "$_v" ] || continue
-        if printf '%s\n' "$_v" > "$_bd/$_n" 2>/dev/null; then
-            _applog_own "$_bd/$_n" "$_uid" 0600 "$_spctx"
+        case "$_n" in
+            .cdid) _dst="$_data_dir/files/.cdid" ;;
+            *)     _dst="$_bd/$_n" ;;
+        esac
+        if _applog_put "$_dst" 0600 "$_uid" "$_spctx" "$_v"; then
             _seeded=$((_seeded + 1))
+        else
+            _failed=$((_failed + 1))
         fi
     done
-    if printf '%s\n' "$_cdid" > "$_data_dir/files/.cdid" 2>/dev/null; then
-        _applog_own "$_data_dir/files/.cdid" "$_uid" 0600 "$_spctx"
-        _seeded=$((_seeded + 1))
-    fi
     se_restore
 
+    if [ "$_failed" -gt 0 ]; then
+        log_warn "$_pkg — seed parsial: $_seeded ok, $_failed gagal (izin/SELinux) — hook tetap spoof lewat sintesis in-process"
+        return 1
+    fi
     if [ "$_seeded" -gt 0 ]; then
         log_ok "$_pkg — seeded $_seeded file (did=$(mask_id "$_did"))"
         return 0
@@ -443,8 +472,11 @@ applog_regen() {
 
     force_stop "$_pkg" >/dev/null 2>&1
     applog_wipe "$_pkg" || :
-    applog_seed "$_pkg" || :
-    log_ok "$_pkg — epoch bumped + cache wiped + seed baru (ID aktif saat app dibuka)"
+    if applog_seed "$_pkg"; then
+        log_ok "$_pkg — epoch bumped + cache wiped + seed baru (ID aktif saat app dibuka)"
+    else
+        log_warn "$_pkg — epoch bumped + cache wiped, tapi seed disk gagal; ID tetap dispoof in-process oleh hook L9 saat app membaca cache"
+    fi
     return 0
 }
 

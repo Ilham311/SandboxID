@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Fix: `applog_seed` fail-closed + skema per-file (hasil code review)
+
+- **helpers.sh** — uid app wajib terbaca. `stat -c '%u'` yang gagal/kosong kini
+  membatalkan seed sebelum satu file pun ditulis, bukan melanjutkan tanpa
+  `chown`. Sebelumnya file berakhir milik root (tidak terbaca uid app) tapi tetap
+  dihitung sukses dan dilaporkan `[OK]`.
+- **helpers.sh** — `_applog_own()` mengembalikan 1 kalau `chown` gagal, dan
+  `_applog_put()` menghapus file yang gagal di-chown alih-alih meninggalkannya
+  root-owned. Direktori (`shared_prefs`, `files`, `files/bd_setting`) yang gagal
+  di-chown membatalkan seluruh seed. Hitungan ok/gagal dilaporkan terpisah;
+  seed parsial mengembalikan 1.
+- **helpers.sh** — `applog_regen` membedakan pesan sukses dan seed-gagal, jadi
+  operator tidak lagi melihat `[OK]` untuk seed yang tidak mendarat.
+- **helpers.sh** — skema per-file, bukan satu template dipakai bertiga.
+  `applog.xml` hanya `device_id`/`install_id`/`ssid`/`cdid`; `snssdk_openudid.xml`
+  hanya `openudid`/`clientudid`. `bd_device_info.xml` **tidak lagi di-seed** —
+  di perangkat nyata isinya blob fingerprint dengan skema berbeda, jadi
+  memalsukannya dengan map applog justru tidak autentik; file itu dibiarkan
+  absen dan hook L9 menyintesis nilainya untuk pembaca native.
+- Diuji di host: happy path 7 file dengan skema benar; `stat` gagal → 0 file
+  ditulis, rc=1; `chown` gagal per-file → file tersebut dihapus, rc=1, laporan
+  "3 ok, 4 gagal".
+
 ### Fix: penyebab UTAMA blank putih — `apply-boot` resetprop key driver grafis ke SELURUH sistem
 
 Fix sebelumnya menutup jalur L9 (per-app, in-process). Ternyata ada jalur kedua
