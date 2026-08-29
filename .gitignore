@@ -24,3 +24,7 @@ jni/hook_dex.h
 
 # Claude Code worktrees (ephemeral; never commit as embedded repos)
 .claude/worktrees/
+
+# Runtime-generated operator selection (ditulis rotate_ids.sh saat runtime;
+# jangan pernah di-commit — sumber datanya adalah data/carriers.tsv)
+carrier.conf
