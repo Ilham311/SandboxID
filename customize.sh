@@ -1,7 +1,4 @@
 #!/system/bin/sh
-# SKIPUNZIP is read by the Magisk installer framework (external), not this
-# script -- 0 means let the framework auto-extract the module zip.
-# shellcheck disable=SC2034
 SKIPUNZIP=0
 
 SBX_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
@@ -28,8 +25,6 @@ else
     ui_print "- Menyiapkan target.txt (kosong dulu; isi nama paket aplikasi untuk mengaktifkan)"
 fi
 
-# Pilihan operator/SIM (carrier.conf) dibuat saat runtime, tidak ikut di zip.
-# Pertahankan lintas upgrade supaya operator pilihan tidak hilang saat pasang ulang.
 LIVE_CARRIER="/data/adb/modules/sandboxid/carrier.conf"
 if [ -s "$LIVE_CARRIER" ]; then
     ui_print "- carrier.conf (pilihan operator) dari instalasi sebelumnya dipertahankan"
@@ -87,7 +82,7 @@ set_perm $MODPATH/bin/sandboxid-x86_64      0 0 0755
 set_perm $MODPATH/bin/sandboxid-x86         0 0 0755
 if [ -f $MODPATH/bin/resetprop-rs ]; then
     set_perm $MODPATH/bin/resetprop-rs 0 0 0755
-    
+
     if [ -f "$MODPATH/bin/resetprop-rs.sha256" ] && command -v sha256sum >/dev/null 2>&1; then
         if ( cd "$MODPATH/bin" && sha256sum -c resetprop-rs.sha256 >/dev/null 2>&1 ); then
             ui_print "- Checksum resetprop-rs OK"
@@ -96,7 +91,6 @@ if [ -f $MODPATH/bin/resetprop-rs ]; then
             rm -f "$MODPATH/bin/resetprop-rs"
         fi
     fi
-
 
     if [ -f "$MODPATH/bin/resetprop-rs" ] && [ "$ABI" != "arm64-v8a" ]; then
         rm -f "$MODPATH/bin/resetprop-rs" "$MODPATH/bin/resetprop-rs.sha256"

@@ -19,7 +19,7 @@ struct CarrierSel {
     std::string mcc;
     std::string mnc;
     std::string iso;
-    std::string carrier_id;   // Android canonical carrier id (getSimCarrierId); empty = unset/UNKNOWN
+    std::string carrier_id;
     bool        phantom = false;
 };
 

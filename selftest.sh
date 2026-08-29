@@ -1,33 +1,4 @@
 #!/system/bin/sh
-#
-# selftest.sh — READ-ONLY detection self-check (F5).
-#
-# Scans the device from a root shell and REPORTS what a detector would find. It
-# changes NOTHING: only getprop / cat / ls / command -v / mountinfo parsing. No
-# setprop, no resetprop, no setenforce, no mount, no framework CLIs.
-#
-# Vantage point matters, and it is the whole reason for the PASS/WARN/FAIL/INFO
-# split:
-#   * Device-wide properties set by `apply_native` (resetprop) ARE visible to
-#     this root shell via getprop, so those are graded PASS / WARN / FAIL.
-#   * Per-app effects — the L2/L9 property + Build hooks, the /proc,/sys memfd
-#     redirects, the per-app build.prop bind-mounts, and the opt-in mount-trace
-#     hider — live in each TARGET app's own hook + mount namespace. A root shell
-#     cannot see them, so they are reported INFO ("verify inside a target app")
-#     and must NEVER read as a false FAIL.
-#   * Real, device-global root traces (su, manager dirs, magisk/overlay mounts)
-#     are equally invisible to a normal app unless it is a target with the hider
-#     enabled, so those are INFO too — this shell always sees them.
-#
-# Oracle for the check list: reveny/Android-Native-Root-Detector's documented
-# signal categories (MIT shell; the detector .so is closed and was NOT copied —
-# used only as a requirements checklist). See CREDITS.md.
-#
-# Output grammar (parse-token contract with webroot/app.js — keep in sync with
-# .gitar/documents/parse-token-safelist.md):
-#     SELFTEST <category> <PASS|WARN|FAIL|INFO> <detail...>
-#     SELFTEST SUMMARY pass=N warn=M fail=K info=J
-# category is a single space-free token; detail is free text.
 
 MODDIR="${MODDIR:-${0%/*}}"
 IDENTITY="${IDENTITY:-$MODDIR/identity.prop}"
@@ -51,7 +22,6 @@ id_get() {
     awk -F= -v k="$1" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$IDENTITY" 2>/dev/null
 }
 
-# --- identity: is a persona applied at all? -------------------------------
 _fp="$(id_get FINGERPRINT)"
 if [ -n "$_fp" ]; then
     emit identitas PASS "persona aktif: $_fp"
@@ -59,13 +29,6 @@ else
     emit identitas WARN "belum ada persona — tekan Acak perangkat baru"
 fi
 
-# --- coherence self-audit (J): internal consistency of the applied persona -
-# All fields come from identity.prop. A detector that RECOMPUTES the fingerprint
-# from Build.* or MAPS SDK->release will flag any mismatch, and an SDK/RELEASE
-# skew is exactly the "upgrade spoof" that force-closes target apps. Catching it
-# here means a broken persona is spotted before a target app ever sees it. These
-# are read-only string checks on identity.prop and run only when a persona is
-# applied (otherwise the identitas WARN above already covers the empty case).
 if [ -n "$_fp" ]; then
     _brand="$(id_get BRAND)";     _product="$(id_get PRODUCT)"
     _device="$(id_get DEVICE)";   _release="$(id_get RELEASE)"
@@ -75,7 +38,6 @@ if [ -n "$_fp" ]; then
     _socman="$(id_get SOC_MANUFACTURER)"; _socmod="$(id_get SOC_MODEL)"
     _type="$(id_get TYPE)";       _tags="$(id_get TAGS)"
 
-    # 1. FINGERPRINT == BRAND/PRODUCT/DEVICE:RELEASE/ID/INCREMENTAL:user/release-keys
     _expfp="${_brand}/${_product}/${_device}:${_release}/${_bid}/${_incr}:user/release-keys"
     if [ "$_fp" = "$_expfp" ]; then
         emit koherensi PASS "fingerprint konsisten dengan field Build"
@@ -83,11 +45,10 @@ if [ -n "$_fp" ]; then
         emit koherensi FAIL "fingerprint tidak cocok dengan BRAND/PRODUCT/DEVICE/RELEASE/ID/INCREMENTAL"
     fi
 
-    # 2. SDK_INT <-> RELEASE major (upgrade-spoof / API-mismatch guard)
     case "$_sdk" in
         30) _exprel=11 ;;
         31) _exprel=12 ;;
-        32) _exprel=12 ;;   # 12L reports release "12"
+        32) _exprel=12 ;;
         33) _exprel=13 ;;
         34) _exprel=14 ;;
         35) _exprel=15 ;;
@@ -105,7 +66,6 @@ if [ -n "$_fp" ]; then
         emit koherensi FAIL "SDK_INT=$_sdk tapi RELEASE=$_release (harusnya Android $_exprel)"
     fi
 
-    # 3. SECURITY_PATCH must be YYYY-MM-DD (10 chars; digits removed leaves "--")
     _pd="$(printf '%s' "$_patch" | tr -d '0-9')"
     if [ "${#_patch}" -eq 10 ] && [ "$_pd" = "--" ]; then
         emit koherensi PASS "security_patch berformat YYYY-MM-DD ($_patch)"
@@ -113,15 +73,12 @@ if [ -n "$_fp" ]; then
         emit koherensi WARN "security_patch bentuk tak lazim (${_patch:-kosong})"
     fi
 
-    # 4. TYPE=user / TAGS=release-keys (retail tells; must match fingerprint tail)
     if [ "$_type" = "user" ] && [ "$_tags" = "release-keys" ]; then
         emit koherensi PASS "TYPE=user TAGS=release-keys"
     else
         emit koherensi WARN "TYPE=${_type:-kosong} TAGS=${_tags:-kosong} (bukan user/release-keys)"
     fi
 
-    # 5. board platform <-> SoC coherence (SoC-leak guard). A Tensor platform
-    #    must report a Google GS* SoC; a non-Tensor row must carry a SoC model.
     case "$_plat" in
         gs101|gs201|zuma|zumapro|laguna)
             case "$_socmod" in
@@ -145,8 +102,6 @@ if [ -n "$_fp" ]; then
             ;;
     esac
 
-    # 6. FLAVOR must equal PRODUCT-TYPE ("oriole-user"); detectors compare it
-    #    against the fingerprint tail.
     _flavor="$(id_get FLAVOR)"
     if [ -n "$_flavor" ]; then
         if [ "$_flavor" = "${_product}-${_type}" ]; then
@@ -156,8 +111,6 @@ if [ -n "$_fp" ]; then
         fi
     fi
 
-    # 7. BUILD_TIME_UTC (Build.TIME / ro.build.date.utc) — numeric and within
-    #    a plausible window: after 2009-01-01, before now.
     _butc="$(id_get BUILD_TIME_UTC)"
     _nowts="$(date +%s 2>/dev/null)"
     case "$_butc" in
@@ -174,7 +127,6 @@ if [ -n "$_fp" ]; then
     esac
 fi
 
-# --- verified boot / VBMeta (device-wide, set by apply_native) ------------
 _vbs="$(gp ro.boot.verifiedbootstate)"
 case "$_vbs" in
     green)             emit vbmeta PASS "verifiedbootstate=green" ;;
@@ -210,7 +162,6 @@ _dig="$(gp ro.boot.vbmeta.digest)"
 case "$_dig" in
     "") emit vbmeta WARN "vbmeta.digest kosong" ;;
     *)
-        # 64 lowercase hex = well-formed SHA-256; anything else is suspicious.
         _clean="$(printf '%s' "$_dig" | tr -d '0-9a-f')"
         if [ -z "$_clean" ] && [ "${#_dig}" -eq 64 ]; then
             emit vbmeta PASS "vbmeta.digest terpasang (64-hex)"
@@ -220,7 +171,6 @@ case "$_dig" in
         ;;
 esac
 
-# --- build.prop identity tells (device-wide) ------------------------------
 _bt="$(gp ro.build.type)"
 case "$_bt" in
     user)          emit build PASS "ro.build.type=user" ;;
@@ -258,7 +208,6 @@ case "$_oem" in
     *)  emit build INFO "sys.oem_unlock_allowed=${_oem:-kosong}" ;;
 esac
 
-# --- SELinux (global; the /sys/fs/selinux/enforce mask is per-target-app) --
 _se="$(getenforce 2>/dev/null)"
 case "$_se" in
     Enforcing)  emit selinux PASS "getenforce=Enforcing" ;;
@@ -268,7 +217,6 @@ case "$_se" in
 esac
 emit selinux INFO "ro.build.selinux + node enforce di-mask per-app — verifikasi di dalam app target"
 
-# --- emulator / custom-ROM property tells (device-wide) -------------------
 _qemu="$(gp ro.kernel.qemu)$(gp ro.boot.qemu)"
 _hw="$(gp ro.hardware)"
 if [ -n "$_qemu" ] || [ "$_hw" = "goldfish" ] || [ "$_hw" = "ranchu" ]; then
@@ -284,8 +232,6 @@ else
     emit rom PASS "tidak ada prop custom-ROM device-wide"
 fi
 
-# --- real root traces: visible to THIS shell; hidden from an app only when
-#     it is a target AND the opt-in hider is enabled. Hence INFO, never FAIL. -
 if command -v su >/dev/null 2>&1; then
     emit root INFO "biner su terlihat dari root shell (disembunyikan di app target hanya bila hider aktif)"
 else
@@ -305,7 +251,6 @@ else
     emit root INFO "hider mount-trace: nonaktif (default) — touch enable_hide untuk mengaktifkan"
 fi
 
-# --- mount traces in the ROOT namespace (an app target sees its OWN ns) ----
 _mi=/proc/self/mountinfo
 if [ -r "$_mi" ]; then
     _n="$(grep -c -E 'magisk|/data/adb|debug_ramdisk|worker| overlay | tmpfs ' "$_mi" 2>/dev/null)"
@@ -315,7 +260,6 @@ else
     emit mount INFO "mountinfo tidak terbaca"
 fi
 
-# --- modified hosts (adblock/hosts tell) ----------------------------------
 if [ -r /system/etc/hosts ]; then
     _hn="$(grep -c -v -E '^[[:space:]]*(#|$)' /system/etc/hosts 2>/dev/null)"
     [ -n "$_hn" ] || _hn=0
@@ -328,7 +272,6 @@ else
     emit hosts INFO "/system/etc/hosts tidak terbaca"
 fi
 
-# --- per-app hook layers: only observable from inside a target app ---------
 _nnr="nonaktif"; [ -f "$MODDIR/no_native_read" ] && _nnr="AKTIF (native-read dimatikan)"
 emit hooks INFO "redirect baca /proc,/sys (boot_id, MAC, /proc/version, meminfo, cpuinfo, enforce): kill-switch no_native_read=$_nnr"
 emit hooks INFO "hook properti L2/L9 + bind build.prop: hanya di app target — verifikasi dengan app detektor"

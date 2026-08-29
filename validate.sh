@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# One-shot validation for the Phase-4 edits: C++ syntax (debug+release),
-# shell syntax, host unit tests, shellcheck. Read-only; writes only /tmp.
 set -u
 cd "$(dirname "$0")" || exit 1
 rc=0
@@ -38,10 +36,6 @@ else
 fi
 
 echo "=== 3b/4 autopif artifact well-formedness ==="
-# Regression test for the heredoc newline bug: $(cat <<EOF) strips the trailing
-# newline, so keys appended after the heredoc used to glue onto the last line
-# ("FLAVOR=caiman-userBUILD_TIME_UTC=1727839200" — corrupted FLAVOR, lost
-# BUILD_TIME_UTC). Every emitted line must be exactly one KEY=VALUE pair.
 SBX_ART=/tmp/sbx_autopif_identity
 if MODDIR="$PWD" AUTOPIF_ARTIFACT="$SBX_ART" sh autopif.sh device >/dev/null 2>&1 \
    && [ -s "$SBX_ART" ]; then

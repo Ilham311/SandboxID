@@ -30,10 +30,6 @@ target_link_libraries(sandboxid_module PRIVATE log)
 add_executable(sandboxid sandboxid.cpp)
 target_include_directories(sandboxid PRIVATE ${CMAKE_SOURCE_DIR})
 
-# Host unit tests for the header-only pure logic (carrier parsing, native-read
-# synthesis, mountinfo selection). The tests are self-contained C++ with their
-# own main(); build & run on a host toolchain with:
-#   cmake -S jni -B build-tests -DSBX_BUILD_TESTS=ON && cmake --build build-tests && ctest --test-dir build-tests
 option(SBX_BUILD_TESTS "Build host unit tests (tests/*.cpp)" OFF)
 if(SBX_BUILD_TESTS)
     if(CMAKE_CROSSCOMPILING)

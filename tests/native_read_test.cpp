@@ -278,7 +278,7 @@ static void test_hide_prop() {
 }
 
 static void test_applog_classify() {
-    // XML caches — both /data/data and /data/user/0 prefixes, any package.
+
     CHECK(classify("/data/data/com.zhiliaoapp.musically/shared_prefs/applog.xml")
           == APPLOG_XML, "applog.xml classify");
     CHECK(classify("/data/user/0/com.ss.android.ugc.trill/shared_prefs/applog.xml")
@@ -290,7 +290,6 @@ static void test_applog_classify() {
     CHECK(classify("/data/data/x/shared_prefs/bd_device_info.xml")
           == APPLOG_XML, "bd_device_info.xml classify");
 
-    // Raw native caches.
     CHECK(classify("/data/data/x/files/bd_setting/device_id")   == BD_RAW_DID,
           "bd_setting/device_id classify");
     CHECK(classify("/data/data/x/files/bd_setting/install_id")  == BD_RAW_IID,
@@ -302,7 +301,6 @@ static void test_applog_classify() {
     CHECK(classify("/data/data/x/files/.cdid")                  == BD_RAW_CDID,
           "files/.cdid classify");
 
-    // Negatives: near-miss names must NOT match.
     CHECK(classify("/data/data/x/shared_prefs/applog_other.xml") == NONE,
           "applog_other.xml not matched");
     CHECK(classify("/data/data/x/files/other.cdid")             == NONE,
@@ -311,20 +309,16 @@ static void test_applog_classify() {
           "bd_setting/other not matched");
     CHECK(classify("/data/data/x/shared_prefs/user_prefs.xml")  == NONE,
           "unrelated xml not matched");
-    // An app legitimately named e.g. "applog.xml" must not be caught: the
-    // suffix always includes the /shared_prefs/ or /files/ component.
+
     CHECK(classify("/data/data/applog.xml") == NONE, "bare applog.xml not matched");
-    // Existing kinds unaffected.
+
     CHECK(classify("/proc/version") == VERSION, "version still classifies");
     CHECK(classify("/proc/meminfo") == MEMINFO, "meminfo still classifies");
 }
 
 static void test_applog_ids() {
-    // Real observed device_register samples decode as (unix_ms << 22):
-    //   6990234216324986369 >> 22 = 1666601709443 (2022-10-24)
-    //   7137846409338136325 >> 22 = 1701795198759 (2023-12-05)
-    // Our synthesis must reproduce that structure exactly.
-    uint64_t epoch = 1710000000000ULL;  // 2024-03-09T16:00:00Z
+
+    uint64_t epoch = 1710000000000ULL;
     uint64_t seed  = fnv1a("google/husky/husky:14/AP1A.240505.004/11583682:user/release-keys|com.zhiliaoapp.musically");
 
     ApplogIds a = make_applog_ids(seed, epoch);
@@ -339,7 +333,6 @@ static void test_applog_ids() {
     CHECK(a.did != a.iid && a.did != a.ssid && a.iid != a.ssid,
           "did/iid/ssid distinct");
 
-    // UUID v4 shape for cdid / clientudid.
     for (const std::string* u : {&a.cdid, &a.clientudid}) {
         CHECK(u->size() == 36, "uuid length 36");
         CHECK((*u)[14] == '4', "uuid version nibble == 4");
@@ -349,11 +342,9 @@ static void test_applog_ids() {
     }
     CHECK(a.cdid != a.clientudid, "cdid and clientudid distinct");
 
-    // openudid: 16 lowercase hex chars (legacy UDID shape the SDK reuses).
     CHECK(a.openudid.size() == 16, "openudid is 16 chars");
     CHECK(is_hexlc(a.openudid), "openudid is lowercase hex");
 
-    // Determinism + sensitivity.
     ApplogIds a2 = make_applog_ids(seed, epoch);
     CHECK(a2.did == a.did && a2.iid == a.iid && a2.ssid == a.ssid &&
           a2.cdid == a.cdid && a2.clientudid == a.clientudid &&
@@ -372,9 +363,6 @@ static void test_applog_xml_patch() {
     uint64_t epoch = 1710000000000ULL;
     ApplogIds a = make_applog_ids(fnv1a("persona|com.zhiliaoapp.musically"), epoch);
 
-    // Key names vary across SDK versions/apps — the patcher must catch both
-    // the short (device_id) and header-prefixed (header_device_id) spellings,
-    // plus case variations, and leave everything else verbatim.
     std::string real =
         "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
         "<map>\n"
@@ -409,17 +397,14 @@ static void test_applog_xml_patch() {
     CHECK(out.find("register_time")          != std::string::npos, "register_time key kept");
     CHECK(out.rfind("</map>", out.size() - 2) != std::string::npos, "closing map intact");
 
-    // Idempotent: patching patched output changes nothing.
     std::string out2;
     CHECK(patch_applog_xml(out, a, out2) && out2 == out, "patch is idempotent");
 
-    // Non-XML / non-map input is rejected, not mangled.
     std::string o;
     CHECK(!patch_applog_xml("hello world", a, o), "plain text rejected");
     CHECK(!patch_applog_xml("<html><body>x</body></html>", a, o), "non-map xml rejected");
     CHECK(!patch_applog_xml("", a, o), "empty input rejected");
 
-    // XML map with no identifier entries passes through unchanged (still true).
     std::string nokeys =
         "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
         "<map>\n    <string name=\"lang\">en</string>\n</map>\n";
@@ -515,6 +500,30 @@ static void test_classify_no_alloc_paths() {
     CHECK(classify("") == NONE, "empty path not classified");
 }
 
+static void test_applog_xml_synth() {
+    ApplogIds ids = make_applog_ids(fnv1a("seed|synth|pkg"), 1727839200000ULL);
+    std::string x = applog_xml_synth(ids);
+    CHECK(x.find("<map>") != std::string::npos, "synth has <map>");
+    CHECK(x.find("</map>") != std::string::npos, "synth has </map>");
+    CHECK(x.find(ids.did) != std::string::npos, "synth carries did");
+    CHECK(x.find(ids.iid) != std::string::npos, "synth carries iid");
+    CHECK(x.find(ids.ssid) != std::string::npos, "synth carries ssid");
+    CHECK(x.find(ids.openudid) != std::string::npos, "synth carries openudid");
+    CHECK(x.find(ids.clientudid) != std::string::npos, "synth carries clientudid");
+    CHECK(x.find(ids.cdid) != std::string::npos, "synth carries cdid");
+
+    ApplogIds other = make_applog_ids(fnv1a("seed|synth|other"), 1727839200000ULL);
+    std::string patched;
+    CHECK(patch_applog_xml(x, other, patched), "synth output is patchable");
+    CHECK(patched.find(other.did) != std::string::npos, "patch replaced did");
+    CHECK(patched.find(ids.did) == std::string::npos, "old did gone after patch");
+    CHECK(patched.find(other.cdid) != std::string::npos, "patch replaced cdid");
+
+    std::string twice;
+    CHECK(patch_applog_xml(patched, other, twice), "patch is idempotent");
+    CHECK(twice == patched, "second patch is a no-op");
+}
+
 int main() {
     test_uuid();
     test_mac();
@@ -531,6 +540,7 @@ int main() {
     test_applog_classify();
     test_applog_ids();
     test_applog_xml_patch();
+    test_applog_xml_synth();
     test_mountinfo();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

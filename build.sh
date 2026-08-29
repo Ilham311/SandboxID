@@ -1,24 +1,4 @@
 #!/usr/bin/env bash
-# ------------------------------------------------------------------------------
-# SandboxID — Magisk / Zygisk module build script
-#
-# Strict mode: -e (exit on error), -u (unset variables are errors), pipefail
-# (a pipeline fails if any command in it fails). This gives us fail-fast on any
-# NDK/CMake/zip regression instead of silently producing a broken ZIP.
-#
-# External references (validated 2026-08):
-#   - Zygisk sample repo (public Zygisk API contract):
-#       https://github.com/topjohnwu/zygisk-module-sample
-#     zygisk.hpp is pinned by commit SHA + SHA256 below to prevent silent
-#     API drift when upstream retags.
-#   - Magisk (parent framework):
-#       https://github.com/topjohnwu/Magisk
-#   - LSPlant (optional L3 Java-method hooker):
-#       https://github.com/LSPosed/LSPlant  (fetched at build time when
-#       SBX_ENABLE_LSPLANT=ON, pinned by fetch_lsplant_deps.sh)
-#   - Android NDK build/cmake toolchain:
-#       https://developer.android.com/ndk/guides/cmake
-# ------------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -28,9 +8,6 @@ cd "$ROOT"
 MIN_SDK="${MIN_SDK:-26}"
 VARIANT="${VARIANT:-both}"
 
-# Fail fast on missing tooling instead of dying mid-build with a cryptic
-# cmake/zip error (or worse, producing an incomplete zip silently).
-# curl is only needed when zygisk.hpp is not already cached in jni/.
 for _tool in cmake zip; do
   if ! command -v "$_tool" >/dev/null 2>&1; then
     echo "ERROR: required tool '$_tool' not found in PATH" >&2
@@ -57,8 +34,6 @@ LSP_CMAKE=""
 LSP_STATUS="disabled (set SBX_ENABLE_LSPLANT=ON to enable L3)"
 if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then
   LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
-  # Extract the pinned LSPlant + Dobby revisions from fetch_lsplant_deps.sh so
-  # the build banner shows exactly what will be linked in — helps release notes.
   LSP_REV="$(grep -E '^LSPLANT_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
   DOBBY_REV="$(grep -E '^DOBBY_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
   LSP_STATUS="enabled [LSPlant=${LSP_REV:-?} Dobby=${DOBBY_REV:-?}]"
@@ -79,11 +54,6 @@ echo "==> MIN_SDK:    $MIN_SDK"
 echo "==> Variant(s): $VARIANT"
 echo "==> LSPlant:    $LSP_STATUS"
 
-
-
-# Pinned Zygisk API sample commit — the SHA256 fence prevents an upstream force-push
-# from silently changing the API contract our hooks are compiled against.
-# Ref: https://github.com/topjohnwu/zygisk-module-sample/commits/master
 ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
 ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
 if [ ! -f jni/zygisk.hpp ]; then
@@ -133,7 +103,6 @@ build_variant() {
     local BUILD="build/$V/$ABI"
     rm -rf "$BUILD"
     mkdir -p "$BUILD"
-    # shellcheck disable=SC2086 # DBG_FLAG / LSP_CMAKE are intentional single-word flags
     cmake -S jni -B "$BUILD" \
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$ABI" \
@@ -146,7 +115,6 @@ build_variant() {
   rm -rf "$PKG"
   mkdir -p "$PKG/zygisk" "$PKG/bin"
   cp module.prop action.sh service.sh customize.sh "$PKG/"
-  # Ship license + attribution with every artifact (transparency requirement).
   [ -f LICENSE ]   && cp LICENSE "$PKG/"
   [ -f CREDITS.md ] && cp CREDITS.md "$PKG/"
   [ -f summarize.sh ] && cp summarize.sh "$PKG/"
@@ -186,7 +154,7 @@ build_variant() {
   cp "build/$V/x86/sandboxid"          "$PKG/bin/sandboxid-x86"
 
   if [ -f prebuilt/resetprop-rs ]; then
-    
+
     if [ -f prebuilt/resetprop-rs.sha256 ] && command -v sha256sum >/dev/null 2>&1; then
       ( cd prebuilt && sha256sum -c resetprop-rs.sha256 >/dev/null ) || {
         echo "  ERROR: prebuilt/resetprop-rs checksum mismatch — refusing to package" >&2
@@ -197,7 +165,7 @@ build_variant() {
       echo "  WARN: cannot verify resetprop-rs checksum (missing .sha256 or sha256sum)" >&2
     fi
     cp prebuilt/resetprop-rs "$PKG/bin/resetprop-rs"
-    
+
     [ -f prebuilt/resetprop-rs.sha256 ] && cp prebuilt/resetprop-rs.sha256 "$PKG/bin/resetprop-rs.sha256"
   else
     echo "  WARN: prebuilt/resetprop-rs missing; native prop apply will rely on Magisk resetprop"
