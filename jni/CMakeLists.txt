@@ -91,8 +91,18 @@ if(SBX_ENABLE_LSPLANT)
         "${SBX_EXT}/dobby/include")
     foreach(t lsplant_static dex_builder_static dobby_static)
         if(TARGET ${t})
-            target_compile_options(${t} PRIVATE -fexceptions -frtti)
+            target_compile_options(${t} PRIVATE -fexceptions -frtti -fno-lto)
         endif()
     endforeach()
     target_compile_definitions(sandboxid_module PRIVATE SBX_ENABLE_LSPLANT=1)
+    if(NOT SBX_DEBUG)
+        # The NDK r26d Clang/LLD ThinLTO pipeline aborts with "Broken module
+        # found" / debug-info fragment mismatches when linking sandboxid_module
+        # against the vendored lsplant/dobby static libs (built with -fexceptions
+        # -frtti above, unlike the rest of this project). Disable LTO for the
+        # final link of this target only; the rest of the project keeps LTO.
+        set_target_properties(sandboxid_module PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF)
+        target_link_options(sandboxid_module PRIVATE -fno-lto)
+    endif()
 endif()
