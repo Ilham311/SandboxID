@@ -31,7 +31,7 @@ Legend: ✅ covered · ⚠️ partial · ❌ gap
 | ~150 system props | ✅ | L2/L7/L9 shared `spoof_prop_value()` |
 | GAID / AppSetId (AdServices) | ⚠️ | L3 AdServices hooked; **GMS `AdvertisingIdClient$Info.getId` / `AppSetIdInfo` deferred** — P0/P1 |
 | GSF ID | ❌ | `ContentResolver.query` → `content://com.google.android.gsf.gservices` not hooked — **P0** |
-| Wi-Fi scan list / BSSID / SSID | ✅ | `getBSSID`/`getSSID` location-redacted; `getScanResults`/`getConfiguredNetworks` return empty List (retType 6) |
+| Wi-Fi scan list / BSSID / SSID | ⚠️ | `getBSSID`/`getSSID` location-redacted; `getConfiguredNetworks` returns empty List (retType 6, plausible); `getScanResults` intentionally NOT hooked — blanket-empty is itself anomalous, needs a fabricated non-empty list — **P1** |
 | Sensor inventory | ❌ | `SensorManager.getSensorList` not hooked (high permissionless entropy) — **P1** |
 | GPU strings (GL_RENDERER/VENDOR, Vulkan) | ❌ | not spoofed (COPG does) — P1 |
 | Display metrics | ❌ | must match MODEL — P2 |

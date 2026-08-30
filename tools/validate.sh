@@ -6,13 +6,28 @@ cd "$(dirname "$0")/.." || exit 1
 rc=0
 
 echo "=== 1/4 clang++ -fsyntax-only (debug + release) ==="
+# jni/*.cpp #include real NDK/Bionic headers (jni.h, android/log.h,
+# sys/system_properties.h, ...) that don't exist on a bare Linux host. When
+# ANDROID_NDK_HOME is set (CI installs the NDK for this job), point clang at
+# its sysroot so the syntax-only check can actually resolve those headers.
+NDK_SYSROOT_FLAGS=""
+if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+  NDK_SYSROOT=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 2 -type d -name sysroot 2>/dev/null | head -1)
+  if [ -n "$NDK_SYSROOT" ]; then
+    NDK_SYSROOT_FLAGS="--sysroot=$NDK_SYSROOT -isystem $NDK_SYSROOT/usr/include -isystem $NDK_SYSROOT/usr/include/aarch64-linux-android"
+  else
+    echo "WARN: ANDROID_NDK_HOME set but no toolchains/llvm/prebuilt/*/sysroot found"
+  fi
+fi
 for f in jni/main.cpp jni/companion.cpp jni/sandboxid.cpp; do
-  if clang++ -std=c++20 -fsyntax-only -DSBX_DEBUG=1 -Wall -Wextra -Ijni "$f" 2>&1; then
+  # shellcheck disable=SC2086
+  if clang++ -std=c++20 -fsyntax-only -DSBX_DEBUG=1 -Wall -Wextra -Ijni $NDK_SYSROOT_FLAGS "$f" 2>&1; then
     echo "OK(debug): $f"
   else
     echo "FAIL(debug): $f"; rc=1
   fi
-  if clang++ -std=c++20 -fsyntax-only -Wall -Wextra -Ijni "$f" 2>&1; then
+  # shellcheck disable=SC2086
+  if clang++ -std=c++20 -fsyntax-only -Wall -Wextra -Ijni $NDK_SYSROOT_FLAGS "$f" 2>&1; then
     echo "OK(rel):   $f"
   else
     echo "FAIL(rel):   $f"; rc=1

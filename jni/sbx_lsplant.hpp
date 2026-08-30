@@ -346,12 +346,18 @@ inline const HookSpec* hook_specs(size_t& n) {
           false, -1, nullptr, 0, V_WIFI_BSSID },
 
         // ---- P1: nearby-network enumeration (empty List) ----
-        // getScanResults/getConfiguredNetworks reveal which APs surround the device
-        // (a strong location/co-location signal). Return an empty List, matching the
-        // location-redacted connection info above. retType 6 => the Java callback
-        // hands back a fresh empty ArrayList; no spoof string is needed.
-        { "android/net/wifi/WifiManager", "getScanResults", "()Ljava/util/List;",
-          false, -1, nullptr, 6, V_EMPTY_LIST },
+        // getConfiguredNetworks reveals saved-network history (a co-location/
+        // history signal); an empty List is plausible on a device with no saved
+        // Wi-Fi networks, so it's safe to blanket-empty (retType 6 => the Java
+        // callback hands back a fresh empty ArrayList; no spoof string needed).
+        //
+        // getScanResults is intentionally NOT hooked here: an always-empty scan
+        // list is itself anomalous (real devices almost always see >=1 AP unless
+        // location is off or scanning is throttled — see docs/IDENTITY_RESEARCH.md
+        // P1 #5). Faking it correctly needs a *plausible, per-persona-stable*
+        // fabricated list (connected AP + a few weak neighbors), not a blanket
+        // empty List; until that's implemented, pass through to the real method
+        // rather than emit a stronger anomaly than the leak it's meant to hide.
         { "android/net/wifi/WifiManager", "getConfiguredNetworks", "()Ljava/util/List;",
           false, -1, nullptr, 6, V_EMPTY_LIST },
 

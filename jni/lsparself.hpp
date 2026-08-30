@@ -26,8 +26,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <string_view>
 
@@ -156,23 +156,27 @@ private:
         // A maps line's pathname is last and can be long (deep app-lib paths,
         // long package names). A fixed buffer would truncate it, the suffix
         // match would fail, and lsplant::Init() would silently disable every L3
-        // hook. std::getline grows the string to fit any line, and is portable
-        // (no POSIX feature-macro dependency for the host L3 syntax-check).
-        std::ifstream maps("/proc/self/maps");
-        if (!maps.is_open()) return false;
+        // hook. getline(3) grows cbuf to fit any line. Opened with fopen("re")
+        // rather than std::ifstream so the fd keeps O_CLOEXEC (std::ifstream
+        // gives no portable way to set it, and a leaked /proc/self/maps fd
+        // surviving into a forked/exec'd child is an avoidable info leak).
+        FILE* fp = fopen("/proc/self/maps", "re");
+        if (!fp) return false;
         uintptr_t          best_base = 0;
         unsigned long long best_off  = ~0ULL;
         std::string        best_path;
-        std::string        line;
-        while (std::getline(maps, line)) {
+        char*   cbuf = nullptr;
+        size_t  cap  = 0;
+        ssize_t n;
+        while ((n = getline(&cbuf, &cap, fp)) != -1) {
             // start-end perms offset dev(maj:min) inode pathname
             unsigned long long start = 0, end = 0, off = 0;
             char perms[8] = {0};
             int  pos = 0;
-            if (sscanf(line.c_str(), "%llx-%llx %7s %llx %*x:%*x %*u %n",
+            if (sscanf(cbuf, "%llx-%llx %7s %llx %*x:%*x %*u %n",
                        &start, &end, perms, &off, &pos) < 4)
                 continue;
-            const char* p = line.c_str() + pos;
+            const char* p = cbuf + pos;
             while (*p == ' ') ++p;
             size_t len = std::strlen(p);
             while (len && (p[len - 1] == '\n' || p[len - 1] == ' ' || p[len - 1] == '\t')) --len;
@@ -186,6 +190,8 @@ private:
                 best_path.assign(p, len);
             }
         }
+        free(cbuf);
+        fclose(fp);
         if (best_path.empty()) return false;
         outPath = best_path;
         outBase = best_base;
