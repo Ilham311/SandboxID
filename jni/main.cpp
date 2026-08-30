@@ -1281,6 +1281,11 @@ public:
             hv.carrier_id = val("GSM_CARRIER_ID");
             hv.gaid       = val("GOOGLE_AID");
             hv.app_set_id = val("APP_SET_ID");
+            hv.model      = val("MODEL");
+            hv.build_time_utc = val("BUILD_TIME_UTC");
+            // Nama proses bisa berimbuhan ":suffix"; getPackageInfo dipanggil
+            // dengan nama paket dasar, jadi ambil bagian sebelum ':'.
+            hv.self_pkg   = pkg_.substr(0, pkg_.find(':'));
             hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                          val("ANDROID_ID"));
 
