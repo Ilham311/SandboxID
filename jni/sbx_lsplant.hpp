@@ -179,7 +179,11 @@ enum ValId {
     // AdvertisingIdClient$Info) load from the app dex only AFTER
     // postAppSpecialize and need a deferred installer — see install_all() — so
     // they are intentionally NOT listed here.
-    V_GAID, V_APP_SET_ID, V_LAT
+    V_GAID, V_APP_SET_ID, V_LAT,
+    // SubscriptionManager read path. Apps enumerate SIMs and read identity off the
+    // returned SubscriptionInfo; MCC/MNC split out of op_num so getMcc()/getMccString()
+    // and the per-slot getters stay coherent with GSM_OPERATOR_NUMERIC (V_OP_NUM).
+    V_MCC_STR, V_MNC_STR
 };
 // retType: 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence
 struct HookSpec {
@@ -237,6 +241,20 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/telephony/TelephonyManager", "getNetworkCountryIso", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_OP_ISO },
 
+        // ---- P1: TelephonyManager per-subId overloads (mostly @hide; fail-soft) ----
+        // Apps holding a subId (from SubscriptionManager) read these instead of the
+        // no-arg forms. Same spoof values so both surfaces agree; keyArgIndex=-1 so
+        // any subId gets the single presented operator. getNetworkCountryIso(I) is
+        // public since API 30; the rest are greylisted and skip when blocked.
+        { "android/telephony/TelephonyManager", "getSubscriberId", "(I)Ljava/lang/String;",
+          false, -1, nullptr, 0, V_IMSI },
+        { "android/telephony/TelephonyManager", "getSimSerialNumber", "(I)Ljava/lang/String;",
+          false, -1, nullptr, 0, V_ICCID },
+        { "android/telephony/TelephonyManager", "getSimOperator", "(I)Ljava/lang/String;",
+          false, -1, nullptr, 0, V_OP_NUM },
+        { "android/telephony/TelephonyManager", "getNetworkCountryIso", "(I)Ljava/lang/String;",
+          false, -1, nullptr, 0, V_OP_ISO },
+
         // ---- P1: SIM-presence gating (int/boolean constants) ----
         // Make a SIM-less device look like it has a ready GSM SIM so apps
         // proceed to the operator/IMSI/ICCID reads above. Overloads/hidden
@@ -255,6 +273,44 @@ inline const HookSpec* hook_specs(size_t& n) {
           false, -1, nullptr, 2, V_MODEM_COUNT },
         { "android/telephony/TelephonyManager", "getSimCarrierId", "()I",
           false, -1, nullptr, 2, V_CARRIER_ID },
+
+        // ---- P1: carrier-id-name / specific-carrier-id (API 28/29) ----
+        // The name getters return CharSequence (retType 5 => our String is a
+        // CharSequence, assignment-compatible). getSimSpecificCarrierId mirrors the
+        // canonical carrier id; empty carrier_id (unverified operator) => spoofed as
+        // UNKNOWN_CARRIER_ID (-1) rather than passthrough, see sbx_value_for().
+        { "android/telephony/TelephonyManager", "getSimCarrierIdName", "()Ljava/lang/CharSequence;",
+          false, -1, nullptr, 5, V_OP_ALPHA },
+        { "android/telephony/TelephonyManager", "getSimSpecificCarrierId", "()I",
+          false, -1, nullptr, 2, V_CARRIER_ID },
+        { "android/telephony/TelephonyManager", "getSimSpecificCarrierIdName", "()Ljava/lang/CharSequence;",
+          false, -1, nullptr, 5, V_OP_ALPHA },
+
+        // ---- P1: SubscriptionInfo getters (the SubscriptionManager read path) ----
+        // Apps enumerate SIMs via SubscriptionManager.getActiveSubscriptionInfoList()
+        // and read identity off each SubscriptionInfo. Hooking the object's getters
+        // covers every caller regardless of how the SubscriptionInfo was obtained and
+        // keeps MCC/MNC/carrier/iso coherent with the TelephonyManager surface above —
+        // a mismatch between the two is a primary tampering tell. getMcc/getMnc (int,
+        // deprecated) and getMccString/getMncString derive from the same op_num split.
+        { "android/telephony/SubscriptionInfo", "getMccString", "()Ljava/lang/String;",
+          false, -1, nullptr, 0, V_MCC_STR },
+        { "android/telephony/SubscriptionInfo", "getMncString", "()Ljava/lang/String;",
+          false, -1, nullptr, 0, V_MNC_STR },
+        { "android/telephony/SubscriptionInfo", "getMcc", "()I",
+          false, -1, nullptr, 2, V_MCC_STR },
+        { "android/telephony/SubscriptionInfo", "getMnc", "()I",
+          false, -1, nullptr, 2, V_MNC_STR },
+        { "android/telephony/SubscriptionInfo", "getCountryIso", "()Ljava/lang/String;",
+          false, -1, nullptr, 0, V_OP_ISO },
+        { "android/telephony/SubscriptionInfo", "getCarrierName", "()Ljava/lang/CharSequence;",
+          false, -1, nullptr, 5, V_OP_ALPHA },
+        { "android/telephony/SubscriptionInfo", "getDisplayName", "()Ljava/lang/CharSequence;",
+          false, -1, nullptr, 5, V_OP_ALPHA },
+        { "android/telephony/SubscriptionInfo", "getCarrierId", "()I",
+          false, -1, nullptr, 2, V_CARRIER_ID },
+        { "android/telephony/SubscriptionInfo", "getIccId", "()Ljava/lang/String;",
+          false, -1, nullptr, 0, V_ICCID },
 
         // ---- P1: MAC addresses ----
         { "android/net/wifi/WifiInfo", "getMacAddress", "()Ljava/lang/String;",
@@ -362,6 +418,12 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_IMSI:       return ids.imsi;
         case V_ICCID:      return ids.iccid;
         case V_OP_NUM:     return v.op_num;
+        // MCC/MNC split out of the operator numeric (MCC = first 3 digits). Feeds both
+        // the String getters (retType 0) and the deprecated int getters (retType 2,
+        // parsed Java-side; leading-zero MNC like "08" parses to 8 as the framework
+        // returns it). Empty op_num => empty => hook passes through to the real method.
+        case V_MCC_STR:    return v.op_num.size() >= 3 ? v.op_num.substr(0, 3) : std::string();
+        case V_MNC_STR:    return v.op_num.size() >  3 ? v.op_num.substr(3)    : std::string();
         case V_OP_ALPHA:   return v.op_alpha;
         case V_OP_ISO:     return v.op_iso;
         case V_WIFI_MAC:   return wifi;
@@ -371,7 +433,14 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_PHONE_TYPE: return "1";       // PHONE_TYPE_GSM
         case V_ROAMING:    return "false";
         case V_MODEM_COUNT:return "1";
-        case V_CARRIER_ID: return v.carrier_id;   // empty => hook passes through
+        // Empty carrier_id means the operator (e.g. Tri/Smartfren) has no verified
+        // AOSP carrier_id, but an empty sval here would make the Java-side hook
+        // fall through to invokeOriginal() and leak the REAL device's carrier_id
+        // alongside our spoofed MCC/MNC — a worse tell than reporting UNKNOWN.
+        // Force TelephonyManager.UNKNOWN_CARRIER_ID (-1) instead whenever a SIM
+        // persona is active; only pass through when there is no SIM at all
+        // (handled by the have_sim gate in install_all()).
+        case V_CARRIER_ID: return v.carrier_id.empty() ? std::string("-1") : v.carrier_id;
         // AdServices (API 34+) platform identifiers:
         case V_GAID:       return gaid;
         case V_APP_SET_ID: return appset;

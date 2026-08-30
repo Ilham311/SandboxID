@@ -82,6 +82,33 @@ static const std::string& val(const std::string& k) {
     return empty;
 }
 
+// Auto-rotate the SIM operator natively. If the persona blob did NOT pin an
+// operator (i.e. no manual `rotate_ids.sh carrier ...` wrote GSM_OPERATOR_* into
+// identity.prop), pick one Indonesian carrier from sandboxid::ID_CARRIERS using
+// the same per-run persona seed L3/L9 use. Result is written straight into
+// g_identity, so BOTH the property layer (gsm.operator.*) and the L3
+// TelephonyManager hooks read the same operator, and it rotates every run.
+// A manual carrier.conf still wins (its GSM_OPERATOR_NUMERIC is already present).
+static void rotate_sim_operator() {
+    auto it = g_identity.find("GSM_OPERATOR_NUMERIC");
+    if (it != g_identity.end() && !it->second.empty()) {
+        LOGD("SIM: operator pinned by persona (%s) — skipping auto-rotate",
+             it->second.c_str());
+        return;
+    }
+    uint64_t seed = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
+                                 val("ANDROID_ID"));
+    uint64_t s = seed ^ 0x53494D53454CULL;              // "SIMSEL"
+    const auto& c = sandboxid::ID_CARRIERS[sbxnr::splitmix64(s) % sandboxid::ID_CARRIERS_N];
+    g_identity["GSM_OPERATOR_NUMERIC"] = c.numeric;
+    g_identity["GSM_OPERATOR_ALPHA"]   = c.alpha;
+    g_identity["GSM_OPERATOR_ISO"]     = c.iso;
+    if (c.carrier_id[0]) g_identity["GSM_CARRIER_ID"] = c.carrier_id;
+    else                 g_identity.erase("GSM_CARRIER_ID");
+    LOGI("SIM auto-rotate: %s (%s%s)", c.alpha, c.numeric,
+         c.carrier_id[0] ? "" : ", cid=UNKNOWN");
+}
+
 static jstring (*orig_native_get)(JNIEnv*, jclass, jstring, jstring) = nullptr;
 static const std::map<std::string, std::string>& prop_to_identity_map() {
     static const std::map<std::string, std::string> m = {
@@ -1187,6 +1214,7 @@ public:
 
         parse_blob();
         LOGD("parse_blob: %zu identity keys", g_identity.size());
+        rotate_sim_operator();
 
         install_build_hook(env_);
         install_prop_hook(api_, env_);
