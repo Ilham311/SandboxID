@@ -29,6 +29,15 @@ if [ -z "${VERSION:-}" ]; then
   echo "ERROR: version= line missing in module.prop" >&2
   exit 1
 fi
+# Module id == install directory under /data/adb/modules. Passed to CMake as
+# SBX_MODULE_ID so jni/config.hpp derives every path from it (see config.hpp).
+# Changing module.prop's id= is all the "New Identity" rebrand needs on the
+# native side; scripts read $MODDIR from the framework.
+MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 || true)"
+if [ -z "${MODULE_ID:-}" ]; then
+  echo "ERROR: id= line missing in module.prop" >&2
+  exit 1
+fi
 
 LSP_CMAKE=""
 LSP_STATUS="disabled (SBX_ENABLE_LSPLANT=OFF requested)"
@@ -109,6 +118,7 @@ build_variant() {
       -DANDROID_ABI="$ABI" \
       -DANDROID_PLATFORM="android-$MIN_SDK" \
       -DCMAKE_BUILD_TYPE=Release \
+      -DSBX_MODULE_ID="$MODULE_ID" \
       $DBG_FLAG ${LSP_CMAKE:-} >/dev/null
     cmake --build "$BUILD" -j
   done
