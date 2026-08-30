@@ -75,6 +75,38 @@ inline bool is_valid_mac(const std::string& m) {
     return !all_zero;
 }
 
+// Decode a validated "xx:xx:xx:xx:xx:xx" MAC into 6 raw bytes. Returns false if
+// the string is not a well-formed MAC (caller must then leave the buffer alone).
+// Used by the native ioctl(SIOCGIFHWADDR)/getifaddrs hooks so the bytes they write
+// are byte-identical to the colon-string served at /sys/class/net (main.cpp) and
+// WifiInfo.getMacAddress (L3) — all three decode the same g_wifi_mac source.
+inline bool mac_str_to_bytes(const std::string& mac, uint8_t out[6]) {
+    if (!is_valid_mac(mac)) return false;
+    auto hv = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (int i = 0; i < 6; ++i) {
+        int hi = hv(mac[i * 3]);
+        int lo = hv(mac[i * 3 + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+    return true;
+}
+
+// True only for Wi-Fi / Wi-Fi-Direct interface names (wlan*, p2p*) — the exact
+// set whose MAC we spoof. Mirrors the /sys/class/net classify() rule so the
+// ioctl/getifaddrs native hooks stay coherent: eth*/rmnet*/lo keep their real
+// hardware address (cellular has no persistent MAC; fabricating one is itself an
+// incoherence, and a spoofed ethernet MAC on a phone is anomalous).
+inline bool is_wifi_iface(const char* name) {
+    if (!name) return false;
+    return std::strncmp(name, "wlan", 4) == 0 || std::strncmp(name, "p2p", 3) == 0;
+}
+
 inline std::string hex_from_seed(uint64_t seed, size_t nbytes) {
     std::string s;
     s.reserve(nbytes * 2);

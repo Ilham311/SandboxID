@@ -28,9 +28,12 @@ public final class EnvCompatState {
     public EnvCompatState() {}
 
     public Object handle(Object[] args) {
+        // retType 9 is a pure observer (GMS class-load watch): it never substitutes
+        // a value — it lets the real method run and then reports the loaded class.
+        if (retType == 9) return watchClassLoad(args);
         try {
             if (keyArgIndex < 0 || matches(args)) {
-                Object v = spoofValue();
+                Object v = spoofValue(args);
                 if (v != null) return v;   // null -> fall through to the real method
             }
         } catch (Throwable ignored) {
@@ -44,7 +47,7 @@ public final class EnvCompatState {
                 && keyMatch != null && keyMatch.equals(String.valueOf(args[keyArgIndex]));
     }
 
-    private Object spoofValue() {
+    private Object spoofValue(Object[] args) {
         switch (retType) {
             case 1: // byte[]
                 return (bval != null && bval.length > 0) ? bval.clone() : null;
@@ -56,10 +59,66 @@ public final class EnvCompatState {
                 return (sval == null) ? null : Boolean.valueOf(Boolean.parseBoolean(sval));
             case 6: // empty java.util.List (e.g. WifiManager.getScanResults/getConfiguredNetworks)
                 return new java.util.ArrayList<Object>();
+            case 7: // GSF/Gservices android_id -> synthetic MatrixCursor (or null passthrough)
+                return buildGservicesCursor(args);
             default: // 0 String / 5 CharSequence
                 return sval;
         }
     }
+
+    // GSF/Gservices android_id: return a one-row MatrixCursor {key,value} carrying
+    // the spoofed id, but ONLY for the exact ContentResolver.query() the Gservices
+    // reader issues — content://com.google.android.gsf.gservices with selectionArgs
+    // == ["android_id"]. Anything else (a different key, a full dump, a null
+    // selectionArgs) returns null so the real provider answers unchanged. Built via
+    // reflection: hook_dex.h is compiled without android.jar, so no android.database.*
+    // type may be named directly. query() is an instance method, so args[0] is the
+    // receiver, args[1] the Uri and args[4] the selectionArgs (same in the 5- and
+    // 6-arg overloads).
+    private Object buildGservicesCursor(Object[] args) {
+        if (sval == null || args == null || args.length <= 4) return null;
+        Object uri = args[1];
+        if (uri == null) return null;
+        if (!String.valueOf(uri).startsWith("content://com.google.android.gsf.gservices"))
+            return null;
+        if (!(args[4] instanceof String[])) return null;
+        String[] selArgs = (String[]) args[4];
+        if (selArgs.length != 1 || !"android_id".equals(selArgs[0])) return null;
+        try {
+            Class<?> mc = Class.forName("android.database.MatrixCursor");
+            Object cursor = mc.getConstructor(String[].class)
+                              .newInstance((Object) new String[]{"key", "value"});
+            mc.getMethod("addRow", Object[].class)
+              .invoke(cursor, (Object) new Object[]{"android_id", sval});
+            return cursor;
+        } catch (Throwable t) {
+            return null;   // fall through to the real provider
+        }
+    }
+
+    // GMS class-load watch (retType 9): run the real findClass, then — for classes
+    // under "com.google.android.gms." — report the loaded Class to native so its
+    // identifier getters can be hooked. Never alters the result; a failure to report
+    // is swallowed so class loading is never disturbed. findClass is an instance
+    // method: args[0] = receiver (ClassLoader), args[1] = the class name String.
+    private Object watchClassLoad(Object[] args) {
+        Object result = invokeOriginal(args);
+        try {
+            if (result != null && args != null && args.length > 1
+                    && args[1] instanceof String) {
+                String name = (String) args[1];
+                if (name.startsWith("com.google.android.gms."))
+                    onClassLoaded(name, result);
+            }
+        } catch (Throwable ignored) {
+            // Observing must never break the app's class loading.
+        }
+        return result;
+    }
+
+    // Implemented in native (sbx_lsplant.hpp sbx_on_class_loaded), bound via
+    // RegisterNatives when the callback class is loaded and the watch is armed.
+    public static native void onClassLoaded(String name, Object cls);
 
     private Object invokeOriginal(Object[] args) {
         try {

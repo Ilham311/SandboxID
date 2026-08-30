@@ -14,6 +14,12 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <ifaddrs.h>
+#include <netpacket/packet.h>
+#include <linux/sockios.h>
 #include <dlfcn.h>
 #include <android/log.h>
 #include <string>
@@ -542,6 +548,8 @@ typedef int   (*sbx_sysprop_get_fn)(const char*, char*);
 typedef int   (*sbx_sysprop_read_fn)(const void*, char*, char*);
 typedef void  (*sbx_sysprop_cb)(void*, const char*, const char*, uint32_t);
 typedef void  (*sbx_sysprop_read_cb_fn)(const void*, sbx_sysprop_cb, void*);
+typedef int   (*sbx_ioctl_fn)(int, unsigned long, void*);
+typedef int   (*sbx_getifaddrs_fn)(struct ifaddrs**);
 
 static sbx_open_fn   orig_open   = nullptr;
 static sbx_openat_fn orig_openat = nullptr;
@@ -549,6 +557,8 @@ static sbx_fopen_fn  orig_fopen  = nullptr;
 static sbx_sysprop_get_fn    orig_sysprop_get    = nullptr;
 static sbx_sysprop_read_fn    orig_sysprop_read    = nullptr;
 static sbx_sysprop_read_cb_fn  orig_sysprop_read_cb  = nullptr;
+static sbx_ioctl_fn      orig_ioctl      = nullptr;
+static sbx_getifaddrs_fn orig_getifaddrs = nullptr;
 
 static std::atomic<bool> g_native_read_active{false};
 static std::string g_boot_id;
@@ -760,6 +770,45 @@ static FILE* sbx_fopen(const char* path, const char* mode) {
     return fp;
 }
 
+// --- Native MAC: ioctl(SIOCGIFHWADDR) + getifaddrs ---------------------------
+// The /sys/class/net/<if>/address read path (classify()->MAC) and the L3
+// WifiInfo.getMacAddress hook both serve the persona MAC, but an app can still
+// recover the real Wi-Fi MAC through two native socket paths that never touch a
+// file or the framework: ioctl(SIOCGIFHWADDR) on an AF_INET socket, and
+// getifaddrs()'s AF_PACKET entries. Both are libc exports reached through the
+// app's PLT, so they belong in this L9 layer. We call the real function first,
+// then rewrite only wlan*/p2p* results in place with the SAME bytes as g_wifi_mac
+// (decoded once) so every layer agrees. eth*/rmnet*/lo are left untouched.
+static int sbx_ioctl(int fd, unsigned long request, void* argp) {
+    int r = orig_ioctl ? orig_ioctl(fd, request, argp)
+                       : (int)syscall(__NR_ioctl, fd, request, argp);
+    if (r == 0 && g_native_read_active && argp && request == SIOCGIFHWADDR) {
+        struct ifreq* ifr = static_cast<struct ifreq*>(argp);
+        if (sbxnr::is_wifi_iface(ifr->ifr_name)) {
+            uint8_t mac[6];
+            if (sbxnr::mac_str_to_bytes(g_wifi_mac, mac)) {
+                memcpy(ifr->ifr_hwaddr.sa_data, mac, 6);
+                ifr->ifr_hwaddr.sa_family = ARPHRD_ETHER;
+            }
+        }
+    }
+    return r;
+}
+
+static int sbx_getifaddrs(struct ifaddrs** ifap) {
+    int r = orig_getifaddrs ? orig_getifaddrs(ifap) : -1;
+    if (r != 0 || !ifap || !*ifap || !g_native_read_active) return r;
+    uint8_t mac[6];
+    if (!sbxnr::mac_str_to_bytes(g_wifi_mac, mac)) return r;   // no valid persona MAC: leave list intact
+    for (struct ifaddrs* ifa = *ifap; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_PACKET) continue;
+        if (!sbxnr::is_wifi_iface(ifa->ifa_name)) continue;
+        struct sockaddr_ll* sll = reinterpret_cast<struct sockaddr_ll*>(ifa->ifa_addr);
+        if (sll->sll_halen == 6) memcpy(sll->sll_addr, mac, 6);
+    }
+    return r;
+}
+
 static void sbx_register_lib_hooks(Api* api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "__system_property_get",
                          reinterpret_cast<void*>(sbx_sysprop_get),  reinterpret_cast<void**>(&orig_sysprop_get));
@@ -779,6 +828,10 @@ static void sbx_register_lib_hooks(Api* api, dev_t dev, ino_t ino) {
                          reinterpret_cast<void*>(sbx_openat), reinterpret_cast<void**>(&orig_openat));
     api->pltHookRegister(dev, ino, "fopen64",
                          reinterpret_cast<void*>(sbx_fopen),  reinterpret_cast<void**>(&orig_fopen));
+    api->pltHookRegister(dev, ino, "ioctl",
+                         reinterpret_cast<void*>(sbx_ioctl),  reinterpret_cast<void**>(&orig_ioctl));
+    api->pltHookRegister(dev, ino, "getifaddrs",
+                         reinterpret_cast<void*>(sbx_getifaddrs), reinterpret_cast<void**>(&orig_getifaddrs));
 }
 
 static int sbx_register_across_libs(Api* api) {
@@ -843,6 +896,8 @@ static void install_native_read_hooks(Api* api) {
     if (!orig_open)   orig_open   = reinterpret_cast<sbx_open_fn>(dlsym(RTLD_DEFAULT, "open"));
     if (!orig_openat) orig_openat = reinterpret_cast<sbx_openat_fn>(dlsym(RTLD_DEFAULT, "openat"));
     if (!orig_fopen)  orig_fopen  = reinterpret_cast<sbx_fopen_fn>(dlsym(RTLD_DEFAULT, "fopen"));
+    if (!orig_ioctl)      orig_ioctl      = reinterpret_cast<sbx_ioctl_fn>(dlsym(RTLD_DEFAULT, "ioctl"));
+    if (!orig_getifaddrs) orig_getifaddrs = reinterpret_cast<sbx_getifaddrs_fn>(dlsym(RTLD_DEFAULT, "getifaddrs"));
 
     int libs = sbx_register_across_libs(api);
     if (libs == 0) {
@@ -1249,8 +1304,22 @@ public:
             hv.app_set_id = val("APP_SET_ID");
             hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                          val("ANDROID_ID"));
+            // GMS play-services getter watch: hooks BaseDexClassLoader.findClass to
+            // reach identifiers defined only in the app's own dex. DEFAULT-OFF —
+            // findClass is on the hot path of all class loading, so it ships behind
+            // a knob until device-validated. Set SBX_GMS_HOOK=1 in the persona to arm.
+            hv.gms_watch  = (val("SBX_GMS_HOOK") == "1");
             if (!sbxlsp::install_all(env_, hv))
                 LOGE("L3 hooks not installed (continuing with L1/L2/L9)");
+
+            // NDK MediaDrm twin: apps that read the Widevine device-unique-id via
+            // the libmediandk C API (AMediaDrm_getPropertyByteArray) bypass every
+            // property layer AND the L3 Java MediaDrm hook. This Dobby inline hook
+            // returns the SAME persona bytes as the Java surface. Independent of
+            // install_all — it needs only Dobby + dlopen, not the ART runtime — so
+            // it runs even if the LSPlant Java hooks above failed to arm. Fail-soft.
+            if (!sbxdrm::install(hv.seed))
+                LOGD("NDK MediaDrm hook not armed (Java MediaDrm hook still covers the common path)");
         }
 #endif
 

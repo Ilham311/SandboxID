@@ -21,6 +21,7 @@
 #include <lsplant.hpp>
 #include <lsparself.hpp>
 #include "sbx_ident_synth.hpp"   // sbxid::synth_all + sbxnr:: primitives (top-level namespaces)
+#include "sbx_native_drm.hpp"    // sbxdrm::install — NDK MediaDrm Widevine-id inline hook
 #if __has_include("hook_dex.h")
 #include "hook_dex.h"
 #define SBX_HAVE_HOOK_DEX 1
@@ -45,6 +46,9 @@ struct HookValues {
     std::string gaid;       // Google Advertising ID (lowercase UUID); empty => synth from seed
     std::string app_set_id; // App Set ID (lowercase UUID, per-app scope); empty => synth from seed
     uint64_t    seed = 0;   // fnv1a(FINGERPRINT|SERIAL|ANDROID_ID)
+    bool gms_watch = false; // arm the GMS class-load watch (findClass hook). DEFAULT
+                            // OFF: findClass is on the hot path of ALL class loading,
+                            // so it ships disabled until device-validated (SBX_GMS_HOOK=1).
 };
 
 #ifndef SBX_ENABLE_LSPLANT
@@ -103,6 +107,17 @@ inline jobject   g_cb_reflected = nullptr; // reflected handle Method (global re
 inline jfieldID  f_isStatic=nullptr, f_keyIdx=nullptr, f_keyMatch=nullptr,
                  f_retType=nullptr, f_sval=nullptr, f_bval=nullptr, f_backup=nullptr;
 inline std::vector<jobject> g_keep;      // global refs to hookers+backups (GC anchor)
+
+// ---- GMS class-load watch state (Batch 4; armed only when HookValues.gms_watch) ----
+// The play-services identifiers most apps actually read live in classes defined in
+// the app's OWN dex, which does not exist yet at postAppSpecialize. We watch
+// BaseDexClassLoader.findClass and, the moment one of these loads, hook its getters
+// with the SAME persona values as the AdServices platform path. Guards are set
+// BEFORE hooking so the FindClass/Hook machinery cannot re-enter the watch.
+inline std::string g_gms_gaid;           // spoof for AdvertisingIdClient$Info.getId()
+inline std::string g_gms_appset;         // spoof for AppSetIdInfo.getId()
+inline bool        g_gms_adv_done   = false;
+inline bool        g_gms_appset_done = false;
 
 inline jclass load_callback_class(JNIEnv* env) {
 #ifndef SBX_HAVE_HOOK_DEX
@@ -194,9 +209,16 @@ enum ValId {
     // empty List — coherent with the location-redacted BSSID/SSID above (an app
     // without location permission gets exactly this) and hides which APs are
     // around the persona. Uses retType 6 (no spoof string needed).
-    V_EMPTY_LIST
+    V_EMPTY_LIST,
+    // GSF / Gservices "android_id" (content://com.google.android.gsf.gservices).
+    // A signed 64-bit long surfaced as a decimal string; FingerprintJS-class device
+    // scores rank it ABOVE Settings.ANDROID_ID and the MediaDrm id, so it must
+    // rotate too. Delivered as a synthetic MatrixCursor (retType 7) built Java-side.
+    V_GSERVICES
 };
-// retType: 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence, 6 empty List
+// retType: 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence, 6 empty
+//          List, 7 Gservices cursor (MatrixCursor, built Java-side from sval),
+//          9 class-load watch (observe only, never substitutes a value)
 struct HookSpec {
     const char* cls;
     const char* name;
@@ -204,8 +226,9 @@ struct HookSpec {
     bool        is_static;
     int         key_index;   // absolute index into args[] (incl. receiver), or -1
     const char* key_match;   // required value at key_index, or nullptr
-    int         ret_type;    // 0 String, 1 byte[]
+    int         ret_type;    // see retType legend above
     int         val_id;
+    bool        no_deopt = false; // skip lsplant::Deoptimize (hot/boot-critical paths)
 };
 
 // Targets resolvable in an ordinary app process at postAppSpecialize. Anything
@@ -373,6 +396,24 @@ inline const HookSpec* hook_specs(size_t& n) {
           false, -1, nullptr, 4, V_LAT },
         { "android/adservices/appsetid/AppSetId", "getId", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_APP_SET_ID },
+
+        // ---- P0: GSF / Gservices android_id (content resolver) ----
+        // The Gservices android_id is read via ContentResolver.query() against
+        // content://com.google.android.gsf.gservices with selectionArgs
+        // ["android_id"]. We hook the query entry points and, ONLY for that exact
+        // lookup, return a one-row MatrixCursor carrying the persona's GSF id
+        // (retType 7, assembled Java-side). Every other query — including a full
+        // gservices dump — passes straight through, so nothing else is disturbed.
+        // key_index=-1: the Uri/selectionArgs test needs real objects, so the
+        // gating happens in EnvCompatState, not via a simple keyMatch. no_deopt:
+        // query() is extremely hot and never inlined into callers, so a deopt would
+        // cost app-wide performance for no benefit.
+        { "android/content/ContentResolver", "query",
+          "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+          false, -1, nullptr, 7, V_GSERVICES, true },
+        { "android/content/ContentResolver", "query",
+          "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;Landroid/os/CancellationSignal;)Landroid/database/Cursor;",
+          false, -1, nullptr, 7, V_GSERVICES, true },
     };
     n = sizeof(S) / sizeof(S[0]);
     return S;
@@ -399,16 +440,17 @@ inline jbyteArray sbx_hex_to_jbytes(JNIEnv* env, const std::string& hex) {
     return a;
 }
 
-// Hook exactly one target. Fail-soft: a missing class/method/overload returns false
-// (skipped) rather than aborting the whole install. `sval` may be empty (=> the hook
-// is registered but passes through until a value exists); `wvbytes` is the hex string
-// for byte[] targets (V_WIDEVINE) or empty.
-inline bool hook_one(JNIEnv* env, const HookSpec& sp,
-                     const std::string& sval, const std::string& wvbytes) {
+// Hook exactly one target on an ALREADY-RESOLVED class. Fail-soft: a missing
+// method/overload returns false (skipped) rather than aborting the whole install.
+// `sval` may be empty (=> the hook is registered but passes through until a value
+// exists); `wvbytes` is the hex string for byte[] targets (V_WIDEVINE) or empty.
+// Split out from hook_one so the GMS class-load watch can hook getters on a jclass
+// it receives from the app's own dex (those classes are not FindClass-able here).
+inline bool hook_one_on_class(JNIEnv* env, jclass cls, const HookSpec& sp,
+                              const std::string& sval, const std::string& wvbytes) {
+    if (!cls) return false;
     if (env->PushLocalFrame(24) != 0) { env->ExceptionClear(); return false; }
     bool ok = [&]() -> bool {
-        jclass cls = env->FindClass(sp.cls);
-        if (!cls || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
         jmethodID mid = sp.is_static ? env->GetStaticMethodID(cls, sp.name, sp.sig)
                                      : env->GetMethodID(cls, sp.name, sp.sig);
         if (!mid || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
@@ -441,8 +483,10 @@ inline bool hook_one(JNIEnv* env, const HookSpec& sp,
         g_keep.push_back(env->NewGlobalRef(hooker));
         g_keep.push_back(env->NewGlobalRef(backup));
 
-        lsplant::Deoptimize(env, target);            // best-effort: defeat inlined callers
-        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (!sp.no_deopt) {
+            lsplant::Deoptimize(env, target);        // best-effort: defeat inlined callers
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
         return true;
     }();
     env->PopLocalFrame(nullptr);
@@ -450,10 +494,80 @@ inline bool hook_one(JNIEnv* env, const HookSpec& sp,
     return ok;
 }
 
+// Resolve sp.cls by name, then hook on it. The common path for the static table.
+inline bool hook_one(JNIEnv* env, const HookSpec& sp,
+                     const std::string& sval, const std::string& wvbytes) {
+    if (env->PushLocalFrame(4) != 0) { env->ExceptionClear(); return false; }
+    jclass cls = env->FindClass(sp.cls);
+    if (!cls || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return false;
+    }
+    bool ok = hook_one_on_class(env, cls, sp, sval, wvbytes);
+    env->PopLocalFrame(nullptr);
+    return ok;
+}
+
+// ---- GMS class-load watch: hook the play-services identifier getters ----------
+// Called from sbx_on_class_loaded once the target class is defined by the app.
+// The getters are no-arg instance methods; no_deopt=true (a freshly-loaded class
+// has no inlined callers yet, so deopt would be wasted work on a sensitive path).
+inline void hook_gms_getters(JNIEnv* env, jclass cls, bool is_advertising) {
+    if (!cls) return;
+    if (is_advertising) {
+        HookSpec gid{ "com/google/android/gms/ads/identifier/AdvertisingIdClient$Info",
+                      "getId", "()Ljava/lang/String;", false, -1, nullptr, 0, V_NONE, true };
+        hook_one_on_class(env, cls, gid, g_gms_gaid, std::string());
+        HookSpec lat{ "com/google/android/gms/ads/identifier/AdvertisingIdClient$Info",
+                      "isLimitAdTrackingEnabled", "()Z", false, -1, nullptr, 4, V_NONE, true };
+        hook_one_on_class(env, cls, lat, "false", std::string());
+    } else {
+        HookSpec sid{ "com/google/android/gms/appset/AppSetIdInfo",
+                      "getId", "()Ljava/lang/String;", false, -1, nullptr, 0, V_NONE, true };
+        hook_one_on_class(env, cls, sid, g_gms_appset, std::string());
+    }
+}
+
+// JNI native bound to EnvCompatState.onClassLoaded(String, Object). The watch's
+// Java handle() calls this AFTER the real findClass returns, only for names under
+// "com.google.android.gms.". clsObj is the loaded java.lang.Class. Fail-soft; the
+// done-guards make each class hook exactly once even under concurrent loads.
+inline void sbx_on_class_loaded(JNIEnv* env, jclass /*self*/, jstring jname, jobject clsObj) {
+    if (!env || !jname || !clsObj) return;
+    const char* nm = env->GetStringUTFChars(jname, nullptr);
+    if (!nm) { if (env->ExceptionCheck()) env->ExceptionClear(); return; }
+    std::string name(nm);
+    env->ReleaseStringUTFChars(jname, nm);
+    if (!g_gms_adv_done &&
+        name == "com.google.android.gms.ads.identifier.AdvertisingIdClient$Info") {
+        g_gms_adv_done = true;                       // set BEFORE hooking (reentrancy guard)
+        hook_gms_getters(env, static_cast<jclass>(clsObj), /*is_advertising=*/true);
+    } else if (!g_gms_appset_done &&
+               name == "com.google.android.gms.appset.AppSetIdInfo") {
+        g_gms_appset_done = true;
+        hook_gms_getters(env, static_cast<jclass>(clsObj), /*is_advertising=*/false);
+    }
+}
+
+// Bind the native onClassLoaded to the callback class, once, before the findClass
+// watch is installed. Fail-soft: on failure the watch simply is not armed.
+inline bool register_class_watch_native(JNIEnv* env) {
+    if (!g_cb_class) return false;
+    JNINativeMethod m{ "onClassLoaded", "(Ljava/lang/String;Ljava/lang/Object;)V",
+                       reinterpret_cast<void*>(&sbx_on_class_loaded) };
+    if (env->RegisterNatives(g_cb_class, &m, 1) != 0) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
 inline std::string sbx_value_for(int val_id, const HookValues& v,
                                  const sbxid::SynthIds& ids,
                                  const std::string& wifi, const std::string& bt,
-                                 const std::string& gaid, const std::string& appset) {
+                                 const std::string& gaid, const std::string& appset,
+                                 const std::string& gsf) {
     switch (val_id) {
         case V_ANDROID_ID: return v.android_id;
         case V_SERIAL:     return v.serial;
@@ -494,6 +608,9 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_GAID:       return gaid;
         case V_APP_SET_ID: return appset;
         case V_LAT:        return "false";        // isLimitAdTrackingEnabled
+        // GSF/Gservices android_id: the decimal string is stored in sval; the Java
+        // callback wraps it in a MatrixCursor only for the android_id lookup.
+        case V_GSERVICES:  return gsf;
         default:           return std::string();
     }
 }
@@ -526,20 +643,21 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
                                          : sbxnr::uuid_from_seed(v.seed ^ 0x47414944ULL);   // "GAID"
     std::string appset = !v.app_set_id.empty() ? v.app_set_id
                                                : sbxnr::uuid_from_seed(v.seed ^ 0x4150534554ULL); // "APSET"
+    // GSF/Gservices android_id (decimal string). Ranked above ANDROID_ID/MediaDrm
+    // by device-scoring SDKs, so it rotates with the persona too.
+    std::string gsf = sbxid::synth_gsf_id(v.seed);
 
-    // NOTE (deferred install, future work): the GMS play-services getters
-    // com.google.android.gms.appset.AppSetIdInfo.getId()/getScope() and
-    // com.google.android.gms.ads.identifier.AdvertisingIdClient$Info.getId()/
-    // isLimitAdTrackingEnabled() are the identifiers most apps actually read, but
+    // The GMS play-services getters — com.google.android.gms.appset.AppSetIdInfo
+    // .getId() and .../ads/identifier/AdvertisingIdClient$Info.getId()/
+    // isLimitAdTrackingEnabled() — are the identifiers most apps actually read, but
     // those classes live in the app's own dex and are not defined until AFTER
-    // postAppSpecialize (the app PathClassLoader does not exist yet here), so
-    // FindClass misses them and they cannot be listed in hook_specs(). Installing
-    // them needs a class-load watch (hook dalvik.system.BaseDexClassLoader.findClass
-    // with a dedicated post-callback that, on a name match, calls back to native to
-    // hook the getters) — a mechanism that must be validated on a device before it
-    // ships, since a fault in a findClass hook would break class loading app-wide.
-    // The AdServices (API 34+) platform path above is the safe, framework-only
-    // subset that needs no deferral.
+    // postAppSpecialize, so FindClass misses them and they cannot sit in
+    // hook_specs(). They are installed via a class-load watch on
+    // dalvik.system.BaseDexClassLoader.findClass (see the v.gms_watch block below),
+    // which is DEFAULT-OFF: a fault in a findClass hook would break class loading
+    // app-wide, so it stays disabled until validated on a device (SBX_GMS_HOOK=1).
+    // The AdServices (API 34+) platform path in hook_specs() is the safe,
+    // framework-only subset that needs no deferral and is always on.
 
     const bool have_sim = !v.op_num.empty();
     size_t n = 0;
@@ -551,9 +669,28 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
         // an operator; without one, let SIM state pass through (real ABSENT).
         if (!have_sim && (vid == V_SIM_STATE || vid == V_MODEM_COUNT || vid == V_CARRIER_ID))
             continue;
-        std::string sval = sbx_value_for(vid, v, ids, wifi, bt, gaid, appset);
+        std::string sval = sbx_value_for(vid, v, ids, wifi, bt, gaid, appset, gsf);
         if (hook_one(env, specs[i], sval, ids.widevine_hex)) ++good;
     }
+
+    // GMS class-load watch (DEFAULT-OFF; see the note above). Arm only when the
+    // knob is set. The watch hooks BaseDexClassLoader.findClass and, once a target
+    // play-services class loads, hooks its getters to return the SAME persona
+    // values as the AdServices path. Fail-soft at every step.
+    if (v.gms_watch) {
+        g_gms_gaid   = gaid;
+        g_gms_appset = appset;
+        if (register_class_watch_native(env)) {
+            HookSpec fc{ "dalvik/system/BaseDexClassLoader", "findClass",
+                         "(Ljava/lang/String;)Ljava/lang/Class;",
+                         false, -1, nullptr, 9, V_NONE, true };  // retType 9 watch, no_deopt
+            if (hook_one(env, fc, std::string(), std::string())) {
+                ++good;
+                SBX_LSP_LOGD("L3 GMS class-load watch armed");
+            }
+        }
+    }
+
     SBX_LSP_LOGD("L3 install_all: %d/%zu targets hooked", good, n);
     if (good == 0) SBX_LSP_LOGE("L3: no targets hooked (continuing with L1/L2/L9)");
     return good > 0;

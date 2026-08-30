@@ -113,6 +113,20 @@ inline std::string synth_widevine_hex(uint64_t seed) {
     return sbxnr::hex_from_seed(seed ^ 0x57565F4944ULL, 32); // "WV_ID"
 }
 
+// --- GSF ID (Google Services Framework "android_id") -------------------------
+// The Gservices android_id is a signed 64-bit long surfaced as a decimal string
+// through content://com.google.android.gsf.gservices. FingerprintJS-style device
+// scores rank it ABOVE the Settings ANDROID_ID and the MediaDrm id, so it must
+// rotate with the persona too. We clear the top bit (>> 1) so the value is a
+// positive 63-bit long — a negative or zero GSF id is treated as "not yet
+// registered" by callers and would itself be a tell.
+inline std::string synth_gsf_id(uint64_t seed) {
+    uint64_t s = seed ^ 0x4753464944ULL;         // "GSFID"
+    uint64_t v = sbxnr::splitmix64(s) >> 1;       // 63-bit, always non-negative as a signed long
+    if (v == 0) v = 1;                            // 0 == "no GSF id" — never emit it
+    return std::to_string(v);
+}
+
 // Bundle so callers synthesize once.
 struct SynthIds {
     std::string imei, imsi, iccid, meid, widevine_hex;

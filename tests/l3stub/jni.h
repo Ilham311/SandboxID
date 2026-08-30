@@ -28,6 +28,13 @@ using jmethodID = _jmethodID*;
 struct _jfieldID {};
 using jfieldID = _jfieldID*;
 
+// Native-method registration descriptor (mirrors <jni.h> JNINativeMethod).
+struct JNINativeMethod {
+    const char* name;
+    const char* signature;
+    void*       fnPtr;
+};
+
 struct JNIEnv {
     jint      PushLocalFrame(jint) { return 0; }
     jobject   PopLocalFrame(jobject) { return nullptr; }
@@ -35,13 +42,17 @@ struct JNIEnv {
     jboolean  ExceptionCheck() { return JNI_FALSE; }
 
     jclass    FindClass(const char*) { return nullptr; }
+    jclass    GetObjectClass(jobject) { return nullptr; }
     jmethodID GetMethodID(jclass, const char*, const char*) { return nullptr; }
     jmethodID GetStaticMethodID(jclass, const char*, const char*) { return nullptr; }
     jfieldID  GetFieldID(jclass, const char*, const char*) { return nullptr; }
+    jint      RegisterNatives(jclass, const JNINativeMethod*, jint) { return 0; }
 
     jobject   NewObject(jclass, jmethodID, ...) { return nullptr; }
     jobject   NewGlobalRef(jobject) { return nullptr; }
     jstring   NewStringUTF(const char*) { return nullptr; }
+    const char* GetStringUTFChars(jstring, jboolean*) { return nullptr; }
+    void      ReleaseStringUTFChars(jstring, const char*) {}
     jobject   NewDirectByteBuffer(void*, jlong) { return nullptr; }
     jbyteArray NewByteArray(jsize) { return nullptr; }
     void      SetByteArrayRegion(jbyteArray, jsize, jsize, const jbyte*) {}
