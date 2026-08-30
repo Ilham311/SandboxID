@@ -1,5 +1,5 @@
 #pragma once
-// Minimal android/log.h stub for host syntax-checking the L3 layer. Never linked.
+
 #include <cstdarg>
 
 enum {

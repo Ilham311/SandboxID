@@ -1,7 +1,5 @@
 #pragma once
-// Minimal JNI stub — ONLY to host-syntax-check jni/sbx_lsplant.hpp under
-// -DSBX_ENABLE_LSPLANT without an NDK. Not a functional JNI: signatures mirror
-// the real <jni.h> closely enough that the L3 code type-checks. Never linked.
+
 #include <cstdint>
 #include <cstdarg>
 
@@ -14,7 +12,6 @@ using jbyte    = int8_t;
 #define JNI_FALSE 0
 #define JNI_TRUE  1
 
-// Opaque reference types (distinct structs so overloads/params stay checkable).
 struct _jobject {};
 using jobject    = _jobject*;
 using jclass     = jobject;
@@ -28,7 +25,6 @@ using jmethodID = _jmethodID*;
 struct _jfieldID {};
 using jfieldID = _jfieldID*;
 
-// Native-method registration descriptor (mirrors <jni.h> JNINativeMethod).
 struct JNINativeMethod {
     const char* name;
     const char* signature;

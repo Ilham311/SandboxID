@@ -191,8 +191,7 @@ struct Identity {
             auto it = kv.find(k);
             if (it != kv.end()) out += k + "=" + it->second + "\n";
         }
-        // Preserve keys not in the fixed order (WIFI_MAC / UPTIME_* injected by the shell
-        // layer, plus any future identity fields) so load()->serialize() is lossless.
+
         for (const auto& kvp : kv) {
             bool known = false;
             for (const auto& k : order) if (k == kvp.first) { known = true; break; }

@@ -55,7 +55,7 @@ fi
 
 if [ -x "$BIN" ] && [ -s "$DEVICE_ID" ]; then
     [ -f "$IDENTITY" ] && cp -f "$IDENTITY" "$MODDIR/identity.prop.bak" 2>/dev/null
-    if cp -f "$DEVICE_ID" "$IDENTITY" 2>/dev/null; then
+    if cp -f "$DEVICE_ID" "$IDENTITY.tmp.$$" 2>/dev/null && mv -f "$IDENTITY.tmp.$$" "$IDENTITY" 2>/dev/null; then
         chmod 0644 "$IDENTITY" 2>/dev/null
         "$BIN" unlock >/dev/null 2>&1 || true
         say ""
@@ -66,6 +66,7 @@ if [ -x "$BIN" ] && [ -s "$DEVICE_ID" ]; then
         "$BIN" lock >/dev/null 2>&1 || true
         [ "$RC" = 0 ] && APPLIED="multibrand"
     else
+        rm -f "$IDENTITY.tmp.$$" 2>/dev/null
         say "Gagal menyalin hasil acak ke identity.prop — pakai metode lama."
     fi
 fi

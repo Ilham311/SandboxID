@@ -75,11 +75,6 @@ inline bool is_valid_mac(const std::string& m) {
     return !all_zero;
 }
 
-// Decode a validated "xx:xx:xx:xx:xx:xx" MAC into 6 raw bytes. Returns false if
-// the string is not a well-formed MAC (caller must then leave the buffer alone).
-// Used by the native ioctl(SIOCGIFHWADDR)/getifaddrs hooks so the bytes they write
-// are byte-identical to the colon-string served at /sys/class/net (main.cpp) and
-// WifiInfo.getMacAddress (L3) — all three decode the same g_wifi_mac source.
 inline bool mac_str_to_bytes(const std::string& mac, uint8_t out[6]) {
     if (!is_valid_mac(mac)) return false;
     auto hv = [](char c) -> int {
@@ -97,11 +92,6 @@ inline bool mac_str_to_bytes(const std::string& mac, uint8_t out[6]) {
     return true;
 }
 
-// True only for Wi-Fi / Wi-Fi-Direct interface names (wlan*, p2p*) — the exact
-// set whose MAC we spoof. Mirrors the /sys/class/net classify() rule so the
-// ioctl/getifaddrs native hooks stay coherent: eth*/rmnet*/lo keep their real
-// hardware address (cellular has no persistent MAC; fabricating one is itself an
-// incoherence, and a spoofed ethernet MAC on a phone is anomalous).
 inline bool is_wifi_iface(const char* name) {
     if (!name) return false;
     return std::strncmp(name, "wlan", 4) == 0 || std::strncmp(name, "p2p", 3) == 0;
@@ -452,9 +442,6 @@ inline Kind classify(const char* path) {
 
     if (std::strcmp(path, "/sys/fs/selinux/enforce") == 0) return SELINUX_ENFORCE;
 
-    // /proc/net/arp enumerates LAN neighbours (gateway + co-located hosts) and is
-    // readable without permission — a strong same-network / co-location signal.
-    // Hidden by returning an empty table (header only). Exact match only.
     if (std::strcmp(path, "/proc/net/arp") == 0) return ARP;
 
     static const char pfx[] = "/sys/class/net/";
@@ -487,10 +474,6 @@ inline Kind classify(const char* path) {
 
 inline std::string selinux_enforce_content() { return std::string("1"); }
 
-// Empty ARP cache: the column header with no entries. Coherent "nothing cached
-// yet" state (fresh connection / cellular / expired entries); hides co-located
-// LAN devices without fabricating fake hosts (which would need a plausible
-// gateway/subnet and risk its own incoherence).
 inline std::string arp_empty_content() {
     return std::string(
         "IP address       HW type     Flags       HW address            Mask     Device\n");

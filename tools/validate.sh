@@ -1,19 +1,9 @@
 #!/usr/bin/env bash
 set -u
-# validate.sh berada di tools/, jadi naik satu tingkat ke root repo agar semua
-# path relatif di bawah (jni/, tests/, scripts/, data/) tetap konsisten.
 cd "$(dirname "$0")/.." || exit 1
 rc=0
 
 echo "=== 1/4 clang++ -fsyntax-only (debug + release) ==="
-# jni/*.cpp #include real NDK/Bionic headers (jni.h, android/log.h,
-# sys/system_properties.h, ...) that don't exist on a bare Linux host. When
-# ANDROID_NDK_HOME is set (CI installs the NDK for this job), add the NDK's
-# Bionic headers via -isystem only (no --sysroot). --sysroot redirects
-# clang's default C-header search root away from the host's /usr/include,
-# which breaks resolution of host libstdc++'s own headers (cstdio, cstdlib,
-# string, ...) that this syntax-only check still needs — causing spurious
-# "stdlib.h file not found" / "__GLIBC_PREREQ not defined" errors.
 NDK_SYSROOT_FLAGS=""
 if [ -n "${ANDROID_NDK_HOME:-}" ]; then
   NDK_SYSROOT=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 2 -type d -name sysroot 2>/dev/null | head -1)
@@ -39,11 +29,6 @@ for f in jni/main.cpp jni/companion.cpp jni/sandboxid.cpp; do
 done
 
 echo "=== 1b/4 L3 stub syntax-check (SBX_ENABLE_LSPLANT lewat header stub) ==="
-# Jalur no-LSPLANT di atas tak pernah mem-parse badan hook L3 (yang selalu-aktif
-# di device). Stub di tests/l3stub/ (bentuk InitInfo LSPlant v2.0 + API xz-embedded)
-# membuat regresi kelas-G1 — mis. drift urutan field InitInfo atau signature —
-# ketangkap host-side tanpa NDK. Selaraskan flag dg build asli: exceptions/RTTI mati.
-# Cek exit-code saja (tanpa -Werror), senada blok 1/4 di atas.
 L3TU=tests/l3stub/l3_syntax_check.cpp
 if [ -f "$L3TU" ]; then
   L3FLAGS="-std=c++20 -fsyntax-only -fno-exceptions -fno-rtti -Wall -Wextra"
@@ -107,7 +92,6 @@ if MODDIR="$PWD" AUTOPIF_DEVICES="$PWD/data/devices.tsv" AUTOPIF_ARTIFACT="$SBX_
 else
   echo "FAIL: autopif.sh device produced no artifact"; rc=1
 fi
-
 
 echo "=== 4/4 shellcheck (severity>=warning, semua *.sh — sama seperti CI) ==="
 if command -v shellcheck >/dev/null 2>&1; then

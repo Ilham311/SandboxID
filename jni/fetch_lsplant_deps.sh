@@ -6,16 +6,8 @@ EXT="$SCRIPT_DIR/external"
 
 LSPLANT_REPO="${LSPLANT_REPO:-https://github.com/LSPosed/LSPlant.git}"
 LSPLANT_REF="${LSPLANT_REF:-v2.0}"
-# Dobby: LSPosed fork (branch maven), pinned to the commit that ships as the dobby 1.2
-# AAR that LSPlant consumes. Upstream jmpews master (issues 297/299, still open) does
-# not build for Android arm64 (@PAGE/@PAGEOFF asm + OSMemory include cycle); this
-# pre-refactor tree has neither defect and needs no source patching.
 DOBBY_REPO="${DOBBY_REPO:-https://github.com/LSPosed/Dobby.git}"
 DOBBY_REF="${DOBBY_REF:-edb2af1216313cf6c0d6771be2b279c1db573faf}"
-# xz-embedded: tiny public-domain .xz decoder. Needed to decompress libart.so's
-# .gnu_debugdata (MiniDebugInfo) so lsparself.hpp can resolve the ART-internal
-# symbols LSPlant requires on stripped retail images. Decoder API is stable;
-# override XZ_REF to pin a commit if reproducibility matters.
 XZ_REPO="${XZ_REPO:-https://github.com/tukaani-project/xz-embedded.git}"
 XZ_REF="${XZ_REF:-master}"
 
@@ -75,9 +67,6 @@ if [ ! -f "$EXT/xz/linux/lib/xz/xz_dec_stream.c" ] \
   } >&2
   exit 1
 fi
-
-# No Dobby source patching: the LSPosed fork above builds cleanly for Android arm64
-# (it predates the upstream rewrite that introduced the @PAGE and OSMemory breakers).
 
 mkdir -p "$EXT/lsparself"
 if [ -f "$EXT/lsparself/lsparself.hpp" ]; then

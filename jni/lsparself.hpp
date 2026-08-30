@@ -1,27 +1,4 @@
 #pragma once
-// lsparself.hpp — minimal self-process ELF symbol resolver.
-//
-// Provides lsparself::Elf, constructed from a loaded-library name/suffix
-// (e.g. "/libart.so"). It locates the module in /proc/self/maps, maps the
-// backing file read-only, and resolves symbol names to their *runtime*
-// addresses by scanning the ELF symbol tables. It exists to back LSPlant's
-// InitInfo.art_symbol_resolver / art_symbol_prefix_resolver callbacks in
-// jni/sbx_lsplant.hpp.
-//
-// Design constraints:
-//   * header-only (included by more than one TU -> everything is inline);
-//   * no C++ exceptions / RTTI (the module is built -fno-exceptions -fno-rtti);
-//   * ILP32 + LP64 clean via ElfW();
-//   * failures are reported as a 0 address, never thrown.
-//
-// Symbol sources, in priority order: unstripped .symtab, then the
-// .gnu_debugdata (MiniDebugInfo) mini-symtab, then exported .dynsym. On a
-// stripped retail libart.so the internal ART symbols LSPlant needs live ONLY
-// in .gnu_debugdata — an xz-compressed mini-ELF — so we decompress it with
-// xz-embedded (see the LSPARSELF_WITH_GNU_DEBUGDATA block below). That support
-// is compiled in automatically whenever <xz.h> is on the include path; without
-// it (e.g. the host syntax-check) we fall back to .symtab/.dynsym only, which
-// is enough on GSI/userdebug images that ship an unstripped .symtab.
 
 #include <cstddef>
 #include <cstdint>
@@ -33,21 +10,11 @@
 
 #include <elf.h>
 #include <fcntl.h>
-#include <link.h>   // ElfW(), Elf{32,64}_* structs
+#include <link.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-// ---- Optional .gnu_debugdata (MiniDebugInfo) support -----------------------
-// A stripped retail libart.so exports almost nothing in .dynsym and carries no
-// .symtab; its internal ART symbols (art::ArtMethod internals, class-linker,
-// jit, ...) survive ONLY inside a .gnu_debugdata section — an LZMA/xz stream
-// wrapping a mini-ELF whose .symtab lists them. If we don't decompress it,
-// LSPlant's art_symbol_resolver resolves those to 0 and lsplant::Init() fails,
-// silently disabling every L3 hook. We decode it with xz-embedded when its
-// public header is on the include path (wired by jni/CMakeLists.txt +
-// fetch_lsplant_deps.sh). When it is absent (e.g. the host syntax-check, which
-// has no xz), we degrade to .symtab/.dynsym exactly as before.
 #if defined(SBX_LSPARSELF_NO_XZ)
 #  define LSPARSELF_WITH_GNU_DEBUGDATA 0
 #elif __has_include(<xz.h>)
@@ -70,7 +37,6 @@ public:
         if (image_ && image_ != MAP_FAILED) munmap(image_, image_size_);
     }
 
-    // Holds an mmap + raw pointers into it; copying/moving would dangle.
     Elf(const Elf&) = delete;
     Elf& operator=(const Elf&) = delete;
 
@@ -78,14 +44,11 @@ public:
         return image_ && load_base_ && (symtab_.syms || dynsym_.syms || debugdata_.syms);
     }
 
-    // Absolute runtime address of the symbol named `name`, or 0 if not found.
     uintptr_t getSymbAddress(std::string_view name) const {
         ElfW(Addr) off = symbolOffset(name);
         return off ? runtimeAddr(off) : 0;
     }
 
-    // Absolute runtime address of the first symbol whose name starts with
-    // `prefix`, or 0 if none match.
     uintptr_t getSymbPrefixFirstAddress(std::string_view prefix) const {
         ElfW(Addr) off = symbolPrefixOffset(prefix);
         return off ? runtimeAddr(off) : 0;
@@ -150,16 +113,8 @@ private:
         mapFileAndIndex(path);
     }
 
-    // Scan /proc/self/maps for the mapping backing `name`; return its on-disk
-    // path plus the load base (the address at which file offset 0 is mapped).
     bool findInMaps(std::string_view name, std::string& outPath, uintptr_t& outBase) {
-        // A maps line's pathname is last and can be long (deep app-lib paths,
-        // long package names). A fixed buffer would truncate it, the suffix
-        // match would fail, and lsplant::Init() would silently disable every L3
-        // hook. getline(3) grows cbuf to fit any line. Opened with fopen("re")
-        // rather than std::ifstream so the fd keeps O_CLOEXEC (std::ifstream
-        // gives no portable way to set it, and a leaked /proc/self/maps fd
-        // surviving into a forked/exec'd child is an avoidable info leak).
+
         FILE* fp = fopen("/proc/self/maps", "re");
         if (!fp) return false;
         uintptr_t          best_base = 0;
@@ -169,7 +124,7 @@ private:
         size_t  cap  = 0;
         ssize_t n;
         while ((n = getline(&cbuf, &cap, fp)) != -1) {
-            // start-end perms offset dev(maj:min) inode pathname
+
             unsigned long long start = 0, end = 0, off = 0;
             char perms[8] = {0};
             int  pos = 0;
@@ -184,7 +139,7 @@ private:
             std::string_view pv(p, len);
             if (pv.compare(pv.size() - name.size(), name.size(), name) != 0) continue;
             (void)end;
-            if (off < best_off) {  // prefer the lowest file offset (ideally 0)
+            if (off < best_off) {
                 best_off  = off;
                 best_base = static_cast<uintptr_t>(start) - static_cast<uintptr_t>(off);
                 best_path.assign(p, len);
@@ -215,7 +170,6 @@ private:
         auto* eh = reinterpret_cast<ElfW(Ehdr)*>(base);
         if (std::memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0) return;
 
-        // Load bias = min p_vaddr among PT_LOAD segments (0 on typical .so).
         vaddr_bias_ = 0;
         bool have_bias = false;
         const size_t phnum = eh->e_phnum;
@@ -245,9 +199,7 @@ private:
             if (!symsh || symsh->sh_entsize == 0) return;
             if (static_cast<size_t>(symsh->sh_link) >= shnum) return;
             const ElfW(Shdr)& strsh = sh[symsh->sh_link];
-            // libart.so is a trusted system file, but a corrupt or truncated
-            // image must not make us point syms/str past the mmap (OOB read /
-            // crash in the hosting app). Same guard indexInnerElf() already has.
+
             if (symsh->sh_offset + symsh->sh_size > image_size_) return;
             if (strsh.sh_offset  + strsh.sh_size  > image_size_) return;
             out.syms  = reinterpret_cast<const ElfW(Sym)*>(base + symsh->sh_offset);
@@ -259,9 +211,7 @@ private:
         fill(symtab_sh, symtab_);
 
 #if LSPARSELF_WITH_GNU_DEBUGDATA
-        // Only needed when the real .symtab is stripped (retail). Located by
-        // NAME (.gnu_debugdata is SHT_PROGBITS), so consult the section-header
-        // string table.
+
         if (!symtab_.syms && eh->e_shstrndx != SHN_UNDEF
                 && static_cast<size_t>(eh->e_shstrndx) < shnum) {
             const ElfW(Shdr)& shstr = sh[eh->e_shstrndx];
@@ -272,7 +222,7 @@ private:
                 if (static_cast<size_t>(sh[i].sh_name) >= shname_sz) continue;
                 if (std::strcmp(shname + sh[i].sh_name, ".gnu_debugdata") != 0) continue;
                 const uint64_t off = sh[i].sh_offset, sz = sh[i].sh_size;
-                if (!sz || off > image_size_ || sz > image_size_ - off) break;  // out of bounds
+                if (!sz || off > image_size_ || sz > image_size_ - off) break;
                 loadGnuDebugData(reinterpret_cast<const uint8_t*>(base + off),
                                  static_cast<size_t>(sz));
                 break;
@@ -282,10 +232,9 @@ private:
     }
 
 #if LSPARSELF_WITH_GNU_DEBUGDATA
-    // Decompress the .xz blob into debugbuf_, then index the inner mini-ELF's
-    // symbol table into debugdata_ (whose pointers alias debugbuf_).
+
     void loadGnuDebugData(const uint8_t* xz_in, size_t xz_in_sz) {
-        if (!xz_in || xz_in_sz < 6) return;                 // shorter than an xz magic
+        if (!xz_in || xz_in_sz < 6) return;
         if (!xzInflate(xz_in, xz_in_sz, debugbuf_)) { debugbuf_.clear(); return; }
         indexInnerElf();
     }
@@ -301,7 +250,7 @@ private:
         auto*        sh    = reinterpret_cast<const ElfW(Shdr)*>(ibase + eh->e_shoff);
         const size_t shnum = eh->e_shnum;
 
-        const ElfW(Shdr)* sym_sh = nullptr;              // prefer .symtab, fall back to .dynsym
+        const ElfW(Shdr)* sym_sh = nullptr;
         for (size_t i = 0; i < shnum; ++i)
             if (sh[i].sh_type == SHT_SYMTAB) { sym_sh = &sh[i]; break; }
         if (!sym_sh)
@@ -318,14 +267,13 @@ private:
         debugdata_.strsz = static_cast<size_t>(strsh.sh_size);
     }
 
-    // Multi-call xz-embedded decode. Returns false on any decoder error.
     static bool xzInflate(const uint8_t* in, size_t in_sz, std::string& out) {
         out.clear();
         xz_crc32_init();
 #ifdef XZ_USE_CRC64
         xz_crc64_init();
 #endif
-        struct xz_dec* dec = xz_dec_init(XZ_DYNALLOC, 1u << 26);  // 64 MiB dict ceiling
+        struct xz_dec* dec = xz_dec_init(XZ_DYNALLOC, 1u << 26);
         if (!dec) return false;
         struct xz_buf b;
         std::memset(&b, 0, sizeof(b));
@@ -338,14 +286,14 @@ private:
             if (b.out_pos)
                 out.append(reinterpret_cast<const char*>(chunk.data()), b.out_pos);
             if (r == XZ_STREAM_END) { ok = true; break; }
-            if (r != XZ_OK) break;                              // decoder error
-            if (b.out_pos == 0 && b.in_pos == b.in_size) break; // truncated stream
-            if (out.size() > (256u << 20)) break;               // runaway guard
+            if (r != XZ_OK) break;
+            if (b.out_pos == 0 && b.in_pos == b.in_size) break;
+            if (out.size() > (256u << 20)) break;
         }
         xz_dec_end(dec);
         return ok && !out.empty();
     }
-#endif  // LSPARSELF_WITH_GNU_DEBUGDATA
+#endif
 
     void*     image_      = nullptr;
     size_t    image_size_ = 0;
@@ -354,9 +302,9 @@ private:
     SymTab    dynsym_;
     SymTab    symtab_;
 #if LSPARSELF_WITH_GNU_DEBUGDATA
-    std::string debugbuf_;   // owns the decompressed .gnu_debugdata mini-ELF
+    std::string debugbuf_;
 #endif
-    SymTab    debugdata_;    // symbols recovered from it (alias into debugbuf_)
+    SymTab    debugdata_;
 };
 
-}  // namespace lsparself
+}

@@ -66,7 +66,7 @@ static void test_mac() {
 }
 
 static void test_mac_bytes_and_iface() {
-    // mac_str_to_bytes: exact decode, matching the ioctl/getifaddrs native hooks.
+
     uint8_t b[6] = {0};
     CHECK(mac_str_to_bytes("02:11:22:33:44:55", b), "decode returns true for valid mac");
     CHECK(b[0] == 0x02 && b[1] == 0x11 && b[2] == 0x22 &&
@@ -76,7 +76,6 @@ static void test_mac_bytes_and_iface() {
     CHECK(mac_str_to_bytes("AA:BB:CC:DD:EE:FF", bu), "decode uppercase mac");
     CHECK(bu[0] == 0xAA && bu[3] == 0xDD && bu[5] == 0xFF, "uppercase decode correct");
 
-    // A seed-derived MAC round-trips through the decoder (the L9 socket path).
     uint8_t bs[6] = {0};
     CHECK(mac_str_to_bytes(mac_from_seed(fnv1a("husky")), bs), "seed mac decodes");
     CHECK(bs[0] == 0x02, "seed mac locally-administered byte preserved");
@@ -86,7 +85,6 @@ static void test_mac_bytes_and_iface() {
     CHECK(!mac_str_to_bytes("00:00:00:00:00:00", bad), "all-zero mac not decoded");
     CHECK(!mac_str_to_bytes("0g:00:11:22:33:44", bad), "non-hex mac not decoded");
 
-    // is_wifi_iface: only wlan*/p2p* get a spoofed MAC on the socket paths.
     CHECK(is_wifi_iface("wlan0"), "wlan0 is wifi");
     CHECK(is_wifi_iface("wlan1"), "wlan1 is wifi");
     CHECK(is_wifi_iface("p2p0"), "p2p0 is wifi");
@@ -290,7 +288,7 @@ static void test_arp() {
     CHECK(c.rfind("IP address", 0) == 0, "arp content starts with the column header");
     CHECK(c.find("HW address") != std::string::npos, "arp header has HW address column");
     CHECK(!c.empty() && c.back() == '\n', "arp header ends with newline");
-    // Empty table => exactly one line (the header), no neighbour rows.
+
     CHECK(std::count(c.begin(), c.end(), '\n') == 1, "arp table is empty (header only)");
 }
 

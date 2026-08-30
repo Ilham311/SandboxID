@@ -88,13 +88,6 @@ static const std::string& val(const std::string& k) {
     return empty;
 }
 
-// Auto-rotate the SIM operator natively. If the persona blob did NOT pin an
-// operator (i.e. no manual `rotate_ids.sh carrier ...` wrote GSM_OPERATOR_* into
-// identity.prop), pick one Indonesian carrier from sandboxid::ID_CARRIERS using
-// the same per-run persona seed L3/L9 use. Result is written straight into
-// g_identity, so BOTH the property layer (gsm.operator.*) and the L3
-// TelephonyManager hooks read the same operator, and it rotates every run.
-// A manual carrier.conf still wins (its GSM_OPERATOR_NUMERIC is already present).
 static void rotate_sim_operator() {
     auto it = g_identity.find("GSM_OPERATOR_NUMERIC");
     if (it != g_identity.end() && !it->second.empty()) {
@@ -104,7 +97,7 @@ static void rotate_sim_operator() {
     }
     uint64_t seed = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                  val("ANDROID_ID"));
-    uint64_t s = seed ^ 0x53494D53454CULL;              // "SIMSEL"
+    uint64_t s = seed ^ 0x53494D53454CULL;
     const auto& c = sandboxid::ID_CARRIERS[sbxnr::splitmix64(s) % sandboxid::ID_CARRIERS_N];
     g_identity["GSM_OPERATOR_NUMERIC"] = c.numeric;
     g_identity["GSM_OPERATOR_ALPHA"]   = c.alpha;
@@ -465,9 +458,7 @@ static int sbx_hooked_clock_gettime(clockid_t clk, struct timespec* ts) {
 static bool sbx_find_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return false;
-    // getline() grows its buffer to fit the whole line: a fixed char[512] would
-    // truncate long /proc/self/maps paths and split one map across two iterations,
-    // making a library's dev/inode impossible to match (Bug #4).
+
     char*  line = nullptr;
     size_t cap  = 0;
     ssize_t n;
@@ -577,7 +568,7 @@ static int sbx_fill_prop(char* value, const std::string& v) {
     if (n > PROP_VALUE_MAX - 1) n = PROP_VALUE_MAX - 1;
     memcpy(value, v.data(), n);
     value[n] = '\0';
-    return (int)n;   // bytes actually written (excl NUL) — matches __system_property_get contract
+    return (int)n;
 }
 
 static inline bool sbx_nr_spoofable(const char* name) {
@@ -770,15 +761,6 @@ static FILE* sbx_fopen(const char* path, const char* mode) {
     return fp;
 }
 
-// --- Native MAC: ioctl(SIOCGIFHWADDR) + getifaddrs ---------------------------
-// The /sys/class/net/<if>/address read path (classify()->MAC) and the L3
-// WifiInfo.getMacAddress hook both serve the persona MAC, but an app can still
-// recover the real Wi-Fi MAC through two native socket paths that never touch a
-// file or the framework: ioctl(SIOCGIFHWADDR) on an AF_INET socket, and
-// getifaddrs()'s AF_PACKET entries. Both are libc exports reached through the
-// app's PLT, so they belong in this L9 layer. We call the real function first,
-// then rewrite only wlan*/p2p* results in place with the SAME bytes as g_wifi_mac
-// (decoded once) so every layer agrees. eth*/rmnet*/lo are left untouched.
 static int sbx_ioctl(int fd, unsigned long request, void* argp) {
     int r = orig_ioctl ? orig_ioctl(fd, request, argp)
                        : (int)syscall(__NR_ioctl, fd, request, argp);
@@ -799,7 +781,7 @@ static int sbx_getifaddrs(struct ifaddrs** ifap) {
     int r = orig_getifaddrs ? orig_getifaddrs(ifap) : -1;
     if (r != 0 || !ifap || !*ifap || !g_native_read_active) return r;
     uint8_t mac[6];
-    if (!sbxnr::mac_str_to_bytes(g_wifi_mac, mac)) return r;   // no valid persona MAC: leave list intact
+    if (!sbxnr::mac_str_to_bytes(g_wifi_mac, mac)) return r;
     for (struct ifaddrs* ifa = *ifap; ifa; ifa = ifa->ifa_next) {
         if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_PACKET) continue;
         if (!sbxnr::is_wifi_iface(ifa->ifa_name)) continue;
@@ -838,7 +820,7 @@ static int sbx_register_across_libs(Api* api) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return 0;
     std::vector<std::pair<dev_t, ino_t>> seen;
-    char*  line = nullptr;   // getline: grow to fit; char[512] would split long maps lines (Bug #4)
+    char*  line = nullptr;
     size_t cap  = 0;
     ssize_t n;
     while ((n = getline(&line, &cap, f)) != -1) {
@@ -1287,10 +1269,7 @@ public:
 
 #ifdef SBX_ENABLE_LSPLANT
         {
-            // L3 spoofs identifiers that arrive over Binder (telephony/DRM) and so are
-            // out of reach of the property layers. Values come from the identity blob;
-            // IMEI/IMSI/ICCID/MEID/Widevine are synthesized from the same persona seed
-            // used by L9, so they rotate together on every action.sh run.
+
             sbxlsp::HookValues hv;
             hv.android_id = val("ANDROID_ID");
             hv.serial     = val("SERIAL");
@@ -1304,20 +1283,11 @@ public:
             hv.app_set_id = val("APP_SET_ID");
             hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                          val("ANDROID_ID"));
-            // GMS play-services getter watch: hooks BaseDexClassLoader.findClass to
-            // reach identifiers defined only in the app's own dex. DEFAULT-OFF —
-            // findClass is on the hot path of all class loading, so it ships behind
-            // a knob until device-validated. Set SBX_GMS_HOOK=1 in the persona to arm.
+
             hv.gms_watch  = (val("SBX_GMS_HOOK") == "1");
             if (!sbxlsp::install_all(env_, hv))
                 LOGE("L3 hooks not installed (continuing with L1/L2/L9)");
 
-            // NDK MediaDrm twin: apps that read the Widevine device-unique-id via
-            // the libmediandk C API (AMediaDrm_getPropertyByteArray) bypass every
-            // property layer AND the L3 Java MediaDrm hook. This Dobby inline hook
-            // returns the SAME persona bytes as the Java surface. Independent of
-            // install_all — it needs only Dobby + dlopen, not the ART runtime — so
-            // it runs even if the LSPlant Java hooks above failed to arm. Fail-soft.
             if (!sbxdrm::install(hv.seed))
                 LOGD("NDK MediaDrm hook not armed (Java MediaDrm hook still covers the common path)");
         }
