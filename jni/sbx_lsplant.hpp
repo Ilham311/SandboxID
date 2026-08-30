@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <mutex>
 
 #ifndef SBX_LSP_TAG
 #define SBX_LSP_TAG "SandboxID-L3"
@@ -16,39 +17,38 @@
 #endif
 
 #ifdef SBX_ENABLE_LSPLANT
-// ============================ LSPlant-enabled build ============================
+
 #include <dobby.h>
 #include <lsplant.hpp>
 #include <lsparself.hpp>
-#include "sbx_ident_synth.hpp"   // sbxid::synth_all + sbxnr:: primitives (top-level namespaces)
+#include "sbx_ident_synth.hpp"
+#include "sbx_native_drm.hpp"
 #if __has_include("hook_dex.h")
 #include "hook_dex.h"
 #define SBX_HAVE_HOOK_DEX 1
 #endif
-#endif // SBX_ENABLE_LSPLANT
+#endif
 
 namespace sbxlsp {
 
-// Values the module feeds to the L3 hooks. main.cpp fills these from the identity
-// blob (val()); the telephony/DRM identifiers are synthesized from `seed` so they
-// rotate together with the persona on every action.sh run. Defined in BOTH build
-// configurations so the no-op stub path keeps the same signature.
 struct HookValues {
     std::string android_id;
     std::string serial;
     std::string wifi_mac;
-    std::string bt_addr;    // bluetooth MAC, e.g. "A1:B2:C3:D4:E5:F6" (empty => seed fallback)
-    std::string op_num;     // gsm operator numeric (MCC+MNC), e.g. "51010"
-    std::string op_alpha;   // operator display name, e.g. "Telkomsel"
-    std::string op_iso;     // operator country iso, e.g. "id"
-    std::string carrier_id; // android carrier id (int as string), e.g. "1435" (empty => skip)
-    std::string gaid;       // Google Advertising ID (lowercase UUID); empty => synth from seed
-    std::string app_set_id; // App Set ID (lowercase UUID, per-app scope); empty => synth from seed
-    uint64_t    seed = 0;   // fnv1a(FINGERPRINT|SERIAL|ANDROID_ID)
+    std::string bt_addr;
+    std::string op_num;
+    std::string op_alpha;
+    std::string op_iso;
+    std::string carrier_id;
+    std::string gaid;
+    std::string app_set_id;
+    uint64_t    seed = 0;
+    bool gms_watch = false;
+
 };
 
 #ifndef SBX_ENABLE_LSPLANT
-// ---- Build without LSPlant: everything compiles to no-ops (validate.sh path) ----
+
 inline bool available()                              { return false; }
 inline bool init(JNIEnv*)                            { return false; }
 inline bool install_all(JNIEnv*, const HookValues&)  { return false; }
@@ -81,9 +81,7 @@ inline bool init(JNIEnv* env) {
         .inline_unhooker = sbx_inline_unhooker,
         .art_symbol_resolver =
             [](std::string_view s) -> void* { return reinterpret_cast<void*>(art.getSymbAddress(s)); },
-        // NOTE: LSPlant v2.0 (the pinned LSPLANT_REF) has no art_symbol_prefix_resolver;
-        // it was added post-v2.0. v2.0 resolves ART symbols fine without it, so we don't
-        // wire lsparself::getSymbPrefixFirstAddress here. Re-add if LSPLANT_REF is bumped.
+
     };
     info.generated_class_name  = kCls;
     info.generated_source_name = kSrc;
@@ -95,18 +93,23 @@ inline bool init(JNIEnv* env) {
     return ok;
 }
 
-// ---- callback class (androidx.core.os.EnvCompatState) loaded from embedded DEX ----
 inline jclass    g_cb_class = nullptr;
-inline jmethodID g_cb_ctor  = nullptr;   // ()V
-inline jmethodID g_cb_handle= nullptr;   // ([Ljava/lang/Object;)Ljava/lang/Object;
-inline jobject   g_cb_reflected = nullptr; // reflected handle Method (global ref)
+inline jmethodID g_cb_ctor  = nullptr;
+inline jmethodID g_cb_handle= nullptr;
+inline jobject   g_cb_reflected = nullptr;
 inline jfieldID  f_isStatic=nullptr, f_keyIdx=nullptr, f_keyMatch=nullptr,
                  f_retType=nullptr, f_sval=nullptr, f_bval=nullptr, f_backup=nullptr;
-inline std::vector<jobject> g_keep;      // global refs to hookers+backups (GC anchor)
+inline std::vector<jobject> g_keep;
+
+inline std::string g_gms_gaid;
+inline std::string g_gms_appset;
+inline bool        g_gms_adv_done   = false;
+inline bool        g_gms_appset_done = false;
+inline std::mutex  g_gms_mu;
 
 inline jclass load_callback_class(JNIEnv* env) {
 #ifndef SBX_HAVE_HOOK_DEX
-    (void)env;   // no DEX embedded: nothing to load
+    (void)env;
     SBX_LSP_LOGE("L3: callback DEX (hook_dex.h) tak ada di build ini — hook dilewati");
     return nullptr;
 #else
@@ -142,7 +145,6 @@ inline jclass load_callback_class(JNIEnv* env) {
 #endif
 }
 
-// Resolve ctor / handle / reflected-handle / all field ids once. Returns false on any miss.
 inline bool resolve_callback_members(JNIEnv* env) {
     if (!g_cb_class) return false;
     g_cb_ctor   = env->GetMethodID(g_cb_class, "<init>", "()V");
@@ -164,63 +166,42 @@ inline bool resolve_callback_members(JNIEnv* env) {
     return f_isStatic && f_keyIdx && f_keyMatch && f_retType && f_sval && f_bval && f_backup;
 }
 
-// ---- which spoof value a target returns ----
 enum ValId {
     V_NONE = 0, V_ANDROID_ID, V_SERIAL, V_IMEI, V_MEID, V_IMSI, V_ICCID,
     V_OP_NUM, V_OP_ALPHA, V_OP_ISO, V_WIFI_MAC, V_BT_ADDR, V_WIDEVINE,
-    // SIM-presence gating: without these an app on a SIM-less device sees
-    // SIM_STATE_ABSENT and never bothers reading operator/IMSI/ICCID, so those
-    // hooks never fire. These return coherent constants (int/boolean).
+
     V_SIM_STATE, V_PHONE_TYPE, V_ROAMING, V_MODEM_COUNT, V_CARRIER_ID,
-    // AdServices (Privacy Sandbox, API 34+) platform identifiers. AdId/AppSetId
-    // are framework classes resolvable at postAppSpecialize, so they install
-    // immediately (fail-soft skip on older APIs). The GMS play-services
-    // equivalents (com.google.android.gms.appset.AppSetIdInfo,
-    // AdvertisingIdClient$Info) load from the app dex only AFTER
-    // postAppSpecialize and need a deferred installer — see install_all() — so
-    // they are intentionally NOT listed here.
+
     V_GAID, V_APP_SET_ID, V_LAT,
-    // SubscriptionManager read path. Apps enumerate SIMs and read identity off the
-    // returned SubscriptionInfo; MCC/MNC split out of op_num so getMcc()/getMccString()
-    // and the per-slot getters stay coherent with GSM_OPERATOR_NUMERIC (V_OP_NUM).
+
     V_MCC_STR, V_MNC_STR,
-    // Wi-Fi *network* identity (the connected AP/SSID, not the device MAC). Returned
-    // as the standard "no ACCESS_FINE_LOCATION" redaction so the real network can't
-    // tie the persona to a physical place. These are the exact values a modern
-    // Android returns to an app that lacks location permission, so they are never
-    // anomalous and stay coherent with an empty scan list.
+
     V_WIFI_SSID, V_WIFI_BSSID,
-    // Nearby-network enumeration (WifiManager scan / configured list). Returns an
-    // empty List — coherent with the location-redacted BSSID/SSID above (an app
-    // without location permission gets exactly this) and hides which APs are
-    // around the persona. Uses retType 6 (no spoof string needed).
-    V_EMPTY_LIST
+
+    V_EMPTY_LIST,
+
+    V_GSERVICES
 };
-// retType: 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence, 6 empty List
+
 struct HookSpec {
     const char* cls;
     const char* name;
     const char* sig;
     bool        is_static;
-    int         key_index;   // absolute index into args[] (incl. receiver), or -1
-    const char* key_match;   // required value at key_index, or nullptr
-    int         ret_type;    // 0 String, 1 byte[]
+    int         key_index;
+    const char* key_match;
+    int         ret_type;
     int         val_id;
+    bool        no_deopt = false;
 };
 
-// Targets resolvable in an ordinary app process at postAppSpecialize. Anything
-// absent on the running API (wrong overload / hidden) simply fails resolution
-// and is skipped — the loop is fail-soft.
 inline const HookSpec* hook_specs(size_t& n) {
     static const HookSpec S[] = {
-        // ---- P0: the classic device identifiers ----
+
         { "android/provider/Settings$Secure", "getString",
           "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;",
           true, 1, "android_id", 0, V_ANDROID_ID },
-        // Bluetooth MAC also leaks through Settings.Secure["bluetooth_address"]
-        // (BluetoothAdapter.getAddress() returns a constant on API 23+, so apps
-        // read it here instead). Same String+key-match shape as android_id; reuses
-        // V_BT_ADDR so it stays identical to the getAddress() hook below.
+
         { "android/provider/Settings$Secure", "getString",
           "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;",
           true, 1, "bluetooth_address", 0, V_BT_ADDR },
@@ -229,7 +210,6 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/media/MediaDrm", "getPropertyByteArray", "(Ljava/lang/String;)[B",
           false, 1, "deviceUniqueId", 1, V_WIDEVINE },
 
-        // ---- P1: TelephonyManager (all instance methods) ----
         { "android/telephony/TelephonyManager", "getDeviceId", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_IMEI },
         { "android/telephony/TelephonyManager", "getDeviceId", "(I)Ljava/lang/String;",
@@ -259,11 +239,6 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/telephony/TelephonyManager", "getNetworkCountryIso", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_OP_ISO },
 
-        // ---- P1: TelephonyManager per-subId overloads (mostly @hide; fail-soft) ----
-        // Apps holding a subId (from SubscriptionManager) read these instead of the
-        // no-arg forms. Same spoof values so both surfaces agree; keyArgIndex=-1 so
-        // any subId gets the single presented operator. getNetworkCountryIso(I) is
-        // public since API 30; the rest are greylisted and skip when blocked.
         { "android/telephony/TelephonyManager", "getSubscriberId", "(I)Ljava/lang/String;",
           false, -1, nullptr, 0, V_IMSI },
         { "android/telephony/TelephonyManager", "getSimSerialNumber", "(I)Ljava/lang/String;",
@@ -273,10 +248,6 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/telephony/TelephonyManager", "getNetworkCountryIso", "(I)Ljava/lang/String;",
           false, -1, nullptr, 0, V_OP_ISO },
 
-        // ---- P1: SIM-presence gating (int/boolean constants) ----
-        // Make a SIM-less device look like it has a ready GSM SIM so apps
-        // proceed to the operator/IMSI/ICCID reads above. Overloads/hidden
-        // methods absent on the running API simply fail resolution and skip.
         { "android/telephony/TelephonyManager", "getSimState", "()I",
           false, -1, nullptr, 2, V_SIM_STATE },
         { "android/telephony/TelephonyManager", "getSimState", "(I)I",
@@ -292,11 +263,6 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/telephony/TelephonyManager", "getSimCarrierId", "()I",
           false, -1, nullptr, 2, V_CARRIER_ID },
 
-        // ---- P1: carrier-id-name / specific-carrier-id (API 28/29) ----
-        // The name getters return CharSequence (retType 5 => our String is a
-        // CharSequence, assignment-compatible). getSimSpecificCarrierId mirrors the
-        // canonical carrier id; empty carrier_id (unverified operator) => spoofed as
-        // UNKNOWN_CARRIER_ID (-1) rather than passthrough, see sbx_value_for().
         { "android/telephony/TelephonyManager", "getSimCarrierIdName", "()Ljava/lang/CharSequence;",
           false, -1, nullptr, 5, V_OP_ALPHA },
         { "android/telephony/TelephonyManager", "getSimSpecificCarrierId", "()I",
@@ -304,13 +270,6 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/telephony/TelephonyManager", "getSimSpecificCarrierIdName", "()Ljava/lang/CharSequence;",
           false, -1, nullptr, 5, V_OP_ALPHA },
 
-        // ---- P1: SubscriptionInfo getters (the SubscriptionManager read path) ----
-        // Apps enumerate SIMs via SubscriptionManager.getActiveSubscriptionInfoList()
-        // and read identity off each SubscriptionInfo. Hooking the object's getters
-        // covers every caller regardless of how the SubscriptionInfo was obtained and
-        // keeps MCC/MNC/carrier/iso coherent with the TelephonyManager surface above —
-        // a mismatch between the two is a primary tampering tell. getMcc/getMnc (int,
-        // deprecated) and getMccString/getMncString derive from the same op_num split.
         { "android/telephony/SubscriptionInfo", "getMccString", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_MCC_STR },
         { "android/telephony/SubscriptionInfo", "getMncString", "()Ljava/lang/String;",
@@ -330,49 +289,32 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/telephony/SubscriptionInfo", "getIccId", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_ICCID },
 
-        // ---- P1: MAC addresses ----
         { "android/net/wifi/WifiInfo", "getMacAddress", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_WIFI_MAC },
         { "android/bluetooth/BluetoothAdapter", "getAddress", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_BT_ADDR },
 
-        // ---- P1: Wi-Fi network identity (connected AP / SSID) ----
-        // Hides the real network the persona is attached to. Both return the
-        // standard location-redacted values, matching what an app without
-        // ACCESS_FINE_LOCATION sees on Android 8+. Plain String getters, so they
-        // slot into the same proven path as getMacAddress above.
         { "android/net/wifi/WifiInfo", "getSSID", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_WIFI_SSID },
         { "android/net/wifi/WifiInfo", "getBSSID", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_WIFI_BSSID },
 
-        // ---- P1: nearby-network enumeration (empty List) ----
-        // getConfiguredNetworks reveals saved-network history (a co-location/
-        // history signal); an empty List is plausible on a device with no saved
-        // Wi-Fi networks, so it's safe to blanket-empty (retType 6 => the Java
-        // callback hands back a fresh empty ArrayList; no spoof string needed).
-        //
-        // getScanResults is intentionally NOT hooked here: an always-empty scan
-        // list is itself anomalous (real devices almost always see >=1 AP unless
-        // location is off or scanning is throttled — see docs/IDENTITY_RESEARCH.md
-        // P1 #5). Faking it correctly needs a *plausible, per-persona-stable*
-        // fabricated list (connected AP + a few weak neighbors), not a blanket
-        // empty List; until that's implemented, pass through to the real method
-        // rather than emit a stronger anomaly than the leak it's meant to hide.
         { "android/net/wifi/WifiManager", "getConfiguredNetworks", "()Ljava/util/List;",
           false, -1, nullptr, 6, V_EMPTY_LIST },
 
-        // ---- P2: AdServices (Privacy Sandbox, API 34+) app-set-id / advertising-id ----
-        // Platform classes, so hookable at install time on API 34+ (fail-soft skip
-        // otherwise). getAdId()/getId() return the spoofed UUIDs; forcing
-        // isLimitAdTrackingEnabled=false keeps the advertising id coherent — a
-        // limit-ad-tracking device is required to report the all-zero id.
         { "android/adservices/adid/AdId", "getAdId", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_GAID },
         { "android/adservices/adid/AdId", "isLimitAdTrackingEnabled", "()Z",
           false, -1, nullptr, 4, V_LAT },
         { "android/adservices/appsetid/AppSetId", "getId", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_APP_SET_ID },
+
+        { "android/content/ContentResolver", "query",
+          "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+          false, -1, nullptr, 7, V_GSERVICES, true },
+        { "android/content/ContentResolver", "query",
+          "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;Landroid/os/CancellationSignal;)Landroid/database/Cursor;",
+          false, -1, nullptr, 7, V_GSERVICES, true },
     };
     n = sizeof(S) / sizeof(S[0]);
     return S;
@@ -399,16 +341,11 @@ inline jbyteArray sbx_hex_to_jbytes(JNIEnv* env, const std::string& hex) {
     return a;
 }
 
-// Hook exactly one target. Fail-soft: a missing class/method/overload returns false
-// (skipped) rather than aborting the whole install. `sval` may be empty (=> the hook
-// is registered but passes through until a value exists); `wvbytes` is the hex string
-// for byte[] targets (V_WIDEVINE) or empty.
-inline bool hook_one(JNIEnv* env, const HookSpec& sp,
-                     const std::string& sval, const std::string& wvbytes) {
+inline bool hook_one_on_class(JNIEnv* env, jclass cls, const HookSpec& sp,
+                              const std::string& sval, const std::string& wvbytes) {
+    if (!cls) return false;
     if (env->PushLocalFrame(24) != 0) { env->ExceptionClear(); return false; }
     bool ok = [&]() -> bool {
-        jclass cls = env->FindClass(sp.cls);
-        if (!cls || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
         jmethodID mid = sp.is_static ? env->GetStaticMethodID(cls, sp.name, sp.sig)
                                      : env->GetMethodID(cls, sp.name, sp.sig);
         if (!mid || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
@@ -424,12 +361,12 @@ inline bool hook_one(JNIEnv* env, const HookSpec& sp,
             jstring km = env->NewStringUTF(sp.key_match);
             env->SetObjectField(hooker, f_keyMatch, km);
         }
-        if (sp.ret_type == 1) {                      // byte[] target (Widevine)
+        if (sp.ret_type == 1) {
             if (wvbytes.size() >= 2) {
                 jbyteArray b = sbx_hex_to_jbytes(env, wvbytes);
                 if (b) env->SetObjectField(hooker, f_bval, b);
             }
-        } else if (!sval.empty()) {                  // String target
+        } else if (!sval.empty()) {
             jstring sv = env->NewStringUTF(sval.c_str());
             env->SetObjectField(hooker, f_sval, sv);
         }
@@ -441,8 +378,10 @@ inline bool hook_one(JNIEnv* env, const HookSpec& sp,
         g_keep.push_back(env->NewGlobalRef(hooker));
         g_keep.push_back(env->NewGlobalRef(backup));
 
-        lsplant::Deoptimize(env, target);            // best-effort: defeat inlined callers
-        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (!sp.no_deopt) {
+            lsplant::Deoptimize(env, target);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
         return true;
     }();
     env->PopLocalFrame(nullptr);
@@ -450,10 +389,70 @@ inline bool hook_one(JNIEnv* env, const HookSpec& sp,
     return ok;
 }
 
+inline bool hook_one(JNIEnv* env, const HookSpec& sp,
+                     const std::string& sval, const std::string& wvbytes) {
+    if (env->PushLocalFrame(4) != 0) { env->ExceptionClear(); return false; }
+    jclass cls = env->FindClass(sp.cls);
+    if (!cls || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return false;
+    }
+    bool ok = hook_one_on_class(env, cls, sp, sval, wvbytes);
+    env->PopLocalFrame(nullptr);
+    return ok;
+}
+
+inline void hook_gms_getters(JNIEnv* env, jclass cls, bool is_advertising) {
+    if (!cls) return;
+    if (is_advertising) {
+        HookSpec gid{ "com/google/android/gms/ads/identifier/AdvertisingIdClient$Info",
+                      "getId", "()Ljava/lang/String;", false, -1, nullptr, 0, V_NONE, true };
+        hook_one_on_class(env, cls, gid, g_gms_gaid, std::string());
+        HookSpec lat{ "com/google/android/gms/ads/identifier/AdvertisingIdClient$Info",
+                      "isLimitAdTrackingEnabled", "()Z", false, -1, nullptr, 4, V_NONE, true };
+        hook_one_on_class(env, cls, lat, "false", std::string());
+    } else {
+        HookSpec sid{ "com/google/android/gms/appset/AppSetIdInfo",
+                      "getId", "()Ljava/lang/String;", false, -1, nullptr, 0, V_NONE, true };
+        hook_one_on_class(env, cls, sid, g_gms_appset, std::string());
+    }
+}
+
+inline void sbx_on_class_loaded(JNIEnv* env, jclass , jstring jname, jobject clsObj) {
+    if (!env || !jname || !clsObj) return;
+    const char* nm = env->GetStringUTFChars(jname, nullptr);
+    if (!nm) { if (env->ExceptionCheck()) env->ExceptionClear(); return; }
+    std::string name(nm);
+    env->ReleaseStringUTFChars(jname, nm);
+    std::lock_guard<std::mutex> lk(g_gms_mu);
+    if (!g_gms_adv_done &&
+        name == "com.google.android.gms.ads.identifier.AdvertisingIdClient$Info") {
+        g_gms_adv_done = true;
+        hook_gms_getters(env, static_cast<jclass>(clsObj), true);
+    } else if (!g_gms_appset_done &&
+               name == "com.google.android.gms.appset.AppSetIdInfo") {
+        g_gms_appset_done = true;
+        hook_gms_getters(env, static_cast<jclass>(clsObj), false);
+    }
+}
+
+inline bool register_class_watch_native(JNIEnv* env) {
+    if (!g_cb_class) return false;
+    JNINativeMethod m{ "onClassLoaded", "(Ljava/lang/String;Ljava/lang/Object;)V",
+                       reinterpret_cast<void*>(&sbx_on_class_loaded) };
+    if (env->RegisterNatives(g_cb_class, &m, 1) != 0) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
 inline std::string sbx_value_for(int val_id, const HookValues& v,
                                  const sbxid::SynthIds& ids,
                                  const std::string& wifi, const std::string& bt,
-                                 const std::string& gaid, const std::string& appset) {
+                                 const std::string& gaid, const std::string& appset,
+                                 const std::string& gsf) {
     switch (val_id) {
         case V_ANDROID_ID: return v.android_id;
         case V_SERIAL:     return v.serial;
@@ -462,38 +461,30 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_IMSI:       return ids.imsi;
         case V_ICCID:      return ids.iccid;
         case V_OP_NUM:     return v.op_num;
-        // MCC/MNC split out of the operator numeric (MCC = first 3 digits). Feeds both
-        // the String getters (retType 0) and the deprecated int getters (retType 2,
-        // parsed Java-side; leading-zero MNC like "08" parses to 8 as the framework
-        // returns it). Empty op_num => empty => hook passes through to the real method.
+
         case V_MCC_STR:    return v.op_num.size() >= 3 ? v.op_num.substr(0, 3) : std::string();
         case V_MNC_STR:    return v.op_num.size() >  3 ? v.op_num.substr(3)    : std::string();
         case V_OP_ALPHA:   return v.op_alpha;
         case V_OP_ISO:     return v.op_iso;
         case V_WIFI_MAC:   return wifi;
         case V_BT_ADDR:    return bt;
-        // Wi-Fi network identity — standard location-redacted values (what an app
-        // without ACCESS_FINE_LOCATION sees), so the real AP/SSID never leaks:
-        case V_WIFI_SSID:  return "<unknown ssid>";        // WifiManager.UNKNOWN_SSID
-        case V_WIFI_BSSID: return "02:00:00:00:00:00";      // WifiInfo redacted BSSID
-        case V_EMPTY_LIST: return std::string();            // retType 6: value comes from Java (empty List)
-        // SIM-presence constants (parsed int/boolean on the Java side):
-        case V_SIM_STATE:  return "5";       // TelephonyManager.SIM_STATE_READY
-        case V_PHONE_TYPE: return "1";       // PHONE_TYPE_GSM
+
+        case V_WIFI_SSID:  return "<unknown ssid>";
+        case V_WIFI_BSSID: return "02:00:00:00:00:00";
+        case V_EMPTY_LIST: return std::string();
+
+        case V_SIM_STATE:  return "5";
+        case V_PHONE_TYPE: return "1";
         case V_ROAMING:    return "false";
         case V_MODEM_COUNT:return "1";
-        // Empty carrier_id means the operator (e.g. Tri/Smartfren) has no verified
-        // AOSP carrier_id, but an empty sval here would make the Java-side hook
-        // fall through to invokeOriginal() and leak the REAL device's carrier_id
-        // alongside our spoofed MCC/MNC — a worse tell than reporting UNKNOWN.
-        // Force TelephonyManager.UNKNOWN_CARRIER_ID (-1) instead whenever a SIM
-        // persona is active; only pass through when there is no SIM at all
-        // (handled by the have_sim gate in install_all()).
+
         case V_CARRIER_ID: return v.carrier_id.empty() ? std::string("-1") : v.carrier_id;
-        // AdServices (API 34+) platform identifiers:
+
         case V_GAID:       return gaid;
         case V_APP_SET_ID: return appset;
-        case V_LAT:        return "false";        // isLimitAdTrackingEnabled
+        case V_LAT:        return "false";
+
+        case V_GSERVICES:  return gsf;
         default:           return std::string();
     }
 }
@@ -510,54 +501,54 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
         }
     }
 
-    // Telephony/DRM identifiers, synthesized from the persona seed for cross-field
-    // consistency and rotated with every fresh identity.
     sbxid::SynthIds ids = sbxid::synth_all(v.seed, v.op_num);
-    // WiFi/BT MACs: prefer the persisted persona values; fall back to the seed.
-    // The WiFi salt matches L9 (main.cpp) so both layers agree if WIFI_MAC is absent.
+
     std::string wifi = !v.wifi_mac.empty() ? v.wifi_mac
                                            : sbxnr::mac_from_seed(v.seed ^ 0x9E3779B97F4A7C15ULL);
     std::string bt   = !v.bt_addr.empty() ? sbx_mac_upper(v.bt_addr)
                                           : sbx_mac_upper(sbxnr::mac_from_seed(v.seed ^ 0x424C554554ULL));
-    // AdServices UUIDs: prefer the persisted persona values, else derive from the
-    // seed so they rotate with every fresh identity (distinct salts => distinct
-    // from each other and from boot_id/cdid/clientudid at L9).
-    std::string gaid   = !v.gaid.empty() ? v.gaid
-                                         : sbxnr::uuid_from_seed(v.seed ^ 0x47414944ULL);   // "GAID"
-    std::string appset = !v.app_set_id.empty() ? v.app_set_id
-                                               : sbxnr::uuid_from_seed(v.seed ^ 0x4150534554ULL); // "APSET"
 
-    // NOTE (deferred install, future work): the GMS play-services getters
-    // com.google.android.gms.appset.AppSetIdInfo.getId()/getScope() and
-    // com.google.android.gms.ads.identifier.AdvertisingIdClient$Info.getId()/
-    // isLimitAdTrackingEnabled() are the identifiers most apps actually read, but
-    // those classes live in the app's own dex and are not defined until AFTER
-    // postAppSpecialize (the app PathClassLoader does not exist yet here), so
-    // FindClass misses them and they cannot be listed in hook_specs(). Installing
-    // them needs a class-load watch (hook dalvik.system.BaseDexClassLoader.findClass
-    // with a dedicated post-callback that, on a name match, calls back to native to
-    // hook the getters) — a mechanism that must be validated on a device before it
-    // ships, since a fault in a findClass hook would break class loading app-wide.
-    // The AdServices (API 34+) platform path above is the safe, framework-only
-    // subset that needs no deferral.
+    std::string gaid   = !v.gaid.empty() ? v.gaid
+                                         : sbxnr::uuid_from_seed(v.seed ^ 0x47414944ULL);
+    std::string appset = !v.app_set_id.empty() ? v.app_set_id
+                                               : sbxnr::uuid_from_seed(v.seed ^ 0x4150534554ULL);
+
+    std::string gsf = sbxid::synth_gsf_id(v.seed);
 
     const bool have_sim = !v.op_num.empty();
+    const bool have_android_id = !v.android_id.empty();
     size_t n = 0;
     const HookSpec* specs = hook_specs(n);
     int good = 0;
     for (size_t i = 0; i < n; ++i) {
         const int vid = specs[i].val_id;
-        // The SIM-presence constants are only coherent when we actually present
-        // an operator; without one, let SIM state pass through (real ABSENT).
+
         if (!have_sim && (vid == V_SIM_STATE || vid == V_MODEM_COUNT || vid == V_CARRIER_ID))
             continue;
-        std::string sval = sbx_value_for(vid, v, ids, wifi, bt, gaid, appset);
+        if (!have_android_id && vid == V_GSERVICES)
+            continue;
+        std::string sval = sbx_value_for(vid, v, ids, wifi, bt, gaid, appset, gsf);
         if (hook_one(env, specs[i], sval, ids.widevine_hex)) ++good;
     }
+
+    if (v.gms_watch) {
+        g_gms_gaid   = gaid;
+        g_gms_appset = appset;
+        if (register_class_watch_native(env)) {
+            HookSpec fc{ "dalvik/system/BaseDexClassLoader", "findClass",
+                         "(Ljava/lang/String;)Ljava/lang/Class;",
+                         false, -1, nullptr, 9, V_NONE, true };
+            if (hook_one(env, fc, std::string(), std::string())) {
+                ++good;
+                SBX_LSP_LOGD("L3 GMS class-load watch armed");
+            }
+        }
+    }
+
     SBX_LSP_LOGD("L3 install_all: %d/%zu targets hooked", good, n);
     if (good == 0) SBX_LSP_LOGE("L3: no targets hooked (continuing with L1/L2/L9)");
     return good > 0;
 }
-#endif // SBX_ENABLE_LSPLANT
+#endif
 
-} // namespace sbxlsp
+}

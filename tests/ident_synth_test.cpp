@@ -1,4 +1,4 @@
-// Host unit test for jni/sbx_ident_synth.hpp — telephony/DRM identifier synthesis.
+
 #include "../jni/sbx_ident_synth.hpp"
 
 #include <cassert>
@@ -31,10 +31,9 @@ int main() {
     uint64_t seed = sbxnr::fnv1a("google/husky/husky:14/AP1A.240505.004/11583682:user/release-keys"
                                  "|A1B2C3D4E5F60718|deadbeefcafef00d");
 
-    // --- Luhn primitive round-trips ---
     CHECK(luhn_valid("35316010" "123456" + std::string(1, luhn_check_digit("35316010123456"))),
           "luhn_check_digit produces a valid full number");
-    {   // deliberately corrupt the check digit -> guaranteed invalid
+    {
         std::string base = "35316010123456";
         char good = luhn_check_digit(base);
         char bad  = (char)('0' + (((good - '0') + 1) % 10));
@@ -42,7 +41,6 @@ int main() {
     }
     CHECK(luhn_valid("79927398713"), "luhn_valid accepts the canonical test number 79927398713");
 
-    // --- IMEI ---
     std::string imei = synth_imei(seed);
     CHECK(imei.size() == 15, "IMEI is 15 digits");
     CHECK(all_digits(imei), "IMEI is all digits");
@@ -51,7 +49,6 @@ int main() {
     CHECK(synth_imei(seed) == imei, "IMEI deterministic for same seed");
     CHECK(synth_imei(seed ^ 1ULL) != imei, "IMEI differs for a different seed");
 
-    // --- IMSI: MCC+MNC must prefix, total 15 ---
     std::string imsi = synth_imsi(seed, "51010");
     CHECK(imsi.size() == 15, "IMSI is 15 digits");
     CHECK(all_digits(imsi), "IMSI is all digits");
@@ -60,7 +57,6 @@ int main() {
     CHECK(synth_imsi(seed, "bogus").rfind("51010", 0) == 0, "IMSI falls back on a non-numeric operator");
     CHECK(synth_imsi(seed, "51010") == imsi, "IMSI deterministic");
 
-    // --- ICCID: starts 89, valid Luhn, length 19 ---
     std::string iccid = synth_iccid(seed, "51010");
     CHECK(iccid.size() == 19, "ICCID is 19 digits");
     CHECK(all_digits(iccid), "ICCID is all digits");
@@ -69,13 +65,11 @@ int main() {
     CHECK(luhn_valid(iccid), "ICCID passes Luhn");
     CHECK(synth_iccid(seed, "51010") == iccid, "ICCID deterministic");
 
-    // --- MEID: 14 uppercase hex ---
     std::string meid = synth_meid(seed);
     CHECK(meid.size() == 14, "MEID is 14 hex chars");
     CHECK(all_hex_upper(meid), "MEID is uppercase hex");
     CHECK(synth_meid(seed) == meid, "MEID deterministic");
-    // Leading hex digit must be A-F (MEID RR region) for every seed, else it
-    // collides with the decimal ESN/IMEI space and fails validators.
+
     {
         bool all_af = true;
         for (uint64_t k = 0; k < 4096; ++k) {
@@ -85,13 +79,11 @@ int main() {
         CHECK(all_af, "MEID leading hex digit is A-F for all seeds");
     }
 
-    // --- Widevine deviceUniqueId: 32 bytes -> 64 hex ---
     std::string wv = synth_widevine_hex(seed);
     CHECK(wv.size() == 64, "Widevine id is 64 hex chars (32 bytes)");
     CHECK(synth_widevine_hex(seed) == wv, "Widevine id deterministic");
     CHECK(synth_widevine_hex(seed ^ 2ULL) != wv, "Widevine id differs for a different seed");
 
-    // --- bundle mirrors the individual synths ---
     SynthIds b = synth_all(seed, "51010");
     CHECK(b.imei == imei && b.imsi == imsi && b.iccid == iccid &&
           b.meid == meid && b.widevine_hex == wv, "synth_all matches individual functions");

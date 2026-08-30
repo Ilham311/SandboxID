@@ -14,6 +14,12 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <ifaddrs.h>
+#include <netpacket/packet.h>
+#include <linux/sockios.h>
 #include <dlfcn.h>
 #include <android/log.h>
 #include <string>
@@ -82,13 +88,6 @@ static const std::string& val(const std::string& k) {
     return empty;
 }
 
-// Auto-rotate the SIM operator natively. If the persona blob did NOT pin an
-// operator (i.e. no manual `rotate_ids.sh carrier ...` wrote GSM_OPERATOR_* into
-// identity.prop), pick one Indonesian carrier from sandboxid::ID_CARRIERS using
-// the same per-run persona seed L3/L9 use. Result is written straight into
-// g_identity, so BOTH the property layer (gsm.operator.*) and the L3
-// TelephonyManager hooks read the same operator, and it rotates every run.
-// A manual carrier.conf still wins (its GSM_OPERATOR_NUMERIC is already present).
 static void rotate_sim_operator() {
     auto it = g_identity.find("GSM_OPERATOR_NUMERIC");
     if (it != g_identity.end() && !it->second.empty()) {
@@ -98,7 +97,7 @@ static void rotate_sim_operator() {
     }
     uint64_t seed = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                  val("ANDROID_ID"));
-    uint64_t s = seed ^ 0x53494D53454CULL;              // "SIMSEL"
+    uint64_t s = seed ^ 0x53494D53454CULL;
     const auto& c = sandboxid::ID_CARRIERS[sbxnr::splitmix64(s) % sandboxid::ID_CARRIERS_N];
     g_identity["GSM_OPERATOR_NUMERIC"] = c.numeric;
     g_identity["GSM_OPERATOR_ALPHA"]   = c.alpha;
@@ -459,9 +458,7 @@ static int sbx_hooked_clock_gettime(clockid_t clk, struct timespec* ts) {
 static bool sbx_find_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return false;
-    // getline() grows its buffer to fit the whole line: a fixed char[512] would
-    // truncate long /proc/self/maps paths and split one map across two iterations,
-    // making a library's dev/inode impossible to match (Bug #4).
+
     char*  line = nullptr;
     size_t cap  = 0;
     ssize_t n;
@@ -542,6 +539,8 @@ typedef int   (*sbx_sysprop_get_fn)(const char*, char*);
 typedef int   (*sbx_sysprop_read_fn)(const void*, char*, char*);
 typedef void  (*sbx_sysprop_cb)(void*, const char*, const char*, uint32_t);
 typedef void  (*sbx_sysprop_read_cb_fn)(const void*, sbx_sysprop_cb, void*);
+typedef int   (*sbx_ioctl_fn)(int, unsigned long, void*);
+typedef int   (*sbx_getifaddrs_fn)(struct ifaddrs**);
 
 static sbx_open_fn   orig_open   = nullptr;
 static sbx_openat_fn orig_openat = nullptr;
@@ -549,6 +548,8 @@ static sbx_fopen_fn  orig_fopen  = nullptr;
 static sbx_sysprop_get_fn    orig_sysprop_get    = nullptr;
 static sbx_sysprop_read_fn    orig_sysprop_read    = nullptr;
 static sbx_sysprop_read_cb_fn  orig_sysprop_read_cb  = nullptr;
+static sbx_ioctl_fn      orig_ioctl      = nullptr;
+static sbx_getifaddrs_fn orig_getifaddrs = nullptr;
 
 static std::atomic<bool> g_native_read_active{false};
 static std::string g_boot_id;
@@ -567,7 +568,7 @@ static int sbx_fill_prop(char* value, const std::string& v) {
     if (n > PROP_VALUE_MAX - 1) n = PROP_VALUE_MAX - 1;
     memcpy(value, v.data(), n);
     value[n] = '\0';
-    return (int)n;   // bytes actually written (excl NUL) — matches __system_property_get contract
+    return (int)n;
 }
 
 static inline bool sbx_nr_spoofable(const char* name) {
@@ -760,6 +761,36 @@ static FILE* sbx_fopen(const char* path, const char* mode) {
     return fp;
 }
 
+static int sbx_ioctl(int fd, unsigned long request, void* argp) {
+    int r = orig_ioctl ? orig_ioctl(fd, request, argp)
+                       : (int)syscall(__NR_ioctl, fd, request, argp);
+    if (r == 0 && g_native_read_active && argp && request == SIOCGIFHWADDR) {
+        struct ifreq* ifr = static_cast<struct ifreq*>(argp);
+        if (sbxnr::is_wifi_iface(ifr->ifr_name)) {
+            uint8_t mac[6];
+            if (sbxnr::mac_str_to_bytes(g_wifi_mac, mac)) {
+                memcpy(ifr->ifr_hwaddr.sa_data, mac, 6);
+                ifr->ifr_hwaddr.sa_family = ARPHRD_ETHER;
+            }
+        }
+    }
+    return r;
+}
+
+static int sbx_getifaddrs(struct ifaddrs** ifap) {
+    int r = orig_getifaddrs ? orig_getifaddrs(ifap) : -1;
+    if (r != 0 || !ifap || !*ifap || !g_native_read_active) return r;
+    uint8_t mac[6];
+    if (!sbxnr::mac_str_to_bytes(g_wifi_mac, mac)) return r;
+    for (struct ifaddrs* ifa = *ifap; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_PACKET) continue;
+        if (!sbxnr::is_wifi_iface(ifa->ifa_name)) continue;
+        struct sockaddr_ll* sll = reinterpret_cast<struct sockaddr_ll*>(ifa->ifa_addr);
+        if (sll->sll_halen == 6) memcpy(sll->sll_addr, mac, 6);
+    }
+    return r;
+}
+
 static void sbx_register_lib_hooks(Api* api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "__system_property_get",
                          reinterpret_cast<void*>(sbx_sysprop_get),  reinterpret_cast<void**>(&orig_sysprop_get));
@@ -779,13 +810,17 @@ static void sbx_register_lib_hooks(Api* api, dev_t dev, ino_t ino) {
                          reinterpret_cast<void*>(sbx_openat), reinterpret_cast<void**>(&orig_openat));
     api->pltHookRegister(dev, ino, "fopen64",
                          reinterpret_cast<void*>(sbx_fopen),  reinterpret_cast<void**>(&orig_fopen));
+    api->pltHookRegister(dev, ino, "ioctl",
+                         reinterpret_cast<void*>(sbx_ioctl),  reinterpret_cast<void**>(&orig_ioctl));
+    api->pltHookRegister(dev, ino, "getifaddrs",
+                         reinterpret_cast<void*>(sbx_getifaddrs), reinterpret_cast<void**>(&orig_getifaddrs));
 }
 
 static int sbx_register_across_libs(Api* api) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return 0;
     std::vector<std::pair<dev_t, ino_t>> seen;
-    char*  line = nullptr;   // getline: grow to fit; char[512] would split long maps lines (Bug #4)
+    char*  line = nullptr;
     size_t cap  = 0;
     ssize_t n;
     while ((n = getline(&line, &cap, f)) != -1) {
@@ -843,6 +878,8 @@ static void install_native_read_hooks(Api* api) {
     if (!orig_open)   orig_open   = reinterpret_cast<sbx_open_fn>(dlsym(RTLD_DEFAULT, "open"));
     if (!orig_openat) orig_openat = reinterpret_cast<sbx_openat_fn>(dlsym(RTLD_DEFAULT, "openat"));
     if (!orig_fopen)  orig_fopen  = reinterpret_cast<sbx_fopen_fn>(dlsym(RTLD_DEFAULT, "fopen"));
+    if (!orig_ioctl)      orig_ioctl      = reinterpret_cast<sbx_ioctl_fn>(dlsym(RTLD_DEFAULT, "ioctl"));
+    if (!orig_getifaddrs) orig_getifaddrs = reinterpret_cast<sbx_getifaddrs_fn>(dlsym(RTLD_DEFAULT, "getifaddrs"));
 
     int libs = sbx_register_across_libs(api);
     if (libs == 0) {
@@ -1232,10 +1269,7 @@ public:
 
 #ifdef SBX_ENABLE_LSPLANT
         {
-            // L3 spoofs identifiers that arrive over Binder (telephony/DRM) and so are
-            // out of reach of the property layers. Values come from the identity blob;
-            // IMEI/IMSI/ICCID/MEID/Widevine are synthesized from the same persona seed
-            // used by L9, so they rotate together on every action.sh run.
+
             sbxlsp::HookValues hv;
             hv.android_id = val("ANDROID_ID");
             hv.serial     = val("SERIAL");
@@ -1249,8 +1283,13 @@ public:
             hv.app_set_id = val("APP_SET_ID");
             hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                          val("ANDROID_ID"));
+
+            hv.gms_watch  = (val("SBX_GMS_HOOK") == "1");
             if (!sbxlsp::install_all(env_, hv))
                 LOGE("L3 hooks not installed (continuing with L1/L2/L9)");
+
+            if (!sbxdrm::install(hv.seed))
+                LOGD("NDK MediaDrm hook not armed (Java MediaDrm hook still covers the common path)");
         }
 #endif
 

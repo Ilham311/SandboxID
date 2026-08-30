@@ -7,13 +7,6 @@
 
 namespace sandboxid {
 
-// Single source of truth for the module id (== the install directory under
-// /data/adb/modules). build.sh passes -DSBX_MODULE_ID="$(id from module.prop)";
-// default keeps the historical "sandboxid" so a plain build is byte-identical.
-// Renaming the module (the "New Identity" rebrand) is then one change in
-// module.prop — every path below repoints automatically. NOTE: the disguised
-// LSPlant callback classes (androidx.core.os.EnvCompatState / HandlerCompatRef)
-// are deliberately NOT derived from this and must stay camouflaged.
 #ifndef SBX_MODULE_ID
 #define SBX_MODULE_ID "sandboxid"
 #endif
@@ -88,21 +81,6 @@ inline constexpr KV VAL_DEFAULTS[] = {
 };
 inline constexpr size_t VAL_DEFAULTS_N = sizeof(VAL_DEFAULTS) / sizeof(VAL_DEFAULTS[0]);
 
-// Indonesian SIM/carrier pool (MCC 510) for native auto-rotation. main.cpp picks
-// ONE entry per run from the persona seed when the blob didn't pin an operator
-// (no manual carrier.conf), so gsm.operator.* (L2) and TelephonyManager getters
-// (L3) stay coherent and rotate together on every action.sh run — no carriers.tsv
-// needed for the default path. carrier_id "" => leave GSM_CARRIER_ID unset
-// (framework treats it as UNKNOWN/-1). numeric = MCC(3)+MNC(2). Mirrors the
-// 6 Indonesian rows in data/carriers.tsv (real MCC/MNC/ISO/carrier_id).
-// carrier_id verified against AOSP carrier_list.textpb: Telkomsel 787, Indosat
-// 789 ("Indosat - M3"), XL/Axis 788 (both map to the shared "XL/AXIS" entry).
-// Tri (51089) and Smartfren (51009) are NOT in the resolvable slice, so their
-// carrier_id is left "" (UNKNOWN) rather than fabricated — a wrong cid alongside
-// a valid MCC/MNC is itself a tampering tell. L3 (sbx_lsplant.hpp) spoofs "" to
-// TelephonyManager.UNKNOWN_CARRIER_ID (-1) instead of passing through to the
-// real getter, so the real device's carrier_id is never leaked alongside the
-// spoofed MCC/MNC.
 struct SimCarrier { const char* alpha; const char* numeric; const char* iso; const char* carrier_id; };
 inline constexpr SimCarrier ID_CARRIERS[] = {
     {"Telkomsel", "51010", "id", "787"},

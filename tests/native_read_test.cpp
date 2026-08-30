@@ -65,6 +65,36 @@ static void test_mac() {
     CHECK(is_valid_mac("AA:BB:CC:DD:EE:FF"), "uppercase mac valid");
 }
 
+static void test_mac_bytes_and_iface() {
+
+    uint8_t b[6] = {0};
+    CHECK(mac_str_to_bytes("02:11:22:33:44:55", b), "decode returns true for valid mac");
+    CHECK(b[0] == 0x02 && b[1] == 0x11 && b[2] == 0x22 &&
+          b[3] == 0x33 && b[4] == 0x44 && b[5] == 0x55, "decode bytes correct");
+
+    uint8_t bu[6] = {0};
+    CHECK(mac_str_to_bytes("AA:BB:CC:DD:EE:FF", bu), "decode uppercase mac");
+    CHECK(bu[0] == 0xAA && bu[3] == 0xDD && bu[5] == 0xFF, "uppercase decode correct");
+
+    uint8_t bs[6] = {0};
+    CHECK(mac_str_to_bytes(mac_from_seed(fnv1a("husky")), bs), "seed mac decodes");
+    CHECK(bs[0] == 0x02, "seed mac locally-administered byte preserved");
+
+    uint8_t bad[6] = {0};
+    CHECK(!mac_str_to_bytes("", bad), "empty mac not decoded");
+    CHECK(!mac_str_to_bytes("00:00:00:00:00:00", bad), "all-zero mac not decoded");
+    CHECK(!mac_str_to_bytes("0g:00:11:22:33:44", bad), "non-hex mac not decoded");
+
+    CHECK(is_wifi_iface("wlan0"), "wlan0 is wifi");
+    CHECK(is_wifi_iface("wlan1"), "wlan1 is wifi");
+    CHECK(is_wifi_iface("p2p0"), "p2p0 is wifi");
+    CHECK(is_wifi_iface("p2p-wlan0-0"), "p2p-dev is wifi");
+    CHECK(!is_wifi_iface("eth0"), "eth0 not wifi");
+    CHECK(!is_wifi_iface("rmnet0"), "rmnet0 not wifi (cellular has no persistent MAC)");
+    CHECK(!is_wifi_iface("lo"), "lo not wifi");
+    CHECK(!is_wifi_iface(nullptr), "null iface not wifi");
+}
+
 static void test_proc_version() {
 
     std::string v = synth_proc_version("14", "11583682", "zuma", "abfarm42", 0x1234abcd);
@@ -258,7 +288,7 @@ static void test_arp() {
     CHECK(c.rfind("IP address", 0) == 0, "arp content starts with the column header");
     CHECK(c.find("HW address") != std::string::npos, "arp header has HW address column");
     CHECK(!c.empty() && c.back() == '\n', "arp header ends with newline");
-    // Empty table => exactly one line (the header), no neighbour rows.
+
     CHECK(std::count(c.begin(), c.end(), '\n') == 1, "arp table is empty (header only)");
 }
 
@@ -541,6 +571,7 @@ static void test_applog_xml_synth() {
 int main() {
     test_uuid();
     test_mac();
+    test_mac_bytes_and_iface();
     test_proc_version();
     test_meminfo();
     test_pixel_ram();

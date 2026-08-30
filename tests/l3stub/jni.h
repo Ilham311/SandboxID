@@ -1,7 +1,5 @@
 #pragma once
-// Minimal JNI stub — ONLY to host-syntax-check jni/sbx_lsplant.hpp under
-// -DSBX_ENABLE_LSPLANT without an NDK. Not a functional JNI: signatures mirror
-// the real <jni.h> closely enough that the L3 code type-checks. Never linked.
+
 #include <cstdint>
 #include <cstdarg>
 
@@ -14,7 +12,6 @@ using jbyte    = int8_t;
 #define JNI_FALSE 0
 #define JNI_TRUE  1
 
-// Opaque reference types (distinct structs so overloads/params stay checkable).
 struct _jobject {};
 using jobject    = _jobject*;
 using jclass     = jobject;
@@ -28,6 +25,12 @@ using jmethodID = _jmethodID*;
 struct _jfieldID {};
 using jfieldID = _jfieldID*;
 
+struct JNINativeMethod {
+    const char* name;
+    const char* signature;
+    void*       fnPtr;
+};
+
 struct JNIEnv {
     jint      PushLocalFrame(jint) { return 0; }
     jobject   PopLocalFrame(jobject) { return nullptr; }
@@ -35,13 +38,17 @@ struct JNIEnv {
     jboolean  ExceptionCheck() { return JNI_FALSE; }
 
     jclass    FindClass(const char*) { return nullptr; }
+    jclass    GetObjectClass(jobject) { return nullptr; }
     jmethodID GetMethodID(jclass, const char*, const char*) { return nullptr; }
     jmethodID GetStaticMethodID(jclass, const char*, const char*) { return nullptr; }
     jfieldID  GetFieldID(jclass, const char*, const char*) { return nullptr; }
+    jint      RegisterNatives(jclass, const JNINativeMethod*, jint) { return 0; }
 
     jobject   NewObject(jclass, jmethodID, ...) { return nullptr; }
     jobject   NewGlobalRef(jobject) { return nullptr; }
     jstring   NewStringUTF(const char*) { return nullptr; }
+    const char* GetStringUTFChars(jstring, jboolean*) { return nullptr; }
+    void      ReleaseStringUTFChars(jstring, const char*) {}
     jobject   NewDirectByteBuffer(void*, jlong) { return nullptr; }
     jbyteArray NewByteArray(jsize) { return nullptr; }
     void      SetByteArrayRegion(jbyteArray, jsize, jsize, const jbyte*) {}

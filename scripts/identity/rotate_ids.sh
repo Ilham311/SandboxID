@@ -69,8 +69,17 @@ set_gaid_value() {
     rm -f "$GMS_DIR"/files/adid_cache.dat 2>/dev/null
     rm -rf "$GMS_DIR"/no_backup/adid* 2>/dev/null
 
+    gms_uid=$(stat -c '%u' "$GMS_DIR" 2>/dev/null)
+    case "$gms_uid" in
+        ''|*[!0-9]*)
+            se_restore
+            log_warn "GAID: uid GMS tak terbaca (stat '$GMS_DIR') — adid_settings.xml root-owned tak ditinggalkan, spoof lewat Settings.Global saja"
+            return 0 ;;
+    esac
+
     mkdir -p "$GMS_DIR/shared_prefs" 2>/dev/null
-    cat > "$ADID" <<XMLEOF
+    _adid_tmp="$GMS_DIR/shared_prefs/.adid_settings.$$"
+    cat > "$_adid_tmp" <<XMLEOF
 <?xml version='1.0' encoding='utf-8' standalone='yes' ?>
 <map>
     <string name="adid_key">$newgaid</string>
@@ -78,8 +87,13 @@ set_gaid_value() {
     <long name="last_reset_time" value="$(date +%s)000" />
 </map>
 XMLEOF
-    gms_uid=$(stat -c '%u' "$GMS_DIR" 2>/dev/null)
-    [ -n "$gms_uid" ] && chown "${gms_uid}:${gms_uid}" "$ADID" 2>/dev/null
+    if [ ! -s "$_adid_tmp" ] || ! mv -f "$_adid_tmp" "$ADID" 2>/dev/null; then
+        rm -f "$_adid_tmp" 2>/dev/null
+        se_restore
+        log_warn "GAID: gagal menulis adid_settings.xml — spoof lewat Settings.Global saja"
+        return 0
+    fi
+    chown "${gms_uid}:${gms_uid}" "$ADID" 2>/dev/null
     chmod 0660 "$ADID" 2>/dev/null
     if command -v chcon >/dev/null 2>&1; then
         parent_ctx=$(ls -Zd "$GMS_DIR/shared_prefs" 2>/dev/null | awk '{print $1}')
@@ -92,14 +106,6 @@ XMLEOF
 }
 
 clear_gsf_id() {
-    # GSF ID (the android_id served by content://com.google.android.gsf.gservices)
-    # is FingerprintJS's #1 composite-deviceId input and outranks MediaDrm/ANDROID_ID.
-    # It is cached in GSF's own databases and is regenerated at the next Google
-    # check-in. If we rotate SSAID/ANDROID_ID but leave the GSF android_id, the two
-    # disagree (a tell) and the old GSF ID resurfaces. Clear it surgically — back up
-    # + remove only the GSF check-in/gservices DBs (not a full `pm clear`, which
-    # would nuke account state we cannot safely rebuild here). GSF recreates the DBs
-    # with correct ownership on next launch, so no root-owned file is left behind.
     log_step "Clear GSF ID (surgical: gservices/checkin DBs)"
 
     GSF_DIR=""
@@ -139,8 +145,6 @@ clear_gsf_id() {
     se_restore
     backup_rotate "gsf_dbs." 10
 
-    # Force GMS to re-check-in too, so the freshly regenerated GSF android_id
-    # propagates through the Google cluster (GAID/ANDROID_ID stay coherent with it).
     force_stop com.google.android.gms
 
     if [ "$_removed" -gt 0 ]; then
@@ -217,10 +221,11 @@ rotate_bluetooth_mac() {
             awk -v m="$newbt" '/^Address = / { print "Address = " m; next } { print }' \
                 "$btcfg" > "${btcfg}.tmp" 2>/dev/null
         else
-            awk -v m="$newbt" 'BEGIN{d=0} /^\[Adapter\]/ && !d { print; print "Address = " m; d=1; next } { print }' \
+            awk -v m="$newbt" 'BEGIN{d=0} /^\[Adapter\]/ && !d { print; print "Address = " m; d=1; next } { print } END { if (!d) { print "[Adapter]"; print "Address = " m } }' \
                 "$btcfg" > "${btcfg}.tmp" 2>/dev/null
         fi
-        if [ -s "${btcfg}.tmp" ] && mv "${btcfg}.tmp" "$btcfg" 2>/dev/null; then
+        if [ -s "${btcfg}.tmp" ] && grep -q '^Address = ' "${btcfg}.tmp" 2>/dev/null \
+                && mv "${btcfg}.tmp" "$btcfg" 2>/dev/null; then
             [ -n "$owner" ] && chown "$owner" "$btcfg" 2>/dev/null
             [ -n "$mode" ]  && chmod "$mode"  "$btcfg" 2>/dev/null
             log_ok "Rewrote Address in $btcfg"
@@ -407,6 +412,7 @@ set_carrier() {
     [ "$phantom" = "1" ] && _ph_note=", phantom"
     log_step "Set operator: $name ($mcc$mnc${iso:+, $iso}$_ph_note)"
 
+    _oldmask=$(umask)
     umask 077
     tmpc="${CARRIER_CONF}.tmp.$$"
     {
@@ -416,10 +422,10 @@ set_carrier() {
         printf 'ISO=%s\n'  "$iso"
         printf 'PHANTOM=%s\n' "$phantom"
         printf 'CARRIER_ID=%s\n' "$cid"
-    } > "$tmpc" 2>/dev/null || { log_err "carrier: gagal tulis carrier.conf"; rm -f "$tmpc"; umask 022; return 1; }
-    mv "$tmpc" "$CARRIER_CONF" 2>/dev/null || { log_err "carrier: gagal simpan carrier.conf"; rm -f "$tmpc"; umask 022; return 1; }
+    } > "$tmpc" 2>/dev/null || { log_err "carrier: gagal tulis carrier.conf"; rm -f "$tmpc"; umask "$_oldmask"; return 1; }
+    mv "$tmpc" "$CARRIER_CONF" 2>/dev/null || { log_err "carrier: gagal simpan carrier.conf"; rm -f "$tmpc"; umask "$_oldmask"; return 1; }
     chmod 0644 "$CARRIER_CONF" 2>/dev/null
-    umask 022
+    umask "$_oldmask"
 
     identity_persist GSM_OPERATOR_NUMERIC "$mcc$mnc" || log_warn "carrier: gagal tulis GSM_OPERATOR_NUMERIC"
     identity_persist GSM_OPERATOR_ALPHA   "$name"    || log_warn "carrier: gagal tulis GSM_OPERATOR_ALPHA"

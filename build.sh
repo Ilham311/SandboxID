@@ -29,10 +29,6 @@ if [ -z "${VERSION:-}" ]; then
   echo "ERROR: version= line missing in module.prop" >&2
   exit 1
 fi
-# Module id == install directory under /data/adb/modules. Passed to CMake as
-# SBX_MODULE_ID so jni/config.hpp derives every path from it (see config.hpp).
-# Changing module.prop's id= is all the "New Identity" rebrand needs on the
-# native side; scripts read $MODDIR from the framework.
 MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 || true)"
 if [ -z "${MODULE_ID:-}" ]; then
   echo "ERROR: id= line missing in module.prop" >&2
@@ -43,8 +39,10 @@ LSP_CMAKE=""
 LSP_STATUS="disabled (SBX_ENABLE_LSPLANT=OFF requested)"
 if [ "${SBX_ENABLE_LSPLANT:-ON}" = "ON" ]; then
   LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
-  LSP_REV="$(grep -E '^LSPLANT_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
-  DOBBY_REV="$(grep -E '^DOBBY_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
+  _refval() { sed -n "s/^$1=//p" jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 \
+                | sed -e 's/^"//' -e 's/"$//' -e 's/^\${[^:]*:-//' -e 's/}$//'; }
+  LSP_REV="$(_refval LSPLANT_REF || true)"
+  DOBBY_REV="$(_refval DOBBY_REF || true)"
   LSP_STATUS="enabled [LSPlant=${LSP_REV:-?} Dobby=${DOBBY_REV:-?}]"
   echo "==> L3 LSPlant $LSP_STATUS — preparing dependencies + callback DEX"
   bash "$ROOT/jni/fetch_lsplant_deps.sh"
@@ -126,41 +124,28 @@ build_variant() {
   rm -rf "$PKG"
   mkdir -p "$PKG/zygisk" "$PKG/bin"
 
-  # Di repo, berkas ditata rapi per-folder (scripts/, data/). Namun framework
-  # Magisk/KSU/APatch dan path absolut di jni/config.hpp mengharapkan semuanya
-  # berada DATAR di root modul (/data/adb/modules/sandboxid/). Karena itu build.sh
-  # "meratakan" kembali seluruh berkas ke root paket ($PKG/) di sini.
-
-  # Manifest + lisensi (wajib; gagal keras bila hilang)
   cp module.prop "$PKG/"
   [ -f LICENSE ]    && cp LICENSE    "$PKG/"
   [ -f CREDITS.md ] && cp CREDITS.md "$PKG/"
 
-  # Skrip lifecycle yang dipanggil framework (install, boot, tombol Action)
   cp scripts/lifecycle/customize.sh "$PKG/"
   cp scripts/lifecycle/service.sh   "$PKG/"
   cp scripts/lifecycle/action.sh    "$PKG/"
   [ -f scripts/lifecycle/post-fs-data.sh ] && cp scripts/lifecycle/post-fs-data.sh "$PKG/"
 
-  # Pustaka bersama + skrip identitas + diagnostik
   [ -f scripts/lib/helpers.sh ]         && cp scripts/lib/helpers.sh         "$PKG/"
   [ -f scripts/identity/rotate_ids.sh ] && cp scripts/identity/rotate_ids.sh "$PKG/"
   [ -f scripts/identity/autopif.sh ]    && cp scripts/identity/autopif.sh    "$PKG/"
   [ -f scripts/debug/summarize.sh ]     && cp scripts/debug/summarize.sh     "$PKG/"
   [ -f scripts/debug/selftest.sh ]      && cp scripts/debug/selftest.sh      "$PKG/"
 
-  # Data referensi + konfigurasi pengguna
   [ -f data/personas.tsv ] && cp data/personas.tsv "$PKG/"
   [ -f data/devices.tsv ]  && cp data/devices.tsv  "$PKG/"
   [ -f data/carriers.tsv ] && cp data/carriers.tsv "$PKG/"
   [ -f data/target.txt ]   && cp data/target.txt   "$PKG/"
 
-  # WebUI (disalin utuh)
   [ -d webroot ] && cp -R webroot "$PKG/"
 
-  # Shim PATH: `su -c sandboxid ...` gagal karena bin/ tak ada di PATH. Berkas di
-  # system/bin/ di-magic-mount ke /system/bin (universal Magisk/KSU/APatch), lalu
-  # meng-exec binary per-ABI di bin/. Memperbaiki "su -c sandboxid tidak berkerja".
   mkdir -p "$PKG/system/bin"
   cat > "$PKG/system/bin/sandboxid" <<'WRAP'
 #!/system/bin/sh

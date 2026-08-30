@@ -30,9 +30,6 @@ target_link_libraries(sandboxid_module PRIVATE log)
 add_executable(sandboxid sandboxid.cpp)
 target_include_directories(sandboxid PRIVATE ${CMAKE_SOURCE_DIR})
 
-# Module id -> compile definition consumed by config.hpp (SBX_MODDIR). build.sh
-# reads id= from module.prop and passes -DSBX_MODULE_ID=<id>. Default (unset)
-# falls back to "sandboxid" inside config.hpp, so a bare cmake build is unchanged.
 if(DEFINED SBX_MODULE_ID AND NOT SBX_MODULE_ID STREQUAL "")
     message(STATUS "[sandboxid] module id: ${SBX_MODULE_ID}")
     target_compile_definitions(sandboxid_module PRIVATE SBX_MODULE_ID="${SBX_MODULE_ID}")
@@ -67,10 +64,6 @@ if(SBX_ENABLE_LSPLANT)
             "  (vendors LSPlant + Dobby + lsparself; see prebuilt/lsplant/README.md)")
     endif()
 
-    # --- xz-embedded: decode libart.so's .gnu_debugdata (MiniDebugInfo) so
-    # lsparself.hpp can resolve the ART-internal symbols LSPlant needs on
-    # stripped retail images. Without this, lsplant::Init() fails there and
-    # ALL L3 hooks are silently disabled. Compiled as a small C static lib.
     set(SBX_XZ "${SBX_EXT}/xz")
     if(NOT EXISTS "${SBX_XZ}/linux/lib/xz/xz_dec_stream.c"
        OR NOT EXISTS "${SBX_XZ}/linux/include/linux/xz.h"
@@ -84,15 +77,12 @@ if(SBX_ENABLE_LSPLANT)
         "${SBX_XZ}/linux/lib/xz/xz_crc64.c"
         "${SBX_XZ}/linux/lib/xz/xz_dec_stream.c"
         "${SBX_XZ}/linux/lib/xz/xz_dec_lzma2.c")
-    # PUBLIC so both the .c files and lsparself.hpp (via the module) see <xz.h>
-    # and agree on XZ_USE_CRC64 (xz's default integrity check is CRC64).
     target_include_directories(sbx_xz PUBLIC "${SBX_XZ}/linux/include/linux")
     target_include_directories(sbx_xz PRIVATE
         "${SBX_XZ}/linux/lib/xz" "${SBX_XZ}/userspace")
     target_compile_definitions(sbx_xz PUBLIC  XZ_USE_CRC64)
     target_compile_definitions(sbx_xz PRIVATE XZ_DEC_ANY_CHECK)
     set_target_properties(sbx_xz PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
-    # Match the LTO-free final link of sandboxid_module (see the r26d note below).
     target_compile_options(sbx_xz PRIVATE -fno-lto)
 
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/hook_dex.h")
@@ -114,8 +104,6 @@ if(SBX_ENABLE_LSPLANT)
     set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
     add_subdirectory("${SBX_LSP_JNI}" lsplant_build)
     add_subdirectory("${SBX_EXT}/dobby" dobby_build)
-    # The LSPosed Dobby fork honors DOBBY_GENERATE_SHARED=OFF and emits a single
-    # STATIC target named `dobby` (there is no separate `dobby_static`). Link it.
     target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby sbx_xz)
     target_include_directories(sandboxid_module PRIVATE
         "${SBX_LSP_JNI}/include"
@@ -128,11 +116,6 @@ if(SBX_ENABLE_LSPLANT)
     endforeach()
     target_compile_definitions(sandboxid_module PRIVATE SBX_ENABLE_LSPLANT=1)
     if(NOT SBX_DEBUG)
-        # The NDK r26d Clang/LLD ThinLTO pipeline aborts with "Broken module
-        # found" / debug-info fragment mismatches when linking sandboxid_module
-        # against the vendored lsplant/dobby static libs (built with -fexceptions
-        # -frtti above, unlike the rest of this project). Disable LTO for the
-        # final link of this target only; the rest of the project keeps LTO.
         set_target_properties(sandboxid_module PROPERTIES
             INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF)
         target_link_options(sandboxid_module PRIVATE -fno-lto)

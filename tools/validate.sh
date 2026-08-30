@@ -1,37 +1,34 @@
 #!/usr/bin/env bash
 set -u
-# validate.sh berada di tools/, jadi naik satu tingkat ke root repo agar semua
-# path relatif di bawah (jni/, tests/, scripts/, data/) tetap konsisten.
 cd "$(dirname "$0")/.." || exit 1
 rc=0
 
 echo "=== 1/4 clang++ -fsyntax-only (debug + release) ==="
-# jni/*.cpp #include real NDK/Bionic headers (jni.h, android/log.h,
-# sys/system_properties.h, ...) that don't exist on a bare Linux host. When
-# ANDROID_NDK_HOME is set (CI installs the NDK for this job), add the NDK's
-# Bionic headers via -isystem only (no --sysroot). --sysroot redirects
-# clang's default C-header search root away from the host's /usr/include,
-# which breaks resolution of host libstdc++'s own headers (cstdio, cstdlib,
-# string, ...) that this syntax-only check still needs — causing spurious
-# "stdlib.h file not found" / "__GLIBC_PREREQ not defined" errors.
-NDK_SYSROOT_FLAGS=""
+SBX_CXX="clang++"
+SBX_ANDROID_TARGET=""
 if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-  NDK_SYSROOT=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 2 -type d -name sysroot 2>/dev/null | head -1)
-  if [ -n "$NDK_SYSROOT" ]; then
-    NDK_SYSROOT_FLAGS="-isystem $NDK_SYSROOT/usr/include -isystem $NDK_SYSROOT/usr/include/aarch64-linux-android"
+  NDK_CXX=""
+  for _hosttag in linux-x86_64 linux-aarch64 darwin-x86_64 darwin-arm64; do
+    _cand="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$_hosttag/bin/clang++"
+    [ -x "$_cand" ] && { NDK_CXX="$_cand"; break; }
+  done
+  [ -z "$NDK_CXX" ] && NDK_CXX=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 3 \( -type f -o -type l \) -name 'clang++' 2>/dev/null | head -1)
+  if [ -n "$NDK_CXX" ] && [ -x "$NDK_CXX" ]; then
+    SBX_CXX="$NDK_CXX"
+    SBX_ANDROID_TARGET="--target=aarch64-linux-android26"
   else
-    echo "WARN: ANDROID_NDK_HOME set but no toolchains/llvm/prebuilt/*/sysroot found"
+    echo "WARN: ANDROID_NDK_HOME set but no clang++ under toolchains/llvm/prebuilt"
   fi
 fi
 for f in jni/main.cpp jni/companion.cpp jni/sandboxid.cpp; do
   # shellcheck disable=SC2086
-  if clang++ -std=c++20 -fsyntax-only -DSBX_DEBUG=1 -Wall -Wextra -Ijni $NDK_SYSROOT_FLAGS "$f" 2>&1; then
+  if "$SBX_CXX" $SBX_ANDROID_TARGET -std=c++20 -fsyntax-only -DSBX_DEBUG=1 -Wall -Wextra -Ijni "$f" 2>&1; then
     echo "OK(debug): $f"
   else
     echo "FAIL(debug): $f"; rc=1
   fi
   # shellcheck disable=SC2086
-  if clang++ -std=c++20 -fsyntax-only -Wall -Wextra -Ijni $NDK_SYSROOT_FLAGS "$f" 2>&1; then
+  if "$SBX_CXX" $SBX_ANDROID_TARGET -std=c++20 -fsyntax-only -Wall -Wextra -Ijni "$f" 2>&1; then
     echo "OK(rel):   $f"
   else
     echo "FAIL(rel):   $f"; rc=1
@@ -39,15 +36,10 @@ for f in jni/main.cpp jni/companion.cpp jni/sandboxid.cpp; do
 done
 
 echo "=== 1b/4 L3 stub syntax-check (SBX_ENABLE_LSPLANT lewat header stub) ==="
-# Jalur no-LSPLANT di atas tak pernah mem-parse badan hook L3 (yang selalu-aktif
-# di device). Stub di tests/l3stub/ (bentuk InitInfo LSPlant v2.0 + API xz-embedded)
-# membuat regresi kelas-G1 — mis. drift urutan field InitInfo atau signature —
-# ketangkap host-side tanpa NDK. Selaraskan flag dg build asli: exceptions/RTTI mati.
-# Cek exit-code saja (tanpa -Werror), senada blok 1/4 di atas.
 L3TU=tests/l3stub/l3_syntax_check.cpp
 if [ -f "$L3TU" ]; then
   L3FLAGS="-std=c++20 -fsyntax-only -fno-exceptions -fno-rtti -Wall -Wextra"
-  L3FLAGS="$L3FLAGS -Wno-missing-designated-field-initializers"
+  L3FLAGS="$L3FLAGS -Wno-missing-field-initializers"
   L3FLAGS="$L3FLAGS -DSBX_ENABLE_LSPLANT=1 -DXZ_USE_CRC64 -Itests/l3stub -Ijni"
   if clang++ $L3FLAGS -DSBX_DEBUG=1 "$L3TU" 2>&1; then
     echo "OK(debug): $L3TU"
@@ -107,7 +99,6 @@ if MODDIR="$PWD" AUTOPIF_DEVICES="$PWD/data/devices.tsv" AUTOPIF_ARTIFACT="$SBX_
 else
   echo "FAIL: autopif.sh device produced no artifact"; rc=1
 fi
-
 
 echo "=== 4/4 shellcheck (severity>=warning, semua *.sh — sama seperti CI) ==="
 if command -v shellcheck >/dev/null 2>&1; then

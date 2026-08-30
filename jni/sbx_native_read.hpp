@@ -75,6 +75,28 @@ inline bool is_valid_mac(const std::string& m) {
     return !all_zero;
 }
 
+inline bool mac_str_to_bytes(const std::string& mac, uint8_t out[6]) {
+    if (!is_valid_mac(mac)) return false;
+    auto hv = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (int i = 0; i < 6; ++i) {
+        int hi = hv(mac[i * 3]);
+        int lo = hv(mac[i * 3 + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+    return true;
+}
+
+inline bool is_wifi_iface(const char* name) {
+    if (!name) return false;
+    return std::strncmp(name, "wlan", 4) == 0 || std::strncmp(name, "p2p", 3) == 0;
+}
+
 inline std::string hex_from_seed(uint64_t seed, size_t nbytes) {
     std::string s;
     s.reserve(nbytes * 2);
@@ -420,9 +442,6 @@ inline Kind classify(const char* path) {
 
     if (std::strcmp(path, "/sys/fs/selinux/enforce") == 0) return SELINUX_ENFORCE;
 
-    // /proc/net/arp enumerates LAN neighbours (gateway + co-located hosts) and is
-    // readable without permission — a strong same-network / co-location signal.
-    // Hidden by returning an empty table (header only). Exact match only.
     if (std::strcmp(path, "/proc/net/arp") == 0) return ARP;
 
     static const char pfx[] = "/sys/class/net/";
@@ -455,10 +474,6 @@ inline Kind classify(const char* path) {
 
 inline std::string selinux_enforce_content() { return std::string("1"); }
 
-// Empty ARP cache: the column header with no entries. Coherent "nothing cached
-// yet" state (fresh connection / cellular / expired entries); hides co-located
-// LAN devices without fabricating fake hosts (which would need a plausible
-// gateway/subnet and risk its own incoherence).
 inline std::string arp_empty_content() {
     return std::string(
         "IP address       HW type     Flags       HW address            Mask     Device\n");

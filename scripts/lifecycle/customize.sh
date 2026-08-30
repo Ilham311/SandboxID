@@ -107,7 +107,6 @@ case "$ABI" in
     *)           ui_print "! ABI tidak dikenal: $ABI" ;;
 esac
 
-# Shim agar `su -c sandboxid ...` bekerja: system/bin/ di-mount ke /system/bin.
 if [ -f "$MODPATH/system/bin/sandboxid" ]; then
     set_perm $MODPATH/system/bin/sandboxid 0 0 0755 u:object_r:system_file:s0
     ui_print "- Perintah 'sandboxid' terpasang di PATH (su -c sandboxid ...)"

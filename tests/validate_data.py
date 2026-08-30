@@ -16,8 +16,6 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# SDK -> Android release major. Matches autopif.sh sdk_release() and the
-# selftest.sh coherence table (32/12L reports release "12").
 SDK_RELEASE = {"30": "11", "31": "12", "32": "12",
                "33": "13", "34": "14", "35": "15", "36": "16"}
 TENSOR_PLATFORMS = {"gs101", "gs201", "zuma", "zumapro", "laguna"}
@@ -61,7 +59,7 @@ def check_sdk_release(path, ln, sdk, release):
 
 def validate_personas(path):
     n = 0
-    models = []  # (lineno, model, is_google)
+    models = []
     for ln, c in rows(path):
         n += 1
         if len(c) not in (10, 15, 16):
@@ -77,7 +75,6 @@ def validate_personas(path):
         if not PATCH_RE.match(patch):
             err(path, ln, "security_patch not YYYY-MM-DD: %r" % patch)
         if len(c) == 10:
-            # Google/Tensor row (cols 11-16 omitted): platform must be Tensor.
             if platform not in TENSOR_PLATFORMS:
                 err(path, ln, "10-col (Google) row but platform %r not in %s"
                     % (platform, sorted(TENSOR_PLATFORMS)))
@@ -122,7 +119,7 @@ def find_tsv(name):
     for cand in (os.path.join(ROOT, "data", name), os.path.join(ROOT, name)):
         if os.path.exists(cand):
             return cand
-    return os.path.join(ROOT, "data", name)  # canonical repo path for the error message
+    return os.path.join(ROOT, "data", name)
 
 
 def main():
@@ -132,9 +129,6 @@ def main():
     np_, models = validate_personas(p_personas)
     nd, device_models = validate_devices(p_devices)
 
-    # Provenance invariant: every non-Google persona must trace to a devices.tsv
-    # row (by model). This proves the persona pool is transformed vetted data,
-    # not fabricated fingerprints.
     for ln, model, is_google in models:
         if not is_google and model not in device_models:
             err(p_personas, ln,
