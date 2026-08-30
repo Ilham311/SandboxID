@@ -516,6 +516,7 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
     std::string gsf = sbxid::synth_gsf_id(v.seed);
 
     const bool have_sim = !v.op_num.empty();
+    const bool have_android_id = !v.android_id.empty();
     size_t n = 0;
     const HookSpec* specs = hook_specs(n);
     int good = 0;
@@ -523,6 +524,8 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
         const int vid = specs[i].val_id;
 
         if (!have_sim && (vid == V_SIM_STATE || vid == V_MODEM_COUNT || vid == V_CARRIER_ID))
+            continue;
+        if (!have_android_id && vid == V_GSERVICES)
             continue;
         std::string sval = sbx_value_for(vid, v, ids, wifi, bt, gaid, appset, gsf);
         if (hook_one(env, specs[i], sval, ids.widevine_hex)) ++good;

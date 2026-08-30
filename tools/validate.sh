@@ -7,7 +7,7 @@ echo "=== 1/4 clang++ -fsyntax-only (debug + release) ==="
 SBX_CXX="clang++"
 SBX_ANDROID_TARGET=""
 if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-  NDK_CXX=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 3 -type f -name 'clang++' 2>/dev/null | head -1)
+  NDK_CXX=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 3 \( -type f -o -type l \) -name 'clang++' 2>/dev/null | head -1)
   if [ -n "$NDK_CXX" ] && [ -x "$NDK_CXX" ]; then
     SBX_CXX="$NDK_CXX"
     SBX_ANDROID_TARGET="--target=aarch64-linux-android26"
