@@ -87,7 +87,10 @@ inline constexpr size_t VAL_DEFAULTS_N = sizeof(VAL_DEFAULTS) / sizeof(VAL_DEFAU
 // 789 ("Indosat - M3"), XL/Axis 788 (both map to the shared "XL/AXIS" entry).
 // Tri (51089) and Smartfren (51009) are NOT in the resolvable slice, so their
 // carrier_id is left "" (UNKNOWN) rather than fabricated — a wrong cid alongside
-// a valid MCC/MNC is itself a tampering tell.
+// a valid MCC/MNC is itself a tampering tell. L3 (sbx_lsplant.hpp) spoofs "" to
+// TelephonyManager.UNKNOWN_CARRIER_ID (-1) instead of passing through to the
+// real getter, so the real device's carrier_id is never leaked alongside the
+// spoofed MCC/MNC.
 struct SimCarrier { const char* alpha; const char* numeric; const char* iso; const char* carrier_id; };
 inline constexpr SimCarrier ID_CARRIERS[] = {
     {"Telkomsel", "51010", "id", "787"},

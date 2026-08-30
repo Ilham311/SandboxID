@@ -277,7 +277,8 @@ inline const HookSpec* hook_specs(size_t& n) {
         // ---- P1: carrier-id-name / specific-carrier-id (API 28/29) ----
         // The name getters return CharSequence (retType 5 => our String is a
         // CharSequence, assignment-compatible). getSimSpecificCarrierId mirrors the
-        // canonical carrier id; empty carrier_id (unverified operator) => passthrough.
+        // canonical carrier id; empty carrier_id (unverified operator) => spoofed as
+        // UNKNOWN_CARRIER_ID (-1) rather than passthrough, see sbx_value_for().
         { "android/telephony/TelephonyManager", "getSimCarrierIdName", "()Ljava/lang/CharSequence;",
           false, -1, nullptr, 5, V_OP_ALPHA },
         { "android/telephony/TelephonyManager", "getSimSpecificCarrierId", "()I",
@@ -432,7 +433,14 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_PHONE_TYPE: return "1";       // PHONE_TYPE_GSM
         case V_ROAMING:    return "false";
         case V_MODEM_COUNT:return "1";
-        case V_CARRIER_ID: return v.carrier_id;   // empty => hook passes through
+        // Empty carrier_id means the operator (e.g. Tri/Smartfren) has no verified
+        // AOSP carrier_id, but an empty sval here would make the Java-side hook
+        // fall through to invokeOriginal() and leak the REAL device's carrier_id
+        // alongside our spoofed MCC/MNC — a worse tell than reporting UNKNOWN.
+        // Force TelephonyManager.UNKNOWN_CARRIER_ID (-1) instead whenever a SIM
+        // persona is active; only pass through when there is no SIM at all
+        // (handled by the have_sim gate in install_all()).
+        case V_CARRIER_ID: return v.carrier_id.empty() ? std::string("-1") : v.carrier_id;
         // AdServices (API 34+) platform identifiers:
         case V_GAID:       return gaid;
         case V_APP_SET_ID: return appset;
