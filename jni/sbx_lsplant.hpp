@@ -189,9 +189,14 @@ enum ValId {
     // tie the persona to a physical place. These are the exact values a modern
     // Android returns to an app that lacks location permission, so they are never
     // anomalous and stay coherent with an empty scan list.
-    V_WIFI_SSID, V_WIFI_BSSID
+    V_WIFI_SSID, V_WIFI_BSSID,
+    // Nearby-network enumeration (WifiManager scan / configured list). Returns an
+    // empty List — coherent with the location-redacted BSSID/SSID above (an app
+    // without location permission gets exactly this) and hides which APs are
+    // around the persona. Uses retType 6 (no spoof string needed).
+    V_EMPTY_LIST
 };
-// retType: 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence
+// retType: 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence, 6 empty List
 struct HookSpec {
     const char* cls;
     const char* name;
@@ -340,6 +345,16 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/net/wifi/WifiInfo", "getBSSID", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_WIFI_BSSID },
 
+        // ---- P1: nearby-network enumeration (empty List) ----
+        // getScanResults/getConfiguredNetworks reveal which APs surround the device
+        // (a strong location/co-location signal). Return an empty List, matching the
+        // location-redacted connection info above. retType 6 => the Java callback
+        // hands back a fresh empty ArrayList; no spoof string is needed.
+        { "android/net/wifi/WifiManager", "getScanResults", "()Ljava/util/List;",
+          false, -1, nullptr, 6, V_EMPTY_LIST },
+        { "android/net/wifi/WifiManager", "getConfiguredNetworks", "()Ljava/util/List;",
+          false, -1, nullptr, 6, V_EMPTY_LIST },
+
         // ---- P2: AdServices (Privacy Sandbox, API 34+) app-set-id / advertising-id ----
         // Platform classes, so hookable at install time on API 34+ (fail-soft skip
         // otherwise). getAdId()/getId() return the spoofed UUIDs; forcing
@@ -454,6 +469,7 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         // without ACCESS_FINE_LOCATION sees), so the real AP/SSID never leaks:
         case V_WIFI_SSID:  return "<unknown ssid>";        // WifiManager.UNKNOWN_SSID
         case V_WIFI_BSSID: return "02:00:00:00:00:00";      // WifiInfo redacted BSSID
+        case V_EMPTY_LIST: return std::string();            // retType 6: value comes from Java (empty List)
         // SIM-presence constants (parsed int/boolean on the Java side):
         case V_SIM_STATE:  return "5";       // TelephonyManager.SIM_STATE_READY
         case V_PHONE_TYPE: return "1";       // PHONE_TYPE_GSM

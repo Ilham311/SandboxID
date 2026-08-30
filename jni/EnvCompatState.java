@@ -20,7 +20,7 @@ public final class EnvCompatState {
     public boolean isStatic;    // was the hooked method static?
     public int     keyArgIndex; // absolute index into args[] to gate on, or -1 = always
     public String  keyMatch;    // required String.valueOf(args[keyArgIndex]), or null
-    public int     retType;     // 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence
+    public int     retType;     // 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence, 6 empty List
     public String  sval;        // spoof value (also the source for int/long/boolean)
     public byte[]  bval;        // spoof bytes (retType == 1)
     public Method  backup;      // original method returned by lsplant::Hook
@@ -54,6 +54,8 @@ public final class EnvCompatState {
                 return (sval == null) ? null : Long.valueOf(Long.parseLong(sval));
             case 4: // boolean
                 return (sval == null) ? null : Boolean.valueOf(Boolean.parseBoolean(sval));
+            case 6: // empty java.util.List (e.g. WifiManager.getScanResults/getConfiguredNetworks)
+                return new java.util.ArrayList<Object>();
             default: // 0 String / 5 CharSequence
                 return sval;
         }
