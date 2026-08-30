@@ -12,6 +12,12 @@ LSPLANT_REF="${LSPLANT_REF:-v2.0}"
 # pre-refactor tree has neither defect and needs no source patching.
 DOBBY_REPO="${DOBBY_REPO:-https://github.com/LSPosed/Dobby.git}"
 DOBBY_REF="${DOBBY_REF:-edb2af1216313cf6c0d6771be2b279c1db573faf}"
+# xz-embedded: tiny public-domain .xz decoder. Needed to decompress libart.so's
+# .gnu_debugdata (MiniDebugInfo) so lsparself.hpp can resolve the ART-internal
+# symbols LSPlant requires on stripped retail images. Decoder API is stable;
+# override XZ_REF to pin a commit if reproducibility matters.
+XZ_REPO="${XZ_REPO:-https://github.com/tukaani-project/xz-embedded.git}"
+XZ_REF="${XZ_REF:-master}"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "ERROR: git is required" >&2
@@ -40,6 +46,7 @@ clone_at() {
 
 clone_at "$LSPLANT_REPO" "$LSPLANT_REF" "$EXT/lsplant"
 clone_at "$DOBBY_REPO"   "$DOBBY_REF"   "$EXT/dobby"
+clone_at "$XZ_REPO"      "$XZ_REF"      "$EXT/xz"
 
 LSP_JNI="$EXT/lsplant/lsplant/src/main/jni"
 if [ ! -f "$LSP_JNI/CMakeLists.txt" ] || [ ! -f "$LSP_JNI/include/lsplant.hpp" ]; then
@@ -54,6 +61,18 @@ if [ ! -f "$LSP_JNI/CMakeLists.txt" ] || [ ! -f "$LSP_JNI/include/lsplant.hpp" ]
 fi
 if [ ! -f "$EXT/dobby/include/dobby.h" ]; then
   echo "ERROR: unexpected Dobby layout — missing $EXT/dobby/include/dobby.h" >&2
+  exit 1
+fi
+if [ ! -f "$EXT/xz/linux/lib/xz/xz_dec_stream.c" ] \
+   || [ ! -f "$EXT/xz/linux/include/linux/xz.h" ] \
+   || [ ! -f "$EXT/xz/userspace/xz_config.h" ]; then
+  {
+    echo "ERROR: unexpected xz-embedded layout under $EXT/xz — expected:"
+    echo "         linux/lib/xz/xz_dec_stream.c"
+    echo "         linux/include/linux/xz.h"
+    echo "         userspace/xz_config.h"
+    echo "  The repo layout may differ at ref '$XZ_REF'; pin a compatible XZ_REF."
+  } >&2
   exit 1
 fi
 

@@ -79,3 +79,35 @@ SM-S921B	e1q	e1qxxx	erd9945	erd9945	34	14	UP1A.231005.007	S921BXXS2AXED	2024-05-
 CPH2557	OP573DL1	CPH2557	mt6833	mt6833	34	14	UP1A.230620.001	T.R4T2.1b4042b_1	2024-12-05	OPPO	OPPO	OPPO A79 5G	MediaTek	MT6833
 # --- Android 15 (SDK 35) ---
 CPH2521	OP56D3L1	CPH2521	taro	taro	35	15	AP3A.240617.008	T.R4T3.1c82702-2-1	2025-02-01	OPPO	OPPO	OPPO Reno10 Pro+ 5G	Qualcomm	SM8475
+
+# ===========================================================================
+# Expanded non-Google coverage (roadmap: Samsung/Knox persona profiles + more).
+# Each row is TRANSFORMED from an already-vetted row in this repo's devices.tsv
+# (model/device/product/board/platform<-board/sdk/release/id/incremental/
+# security_patch + brand/manufacturer/marketname/soc_manufacturer/soc_model;
+# `radio` omitted -> the device keeps its real baseband). Provenance is enforced
+# by tests/validate_data.py (every non-Google persona model must exist in
+# devices.tsv). No third-party source is copied; see CREDITS.md.
+# NOTE (vivo rows): `incremental` is a real ro.build.version.incremental from
+# public vivo qssi/mssi ENGINEERING dumps (eng.compil.*) - internally consistent
+# with the generated fingerprint but engineering-channel, not a retail OTA
+# string; every other vivo field is retail. (Same caveat as devices.tsv.)
+# ===========================================================================
+# Samsung (SDK 33-34): the named "Samsung/Knox persona profiles" roadmap gap.
+SM-S911B	dm1q	dm1qxxx	kalama	kalama	33	13	TP1A.220624.014	S911BXXU1AWC8	2023-04-01	samsung	samsung	Galaxy S23	Qualcomm	SM8550
+SM-A556B	a55x	a55xnaxx	erd8845	erd8845	34	14	UP1A.231005.007	A556BXXS2AXD3	2024-04-01	samsung	samsung	Galaxy A55 5G	Samsung	s5e8845
+SM-A155F	a15	a15nsxx	mt6789	mt6789	34	14	UP1A.231005.007	A155FXXU1AWKA	2023-11-01	samsung	samsung	Galaxy A15	MediaTek	MT6789
+SM-F741B	b6q	b6qxxx	pineapple	pineapple	34	14	UP1A.231005.007	F741BXXU1AXFD	2024-06-01	samsung	samsung	Galaxy Z Flip6	Qualcomm	SM8650
+# vivo (SDK 33-34): engineering-incremental caveat noted in the header above.
+V2250	V2250	V2250_EEA	lahaina	lahaina	33	13	TP1A.220624.014	eng.compil.20231214.171221	2023-12-01	vivo	vivo	vivo V29 5G	Qualcomm	SM7325
+V2218	V2218	V2218	mt6985	mt6985	33	13	TP1A.220624.014	eng.compil.20221221.210046	2022-12-01	vivo	vivo	vivo X90	MediaTek	MT6985
+V2309	V2309	V2309	mt6989	mt6989	34	14	UP1A.231005.007	eng.compil.20240410.221153	2024-04-01	vivo	vivo	vivo X100	MediaTek	MT6989
+V2230	V2230	V2230	mt6895	mt6895	34	14	UP1A.231005.007	eng.compil.20240507.115627	2024-05-01	vivo	vivo	vivo V27 Pro	MediaTek	MT6895
+# Infinix / Xiaomi / Redmi / OPPO (SDK 33-34).
+Infinix X6739	Infinix-X6739	X6739-GL	mt6893	mt6893	33	13	TP1A.220624.014	231024V2278	2023-10-05	Infinix	INFINIX	Infinix GT 10 Pro	MediaTek	MT6893
+Infinix X6731	Infinix-X6731	X6731-GL	mt6893	mt6893	33	13	TP1A.220624.014	240829V442	2024-07-05	Infinix	INFINIX	Infinix Zero 30 5G	MediaTek	MT6893
+Infinix X6837	Infinix-X6837	X6837-GL	mt6789	mt6789	33	13	TP1A.220624.014	240929V1425	2024-08-05	Infinix	INFINIX	Infinix Hot 40 Pro	MediaTek	MT6789
+2306EPN60G	aristotle	aristotle_global	mt6895	mt6895	33	13	TP1A.220624.014	V14.0.10.0.TMFMIXM	2023-09-01	Xiaomi	Xiaomi	Xiaomi 13T	MediaTek	MT6895
+23021RAAEG	tapas	tapas_global	bengal	bengal	33	13	TKQ1.221114.001	V14.0.14.0.TMTMIXM	2023-09-01	Redmi	Xiaomi	Redmi Note 12 4G	Qualcomm	SM6225
+CPH2577	OP574FL1	CPH2577	mt6768	mt6768	34	14	UP1A.230620.001	T.R4T2.1537533_1a3e6	2023-12-05	OPPO	OPPO	OPPO A58	MediaTek	MT6768
+CPH2359	OP5339L1	CPH2359	mt6893	mt6893	34	14	UKQ1.230924.001	S.179f3a1_501a	2024-04-05	OPPO	OPPO	OPPO Reno8 5G	MediaTek	MT6893
