@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <string_view>
 
@@ -152,21 +153,26 @@ private:
     // Scan /proc/self/maps for the mapping backing `name`; return its on-disk
     // path plus the load base (the address at which file offset 0 is mapped).
     bool findInMaps(std::string_view name, std::string& outPath, uintptr_t& outBase) {
-        FILE* fp = fopen("/proc/self/maps", "re");
-        if (!fp) return false;
-        char line[512];
+        // A maps line's pathname is last and can be long (deep app-lib paths,
+        // long package names). A fixed buffer would truncate it, the suffix
+        // match would fail, and lsplant::Init() would silently disable every L3
+        // hook. std::getline grows the string to fit any line, and is portable
+        // (no POSIX feature-macro dependency for the host L3 syntax-check).
+        std::ifstream maps("/proc/self/maps");
+        if (!maps.is_open()) return false;
         uintptr_t          best_base = 0;
         unsigned long long best_off  = ~0ULL;
         std::string        best_path;
-        while (fgets(line, sizeof(line), fp)) {
+        std::string        line;
+        while (std::getline(maps, line)) {
             // start-end perms offset dev(maj:min) inode pathname
             unsigned long long start = 0, end = 0, off = 0;
             char perms[8] = {0};
             int  pos = 0;
-            if (sscanf(line, "%llx-%llx %7s %llx %*x:%*x %*u %n",
+            if (sscanf(line.c_str(), "%llx-%llx %7s %llx %*x:%*x %*u %n",
                        &start, &end, perms, &off, &pos) < 4)
                 continue;
-            const char* p = line + pos;
+            const char* p = line.c_str() + pos;
             while (*p == ' ') ++p;
             size_t len = std::strlen(p);
             while (len && (p[len - 1] == '\n' || p[len - 1] == ' ' || p[len - 1] == '\t')) --len;
@@ -180,7 +186,6 @@ private:
                 best_path.assign(p, len);
             }
         }
-        fclose(fp);
         if (best_path.empty()) return false;
         outPath = best_path;
         outBase = best_base;
@@ -234,6 +239,11 @@ private:
             if (!symsh || symsh->sh_entsize == 0) return;
             if (static_cast<size_t>(symsh->sh_link) >= shnum) return;
             const ElfW(Shdr)& strsh = sh[symsh->sh_link];
+            // libart.so is a trusted system file, but a corrupt or truncated
+            // image must not make us point syms/str past the mmap (OOB read /
+            // crash in the hosting app). Same guard indexInnerElf() already has.
+            if (symsh->sh_offset + symsh->sh_size > image_size_) return;
+            if (strsh.sh_offset  + strsh.sh_size  > image_size_) return;
             out.syms  = reinterpret_cast<const ElfW(Sym)*>(base + symsh->sh_offset);
             out.count = static_cast<size_t>(symsh->sh_size / symsh->sh_entsize);
             out.str   = reinterpret_cast<const char*>(base + strsh.sh_offset);
