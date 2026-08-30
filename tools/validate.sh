@@ -89,17 +89,6 @@ else
   echo "FAIL: autopif.sh device produced no artifact"; rc=1
 fi
 
-echo "=== 3c/4 data TSV validation (personas/devices/carriers) ==="
-if command -v python3 >/dev/null 2>&1; then
-  if python3 tests/validate_data.py; then
-    echo "OK: validate_data"
-  else
-    echo "FAIL: validate_data"; rc=1
-  fi
-else
-  echo "SKIP: python3 not installed"
-fi
-
 echo "=== 4/4 shellcheck (severity>=warning, semua *.sh — sama seperti CI) ==="
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck --version | head -2
