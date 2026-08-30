@@ -19,7 +19,7 @@ if [ -n "${ANDROID_NDK_HOME:-}" ]; then
     _cand="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$_hosttag/bin/clang++"
     [ -x "$_cand" ] && { NDK_CXX="$_cand"; break; }
   done
-  [ -z "$NDK_CXX" ] && NDK_CXX=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 3 -name 'clang++' 2>/dev/null | head -1)
+  [ -z "$NDK_CXX" ] && NDK_CXX=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 3 \( -type f -o -type l \) -name 'clang++' 2>/dev/null | head -1)
   if [ -n "$NDK_CXX" ] && [ -x "$NDK_CXX" ]; then
     SBX_CXX="$NDK_CXX"
     SBX_ANDROID_TARGET="--target=aarch64-linux-android26"
