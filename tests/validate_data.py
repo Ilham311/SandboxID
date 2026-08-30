@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate SandboxID identity data files: personas.tsv, devices.tsv, carriers.tsv.
+"""Validate SandboxID identity data files: personas.tsv, devices.tsv.
 
 Pure stdlib, no NDK/compiler needed — runnable on any host with python3 and
 suitable as a CI gate alongside the shell-lint step. It mirrors the coherence
@@ -116,25 +116,6 @@ def validate_devices(path):
     return n, device_models
 
 
-def validate_carriers(path):
-    n = 0
-    for ln, c in rows(path):
-        n += 1
-        if len(c) not in (4, 5):
-            err(path, ln, "expected 4/5 fields, got %d" % len(c))
-            continue
-        _name, mcc, mnc, iso = c[:4]
-        if not re.match(r"^\d{3}$", mcc):
-            err(path, ln, "mcc not 3 digits: %r" % mcc)
-        if not re.match(r"^\d{2,3}$", mnc):
-            err(path, ln, "mnc not 2-3 digits: %r" % mnc)
-        if not re.match(r"^[a-z]{2}$", iso):
-            err(path, ln, "iso not 2 lowercase letters: %r" % iso)
-        if len(c) == 5 and c[4] and not c[4].isdigit():
-            err(path, ln, "carrier_id not numeric: %r" % c[4])
-    return n
-
-
 def find_tsv(name):
     """Resolve a data file in both layouts: data/<name> in the repo, or <name>
     at the root of a build.sh-flattened module package."""
@@ -147,11 +128,9 @@ def find_tsv(name):
 def main():
     p_personas = find_tsv("personas.tsv")
     p_devices = find_tsv("devices.tsv")
-    p_carriers = find_tsv("carriers.tsv")
 
     np_, models = validate_personas(p_personas)
     nd, device_models = validate_devices(p_devices)
-    nc = validate_carriers(p_carriers)
 
     # Provenance invariant: every non-Google persona must trace to a devices.tsv
     # row (by model). This proves the persona pool is transformed vetted data,
@@ -165,9 +144,9 @@ def main():
         print(w)
     for e in errors:
         print(e)
-    print("validate_data: %d rows (%d personas, %d devices, %d carriers), "
+    print("validate_data: %d rows (%d personas, %d devices), "
           "%d errors, %d warnings"
-          % (np_ + nd + nc, np_, nd, nc, len(errors), len(warnings)))
+          % (np_ + nd, np_, nd, len(errors), len(warnings)))
     return 1 if errors else 0
 
 

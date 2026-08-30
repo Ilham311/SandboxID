@@ -104,7 +104,7 @@ else
   echo "FAIL: autopif.sh device produced no artifact"; rc=1
 fi
 
-echo "=== 3c/4 data TSV validation (personas/devices/carriers) ==="
+echo "=== 3c/4 data TSV validation (personas/devices) ==="
 if command -v python3 >/dev/null 2>&1; then
   if python3 tests/validate_data.py; then
     echo "OK: validate_data"
