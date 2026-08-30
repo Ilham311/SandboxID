@@ -1209,9 +1209,13 @@ public:
             hv.android_id = val("ANDROID_ID");
             hv.serial     = val("SERIAL");
             hv.wifi_mac   = val("WIFI_MAC");
+            hv.bt_addr    = val("BLUETOOTH_ADDR");
             hv.op_num     = val("GSM_OPERATOR_NUMERIC");
             hv.op_alpha   = val("GSM_OPERATOR_ALPHA");
             hv.op_iso     = val("GSM_OPERATOR_ISO");
+            hv.carrier_id = val("GSM_CARRIER_ID");
+            hv.gaid       = val("GOOGLE_AID");
+            hv.app_set_id = val("APP_SET_ID");
             hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                          val("ANDROID_ID"));
             if (!sbxlsp::install_all(env_, hv))

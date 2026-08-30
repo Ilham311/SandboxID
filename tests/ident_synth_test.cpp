@@ -74,6 +74,16 @@ int main() {
     CHECK(meid.size() == 14, "MEID is 14 hex chars");
     CHECK(all_hex_upper(meid), "MEID is uppercase hex");
     CHECK(synth_meid(seed) == meid, "MEID deterministic");
+    // Leading hex digit must be A-F (MEID RR region) for every seed, else it
+    // collides with the decimal ESN/IMEI space and fails validators.
+    {
+        bool all_af = true;
+        for (uint64_t k = 0; k < 4096; ++k) {
+            char c0 = synth_meid(seed ^ (k * 0x9E3779B97F4A7C15ULL))[0];
+            if (c0 < 'A' || c0 > 'F') { all_af = false; break; }
+        }
+        CHECK(all_af, "MEID leading hex digit is A-F for all seeds");
+    }
 
     // --- Widevine deviceUniqueId: 32 bytes -> 64 hex ---
     std::string wv = synth_widevine_hex(seed);

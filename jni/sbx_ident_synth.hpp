@@ -92,9 +92,19 @@ inline std::string synth_iccid(uint64_t seed, const std::string& mccmnc) {
 }
 
 // --- MEID: 14 hex uppercase (CDMA device id, getMeid) ------------------------
+// The leading hex digit is forced into A..F: the MEID numbering reserves the
+// A0-FF "RR" region so a hex MEID never collides with the older decimal
+// ESN/IMEI space. A MEID whose first nibble is 0-9 is malformed and fails
+// fingerprint-SDK validators.
 inline std::string synth_meid(uint64_t seed) {
     std::string h = sbxnr::hex_from_seed(seed ^ 0x4D454944ULL, 7); // 14 hex chars
     for (char& c : h) if (c >= 'a' && c <= 'f') c = (char)(c - 'a' + 'A');
+    if (!h.empty()) {
+        char c0 = h[0];
+        int v = (c0 >= '0' && c0 <= '9') ? c0 - '0'
+              : (c0 >= 'A' && c0 <= 'F') ? c0 - 'A' + 10 : 0;
+        if (v < 0xA) h[0] = (char)('A' + (v % 6));    // 0-9 -> A-F, deterministic
+    }
     return h;
 }
 

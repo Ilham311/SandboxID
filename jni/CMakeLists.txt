@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(sandboxid LANGUAGES CXX)
+project(sandboxid LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 
@@ -58,6 +58,34 @@ if(SBX_ENABLE_LSPLANT)
             "  (vendors LSPlant + Dobby + lsparself; see prebuilt/lsplant/README.md)")
     endif()
 
+    # --- xz-embedded: decode libart.so's .gnu_debugdata (MiniDebugInfo) so
+    # lsparself.hpp can resolve the ART-internal symbols LSPlant needs on
+    # stripped retail images. Without this, lsplant::Init() fails there and
+    # ALL L3 hooks are silently disabled. Compiled as a small C static lib.
+    set(SBX_XZ "${SBX_EXT}/xz")
+    if(NOT EXISTS "${SBX_XZ}/linux/lib/xz/xz_dec_stream.c"
+       OR NOT EXISTS "${SBX_XZ}/linux/include/linux/xz.h"
+       OR NOT EXISTS "${SBX_XZ}/userspace/xz_config.h")
+        message(FATAL_ERROR
+            "[sandboxid] xz-embedded missing under ${SBX_XZ}.\n"
+            "  Run:  bash ${CMAKE_SOURCE_DIR}/fetch_lsplant_deps.sh")
+    endif()
+    add_library(sbx_xz STATIC
+        "${SBX_XZ}/linux/lib/xz/xz_crc32.c"
+        "${SBX_XZ}/linux/lib/xz/xz_crc64.c"
+        "${SBX_XZ}/linux/lib/xz/xz_dec_stream.c"
+        "${SBX_XZ}/linux/lib/xz/xz_dec_lzma2.c")
+    # PUBLIC so both the .c files and lsparself.hpp (via the module) see <xz.h>
+    # and agree on XZ_USE_CRC64 (xz's default integrity check is CRC64).
+    target_include_directories(sbx_xz PUBLIC "${SBX_XZ}/linux/include/linux")
+    target_include_directories(sbx_xz PRIVATE
+        "${SBX_XZ}/linux/lib/xz" "${SBX_XZ}/userspace")
+    target_compile_definitions(sbx_xz PUBLIC  XZ_USE_CRC64)
+    target_compile_definitions(sbx_xz PRIVATE XZ_DEC_ANY_CHECK)
+    set_target_properties(sbx_xz PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
+    # Match the LTO-free final link of sandboxid_module (see the r26d note below).
+    target_compile_options(sbx_xz PRIVATE -fno-lto)
+
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/hook_dex.h")
         message(STATUS "[sandboxid] generating hook_dex.h (LSPlant callback DEX)")
         execute_process(
@@ -79,7 +107,7 @@ if(SBX_ENABLE_LSPLANT)
     add_subdirectory("${SBX_EXT}/dobby" dobby_build)
     # The LSPosed Dobby fork honors DOBBY_GENERATE_SHARED=OFF and emits a single
     # STATIC target named `dobby` (there is no separate `dobby_static`). Link it.
-    target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby)
+    target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby sbx_xz)
     target_include_directories(sandboxid_module PRIVATE
         "${SBX_LSP_JNI}/include"
         "${SBX_EXT}/lsparself"
