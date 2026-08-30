@@ -61,32 +61,7 @@ echo "==> MIN_SDK:    $MIN_SDK"
 echo "==> Variant(s): $VARIANT"
 echo "==> LSPlant:    $LSP_STATUS"
 
-ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
-ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
-if [ ! -f jni/zygisk.hpp ]; then
-  echo "==> Fetching zygisk.hpp @ ${ZYGISK_HPP_COMMIT}"
-  if ! curl -fsSL -o jni/zygisk.hpp \
-      "https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/${ZYGISK_HPP_COMMIT}/module/jni/zygisk.hpp"; then
-    echo "ERROR: failed to fetch zygisk.hpp from pinned commit ${ZYGISK_HPP_COMMIT}" >&2
-    echo "  check network access to raw.githubusercontent.com" >&2
-    exit 1
-  fi
-fi
-if command -v sha256sum >/dev/null 2>&1; then
-  GOT_HPP="$(sha256sum jni/zygisk.hpp | cut -d' ' -f1)"
-elif command -v shasum >/dev/null 2>&1; then
-  GOT_HPP="$(shasum -a 256 jni/zygisk.hpp | cut -d' ' -f1)"
-else
-  echo "ERROR: no sha256 tool (sha256sum/shasum) to verify zygisk.hpp" >&2; exit 1
-fi
-if [ "$GOT_HPP" != "$ZYGISK_HPP_SHA256" ]; then
-  echo "ERROR: zygisk.hpp checksum mismatch — refusing to build" >&2
-  echo "  expected $ZYGISK_HPP_SHA256" >&2
-  echo "  got      $GOT_HPP" >&2
-  echo "  delete jni/zygisk.hpp to re-fetch from pinned commit ${ZYGISK_HPP_COMMIT}" >&2
-  exit 1
-fi
-echo "==> zygisk.hpp verified"
+bash "$ROOT/jni/tools/fetch_zygisk_hpp.sh"
 
 mkdir -p "$OUT"
 
