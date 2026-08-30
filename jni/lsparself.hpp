@@ -271,8 +271,10 @@ private:
                 if (sh[i].sh_type != SHT_PROGBITS) continue;
                 if (static_cast<size_t>(sh[i].sh_name) >= shname_sz) continue;
                 if (std::strcmp(shname + sh[i].sh_name, ".gnu_debugdata") != 0) continue;
-                loadGnuDebugData(reinterpret_cast<const uint8_t*>(base + sh[i].sh_offset),
-                                 static_cast<size_t>(sh[i].sh_size));
+                const uint64_t off = sh[i].sh_offset, sz = sh[i].sh_size;
+                if (!sz || off > image_size_ || sz > image_size_ - off) break;  // out of bounds
+                loadGnuDebugData(reinterpret_cast<const uint8_t*>(base + off),
+                                 static_cast<size_t>(sz));
                 break;
             }
         }
