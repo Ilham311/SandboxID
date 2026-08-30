@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <algorithm>
 
 using namespace sbxnr;
 
@@ -246,6 +247,19 @@ static void test_selinux() {
     std::string c = selinux_enforce_content();
     CHECK(c == "1", "selinux enforce content is exactly \"1\"");
     CHECK(c.size() == 1, "selinux enforce content is 1 byte (no trailing newline)");
+}
+
+static void test_arp() {
+    CHECK(classify("/proc/net/arp") == ARP, "arp classify");
+    CHECK(classify("/proc/net/arpx") == NONE, "arp exact-match only");
+    CHECK(classify("/proc/net/arp/x") == NONE, "arp subpath not matched");
+    CHECK(classify("/proc/net/tcp") == NONE, "other /proc/net not matched");
+    std::string c = arp_empty_content();
+    CHECK(c.rfind("IP address", 0) == 0, "arp content starts with the column header");
+    CHECK(c.find("HW address") != std::string::npos, "arp header has HW address column");
+    CHECK(!c.empty() && c.back() == '\n', "arp header ends with newline");
+    // Empty table => exactly one line (the header), no neighbour rows.
+    CHECK(std::count(c.begin(), c.end(), '\n') == 1, "arp table is empty (header only)");
 }
 
 static void test_hide_prop() {
@@ -534,6 +548,7 @@ int main() {
     test_classify();
     test_hex_from_seed();
     test_selinux();
+    test_arp();
     test_hide_prop();
     test_native_unsafe_prop();
     test_classify_no_alloc_paths();

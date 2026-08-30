@@ -6,13 +6,32 @@ cd "$(dirname "$0")/.." || exit 1
 rc=0
 
 echo "=== 1/4 clang++ -fsyntax-only (debug + release) ==="
+# jni/*.cpp #include real NDK/Bionic headers (jni.h, android/log.h,
+# sys/system_properties.h, ...) that don't exist on a bare Linux host. When
+# ANDROID_NDK_HOME is set (CI installs the NDK for this job), add the NDK's
+# Bionic headers via -isystem only (no --sysroot). --sysroot redirects
+# clang's default C-header search root away from the host's /usr/include,
+# which breaks resolution of host libstdc++'s own headers (cstdio, cstdlib,
+# string, ...) that this syntax-only check still needs — causing spurious
+# "stdlib.h file not found" / "__GLIBC_PREREQ not defined" errors.
+NDK_SYSROOT_FLAGS=""
+if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+  NDK_SYSROOT=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 2 -type d -name sysroot 2>/dev/null | head -1)
+  if [ -n "$NDK_SYSROOT" ]; then
+    NDK_SYSROOT_FLAGS="-isystem $NDK_SYSROOT/usr/include -isystem $NDK_SYSROOT/usr/include/aarch64-linux-android"
+  else
+    echo "WARN: ANDROID_NDK_HOME set but no toolchains/llvm/prebuilt/*/sysroot found"
+  fi
+fi
 for f in jni/main.cpp jni/companion.cpp jni/sandboxid.cpp; do
-  if clang++ -std=c++20 -fsyntax-only -DSBX_DEBUG=1 -Wall -Wextra -Ijni "$f" 2>&1; then
+  # shellcheck disable=SC2086
+  if clang++ -std=c++20 -fsyntax-only -DSBX_DEBUG=1 -Wall -Wextra -Ijni $NDK_SYSROOT_FLAGS "$f" 2>&1; then
     echo "OK(debug): $f"
   else
     echo "FAIL(debug): $f"; rc=1
   fi
-  if clang++ -std=c++20 -fsyntax-only -Wall -Wextra -Ijni "$f" 2>&1; then
+  # shellcheck disable=SC2086
+  if clang++ -std=c++20 -fsyntax-only -Wall -Wextra -Ijni $NDK_SYSROOT_FLAGS "$f" 2>&1; then
     echo "OK(rel):   $f"
   else
     echo "FAIL(rel):   $f"; rc=1
@@ -87,6 +106,17 @@ if MODDIR="$PWD" AUTOPIF_DEVICES="$PWD/data/devices.tsv" AUTOPIF_ARTIFACT="$SBX_
   fi
 else
   echo "FAIL: autopif.sh device produced no artifact"; rc=1
+fi
+
+echo "=== 3c/4 data TSV validation (personas/devices) ==="
+if command -v python3 >/dev/null 2>&1; then
+  if python3 tests/validate_data.py; then
+    echo "OK: validate_data"
+  else
+    echo "FAIL: validate_data"; rc=1
+  fi
+else
+  echo "SKIP: python3 not installed"
 fi
 
 echo "=== 4/4 shellcheck (severity>=warning, semua *.sh — sama seperti CI) ==="

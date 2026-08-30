@@ -7,23 +7,35 @@
 
 namespace sandboxid {
 
-inline constexpr char MODDIR[]        = "/data/adb/modules/sandboxid";
-inline constexpr char IDENTITY_FILE[] = "/data/adb/modules/sandboxid/identity.prop";
-inline constexpr char MOUNTDIR[]      = "/data/adb/modules/sandboxid/mount";
-inline constexpr char TARGET_FILE[]   = "/data/adb/modules/sandboxid/target.txt";
+// Single source of truth for the module id (== the install directory under
+// /data/adb/modules). build.sh passes -DSBX_MODULE_ID="$(id from module.prop)";
+// default keeps the historical "sandboxid" so a plain build is byte-identical.
+// Renaming the module (the "New Identity" rebrand) is then one change in
+// module.prop — every path below repoints automatically. NOTE: the disguised
+// LSPlant callback classes (androidx.core.os.EnvCompatState / HandlerCompatRef)
+// are deliberately NOT derived from this and must stay camouflaged.
+#ifndef SBX_MODULE_ID
+#define SBX_MODULE_ID "sandboxid"
+#endif
+#define SBX_MODDIR "/data/adb/modules/" SBX_MODULE_ID
 
-inline constexpr char PERSONAS_FILE[] = "/data/adb/modules/sandboxid/personas.tsv";
+inline constexpr char MODDIR[]        = SBX_MODDIR;
+inline constexpr char IDENTITY_FILE[] = SBX_MODDIR "/identity.prop";
+inline constexpr char MOUNTDIR[]      = SBX_MODDIR "/mount";
+inline constexpr char TARGET_FILE[]   = SBX_MODDIR "/target.txt";
 
-inline constexpr char PERSONA_OVERRIDE[] = "/data/adb/modules/sandboxid/persona.override";
+inline constexpr char PERSONAS_FILE[] = SBX_MODDIR "/personas.tsv";
 
-inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/sandboxid/identity.prop.bak";
-inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mode";
+inline constexpr char PERSONA_OVERRIDE[] = SBX_MODDIR "/persona.override";
 
-inline constexpr char CARRIER_CONF[]  = "/data/adb/modules/sandboxid/carrier.conf";
-inline constexpr char CARRIERS_FILE[] = "/data/adb/modules/sandboxid/carriers.tsv";
-inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetprop-rs";
+inline constexpr char IDENTITY_BAK[]  = SBX_MODDIR "/identity.prop.bak";
+inline constexpr char MODE_FILE[]     = SBX_MODDIR "/identity.mode";
 
-inline constexpr char ENABLE_HIDE[]   = "/data/adb/modules/sandboxid/enable_hide";
+inline constexpr char CARRIER_CONF[]  = SBX_MODDIR "/carrier.conf";
+inline constexpr char CARRIERS_FILE[] = SBX_MODDIR "/carriers.tsv";
+inline constexpr char RESETPROP[]     = SBX_MODDIR "/bin/resetprop-rs";
+
+inline constexpr char ENABLE_HIDE[]   = SBX_MODDIR "/enable_hide";
 
 enum Cmd : uint8_t {
     CMD_GET_IDENTITY = 2,

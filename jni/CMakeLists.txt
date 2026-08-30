@@ -30,6 +30,15 @@ target_link_libraries(sandboxid_module PRIVATE log)
 add_executable(sandboxid sandboxid.cpp)
 target_include_directories(sandboxid PRIVATE ${CMAKE_SOURCE_DIR})
 
+# Module id -> compile definition consumed by config.hpp (SBX_MODDIR). build.sh
+# reads id= from module.prop and passes -DSBX_MODULE_ID=<id>. Default (unset)
+# falls back to "sandboxid" inside config.hpp, so a bare cmake build is unchanged.
+if(DEFINED SBX_MODULE_ID AND NOT SBX_MODULE_ID STREQUAL "")
+    message(STATUS "[sandboxid] module id: ${SBX_MODULE_ID}")
+    target_compile_definitions(sandboxid_module PRIVATE SBX_MODULE_ID="${SBX_MODULE_ID}")
+    target_compile_definitions(sandboxid        PRIVATE SBX_MODULE_ID="${SBX_MODULE_ID}")
+endif()
+
 option(SBX_BUILD_TESTS "Build host unit tests (tests/*.cpp)" OFF)
 if(SBX_BUILD_TESTS)
     if(CMAKE_CROSSCOMPILING)

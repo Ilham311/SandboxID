@@ -652,6 +652,9 @@ static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& o
 
             out = sbxnr::selinux_enforce_content();
             return true;
+        case sbxnr::ARP:
+            out = sbxnr::arp_empty_content();
+            return true;
         case sbxnr::MEMINFO: {
             std::string real = sbx_read_real("/proc/meminfo");
             if (real.empty()) return false;

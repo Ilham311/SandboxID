@@ -5,12 +5,13 @@ on:
     branches:
       - main
       - master
-      # TEMPORARY: build this fix branch in CI to verify the Dobby/LSPlant build.
-      # Remove this line before merging to main (release steps below are gated to
-      # main/master, so a branch build only lints + compiles + uploads artifacts).
-      - fix/dobby-arm64-build
+      # Build feature branches too (release steps below stay gated to main/tags,
+      # so a branch/PR build only validates + compiles + uploads artifacts).
+      - 'feat/**'
+      - 'fix/**'
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
     inputs:
       force_version:
@@ -26,7 +27,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang shellcheck python3 libc6-dev g++
+      - name: Setup NDK
+        id: ndk
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779
+        with:
+          ndk-version: r26d
+      - name: Run local CI mirror (tools/validate.sh)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash tools/validate.sh
+
   build:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

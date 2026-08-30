@@ -392,6 +392,7 @@ inline bool patch_cpuinfo(const std::string& real, int action,
 
 enum Kind {
     NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE,
+    ARP,
 
     APPLOG_XML,
     BD_RAW_DID,
@@ -418,6 +419,11 @@ inline Kind classify(const char* path) {
     if (std::strcmp(path, "/proc/cpuinfo") == 0) return CPUINFO;
 
     if (std::strcmp(path, "/sys/fs/selinux/enforce") == 0) return SELINUX_ENFORCE;
+
+    // /proc/net/arp enumerates LAN neighbours (gateway + co-located hosts) and is
+    // readable without permission — a strong same-network / co-location signal.
+    // Hidden by returning an empty table (header only). Exact match only.
+    if (std::strcmp(path, "/proc/net/arp") == 0) return ARP;
 
     static const char pfx[] = "/sys/class/net/";
     const size_t pl = sizeof(pfx) - 1;
@@ -448,6 +454,15 @@ inline Kind classify(const char* path) {
 }
 
 inline std::string selinux_enforce_content() { return std::string("1"); }
+
+// Empty ARP cache: the column header with no entries. Coherent "nothing cached
+// yet" state (fresh connection / cellular / expired entries); hides co-located
+// LAN devices without fabricating fake hosts (which would need a plausible
+// gateway/subnet and risk its own incoherence).
+inline std::string arp_empty_content() {
+    return std::string(
+        "IP address       HW type     Flags       HW address            Mask     Device\n");
+}
 
 inline bool is_emulator_prop(const char* name) {
     if (!name) return false;
