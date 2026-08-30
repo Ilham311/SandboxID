@@ -104,7 +104,6 @@ else
   echo "FAIL: autopif.sh device produced no artifact"; rc=1
 fi
 
-#<<<<<<< feat/l3-identity-hardening
 echo "=== 3c/4 data TSV validation (personas/devices) ==="
 if command -v python3 >/dev/null 2>&1; then
   if python3 tests/validate_data.py; then
@@ -116,8 +115,6 @@ else
   echo "SKIP: python3 not installed"
 fi
 
-#=======
-#>>>>>>> main
 echo "=== 4/4 shellcheck (severity>=warning, semua *.sh — sama seperti CI) ==="
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck --version | head -2
