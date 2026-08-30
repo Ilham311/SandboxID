@@ -7,12 +7,17 @@ echo "=== 1/4 clang++ -fsyntax-only (debug + release) ==="
 SBX_CXX="clang++"
 SBX_ANDROID_TARGET=""
 if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-  NDK_CXX=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 3 -type f -name 'clang++' 2>/dev/null | head -1)
+  NDK_CXX=""
+  for _hosttag in linux-x86_64 linux-aarch64 darwin-x86_64 darwin-arm64; do
+    _cand="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$_hosttag/bin/clang++"
+    [ -x "$_cand" ] && { NDK_CXX="$_cand"; break; }
+  done
+  [ -z "$NDK_CXX" ] && NDK_CXX=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -maxdepth 3 -name 'clang++' 2>/dev/null | head -1)
   if [ -n "$NDK_CXX" ] && [ -x "$NDK_CXX" ]; then
     SBX_CXX="$NDK_CXX"
     SBX_ANDROID_TARGET="--target=aarch64-linux-android26"
   else
-    echo "WARN: ANDROID_NDK_HOME set but no toolchains/llvm/prebuilt/*/bin/clang++ found"
+    echo "WARN: ANDROID_NDK_HOME set but no clang++ under toolchains/llvm/prebuilt"
   fi
 fi
 for f in jni/main.cpp jni/companion.cpp jni/sandboxid.cpp; do
