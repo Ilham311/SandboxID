@@ -35,7 +35,7 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang shellcheck python3
+          sudo apt-get install -y clang shellcheck python3 libc6-dev g++
       - name: Setup NDK
         id: ndk
         uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779
