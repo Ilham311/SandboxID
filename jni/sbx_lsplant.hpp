@@ -183,7 +183,13 @@ enum ValId {
     // SubscriptionManager read path. Apps enumerate SIMs and read identity off the
     // returned SubscriptionInfo; MCC/MNC split out of op_num so getMcc()/getMccString()
     // and the per-slot getters stay coherent with GSM_OPERATOR_NUMERIC (V_OP_NUM).
-    V_MCC_STR, V_MNC_STR
+    V_MCC_STR, V_MNC_STR,
+    // Wi-Fi *network* identity (the connected AP/SSID, not the device MAC). Returned
+    // as the standard "no ACCESS_FINE_LOCATION" redaction so the real network can't
+    // tie the persona to a physical place. These are the exact values a modern
+    // Android returns to an app that lacks location permission, so they are never
+    // anomalous and stay coherent with an empty scan list.
+    V_WIFI_SSID, V_WIFI_BSSID
 };
 // retType: 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence
 struct HookSpec {
@@ -206,6 +212,13 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/provider/Settings$Secure", "getString",
           "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;",
           true, 1, "android_id", 0, V_ANDROID_ID },
+        // Bluetooth MAC also leaks through Settings.Secure["bluetooth_address"]
+        // (BluetoothAdapter.getAddress() returns a constant on API 23+, so apps
+        // read it here instead). Same String+key-match shape as android_id; reuses
+        // V_BT_ADDR so it stays identical to the getAddress() hook below.
+        { "android/provider/Settings$Secure", "getString",
+          "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;",
+          true, 1, "bluetooth_address", 0, V_BT_ADDR },
         { "android/os/Build", "getSerial", "()Ljava/lang/String;",
           true, -1, nullptr, 0, V_SERIAL },
         { "android/media/MediaDrm", "getPropertyByteArray", "(Ljava/lang/String;)[B",
@@ -317,6 +330,16 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/bluetooth/BluetoothAdapter", "getAddress", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_BT_ADDR },
 
+        // ---- P1: Wi-Fi network identity (connected AP / SSID) ----
+        // Hides the real network the persona is attached to. Both return the
+        // standard location-redacted values, matching what an app without
+        // ACCESS_FINE_LOCATION sees on Android 8+. Plain String getters, so they
+        // slot into the same proven path as getMacAddress above.
+        { "android/net/wifi/WifiInfo", "getSSID", "()Ljava/lang/String;",
+          false, -1, nullptr, 0, V_WIFI_SSID },
+        { "android/net/wifi/WifiInfo", "getBSSID", "()Ljava/lang/String;",
+          false, -1, nullptr, 0, V_WIFI_BSSID },
+
         // ---- P2: AdServices (Privacy Sandbox, API 34+) app-set-id / advertising-id ----
         // Platform classes, so hookable at install time on API 34+ (fail-soft skip
         // otherwise). getAdId()/getId() return the spoofed UUIDs; forcing
@@ -427,6 +450,10 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_OP_ISO:     return v.op_iso;
         case V_WIFI_MAC:   return wifi;
         case V_BT_ADDR:    return bt;
+        // Wi-Fi network identity — standard location-redacted values (what an app
+        // without ACCESS_FINE_LOCATION sees), so the real AP/SSID never leaks:
+        case V_WIFI_SSID:  return "<unknown ssid>";        // WifiManager.UNKNOWN_SSID
+        case V_WIFI_BSSID: return "02:00:00:00:00:00";      // WifiInfo redacted BSSID
         // SIM-presence constants (parsed int/boolean on the Java side):
         case V_SIM_STATE:  return "5";       // TelephonyManager.SIM_STATE_READY
         case V_PHONE_TYPE: return "1";       // PHONE_TYPE_GSM
