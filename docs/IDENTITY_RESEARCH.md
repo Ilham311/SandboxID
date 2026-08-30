@@ -39,7 +39,7 @@ Legend: ✅ covered · ⚠️ partial · ❌ gap
 | NsdManager / mDNS / MulticastLock | ❌ | not suppressed — P3 |
 | WebView UA (`WebSettings`) | ❌ | not hooked — P3 |
 | Airplane mode (`Settings.Global.getInt`) | ❌ | trivial to add; low value — P3 |
-| action.sh: clear GMS/GSF/Play/BT data on rotate | ❌ | IDs resurface without it (AAClean pattern) — **P1** |
+| action.sh: clear GMS/GSF/Play/BT data on rotate | ⚠️ | GAID (`set_gaid_value`) + GSF DBs (`clear_gsf_id`, in `all`) + BT store now cleared on rotate; Play Store data-clear still open — P2 |
 
 ## 2. Priority roadmap — "new identity in 1× action.sh"
 
@@ -57,7 +57,7 @@ Ordered by *how badly the gap breaks a fresh identity*, not by effort.
 7. **GPU strings** — `GL_RENDERER`/`GL_VENDOR`/Vulkan device name coherent with MODEL (COPG is the reference).
 
 **P2 — make the rotation actually clean:**
-8. **action.sh** — on persona rotate, clear the whole Google cluster together (`com.google.android.gms`, `com.google.android.gsf`, Play Store, Bluetooth pairing store) so GAID/GSF/ANDROID_ID don't resurface (AAClean checklist pattern).
+8. **action.sh** — on persona rotate, clear the whole Google cluster together (`com.google.android.gms`, `com.google.android.gsf`, Play Store, Bluetooth pairing store) so GAID/GSF/ANDROID_ID don't resurface (AAClean checklist pattern). _Partially shipped: `rotate_ids.sh` now surgically clears the GSF check-in/gservices DBs (`clear_gsf_id`, wired into `all`) alongside the existing GAID + BT store clears; a full Play Store data-clear is the remaining piece._
 9. **Verifier** — expand a self-test that dumps every spoofed ID post-rotate and flags any that still match the host (Mantle "Verify" idea).
 
 **P3 — low value or high coherence risk (do last, behind device testing):**
@@ -184,7 +184,7 @@ For a persona to be *complete and coherent* in one `action.sh` run, all of these
 - **G. Carrier/locale** — MCC/MNC ✅ (must match locale/timezone — verify).
 - **H. Telemetry roots** — ByteDance openudid/cdid coherence ✅ (via native read).
 - **I. Discovery/LAN** — arp ❌, mDNS ❌ (P3, coherence-risky).
-- **J. Rotation hygiene** — action.sh clears Google/Play/BT data ❌ (P2).
+- **J. Rotation hygiene** — action.sh clears Google/Play/BT data ⚠️ (GAID + GSF DBs + BT store done; Play Store data-clear pending — P2).
 
 ## 5. Coherence rules (apply to every new vector)
 

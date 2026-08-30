@@ -91,6 +91,68 @@ XMLEOF
     return 0
 }
 
+clear_gsf_id() {
+    # GSF ID (the android_id served by content://com.google.android.gsf.gservices)
+    # is FingerprintJS's #1 composite-deviceId input and outranks MediaDrm/ANDROID_ID.
+    # It is cached in GSF's own databases and is regenerated at the next Google
+    # check-in. If we rotate SSAID/ANDROID_ID but leave the GSF android_id, the two
+    # disagree (a tell) and the old GSF ID resurfaces. Clear it surgically — back up
+    # + remove only the GSF check-in/gservices DBs (not a full `pm clear`, which
+    # would nuke account state we cannot safely rebuild here). GSF recreates the DBs
+    # with correct ownership on next launch, so no root-owned file is left behind.
+    log_step "Clear GSF ID (surgical: gservices/checkin DBs)"
+
+    GSF_DIR=""
+    for _base in /data/data /data/user/0; do
+        [ -d "$_base/com.google.android.gsf" ] && { GSF_DIR="$_base/com.google.android.gsf"; break; }
+    done
+    if [ -z "$GSF_DIR" ]; then
+        log_warn "GSF (com.google.android.gsf) not installed — GSF ID clear skipped"
+        return 0
+    fi
+
+    force_stop com.google.android.gsf
+    command -v am >/dev/null 2>&1 && am kill --user 0 com.google.android.gsf </dev/null >/dev/null 2>&1
+
+    se_permissive
+    _ts=$(date +%s)
+    _bkp="$BACKUP_DIR_ROOT/gsf_dbs.${_ts}.tar"
+    _dbdir="$GSF_DIR/databases"
+    _removed=0
+    if [ -d "$_dbdir" ]; then
+        ( cd "$_dbdir" && tar -cf "$_bkp" \
+            gservices.db gservices.db-journal gservices.db-wal gservices.db-shm \
+            checkin.db checkin.db-journal checkin.db-wal checkin.db-shm \
+            googlesettings.db googlesettings.db-journal 2>/dev/null ) || :
+        [ -s "$_bkp" ] && chmod 0600 "$_bkp" 2>/dev/null
+        for _f in gservices.db gservices.db-journal gservices.db-wal gservices.db-shm \
+                  checkin.db checkin.db-journal checkin.db-wal checkin.db-shm \
+                  googlesettings.db googlesettings.db-journal; do
+            _abs="$_dbdir/$_f"
+            case "$_abs" in
+                "$GSF_DIR"/databases/*) : ;;
+                *) continue ;;
+            esac
+            [ -e "$_abs" ] && rm -f "$_abs" 2>/dev/null && _removed=$((_removed + 1))
+        done
+    fi
+    se_restore
+    backup_rotate "gsf_dbs." 10
+
+    # Force GMS to re-check-in too, so the freshly regenerated GSF android_id
+    # propagates through the Google cluster (GAID/ANDROID_ID stay coherent with it).
+    force_stop com.google.android.gms
+
+    if [ "$_removed" -gt 0 ]; then
+        REBOOT_NEEDED=1
+        log_ok "GSF ID cleared ($_removed DB file(s), backup in $BACKUP_DIR_ROOT)"
+        log_warn "REBOOT/re-check-in REQUIRED: GSF regenerates android_id at next check-in."
+    else
+        log_info "No GSF check-in DBs present (already clean)"
+    fi
+    return 0
+}
+
 randomize_wlan_mac() {
     newmac="${1:-}"
     [ -z "$newmac" ] && newmac="$(identity_get WIFI_MAC 2>/dev/null || true)"
@@ -429,6 +491,7 @@ case "$cmd" in
     all)
         wipe_ssaid                    || FAILURES=$((FAILURES + 1))
         set_gaid_value "$@"           || FAILURES=$((FAILURES + 1))
+        clear_gsf_id                  || FAILURES=$((FAILURES + 1))
         randomize_wlan_mac            || FAILURES=$((FAILURES + 1))
         rotate_bluetooth_mac          || FAILURES=$((FAILURES + 1))
         sync_device_name              || FAILURES=$((FAILURES + 1))
@@ -444,6 +507,7 @@ case "$cmd" in
         ;;
     ssaid)                wipe_ssaid              || FAILURES=$((FAILURES + 1)) ;;
     gaid)                 set_gaid_value "$@"     || FAILURES=$((FAILURES + 1)) ;;
+    gsf|gsf-id)           clear_gsf_id            || FAILURES=$((FAILURES + 1)) ;;
     wlan-mac|mac)         randomize_wlan_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
     bt-mac|bluetooth-mac) rotate_bluetooth_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
     device-name|name)     sync_device_name "$@"   || FAILURES=$((FAILURES + 1)) ;;
@@ -455,10 +519,11 @@ case "$cmd" in
     -h|--help|help)
         cat <<USAGE
 Usage: rotate_ids.sh <cmd> [args]
-  all                        - SSAID + GAID + wlan-MAC + BT-MAC + device-name + boot-count + applog (default)
+  all                        - SSAID + GAID + GSF-ID + wlan-MAC + BT-MAC + device-name + boot-count + applog (default)
   safe                       - GAID + BT-MAC + device-name + boot-count + applog (no reboot, no wifi reset)
   ssaid                      - wipe settings_ssaid.xml (needs reboot)
   gaid [uuid]                - set Google Advertising ID
+  gsf                        - clear GSF ID (gservices/checkin DBs; regenerates at next check-in)
   wlan-mac [xx:xx:..]        - set wlan0 MAC
   bt-mac [xx:xx:..]          - set Bluetooth adapter MAC
   device-name [name]         - sync device_name/BT to persona (identity.prop MODEL)
