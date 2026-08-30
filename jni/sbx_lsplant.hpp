@@ -15,6 +15,18 @@
 #define SBX_LSP_LOGD(...) ((void)0)
 #endif
 
+#ifdef SBX_ENABLE_LSPLANT
+// ============================ LSPlant-enabled build ============================
+#include <dobby.h>
+#include <lsplant.hpp>
+#include <lsparself.hpp>
+#include "sbx_ident_synth.hpp"   // sbxid::synth_all + sbxnr:: primitives (top-level namespaces)
+#if __has_include("hook_dex.h")
+#include "hook_dex.h"
+#define SBX_HAVE_HOOK_DEX 1
+#endif
+#endif // SBX_ENABLE_LSPLANT
+
 namespace sbxlsp {
 
 // Values the module feeds to the L3 hooks. main.cpp fills these from the identity
@@ -38,15 +50,6 @@ inline bool init(JNIEnv*)                            { return false; }
 inline bool install_all(JNIEnv*, const HookValues&)  { return false; }
 
 #else
-// ============================ LSPlant-enabled build ============================
-#include <dobby.h>
-#include <lsplant.hpp>
-#include <lsparself.hpp>
-#include "sbx_ident_synth.hpp"   // sbxid::synth_all + sbxnr:: primitives
-#if __has_include("hook_dex.h")
-#include "hook_dex.h"
-#define SBX_HAVE_HOOK_DEX 1
-#endif
 
 inline bool available() { return true; }
 
@@ -74,8 +77,9 @@ inline bool init(JNIEnv* env) {
         .inline_unhooker = sbx_inline_unhooker,
         .art_symbol_resolver =
             [](std::string_view s) -> void* { return reinterpret_cast<void*>(art.getSymbAddress(s)); },
-        .art_symbol_prefix_resolver =
-            [](std::string_view s) -> void* { return reinterpret_cast<void*>(art.getSymbPrefixFirstAddress(s)); },
+        // NOTE: LSPlant v2.0 (the pinned LSPLANT_REF) has no art_symbol_prefix_resolver;
+        // it was added post-v2.0. v2.0 resolves ART symbols fine without it, so we don't
+        // wire lsparself::getSymbPrefixFirstAddress here. Re-add if LSPLANT_REF is bumped.
     };
     info.generated_class_name  = kCls;
     info.generated_source_name = kSrc;

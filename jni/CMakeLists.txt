@@ -77,6 +77,8 @@ if(SBX_ENABLE_LSPLANT)
     set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
     add_subdirectory("${SBX_LSP_JNI}" lsplant_build)
     add_subdirectory("${SBX_EXT}/dobby" dobby_build)
+    # The LSPosed Dobby fork honors DOBBY_GENERATE_SHARED=OFF and emits a single
+    # STATIC target named `dobby` (there is no separate `dobby_static`). Link it.
     target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby)
     target_include_directories(sandboxid_module PRIVATE
         "${SBX_LSP_JNI}/include"
@@ -84,8 +86,18 @@ if(SBX_ENABLE_LSPLANT)
         "${SBX_EXT}/dobby/include")
     foreach(t lsplant_static dex_builder_static dobby)
         if(TARGET ${t})
-            target_compile_options(${t} PRIVATE -fexceptions -frtti)
+            target_compile_options(${t} PRIVATE -fexceptions -frtti -fno-lto)
         endif()
     endforeach()
     target_compile_definitions(sandboxid_module PRIVATE SBX_ENABLE_LSPLANT=1)
+    if(NOT SBX_DEBUG)
+        # The NDK r26d Clang/LLD ThinLTO pipeline aborts with "Broken module
+        # found" / debug-info fragment mismatches when linking sandboxid_module
+        # against the vendored lsplant/dobby static libs (built with -fexceptions
+        # -frtti above, unlike the rest of this project). Disable LTO for the
+        # final link of this target only; the rest of the project keeps LTO.
+        set_target_properties(sandboxid_module PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF)
+        target_link_options(sandboxid_module PRIVATE -fno-lto)
+    endif()
 endif()
