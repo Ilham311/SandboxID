@@ -123,14 +123,32 @@ inline sigjmp_buf              sbx_probe_jmp;
 inline volatile sig_atomic_t   sbx_probe_fault = 0;
 inline void sbx_probe_sig_handler(int) { sbx_probe_fault = 1; siglongjmp(sbx_probe_jmp, 1); }
 
+// Serialisasi akses ke handler sinyal proses-lebar dipakai sbx_can_execute —
+// mencegah thread lain memasang/melepas handler SIGSEGV/SIGBUS/SIGILL secara
+// bersamaan selagi probe berjalan (mis. crash handler pihak ketiga).
+inline std::mutex sbx_probe_mutex;
+
 // Coba eksekusi fn (leaf 'ret') di bawah guard sinyal; true bila kembali normal.
+// Menjaga SIGSEGV, SIGBUS, DAN SIGILL — halaman throwaway hasil COW/mmap bisa
+// memicu ketiganya (instruksi tak valid pada level-PTE juga observasinya SIGILL
+// di sejumlah kernel/arch), bukan cuma SEGV/BUS. Akses ke handler proses-lebar
+// diserialisasi lewat sbx_probe_mutex agar tidak balapan dengan thread lain.
 inline bool sbx_can_execute(void* fn) {
-    struct sigaction sa{}, old_segv{}, old_bus{};
+    std::lock_guard<std::mutex> lock(sbx_probe_mutex);
+    struct sigaction sa{}, old_segv{}, old_bus{}, old_ill{};
     sa.sa_handler = sbx_probe_sig_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     if (sigaction(SIGSEGV, &sa, &old_segv) != 0) return false;
-    sigaction(SIGBUS, &sa, &old_bus);
+    if (sigaction(SIGBUS, &sa, &old_bus) != 0) {
+        sigaction(SIGSEGV, &old_segv, nullptr);
+        return false;
+    }
+    if (sigaction(SIGILL, &sa, &old_ill) != 0) {
+        sigaction(SIGSEGV, &old_segv, nullptr);
+        sigaction(SIGBUS, &old_bus, nullptr);
+        return false;
+    }
     sbx_probe_fault = 0;
     volatile bool ran = false;
     if (sigsetjmp(sbx_probe_jmp, 1) == 0) {
@@ -139,6 +157,7 @@ inline bool sbx_can_execute(void* fn) {
     }
     sigaction(SIGSEGV, &old_segv, nullptr);
     sigaction(SIGBUS, &old_bus, nullptr);
+    sigaction(SIGILL, &old_ill, nullptr);
     return ran && !sbx_probe_fault;
 }
 // true bila SELURUH rentang [addr, addr+len) tercakup region 'x' di maps.

@@ -90,8 +90,12 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
       SBX_DOBBY_LOGI("CodePatch: jalur /proc/self/mem aktif (tanpa mprotect PROT_EXEC)");
     }
   } else {
-    SBX_DOBBY_LOGE("CodePatch: /proc/self/mem gagal @%p size=%u (errno=%d %s) — fallback mprotect",
-                   address, buffer_size, errno, strerror(errno));
+    static bool logged_fail = false;
+    if (!logged_fail) {
+      logged_fail = true;
+      SBX_DOBBY_LOGE("CodePatch: /proc/self/mem gagal @%p size=%u (errno=%d %s) — fallback mprotect",
+                     address, buffer_size, errno, strerror(errno));
+    }
   }
 #endif
 
@@ -103,7 +107,7 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
     size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
     uintptr_t addr = (uintptr_t)address;
     uintptr_t start_page = ALIGN_FLOOR(addr, page_size);
-    uintptr_t end_page = ALIGN_FLOOR(addr + buffer_size - 1, page_size);
+    uintptr_t end_page = ALIGN_FLOOR(addr + (buffer_size > 0 ? buffer_size - 1 : 0), page_size);
     size_t range_len = (end_page - start_page) + page_size;
 
     if (mprotect((void *)start_page, range_len, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
@@ -111,11 +115,19 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
       // Restore best-effort; bila gagal halaman tetap RWX (masih executable).
       mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC);
       patched = true;
-      SBX_DOBBY_LOGI("CodePatch: jalur fallback mprotect(RWX) dipakai @%p len=%zu",
-                     (void *)start_page, range_len);
+      static bool logged_fallback_ok = false;
+      if (!logged_fallback_ok) {
+        logged_fallback_ok = true;
+        SBX_DOBBY_LOGI("CodePatch: jalur fallback mprotect(RWX) dipakai @%p len=%zu",
+                       (void *)start_page, range_len);
+      }
     } else {
-      SBX_DOBBY_LOGE("CodePatch: mprotect(RWX) gagal @%p len=%zu (errno=%d %s) — hook dibatalkan",
-                     (void *)start_page, range_len, errno, strerror(errno));
+      static bool logged_fallback_fail = false;
+      if (!logged_fallback_fail) {
+        logged_fallback_fail = true;
+        SBX_DOBBY_LOGE("CodePatch: mprotect(RWX) gagal @%p len=%zu (errno=%d %s) — hook dibatalkan",
+                       (void *)start_page, range_len, errno, strerror(errno));
+      }
     }
   }
 
