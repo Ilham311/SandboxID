@@ -18,6 +18,8 @@ typedef int (*getpropbytearray_fn)(void* , const char*, SbxByteArray*);
 inline getpropbytearray_fn g_orig = nullptr;
 inline uint8_t             g_wv_bytes[32];
 inline size_t              g_wv_len = 0;
+inline uint8_t             g_wv_prov_bytes[32];
+inline size_t              g_wv_prov_len = 0;
 
 inline int sbx_amediadrm_getpropbytearray(void* mObj, const char* prop, SbxByteArray* out) {
     if (prop && out && g_wv_len == sizeof(g_wv_bytes) &&
@@ -26,22 +28,28 @@ inline int sbx_amediadrm_getpropbytearray(void* mObj, const char* prop, SbxByteA
         out->length = g_wv_len;
         return 0;
     }
+    if (prop && out && g_wv_prov_len == sizeof(g_wv_prov_bytes) &&
+        std::strcmp(prop, "provisioningUniqueId") == 0) {
+        out->ptr    = g_wv_prov_bytes;
+        out->length = g_wv_prov_len;
+        return 0;
+    }
     if (g_orig) return g_orig(mObj, prop, out);
     return -10000;
 }
 
-inline bool decode_hex32(const std::string& hex) {
-    if (hex.size() < sizeof(g_wv_bytes) * 2) return false;
+inline bool decode_hex32(const std::string& hex, uint8_t* dst) {
+    if (hex.size() < 32u * 2) return false;
     auto hv = [](char c) -> int {
         if (c >= '0' && c <= '9') return c - '0';
         if (c >= 'a' && c <= 'f') return c - 'a' + 10;
         if (c >= 'A' && c <= 'F') return c - 'A' + 10;
         return -1;
     };
-    for (size_t i = 0; i < sizeof(g_wv_bytes); ++i) {
+    for (size_t i = 0; i < 32u; ++i) {
         int hi = hv(hex[2 * i]), lo = hv(hex[2 * i + 1]);
         if (hi < 0 || lo < 0) return false;
-        g_wv_bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
+        dst[i] = static_cast<uint8_t>((hi << 4) | lo);
     }
     return true;
 }
@@ -51,8 +59,10 @@ inline bool install(uint64_t seed) {
     if (done) return g_orig != nullptr;
     done = true;
 
-    if (!decode_hex32(sbxid::synth_widevine_hex(seed))) return false;
+    if (!decode_hex32(sbxid::synth_widevine_hex(seed), g_wv_bytes)) return false;
     g_wv_len = sizeof(g_wv_bytes);
+    if (decode_hex32(sbxid::synth_widevine_prov_hex(seed), g_wv_prov_bytes))
+        g_wv_prov_len = sizeof(g_wv_prov_bytes);
 
     void* h = dlopen("libmediandk.so", RTLD_NOW | RTLD_NOLOAD);
     if (!h) h = dlopen("libmediandk.so", RTLD_NOW);

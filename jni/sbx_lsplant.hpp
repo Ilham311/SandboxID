@@ -551,6 +551,17 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
         if (hook_one(env, specs[i], sval, ids.widevine_hex)) ++good;
     }
 
+    // Widevine provisioningUniqueId (byte[]): dibangun terpisah dari tabel agar
+    // memakai byte yang BERBEDA dari deviceUniqueId (nilai asli keduanya memang
+    // beda; menyamakannya bisa jadi tell saat app membaca keduanya).
+    {
+        std::string prov_hex = sbxid::synth_widevine_prov_hex(v.seed);
+        HookSpec pv{ "android/media/MediaDrm", "getPropertyByteArray",
+                     "(Ljava/lang/String;)[B",
+                     false, 1, "provisioningUniqueId", 1, V_WIDEVINE };
+        if (hook_one(env, pv, std::string(), prov_hex)) ++good;
+    }
+
     // Waktu instal/update aplikasi (retType 8): hanya paket sendiri, dijangkar
     // ke tanggal build agar stabil lintas restart dan plausibel (instal setelah
     // perangkat dibuat). firstInstallTime == lastUpdateTime → tampak belum

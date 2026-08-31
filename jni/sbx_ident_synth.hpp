@@ -87,6 +87,10 @@ inline std::string synth_widevine_hex(uint64_t seed) {
     return sbxnr::hex_from_seed(seed ^ 0x57565F4944ULL, 32);
 }
 
+inline std::string synth_widevine_prov_hex(uint64_t seed) {
+    return sbxnr::hex_from_seed(seed ^ 0x50524F565F5544ULL, 32);
+}
+
 inline std::string synth_gsf_id(uint64_t seed) {
     uint64_t s = seed ^ 0x4753464944ULL;
     uint64_t v = sbxnr::splitmix64(s) >> 1;
