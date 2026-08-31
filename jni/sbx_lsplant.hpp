@@ -88,25 +88,34 @@ inline void* sbx_inline_hooker(void* target, void* hooker) {
 }
 inline bool sbx_inline_unhooker(void* func) { return DobbyDestroy(func) == 0; }
 
-// ── Preflight kapabilitas code-patch (W^X / SELinux) ────────────────────────
-// Menjawab satu pertanyaan sebelum lsplant::Init menyentuh libart hidup: pada
-// kernel/SELinux perangkat INI, bisakah proses menulis byte ke halaman .text
-// file-backed r-x LALU halaman itu TETAP executable? Jika tidak (untrusted_app
-// ditolak execmem/execmod, atau kernel mencabut PROT_EXEC saat COW FOLL_FORCE),
-// lsplant::Init akan meng-COW halaman libart lalu MEMANGGIL
-// art::Runtime::SetRuntimeDebugState (langkah TERAKHIR InitNative, runtime.hpp:85)
-// pada halaman yang kehilangan exec → SIGSEGV SEGV_ACCERR EXECUTE di +0.
+// ── Preflight kapabilitas inline-hook (W^X / SELinux) ───────────────────────
+// Inline-hook L3 butuh DUA kapabilitas SELinux yang BERBEDA; keduanya harus ada
+// sebelum lsplant::Init menyentuh libart hidup, atau proses crash. Riset 20 repo
+// (Frida/YAHFA/ShadowHook/Dobby/LSPlant/LSPosed) mengkonfirmasi pemisahan ini:
 //
-// Uji dijalankan pada SALINAN throwaway MAP_PRIVATE dari libart.so (file & label
-// SELinux sama) sehingga perilaku kernel/SELinux teruji APA ADANYA tanpa pernah
-// menyentuh halaman libart hidup — koreksi kritis: menulis-balik ke halaman
-// libart nyata bisa MENGUPAS exec-nya sendiri dan MEMICU crash yang mau dicegah.
-// Ladder tulis mencerminkan CodePatch (pwrite64 /proc/self/mem → fallback
-// mprotect RWX). Verifikasi exec: cek 'x' di /proc/self/maps DAN (arm64/x86)
-// benar-benar EKSEKUSI sebyte 'ret' di bawah guard SIGSEGV/SIGBUS — satu-satunya
-// cara memastikan halaman executable, termasuk pengupasan exec level-PTE yang
-// tak tampak di maps. Hasil di-cache. Referensi: Frida/YAHFA/ShadowHook (gagal
-// anggun, jangan crash host), offlinemark "obscure quirk of /proc", CVE-2022-50014.
+//   (1) execmod  — menulis byte ke halaman .text libart file-backed r-x LALU
+//                  halaman itu tetap executable (COW private page). Dipakai
+//                  CodePatch untuk menanam jump ke fungsi target di libart.
+//   (2) execmem  — memori ANONIM yang bisa ditulis-kode lalu dieksekusi. Dipakai
+//                  DUA situs: arena trampolin Dobby (mmap RX anon + tulis) DAN
+//                  trampolin per-metode LSPlant (mmap RWX anon, lsplant.cc:539).
+//
+// Perangkat W^X keras (untrusted_app A15/16) sering mengizinkan (1) tapi MENOLAK
+// (2): `self:process execmem` tak diberikan → mmap/mprotect anon-exec = EACCES.
+// Probe LAMA hanya menguji (1) di salinan libart file-backed → LOLOS PALSU →
+// lsplant::Init lanjut → salah satu langkah InitNative menanam hook yang butuh
+// trampolin anon yang tak bisa dialokasikan → cabang rusak → saat langkah
+// TERAKHIR memanggil art::Runtime::SetRuntimeDebugState (runtime.hpp:85) →
+// SIGSEGV SEGV_ACCERR EXECUTE di +0. Itulah crash berulang yang diadukan user.
+//
+// Perbaikan: uji KEDUA kelas. Semua uji di halaman throwaway (salinan libart
+// MAP_PRIVATE untuk execmod; mmap anon untuk execmem) — TAK PERNAH menyentuh
+// libart hidup, dan eksekusi 'ret' selalu di bawah guard SIGSEGV/SIGBUS/SIGILL
+// sehingga probe sendiri tak akan meng-crash host. Verifikasi exec: cek 'x' di
+// /proc/self/maps DAN (arm64/x86) benar-benar EKSEKUSI sebyte 'ret'. Hasil di-
+// cache. lsplant::Init akhirnya dibungkus guard sinyal sebagai jaring terakhir.
+// Ref: AOSP jit_memory_region.cc (memfd dual-map), ShadowHook #111 (mmap sukses
+// tapi non-exec), offlinemark "obscure quirk of /proc", CVE-2022-50014.
 #if defined(__aarch64__)
 #  define SBX_LSP_RET_BYTES {0xC0, 0x03, 0x5F, 0xD6}   // ret
 #  define SBX_LSP_HAVE_EXEC_PROBE 1
@@ -128,17 +137,38 @@ inline void sbx_probe_sig_handler(int) { sbx_probe_fault = 1; siglongjmp(sbx_pro
 // bersamaan selagi probe berjalan (mis. crash handler pihak ketiga).
 inline std::mutex sbx_probe_mutex;
 
+// Alt-stack sinyal per-thread: SA_ONSTACK butuh sigaltstack aktif di thread yang
+// SEDANG mendapat sinyal — tanpanya, SIGSEGV akibat stack-overflow (SP sudah
+// invalid) tak bisa dikirim ke handler sama sekali (kernel diam-diam re-raise
+// SIGSEGV default -> proses mati) sekalipun sa_flags berisi SA_ONSTACK. Dipasang
+// sekali per-thread & dibiarkan terpasang (thread_local, dialokasikan statik agar
+// tak butuh unwind saat siglongjmp). Ref: sigaltstack(2), signal-safety(7).
+inline bool sbx_ensure_sigaltstack() {
+    thread_local bool installed = false;
+    if (installed) return true;
+    static thread_local uint8_t stack_mem[SIGSTKSZ > 32768 ? SIGSTKSZ : 32768];
+    stack_t ss{};
+    ss.ss_sp = stack_mem;
+    ss.ss_size = sizeof(stack_mem);
+    ss.ss_flags = 0;
+    installed = sigaltstack(&ss, nullptr) == 0;
+    return installed;
+}
+
 // Coba eksekusi fn (leaf 'ret') di bawah guard sinyal; true bila kembali normal.
 // Menjaga SIGSEGV, SIGBUS, DAN SIGILL — halaman throwaway hasil COW/mmap bisa
 // memicu ketiganya (instruksi tak valid pada level-PTE juga observasinya SIGILL
 // di sejumlah kernel/arch), bukan cuma SEGV/BUS. Akses ke handler proses-lebar
 // diserialisasi lewat sbx_probe_mutex agar tidak balapan dengan thread lain.
+// SA_ONSTACK + sigaltstack terpasang: bila fault sesungguhnya adalah stack-overflow
+// (SP rusak), handler tetap jalan di alt-stack yang sehat alih-alih re-fault diam.
 inline bool sbx_can_execute(void* fn) {
     std::lock_guard<std::mutex> lock(sbx_probe_mutex);
+    sbx_ensure_sigaltstack();
     struct sigaction sa{}, old_segv{}, old_bus{}, old_ill{};
     sa.sa_handler = sbx_probe_sig_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = SA_ONSTACK;
     if (sigaction(SIGSEGV, &sa, &old_segv) != 0) return false;
     if (sigaction(SIGBUS, &sa, &old_bus) != 0) {
         sigaction(SIGSEGV, &old_segv, nullptr);
@@ -160,6 +190,41 @@ inline bool sbx_can_execute(void* fn) {
     sigaction(SIGILL, &old_ill, nullptr);
     return ran && !sbx_probe_fault;
 }
+// Tulis patch ke dst (RWX anon langsung, tanpa ladder mprotect) di bawah guard
+// sinyal yang sama dengan sbx_can_execute — sebagian ROM/hardened-kernel memicu
+// SIGSEGV/SIGBUS saat MENULIS ke halaman anon RWX yang baru di-mmap (bukan cuma
+// saat eksekusi), mis. lewat MTE/PKEY atau kebijakan W^X yang menjebol write itu
+// sendiri. Tanpa guard ini, probe B (lsplant.cc:539 gaya trampolin) bisa
+// meng-crash proses sebelum sempat memutuskan L3 harus dilewati.
+inline bool sbx_write_direct_guarded(void* dst, const uint8_t* patch, size_t patch_len) {
+    std::lock_guard<std::mutex> lock(sbx_probe_mutex);
+    sbx_ensure_sigaltstack();
+    struct sigaction sa{}, old_segv{}, old_bus{}, old_ill{};
+    sa.sa_handler = sbx_probe_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_ONSTACK;
+    if (sigaction(SIGSEGV, &sa, &old_segv) != 0) return false;
+    if (sigaction(SIGBUS, &sa, &old_bus) != 0) {
+        sigaction(SIGSEGV, &old_segv, nullptr);
+        return false;
+    }
+    if (sigaction(SIGILL, &sa, &old_ill) != 0) {
+        sigaction(SIGSEGV, &old_segv, nullptr);
+        sigaction(SIGBUS, &old_bus, nullptr);
+        return false;
+    }
+    sbx_probe_fault = 0;
+    volatile bool wrote = false;
+    if (sigsetjmp(sbx_probe_jmp, 1) == 0) {
+        memcpy(dst, patch, patch_len);
+        wrote = true;
+    }
+    sigaction(SIGSEGV, &old_segv, nullptr);
+    sigaction(SIGBUS, &old_bus, nullptr);
+    sigaction(SIGILL, &old_ill, nullptr);
+    return wrote && !sbx_probe_fault;
+}
+
 // true bila SELURUH rentang [addr, addr+len) tercakup region 'x' di maps.
 inline bool sbx_perms_has_exec(uintptr_t addr, size_t len) {
     FILE* f = fopen("/proc/self/maps", "re");
@@ -208,13 +273,45 @@ inline bool sbx_find_libart_text(std::string& path_out, unsigned long& off_out) 
     return found;
 }
 
-// Jalankan probe satu kali: petakan throwaway r-x libart, tulis 'ret' via ladder
-// CodePatch, verifikasi byte + exec-retention. TIDAK menyentuh libart hidup.
-inline bool sbx_run_codepatch_probe() {
+// Ladder tulis identik CodePatch: (1) pwrite64 /proc/self/mem FOLL_FORCE, lalu
+// (2) fallback mprotect(RWX)→memcpy→restore R|X. dst harus page-aligned & panjang
+// ≤ page. Mengembalikan true bila byte akhirnya cocok di dst. Dipakai probe
+// execmod (halaman libart file-backed) DAN execmem (halaman anon).
+inline bool sbx_write_via_ladder(void* dst, const uint8_t* patch, size_t patch_len, size_t page) {
+    bool wrote = false;
+    int mem = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
+    if (mem >= 0) {
+        size_t total = 0;
+        bool ok = true;
+        while (total < patch_len) {
+            ssize_t w = pwrite64(mem, patch + total, patch_len - total,
+                                 (off64_t)((uintptr_t)dst + total));
+            if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
+            if (w == 0) { ok = false; break; }
+            total += (size_t)w;
+        }
+        close(mem);
+        wrote = ok && total == patch_len;
+    }
+    if (!wrote) {
+        if (mprotect(dst, page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            memcpy(dst, patch, patch_len);
+            mprotect(dst, page, PROT_READ | PROT_EXEC);
+            wrote = true;
+        }
+    }
+    return wrote && memcmp(dst, patch, patch_len) == 0;
+}
+
+// Probe execmod: tulis 'ret' ke SALINAN throwaway file-backed dari .text libart,
+// lalu verifikasi exec dipertahankan. Menguji apakah proses boleh menulis-kode ke
+// halaman file-backed r-x (COW private) lalu tetap mengeksekusinya — kapabilitas
+// yang dibutuhkan CodePatch untuk menanam jump di libart. TAK menyentuh libart hidup.
+inline bool sbx_run_execmod_probe() {
     std::string libart;
     unsigned long file_off = 0;
     if (!sbx_find_libart_text(libart, file_off)) {
-        SBX_LSP_LOGE("probe: region r-x libart.so tak ditemukan di maps — anggap TAK mampu");
+        SBX_LSP_LOGE("probe execmod: region r-x libart.so tak ditemukan di maps — anggap TAK mampu");
         return false;
     }
 
@@ -224,7 +321,7 @@ inline bool sbx_run_codepatch_probe() {
 
     int fd = open(libart.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        SBX_LSP_LOGE("probe: open(%s) gagal (errno=%d %s) — anggap TAK mampu",
+        SBX_LSP_LOGE("probe execmod: open(%s) gagal (errno=%d %s) — anggap TAK mampu",
                      libart.c_str(), errno, strerror(errno));
         return false;
     }
@@ -232,40 +329,15 @@ inline bool sbx_run_codepatch_probe() {
     void* map = mmap(nullptr, page, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, (off_t)aligned_off);
     close(fd);
     if (map == MAP_FAILED) {
-        SBX_LSP_LOGE("probe: mmap(PROT_EXEC libart, off=%lu) gagal (errno=%d %s) — anggap TAK mampu",
+        SBX_LSP_LOGE("probe execmod: mmap(PROT_EXEC libart, off=%lu) gagal (errno=%d %s) — anggap TAK mampu",
                      aligned_off, errno, strerror(errno));
         return false;
     }
 
     const uint8_t patch[] = SBX_LSP_RET_BYTES;
     const size_t patch_len = sizeof(patch);
-    bool wrote = false;
 
-    // Ladder tulis identik CodePatch: (1) /proc/self/mem pwrite64 FOLL_FORCE.
-    int mem = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
-    if (mem >= 0) {
-        size_t total = 0;
-        bool ok = true;
-        while (total < patch_len) {
-            ssize_t w = pwrite64(mem, patch + total, patch_len - total,
-                                 (off64_t)((uintptr_t)map + total));
-            if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
-            if (w == 0) { ok = false; break; }
-            total += (size_t)w;
-        }
-        close(mem);
-        wrote = ok && total == patch_len;
-    }
-    // (2) fallback mprotect(RWX)→memcpy→restore R|X bila /proc/self/mem gagal.
-    if (!wrote) {
-        if (mprotect(map, page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
-            memcpy(map, patch, patch_len);
-            mprotect(map, page, PROT_READ | PROT_EXEC);
-            wrote = true;
-        }
-    }
-
-    bool bytes_ok = wrote && memcmp(map, patch, patch_len) == 0;
+    bool bytes_ok = sbx_write_via_ladder(map, patch, patch_len, page);
     bool maps_exec = bytes_ok && sbx_perms_has_exec((uintptr_t)map, patch_len);
     bool exec_ok = maps_exec;
 #ifdef SBX_LSP_HAVE_EXEC_PROBE
@@ -277,22 +349,135 @@ inline bool sbx_run_codepatch_probe() {
     munmap(map, page);
 
     if (!exec_ok) {
-        SBX_LSP_LOGE("probe: patch .text TAK aman (wrote=%d bytes_ok=%d maps_exec=%d exec_ok=%d) "
-                     "— perangkat mencabut exec pasca-tulis; L3 inline-hook DILEWATI",
-                     wrote, bytes_ok, maps_exec, exec_ok);
+        SBX_LSP_LOGE("probe execmod: TAK aman (bytes_ok=%d maps_exec=%d exec_ok=%d) "
+                     "— perangkat mencabut exec pasca-tulis file-backed; L3 inline-hook DILEWATI",
+                     bytes_ok, maps_exec, exec_ok);
     } else {
-        SBX_LSP_LOGI("probe: patch .text AMAN (exec dipertahankan) — L3 inline-hook diaktifkan");
+        SBX_LSP_LOGI("probe execmod: AMAN (file-backed .text writable & tetap executable)");
     }
     return exec_ok;
 }
 
-// Kapabilitas code-patch, dihitung sekali lalu di-cache (thread-safe).
+// Probe execmem: uji kapabilitas yang BENAR-BENAR runtuh di perangkat W^X keras —
+// memori ANONIM yang bisa ditulis-kode lalu dieksekusi (`self:process execmem`).
+// Inilah yang ditolak untrusted_app A15/16 dan yang tak pernah diuji probe lama.
+// Dua sub-uji mencerminkan dua situs alokasi anon nyata yang dipakai lsplant::Init:
+//   (A) arena trampolin Dobby     — mmap(RX anon) + tulis-kode via ladder CodePatch
+//   (B) trampolin per-metode LSPlant — mmap(RWX anon) langsung (lsplant.cc:539)
+// KEDUANYA harus lolos: sebagian ROM mengizinkan satu gaya alokasi tapi menolak
+// yang lain (mmap RX sukses tapi mprotect+W ditolak, atau sebaliknya). Semua
+// halaman throwaway & di-munmap; eksekusi 'ret' di bawah guard sinyal. Log bertag
+// SandboxID + errno agar KONKLUSIF di logcat. Ref: AOSP jit_memory_region.cc.
+inline bool sbx_run_execmem_probe() {
+    long ps = sysconf(_SC_PAGESIZE);
+    size_t page = (ps > 0) ? (size_t)ps : 4096;
+    const uint8_t patch[] = SBX_LSP_RET_BYTES;
+    const size_t patch_len = sizeof(patch);
+
+    // (A) Gaya arena Dobby: mmap(PROT_READ|PROT_EXEC anon) lalu tulis via ladder.
+    void* a = mmap(nullptr, page, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (a == MAP_FAILED) {
+        SBX_LSP_LOGE("probe execmem A: mmap(RX anon) DITOLAK (errno=%d %s) — execmem tak diberikan; L3 DILEWATI",
+                     errno, strerror(errno));
+        return false;
+    }
+    bool a_wrote = sbx_write_via_ladder(a, patch, patch_len, page);
+    int a_errno = errno;   // tangkap sebelum panggilan lain menimpa (mprotect EACCES)
+    bool a_exec = a_wrote && sbx_perms_has_exec((uintptr_t)a, patch_len);
+#ifdef SBX_LSP_HAVE_EXEC_PROBE
+    if (a_exec) { __builtin___clear_cache((char*)a, (char*)a + page); a_exec = sbx_can_execute(a); }
+#endif
+    munmap(a, page);
+    if (!a_exec) {
+        SBX_LSP_LOGE("probe execmem A (arena Dobby): TAK mampu (wrote=%d errno=%d %s) — "
+                     "tulis/eksekusi memori anonim ditolak; L3 inline-hook DILEWATI",
+                     a_wrote, a_errno, strerror(a_errno));
+        return false;
+    }
+
+    // (B) Gaya trampolin LSPlant: mmap(PROT_READ|PROT_WRITE|PROT_EXEC anon) langsung.
+    void* b = mmap(nullptr, page, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (b == MAP_FAILED) {
+        SBX_LSP_LOGE("probe execmem B: mmap(RWX anon) DITOLAK (errno=%d %s) — execmem tak diberikan; L3 DILEWATI",
+                     errno, strerror(errno));
+        return false;
+    }
+    bool b_wrote = sbx_write_direct_guarded(b, patch, patch_len);
+    int b_errno = errno;
+    bool b_exec = b_wrote && sbx_perms_has_exec((uintptr_t)b, patch_len);
+#ifdef SBX_LSP_HAVE_EXEC_PROBE
+    if (b_exec) { __builtin___clear_cache((char*)b, (char*)b + page); b_exec = sbx_can_execute(b); }
+#endif
+    munmap(b, page);
+    if (!b_exec) {
+        SBX_LSP_LOGE("probe execmem B (trampolin LSPlant): TAK mampu (wrote=%d errno=%d %s) — "
+                     "RWX anon tak tertulis/executable; L3 DILEWATI",
+                     b_wrote, b_errno, strerror(b_errno));
+        return false;
+    }
+
+    SBX_LSP_LOGI("probe execmem: AMAN (anon RX+RWX writable & executable) — L3 inline-hook diaktifkan");
+    return true;
+}
+
+// Guard sinyal untuk lsplant::Init: jaring TERAKHIR bila kedua probe lolos tapi
+// Init tetap execute-fault di jalur tak teruji. Mengubah SIGSEGV/SIGBUS/SIGILL
+// fatal menjadi skip bersih (return false) alih-alih crash proses. Tanpa lock_guard
+// / objek stack ber-destructor di antara sigsetjmp & panggilan: siglongjmp TIDAK
+// meng-unwind stack, jadi tak ada yang bocor. init() satu-shot & sekuensial setelah
+// codepatch_capable() memoized, jadi tak ada probe lain yang balapan pasang handler.
+// PENTING: siglongjmp keluar dari lsplant::Init (kode pihak ketiga, di luar
+// kendali kita) TIDAK bisa "bersih" dalam arti penuh — bila fault terjadi persis
+// selagi Init memegang mutex internal (lsplant/ART) atau di tengah malloc/free,
+// lock tersebut TETAP terkunci selamanya (siglongjmp tak memanggil destructor
+// ataupun unlock) & heap arena bisa tertinggal dalam keadaan tak konsisten.
+// Melanjutkan proses seolah aman (mis. lanjut ke install_all/hook lain yang
+// mengambil lock/alokasi baru) berisiko deadlock atau korupsi heap tertunda
+// yang jauh lebih sulit didiagnosis daripada crash asli. Karena itu fault di
+// sini diperlakukan FATAL bagi seluruh proses (bukan sekadar L3 dinonaktifkan):
+// proses dihentikan segera via _exit() dari dalam handler, sebelum kembali ke
+// kode apa pun yang mungkin menyentuh lock/heap yang tertinggal rusak. Zygote
+// akan me-restart proses aplikasi bersih (tanpa state fault ini).
+inline void sbx_init_sig_handler(int sig) {
+    // Async-signal-safe: hanya write(2) mentah, lalu _exit(2) — TIDAK memanggil
+    // siglongjmp (yang akan melanjutkan eksekusi C++ arbitrer di atas lock/heap
+    // yang mungkin rusak). Proses tak akan lanjut, jadi tak ada jmp_buf/flag
+    // untuk dibaca balik.
+    static const char msg[] = "SandboxID: lsplant::Init execute-fault — proses dihentikan (bukan di-recover)\n";
+    (void)sig;
+    ::write(2, msg, sizeof(msg) - 1);
+    ::_exit(127);
+}
+
+inline bool sbx_guarded_lsplant_init(JNIEnv* env, const lsplant::InitInfo& info) {
+    sbx_ensure_sigaltstack();   // SA_ONSTACK: fault SP-rusak (stack-overflow) tetap tertangani
+    struct sigaction sa {}, old_segv {}, old_bus {}, old_ill {};
+    sa.sa_handler = sbx_init_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_ONSTACK;
+    bool h_segv = sigaction(SIGSEGV, &sa, &old_segv) == 0;
+    bool h_bus  = h_segv && sigaction(SIGBUS, &sa, &old_bus) == 0;
+    bool h_ill  = h_bus  && sigaction(SIGILL, &sa, &old_ill) == 0;
+    if (!h_ill) {   // guard tak lengkap → jangan setengah-pasang; jalankan apa adanya
+        if (h_bus)  sigaction(SIGBUS,  &old_bus,  nullptr);
+        if (h_segv) sigaction(SIGSEGV, &old_segv, nullptr);
+        return lsplant::Init(env, info);
+    }
+    bool r = lsplant::Init(env, info);   // fault di sini -> handler _exit() langsung, tak kembali ke sini
+    sigaction(SIGILL,  &old_ill,  nullptr);
+    sigaction(SIGBUS,  &old_bus,  nullptr);
+    sigaction(SIGSEGV, &old_segv, nullptr);
+    return r;
+}
+
+// Kapabilitas inline-hook, dihitung sekali lalu di-cache (thread-safe). Perlu KEDUA:
+// execmod (patch .text libart file-backed) DAN execmem (trampolin memori anonim).
 inline bool codepatch_capable() {
     static std::mutex mu;
     static bool computed = false, capable = false;
     std::lock_guard<std::mutex> lk(mu);
     if (!computed) {
-        capable = sbx_run_codepatch_probe();
+        capable = sbx_run_execmod_probe() && sbx_run_execmem_probe();
         computed = true;
     }
     return capable;
@@ -336,14 +521,15 @@ inline bool init(JNIEnv* env) {
     info.generated_source_name = kSrc;
     info.generated_field_name  = kFld;
 
-    // Gate kapabilitas: pada perangkat yang mencabut exec setelah .text di-patch
-    // (untrusted_app ditolak execmem/execmod, atau kernel strip-exec saat COW),
-    // lsplant::Init akan MEMANGGIL SetRuntimeDebugState pada halaman libart yang
-    // sudah kehilangan exec → SIGSEGV SEGV_ACCERR EXECUTE +0. Probe throwaway
-    // menjawabnya TANPA menyentuh libart hidup; kalau tak mampu, lewati L3 dan
-    // kembalikan false secara bersih (L1/L2 native tetap jalan via mekanisme aman).
+    // Gate kapabilitas: L3 butuh execmod (patch .text libart) DAN execmem (trampolin
+    // memori anonim untuk arena Dobby + trampolin per-metode LSPlant). Perangkat W^X
+    // keras (untrusted_app A15/16) sering mengizinkan execmod tapi menolak execmem →
+    // salah satu langkah InitNative gagal mengalokasikan trampolin anon → cabang rusak
+    // → langkah TERAKHIR memanggil SetRuntimeDebugState pada alamat non-exec → SIGSEGV
+    // SEGV_ACCERR EXECUTE +0. Probe throwaway menguji KEDUA kelas TANPA menyentuh
+    // libart hidup; kalau tak mampu, lewati L3 & kembalikan false bersih (L1/L2 jalan).
     if (!codepatch_capable()) {
-        SBX_LSP_LOGE("L3 init: perangkat menolak patch .text (probe gagal) — "
+        SBX_LSP_LOGE("L3 init: perangkat menolak execmod/execmem (probe gagal) — "
                      "lsplant::Init DILEWATI demi mencegah crash SetRuntimeDebugState");
         ok = false;
         return ok;
@@ -352,8 +538,8 @@ inline bool init(JNIEnv* env) {
     // Diagnostik: apakah resolver ELF menemukan simbol libart? art.valid()==0
     // berarti /libart.so tak ketemu di /proc/self/maps atau symtab/.gnu_debugdata
     // gagal di-parse → lsplant::Init pasti gagal. Log ungated agar terlihat.
-    SBX_LSP_LOGE("L3 init: art.valid=%d — memanggil lsplant::Init", art.valid() ? 1 : 0);
-    ok = lsplant::Init(env, info);
+    SBX_LSP_LOGE("L3 init: art.valid=%d — memanggil lsplant::Init (di bawah guard sinyal)", art.valid() ? 1 : 0);
+    ok = sbx_guarded_lsplant_init(env, info);
     if (!ok) SBX_LSP_LOGE("lsplant::Init failed — L3 disabled this process (L1/L2 tetap)");
     else     SBX_LSP_LOGD("lsplant::Init ok");
     return ok;
