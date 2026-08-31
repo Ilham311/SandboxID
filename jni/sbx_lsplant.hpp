@@ -8,7 +8,7 @@
 #include <mutex>
 
 #ifndef SBX_LSP_TAG
-#define SBX_LSP_TAG "SandboxID-L3"
+#define SBX_LSP_TAG "SandboxID"
 #endif
 #define SBX_LSP_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, SBX_LSP_TAG, __VA_ARGS__)
 #ifdef SBX_DEBUG
@@ -83,9 +83,24 @@ inline bool init(JNIEnv* env) {
     lsplant::InitInfo info{
         .inline_hooker   = sbx_inline_hooker,
         .inline_unhooker = sbx_inline_unhooker,
+        // Android 15 (API 35): ART merename JitCodeCache::GarbageCollectCache ->
+        // DoCollection. LSPlant v6.4 masih minta simbol lama & tanpa fallback, jadi
+        // JitCodeCache::Init gagal -> lsplant::Init gagal -> semua hook L3 mati. Alias
+        // di bawah setara fix upstream master handler(GarbageCollectCache_, DoCollection_):
+        // hook fungsi yang sama, signature (JitCodeCache*, Thread*) identik.
+        // Credit: LSPosed/LSPlant master jit_code_cache.cxx (Apache-2.0), Issue #97.
         .art_symbol_resolver =
-            [](std::string_view s) -> void* { return reinterpret_cast<void*>(art.getSymbAddress(s)); },
-
+            [](std::string_view s) -> void* {
+                void* a = reinterpret_cast<void*>(art.getSymbAddress(s));
+                if (!a && s == "_ZN3art3jit12JitCodeCache19GarbageCollectCacheEPNS_6ThreadE")
+                    a = reinterpret_cast<void*>(art.getSymbAddress(
+                        "_ZN3art3jit12JitCodeCache12DoCollectionEPNS_6ThreadE"));
+                return a;
+            },
+        .art_symbol_prefix_resolver =
+            [](std::string_view s) -> void* {
+                return reinterpret_cast<void*>(art.getSymbPrefixFirstAddress(s));
+            },
     };
     info.generated_class_name  = kCls;
     info.generated_source_name = kSrc;
@@ -402,7 +417,7 @@ inline bool hook_one_on_class(JNIEnv* env, jclass cls, const HookSpec& sp,
         g_keep.push_back(env->NewGlobalRef(backup));
 
         if (!sp.no_deopt) {
-            lsplant::Deoptimize(env, target);
+            (void) lsplant::Deoptimize(env, target);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
         return true;
