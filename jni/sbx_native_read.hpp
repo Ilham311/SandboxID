@@ -433,6 +433,19 @@ inline bool ends_with(const std::string& s, const char* suffix) {
     return ends_with(s.c_str(), s.size(), suffix);
 }
 
+// Hanya file yang peta ID-nya memang kanonis yang boleh disintesis dari nol
+// ketika belum ada di disk. Untuk file lain (mis. header_custom) sintesis stub
+// justru salah bentuk, jadi kita hanya patch bila file sudah eksis.
+inline bool applog_xml_is_synthable(const char* path) {
+    if (!path) return false;
+    size_t n = std::strlen(path);
+    return ends_with(path, n, "/shared_prefs/applog.xml") ||
+           ends_with(path, n, "/shared_prefs/applog_stats.xml") ||
+           ends_with(path, n, "/shared_prefs/snssdk_openudid.xml") ||
+           ends_with(path, n, "/shared_prefs/snssdk_did.xml") ||
+           ends_with(path, n, "/shared_prefs/bd_device_info.xml");
+}
+
 inline Kind classify(const char* path) {
     if (!path) return NONE;
     if (std::strcmp(path, "/proc/sys/kernel/random/boot_id") == 0) return BOOTID;
@@ -458,16 +471,27 @@ inline Kind classify(const char* path) {
     }
 
     const size_t pl2 = std::strlen(path);
+    // ByteDance AppLog / DeviceRegister SharedPreferences yang menyimpan ID.
+    // Daftar dikurasi sinkron dengan applog_wipe() di scripts/lib/helpers.sh.
+    // patch_applog_xml hanya menulis ulang <string> yang key-nya cocok ID
+    // AppLog; key lain diteruskan apa adanya, jadi cakupan lebih luas = aman.
     if (ends_with(path, pl2, "/shared_prefs/applog.xml") ||
+        ends_with(path, pl2, "/shared_prefs/applog_stats.xml") ||
         ends_with(path, pl2, "/shared_prefs/snssdk_openudid.xml") ||
         ends_with(path, pl2, "/shared_prefs/snssdk_did.xml") ||
-        ends_with(path, pl2, "/shared_prefs/bd_device_info.xml"))
+        ends_with(path, pl2, "/shared_prefs/bd_device_info.xml") ||
+        ends_with(path, pl2, "/shared_prefs/header_custom.xml") ||
+        ends_with(path, pl2, "/shared_prefs/ug_install_settings_pref.xml"))
         return APPLOG_XML;
     if (ends_with(path, pl2, "/files/bd_setting/device_id"))   return BD_RAW_DID;
     if (ends_with(path, pl2, "/files/bd_setting/install_id"))  return BD_RAW_IID;
     if (ends_with(path, pl2, "/files/bd_setting/openudid"))    return BD_RAW_OPENUDID;
     if (ends_with(path, pl2, "/files/bd_setting/clientudid"))  return BD_RAW_CLIENTUDID;
     if (ends_with(path, pl2, "/files/.cdid"))                  return BD_RAW_CDID;
+    // Versi SDK yang lebih baru memindah file ID mentah ke no_backup/.
+    if (ends_with(path, pl2, "/no_backup/applog_device_id.dat")) return BD_RAW_DID;
+    if (ends_with(path, pl2, "/no_backup/bd_device_id"))         return BD_RAW_DID;
+    if (ends_with(path, pl2, "/no_backup/.cdid"))                return BD_RAW_CDID;
 
     return NONE;
 }
