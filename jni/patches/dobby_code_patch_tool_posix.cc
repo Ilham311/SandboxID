@@ -1,0 +1,148 @@
+// ============================================================================
+// SandboxID patch untuk Dobby — CodePatch() ramah W^X (Android 15 / API 35).
+//
+// KENAPA: Dobby yang di-pin (LSPosed/Dobby @ edb2af1, 2021) menulis kode lewat
+//   mprotect(PROT_READ|PROT_WRITE|PROT_EXEC) + memcpy TANPA memeriksa nilai
+//   balik mprotect. Di Android 15 kernel menegakkan W^X: SELinux menolak
+//   permintaan halaman jadi writable+executable (neverallow execmem untuk
+//   proses app/isolated). mprotect gagal (EACCES), lalu memcpy tetap menulis
+//   ke halaman R-X → SIGSEGV SEGV_ACCERR di dalam __memcpy_aarch64_simd saat
+//   lsplant::Init menginstal hook (crash yang dilaporkan pada OPPO/CPH2521,
+//   SDK_INT=35). Arena trampoline pun dialokasikan PROT_READ|PROT_EXEC
+//   (MemoryArena::AllocateCodeChunk → kReadExecute), jadi tulisan ke arena
+//   maupun ke target libart sama-sama kena.
+//
+// FIX: tulis byte kode lewat /proc/self/mem (pwrite64). Kernel melayani
+//   tulisan ini dengan FOLL_FORCE sehingga menembus proteksi halaman R-X
+//   tanpa perlu mengubahnya jadi RWX — untuk mapping file-backed (libart)
+//   memicu COW, untuk halaman anonim (arena) di-fault-in lalu ditulis. Ini
+//   juga TIDAK meminta izin SELinux `execmem` (yang diminta mprotect saat
+//   menambah PROT_EXEC/PROT_WRITE), jadi tetap jalan di ROM/kernel yang
+//   solusi root-nya gagal memuat sepolicy `execmem` (persis pemicu crash).
+//
+//   CATATAN: Dobby upstream TERBARU (jmpews & LSPosed master) pun MASIH pakai
+//   mprotect(RWX)+memcpy — mereka bergantung pada root solution menyuntik
+//   sepolicy `execmem`. Pendekatan /proc/self/mem di sini lebih tahan banting
+//   untuk Android 15/16 yang W^X-nya ketat.
+//
+//   CodePatch() adalah SATU-SATUNYA choke point tulisan ke memori eksekusi di
+//   Dobby (InterceptRouting + AssemblyCodeBuilder + ClosureTrampoline), jadi
+//   perbaikan di sini menutup semua jalur. Bila /proc/self/mem DAN mprotect
+//   sama-sama gagal, fungsi kini mengembalikan kMemoryOperationError (bukan
+//   menulis paksa) sehingga hook gagal dengan rapi, bukan meng-crash proses.
+//
+// KREDIT / REFERENSI:
+//   - Dobby (upstream)      : https://github.com/jmpews/Dobby (LSPosed fork)
+//   - Teknik /proc/self/mem : ShadowHook (bytedance/android-inline-hook),
+//                             YAHFA, HookZz — pola sama untuk menembus
+//                             proteksi halaman kode tanpa RWX.
+//   - Crash identik + akar  : JingMatrix/Vector#559 & JingMatrix/LSPosed#560
+//     masalah (execmem/W^X)   (SEGV_ACCERR di __memcpy_aarch64_simd saat
+//                             lsplant menulis memori ART read-only; avc denied
+//                             { execmem } karena sepolicy tak termuat).
+//
+// File ini disalin menimpa
+//   external/dobby/source/UserMode/ExecMemory/code-patch-tool-posix.cc
+// oleh jni/fetch_lsplant_deps.sh setelah Dobby di-clone (external/ di-gitignore,
+// jadi patch harus disuntik saat fetch agar sampai ke CI).
+// ============================================================================
+
+#include "dobby_internal.h"
+
+#include "core/arch/Cpu.h"
+
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <string.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#if !defined(__APPLE__)
+
+#if defined(__ANDROID__) || defined(__linux__)
+// Tulis 'buffer_size' byte dari 'buffer' ke 'address' lewat /proc/self/mem.
+// Mengembalikan true bila seluruh byte tertulis. Tidak butuh halaman writable:
+// kernel memakai FOLL_FORCE sehingga menembus halaman R-X (COW untuk mapping
+// file-backed, fault-in untuk halaman anonim). Aman di kernel W^X Android 15.
+static bool sbx_write_via_proc_self_mem(void *address, uint8_t *buffer, uint32_t buffer_size) {
+  int fd = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
+  if (fd < 0)
+    return false;
+
+  bool ok = true;
+  size_t total = 0;
+  while (total < buffer_size) {
+    ssize_t n = pwrite64(fd, buffer + total, (size_t)buffer_size - total,
+                         (off64_t)((uintptr_t)address + total));
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      ok = false;
+      break;
+    }
+    if (n == 0) {
+      ok = false;
+      break;
+    }
+    total += (size_t)n;
+  }
+
+  close(fd);
+  return ok && total == (size_t)buffer_size;
+}
+#endif
+
+PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t buffer_size) {
+  int page_size = (int)sysconf(_SC_PAGESIZE);
+  uintptr_t page_align_address = ALIGN_FLOOR(address, page_size);
+  int offset = (uintptr_t)address - page_align_address;
+
+  bool patched = false;
+
+#if defined(__ANDROID__) || defined(__linux__)
+  // Jalur utama: tulis lewat /proc/self/mem. Portabel lintas versi Android dan
+  // tidak pernah butuh halaman writable — inilah yang membuatnya lolos W^X.
+  patched = sbx_write_via_proc_self_mem(address, buffer, buffer_size);
+#endif
+
+  // Fallback: kernel lama / tanpa W^X, atau /proc/self/mem dibatasi kebijakan
+  // (atau platform POSIX non-Linux/Android yang tak punya /proc/self/mem sama
+  // sekali). Ubah izin halaman jadi RWX, memcpy, lalu kembalikan ke R-X. Nilai
+  // balik mprotect diperiksa agar tidak pernah lagi menulis ke halaman
+  // non-writable. Tangani SEMUA halaman yang dilintasi patch (awal, tengah,
+  // akhir) — paritas dengan Dobby upstream terbaru yang memperbaiki bug
+  // cross-page versi 2021 (versi lama cuma mem-mprotect halaman awal).
+  if (!patched) {
+    uintptr_t start_page = page_align_address;
+    uintptr_t end_page = ALIGN_FLOOR((uintptr_t)address + buffer_size - 1, page_size);
+    size_t page_count = ((end_page - start_page) / (uintptr_t)page_size) + 1;
+
+    bool mprotect_ok = true;
+    for (size_t i = 0; i < page_count; ++i) {
+      uintptr_t p = start_page + i * (uintptr_t)page_size;
+      if (mprotect((void *)p, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        mprotect_ok = false;
+        break;
+      }
+    }
+
+    if (mprotect_ok) {
+      memcpy((void *)((addr_t)page_align_address + offset), buffer, buffer_size);
+      for (size_t i = 0; i < page_count; ++i) {
+        uintptr_t p = start_page + i * (uintptr_t)page_size;
+        mprotect((void *)p, page_size, PROT_READ | PROT_EXEC);
+      }
+      patched = true;
+    }
+  }
+
+  if (!patched)
+    return kMemoryOperationError;
+
+  addr_t clear_start_ = (addr_t)page_align_address + offset;
+  ClearCache((void *)clear_start_, (void *)(clear_start_ + buffer_size));
+  return kMemoryOperationSuccess;
+}
+
+#endif
