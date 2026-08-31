@@ -69,9 +69,9 @@ inline void* sbx_inline_hooker(void* target, void* hooker) {
 inline bool sbx_inline_unhooker(void* func) { return DobbyDestroy(func) == 0; }
 
 inline bool init(JNIEnv* env) {
-    if (!env) return false;
+    if (!env) { SBX_LSP_LOGE("L3 init: env NULL — dibatalkan"); return false; }
     static bool done = false, ok = false;
-    if (done) return ok;
+    if (done) { if (!ok) SBX_LSP_LOGE("L3 init: cached-fail (init sebelumnya gagal)"); return ok; }
     done = true;
 
     static lsparself::Elf art("/libart.so");
@@ -91,6 +91,10 @@ inline bool init(JNIEnv* env) {
     info.generated_source_name = kSrc;
     info.generated_field_name  = kFld;
 
+    // Diagnostik: apakah resolver ELF menemukan simbol libart? art.valid()==0
+    // berarti /libart.so tak ketemu di /proc/self/maps atau symtab/.gnu_debugdata
+    // gagal di-parse → lsplant::Init pasti gagal. Log ungated agar terlihat.
+    SBX_LSP_LOGE("L3 init: art.valid=%d — memanggil lsplant::Init", art.valid() ? 1 : 0);
     ok = lsplant::Init(env, info);
     if (!ok) SBX_LSP_LOGE("lsplant::Init failed — L3 disabled this process (L1/L2 tetap)");
     else     SBX_LSP_LOGD("lsplant::Init ok");
@@ -510,7 +514,18 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
 }
 
 inline bool install_all(JNIEnv* env, const HookValues& v) {
-    if (!env) return false;
+    // Diagnostik masuk (ungated): jika baris ini TIDAK muncul di logcat padahal
+    // main.cpp mencetak "L3 hooks not installed", berarti binary terpasang ≠
+    // source (mismatch build), bukan bug logika di sini.
+    SBX_LSP_LOGE("L3 install_all: masuk (env=%p, have_hook_dex=%d)",
+                 (void*)env,
+#ifdef SBX_HAVE_HOOK_DEX
+                 1
+#else
+                 0
+#endif
+    );
+    if (!env) { SBX_LSP_LOGE("L3 install_all: env NULL — dibatalkan"); return false; }
     if (!init(env)) return false;
 
     if (!g_cb_class) {

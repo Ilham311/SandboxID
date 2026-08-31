@@ -1299,12 +1299,22 @@ public:
         blob_.resize(len);
         if (!sandboxid::read_full(fd, blob_.data(), len)) { ::close(fd); unload(); return; }
 
-        // Jangan bawa socket companion melewati specialize: zygote menyapu fd
-        // (exemptFd tak selalu tersedia) dan jeda multi-detik sampai DO_MOUNTS
-        // (setelah semua hook L3/L9 terpasang) melampaui SO_RCVTIMEO companion.
-        // Tutup di sini; sambung ulang fresh di postAppSpecialize untuk
-        // DO_MOUNTS/DO_HIDE — SO_PEERCRED tetap valid karena pid app stabil.
-        ::close(fd);
+        // connectCompanion() HANYA boleh dipanggil di pre*Specialize (lihat
+        // jni/zygisk.hpp:213 — "This API only works in the pre[XXX]Specialize
+        // methods due to SELinux restrictions"). DO_MOUNTS wajib pasca-specialize
+        // (butuh pid app + mount-ns app sudah jadi untuk setns), jadi socket ini
+        // HARUS dibawa melewati specialize. exemptFd melindunginya dari fd-sweep
+        // zygote (jni/zygisk.hpp:250-256); tanpa itu child akan crash karena fd
+        // bocor (ZygiskNext wiki: leaked pre-specialize fd → forked child crash).
+        // Gap sampai DO_MOUNTS ditoleransi di sisi companion (SBX_IDLE_TIMEOUT).
+        if (api_->exemptFd(fd)) {
+            comp_fd_ = fd;
+        } else {
+            LOGW("exemptFd(fd=%d) gagal — socket akan disapu zygote; bind-mount "
+                 "dilewati untuk proses ini", fd);
+            ::close(fd);
+            comp_fd_ = -1;
+        }
 
         active_  = true;
         pkg_     = pkg;
@@ -1362,22 +1372,16 @@ public:
         }
 #endif
 
-        // Sambungan companion baru khusus bind-mount pasca-specialize. Socket
-        // pre-specialize sudah ditutup; ini menghilangkan ketergantungan pada
-        // exemptFd dan menghindari jeda idle yang memicu SO_RCVTIMEO companion.
-        // Otorisasi DO_MOUNTS (SO_PEERCRED pid==peer.pid) tetap lolos karena pid
-        // app stabil melewati specialize.
-        {
-            int mfd = api_->connectCompanion();
-            if (mfd >= 0) {
-                ::setsockopt(mfd, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
-                ::setsockopt(mfd, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
-                request_companion_mounts(mfd);
-                if (val("SBX_HIDE") == "1") request_companion_hide(mfd);
-                ::close(mfd);
-            } else {
-                LOGW("connectCompanion() pasca-specialize gagal — bind-mount dilewati");
-            }
+        // Kirim DO_MOUNTS/DO_HIDE lewat socket companion yang dibawa dari
+        // preAppSpecialize (connectCompanion tak bisa dipanggil di sini).
+        // Companion menahan koneksi selama gap specialize via SBX_IDLE_TIMEOUT.
+        if (comp_fd_ >= 0) {
+            request_companion_mounts(comp_fd_);
+            if (val("SBX_HIDE") == "1") request_companion_hide(comp_fd_);
+            ::close(comp_fd_);
+            comp_fd_ = -1;
+        } else {
+            LOGW("socket companion tak tersedia (exemptFd gagal) — bind-mount dilewati");
         }
     }
 
@@ -1386,6 +1390,7 @@ public:
 private:
     Api* api_ = nullptr;
     JNIEnv* env_ = nullptr;
+    int comp_fd_ = -1;
     std::string pkg_;
     bool active_ = false;
     std::vector<uint8_t> blob_;

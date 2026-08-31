@@ -42,6 +42,12 @@
 #endif
 
 static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
+// Timeout longgar khusus MENUNGGU perintah berikutnya di puncak loop. Antara
+// GET_IDENTITY (preAppSpecialize) dan DO_MOUNTS (postAppSpecialize) ada jeda
+// specialize app — pemasangan hook L3/L9 bisa makan >2 detik — jadi memakai
+// SBX_IO_TIMEOUT (2s) di sini akan memutus koneksi sebelum DO_MOUNTS tiba.
+// Payload tiap perintah tetap dibaca dengan SBX_IO_TIMEOUT (2s) yang ketat.
+static constexpr struct timeval SBX_IDLE_TIMEOUT = {30, 0};
 
 static void watch_target_death(uint32_t pid, int client_fd);
 
@@ -473,7 +479,11 @@ extern "C" void sandboxid_companion(int client) {
 
     while (true) {
         uint8_t cmd = 0;
+        // Tunggu perintah berikutnya dengan timeout longgar (jeda specialize),
+        // lalu perketat kembali ke SBX_IO_TIMEOUT untuk membaca payload-nya.
+        ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &SBX_IDLE_TIMEOUT, sizeof(SBX_IDLE_TIMEOUT));
         if (!sandboxid::read_full(client, &cmd, 1)) break;
+        ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
         LOGD("recv cmd=%u", cmd);
 
         if (cmd == sandboxid::CMD_GET_IDENTITY) {
