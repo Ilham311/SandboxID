@@ -1,7 +1,7 @@
 // ============================================================================
 // SandboxID patch untuk Dobby — CodePatch() ramah W^X (Android 15 / API 35).
 //
-// DUA crash berurutan yang ditangani file ini:
+// TIGA crash berurutan yang ditangani file ini:
 //
 // [CRASH #1 — WRITE fault di memcpy]  Dobby yang di-pin (LSPosed/Dobby @ edb2af1,
 //   2021) menulis kode lewat mprotect(PROT_READ|PROT_WRITE|PROT_EXEC) + memcpy
@@ -23,25 +23,37 @@
 //   Gejala identik dilaporkan di bytedance/android-inline-hook#96 ("PROT_EXEC
 //   asli suatu alamat terhapus → crash runtime").
 //
-// FIX:
-//   (Jalur 1, utama) Tulis byte kode lewat /proc/self/mem (pwrite64). Kernel
-//     melayani tulisan ini dengan FOLL_FORCE sehingga menembus halaman R-X tanpa
-//     mengubahnya jadi W+X, dan TIDAK meminta izin SELinux execmem/execmod.
-//     Lalu PULIHKAN exec: paksa PTE ditulis ulang dengan mprotect(R) → mprotect
-//     (R|X). Perlu drop-lalu-restore karena mprotect(R|X) langsung akan no-op
-//     saat flag VMA sudah == R|X (kernel mem-bypass PTE-walk bila
-//     newflags==oldflags), sehingga bit exec PTE yang tercabut tak tertulis
-//     ulang. Kita TAK PERNAH minta W+X (aman W^X) dan berakhir di R|X.
-//   (Jalur 2, fallback) Dua-langkah mprotect(R|W) → memcpy → mprotect(R|X):
-//     untuk kernel yang membatasi /proc/self/mem tapi mengizinkan penulisan via
-//     mprotect. Tetap tak pernah minta W+X simultan (beda dari RWX Dobby lama).
+// [CRASH #3 — EXECUTE fault, SAMA dengan #2, TAPI fix #2 sudah ter-ship]  Pada
+//   modul v2.1.19 (device google/tegu-spoof, kernel custom A15, proses usap64)
+//   crash #2 MUNCUL LAGI di SetRuntimeDebugState+0 walau .so terbukti memuat fix
+//   #2. Artinya "tulis /proc/self/mem lalu restore exec" TIDAK cukup: di kernel
+//   ketat ini, halaman .text yang di-COW oleh FOLL_FORCE tampaknya tak bisa
+//   dikembalikan executable. Dobby upstream (LSPosed & JingMatrix) justru TIDAK
+//   memakai /proc/self/mem — DobbyCodePatch cukup mprotect(RWX)→memcpy→mprotect
+//   (RX) dan itu jalan di mayoritas A15. Maka akar masalah #3 = jalur
+//   /proc/self/mem yang kita dahulukan. PERBAIKAN #3: balik urutan jalur —
+//   dahulukan mprotect(R|W)→memcpy→mprotect(R|X) (W^X-safe, halaman di-COW selagi
+//   VMA writable → boleh balik R|X), /proc/self/mem hanya fallback.
+//
+// FIX (urutan jalur DIBALIK sejak crash #3 — mprotect diutamakan, /proc/self/mem
+//      diturunkan jadi fallback karena JUSTRU memicu crash #3):
+//   (Jalur 1, utama) mprotect(R|W) → memcpy → mprotect(R|X). Pola JIT standar,
+//     sejalan Dobby upstream (DobbyCodePatch) TAPI tanpa W+X simultan → aman W^X.
+//     Halaman di-COW selagi VMA-nya writable (R|W) sehingga kernel memperlakukan
+//     sebagai halaman data biasa; transisi balik ke R|X dipatuhi — TIDAK
+//     meninggalkan halaman COW non-exec seperti jalur /proc/self/mem.
+//   (Jalur 2, fallback) Tulis via /proc/self/mem (pwrite64, FOLL_FORCE menembus
+//     halaman R-X) untuk .text execute-only/tersegel yang menolak +W, lalu PAKSA
+//     pulihkan exec mprotect(R) → mprotect(R|X). CATATAN: jalur inilah yang
+//     memicu crash #3 (COW men-dirty selagi VMA r-x → kernel ketat mencabut
+//     PROT_EXEC permanen), maka kini hanya dipakai bila Jalur 1 gagal total.
 //   (Jalur 3, fallback terakhir) mprotect(RWX) → memcpy → mprotect(R|X): paritas
-//     Dobby upstream, hanya berhasil di kernel tanpa W^X / dengan sepolicy
-//     execmem termuat. Juga jalur untuk POSIX non-Linux tanpa /proc/self/mem.
-//   Bila SEMUA jalur gagal, fungsi mengembalikan kMemoryOperationError (bukan
-//   menulis paksa) sehingga hook gagal rapi, bukan meng-crash proses. Nilai balik
-//   mprotect + errno dicatat ke logcat (tag "SandboxID-Dobby") agar mekanisme
-//   W^X device dapat dipastikan dari log berikutnya.
+//     Dobby upstream, hanya berhasil di kernel tanpa W^X. Juga jalur POSIX
+//     non-Linux tanpa /proc/self/mem.
+//   Bila SEMUA jalur gagal, fungsi mengembalikan kMemoryOperationError (hook
+//   gagal rapi, bukan meng-crash proses). Nilai balik mprotect + errno dicatat ke
+//   logcat (tag "SandboxID-Dobby") — JANGAN filter tag ini saat menangkap logcat,
+//   atau diagnosis jalur & W^X device tak akan terlihat di log.
 //
 //   Ukuran halaman diambil dinamis dari sysconf(_SC_PAGESIZE) (aman untuk device
 //   16KB seperti sebagian ColorOS A15) dan SEMUA halaman yang dilintasi patch
@@ -134,56 +146,53 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
   bool patched = false;
 
 #if defined(__ANDROID__) || defined(__linux__)
-  // -- Jalur 1 (utama): tulis via /proc/self/mem, lalu PULIHKAN exec. --
-  // Tulisan men-dirty (COW) halaman .text; di kernel W^X ketat halaman COW bisa
-  // kehilangan PROT_EXEC → fungsi se-halaman gagal dieksekusi (SetRuntimeDebug-
-  // State execute-fault). VMA tetap r-x sepanjang jalur ini (tak pernah kita
-  // jadikan writable), jadi mprotect(R|X) di bawah BUKAN "exec gain on writable".
-  // Paksa PTE ditulis ulang lewat R → R|X karena mprotect ke flag yang sama
-  // (R|X == R|X) di-bypass kernel (newflags==oldflags) sehingga bit exec tak
-  // dipulihkan.
-  if (sbx_write_via_proc_self_mem(address, buffer, buffer_size)) {
-    if (mprotect((void *)start_page, range_len, PROT_READ) != 0) {
-      SBX_DOBBY_LOGE("CodePatch: drop-exec (PROT_READ) gagal @%p len=%zu (errno=%d %s)",
-                     (void *)start_page, range_len, errno, strerror(errno));
-    } else if (mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
+  // -- Jalur 1 (utama): mprotect(R|W) → memcpy → mprotect(R|X). --
+  // Pola JIT standar, sejalan dengan Dobby upstream tetapi TANPA meminta W+X
+  // simultan (RWX), jadi aman di kernel W^X. Halaman di-COW selagi VMA-nya
+  // writable (R|W) sehingga kernel memperlakukannya sebagai halaman data biasa;
+  // transisi balik ke R|X dipatuhi. Berbeda dari tulis via /proc/self/mem
+  // (FOLL_FORCE) yang men-dirty halaman selagi VMA masih r-x → sebagian kernel
+  // ketat (custom A15) MENCABUT PROT_EXEC halaman COW itu permanen → fungsi
+  // se-halaman yang DIPANGGIL langsung LSPlant (SetRuntimeDebugState) execute-
+  // fault. Karena itu jalur mprotect kini DIDAHULUKAN (akar masalah crash #3).
+  if (mprotect((void *)start_page, range_len, PROT_READ | PROT_WRITE) == 0) {
+    memcpy(address, buffer, buffer_size);
+    if (mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
       patched = true;
-      static bool sbx_logged_once = false;
-      if (!sbx_logged_once) {
-        sbx_logged_once = true;
-        SBX_DOBBY_LOGI("CodePatch: jalur /proc/self/mem + restore-exec aktif (page_size=%zu)",
-                       page_size);
+      static bool sbx_logged_rw = false;
+      if (!sbx_logged_rw) {
+        sbx_logged_rw = true;
+        SBX_DOBBY_LOGI("CodePatch: jalur mprotect(R|W→R|X) aktif (page_size=%zu)", page_size);
       }
     } else {
-      SBX_DOBBY_LOGE("CodePatch: pulihkan exec gagal @%p len=%zu (errno=%d %s) — mencoba pulihkan R|X sekali lagi",
+      SBX_DOBBY_LOGE("CodePatch: R|X pasca-R|W gagal @%p len=%zu (errno=%d %s)",
                      (void *)start_page, range_len, errno, strerror(errno));
-      // Halaman sekarang tersangkut di PROT_READ (non-exec, non-write) karena
-      // restore gagal. Jangan biarkan begitu saja / jangan turun ke Jalur 2
-      // (yang akan mprotect R|W lalu memcpy ULANG byte yang SUDAH ditulis) —
-      // coba sekali lagi pulihkan R|X agar minimal exec-bit balik seperti semula.
-      if (mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
-        patched = true;
-      } else {
-        SBX_DOBBY_LOGE("CodePatch: percobaan ulang pulihkan R|X gagal @%p len=%zu (errno=%d %s)",
-                       (void *)start_page, range_len, errno, strerror(errno));
-      }
     }
+  } else {
+    SBX_DOBBY_LOGE("CodePatch: mprotect R|W gagal @%p len=%zu (errno=%d %s) — coba /proc/self/mem",
+                   (void *)start_page, range_len, errno, strerror(errno));
   }
 
-  // -- Jalur 2 (fallback): dua-langkah mprotect W^X-safe (R|W → R|X). --
+  // -- Jalur 2 (fallback): /proc/self/mem (pwrite64) + PAKSA pulihkan exec. --
+  // Untuk .text yang tak boleh ditambah PROT_WRITE (execute-only / tersegel) di
+  // mana mprotect(R|W) di Jalur 1 ditolak. FOLL_FORCE menembus halaman R-X. Lalu
+  // paksa PTE ditulis ulang R → R|X (mprotect ke flag sama di-bypass kernel bila
+  // newflags==oldflags). CATATAN: jalur inilah yang memicu crash #3 di kernel
+  // ketat (COW-strip-exec), jadi SENGAJA hanya dipakai bila Jalur 1 gagal total.
   if (!patched) {
-    if (mprotect((void *)start_page, range_len, PROT_READ | PROT_WRITE) == 0) {
-      memcpy(address, buffer, buffer_size);
-      if (mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
+    if (sbx_write_via_proc_self_mem(address, buffer, buffer_size)) {
+      if (mprotect((void *)start_page, range_len, PROT_READ) == 0 &&
+          mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
         patched = true;
-        SBX_DOBBY_LOGI("CodePatch: fallback dua-langkah (R|W→R|X) dipakai");
+        SBX_DOBBY_LOGI("CodePatch: jalur /proc/self/mem + restore-exec dipakai @%p len=%zu",
+                       (void *)start_page, range_len);
       } else {
-        SBX_DOBBY_LOGE("CodePatch: R|X pasca-R|W gagal @%p (errno=%d %s)",
-                       (void *)start_page, errno, strerror(errno));
+        SBX_DOBBY_LOGE("CodePatch: pulihkan exec pasca-/proc/self/mem gagal @%p len=%zu (errno=%d %s)",
+                       (void *)start_page, range_len, errno, strerror(errno));
+        if (mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
+          patched = true;
+        }
       }
-    } else {
-      SBX_DOBBY_LOGE("CodePatch: mprotect R|W gagal @%p (errno=%d %s)",
-                     (void *)start_page, errno, strerror(errno));
     }
   }
 #endif
