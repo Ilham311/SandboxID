@@ -593,6 +593,50 @@ static void test_applog_xml_synth() {
     CHECK(twice == patched, "second patch is a no-op");
 }
 
+static void test_uptime_stat() {
+    using namespace sbxnr;
+    // classify jalur baru
+    CHECK(classify("/proc/uptime") == UPTIME, "uptime classifies");
+    CHECK(classify("/proc/stat") == STAT, "stat classifies");
+
+    // off <= 0 -> tak berubah
+    CHECK(patch_uptime("12345.67 98765.43\n", 0) == "12345.67 98765.43\n",
+          "uptime off=0 passthrough");
+    CHECK(patch_stat_btime("btime 1700000000\n", 0) == "btime 1700000000\n",
+          "stat off=0 passthrough");
+
+    // uptime bertambah off detik
+    std::string up = patch_uptime("100.00 50.00\n", 3600);
+    CHECK(up.rfind("3700.00", 0) == 0, "uptime += 3600");
+    CHECK(up.find(" 50.00\n") != std::string::npos, "uptime idle field kept");
+
+    // uptime dengan spasi awal + tanpa newline
+    std::string up2 = patch_uptime("  10.50 20.00", 5);
+    CHECK(up2 == "  10.50 20.00" || up2.find("15.50") != std::string::npos,
+          "uptime leading ws handled");
+    CHECK(patch_uptime("15.50", 5) == "15.50" ||
+          patch_uptime("garbage", 5) == "garbage", "uptime malformed passthrough");
+
+    // btime berkurang off detik (boot lebih awal)
+    std::string st = patch_stat_btime(
+        "cpu  1 2 3 4\nbtime 1700000000\nprocesses 99\n", 100);
+    CHECK(st.find("btime 1699999900\n") != std::string::npos, "btime -= 100");
+    CHECK(st.find("cpu  1 2 3 4\n") != std::string::npos, "stat cpu line kept");
+    CHECK(st.find("processes 99") != std::string::npos, "stat trailing kept");
+
+    // btime tak boleh underflow di bawah 0
+    std::string st2 = patch_stat_btime("btime 50\n", 100);
+    CHECK(st2 == "btime 50\n", "btime underflow guarded (unchanged)");
+
+    // "btime" bukan di awal baris tak match
+    CHECK(patch_stat_btime("xbtime 1700000000\n", 10) == "xbtime 1700000000\n",
+          "btime not-at-line-start ignored");
+
+    // ram_gb_to_memtotal_kb + round_up_marketing dipakai sysinfo path
+    CHECK(round_up_marketing_gb(ram_gb_to_memtotal_kb(8)) == 8,
+          "8GB roundtrips through marketing tier");
+}
+
 int main() {
     test_uuid();
     test_mac();
@@ -600,6 +644,7 @@ int main() {
     test_proc_version();
     test_meminfo();
     test_pixel_ram();
+    test_uptime_stat();
     test_cpuinfo();
     test_classify();
     test_hex_from_seed();

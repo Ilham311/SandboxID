@@ -173,7 +173,10 @@ private:
         vaddr_bias_ = 0;
         bool have_bias = false;
         const size_t phnum = eh->e_phnum;
-        if (eh->e_phoff && phnum) {
+        if (eh->e_phoff && phnum &&
+            eh->e_phentsize >= sizeof(ElfW(Phdr)) &&
+            eh->e_phoff <= image_size_ &&
+            phnum <= (image_size_ - eh->e_phoff) / eh->e_phentsize) {
             for (size_t i = 0; i < phnum; ++i) {
                 auto* ph = reinterpret_cast<ElfW(Phdr)*>(
                     base + eh->e_phoff + i * eh->e_phentsize);
@@ -186,6 +189,12 @@ private:
 
         const size_t shnum = eh->e_shnum;
         if (!eh->e_shoff || !shnum) return;
+        // Bounds-check tabel section-header terhadap ukuran image sebelum
+        // di-index (mencegah OOB pada libart yang cacat/terpotong). Kode meng-
+        // index sh[i] sebagai array Shdr rapat, jadi entsize diasumsikan
+        // sizeof(Shdr).
+        if (eh->e_shoff > image_size_ ||
+            shnum > (image_size_ - eh->e_shoff) / sizeof(ElfW(Shdr))) return;
         auto* sh = reinterpret_cast<ElfW(Shdr)*>(base + eh->e_shoff);
 
         const ElfW(Shdr)* dynsym_sh = nullptr;
@@ -200,8 +209,10 @@ private:
             if (static_cast<size_t>(symsh->sh_link) >= shnum) return;
             const ElfW(Shdr)& strsh = sh[symsh->sh_link];
 
-            if (symsh->sh_offset + symsh->sh_size > image_size_) return;
-            if (strsh.sh_offset  + strsh.sh_size  > image_size_) return;
+            if (symsh->sh_offset > image_size_ ||
+                symsh->sh_size > image_size_ - symsh->sh_offset) return;
+            if (strsh.sh_offset > image_size_ ||
+                strsh.sh_size  > image_size_ - strsh.sh_offset) return;
             out.syms  = reinterpret_cast<const ElfW(Sym)*>(base + symsh->sh_offset);
             out.count = static_cast<size_t>(symsh->sh_size / symsh->sh_entsize);
             out.str   = reinterpret_cast<const char*>(base + strsh.sh_offset);

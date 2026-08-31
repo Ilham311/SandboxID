@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <net/if_arp.h>
@@ -48,6 +49,17 @@
 #  define __NR_memfd_create 319
 # elif defined(__i386__)
 #  define __NR_memfd_create 356
+# endif
+#endif
+#ifndef __NR_sysinfo
+# if defined(__aarch64__)
+#  define __NR_sysinfo 179
+# elif defined(__arm__)
+#  define __NR_sysinfo 116
+# elif defined(__x86_64__)
+#  define __NR_sysinfo 99
+# elif defined(__i386__)
+#  define __NR_sysinfo 116
 # endif
 #endif
 
@@ -541,6 +553,7 @@ typedef void  (*sbx_sysprop_cb)(void*, const char*, const char*, uint32_t);
 typedef void  (*sbx_sysprop_read_cb_fn)(const void*, sbx_sysprop_cb, void*);
 typedef int   (*sbx_ioctl_fn)(int, unsigned long, void*);
 typedef int   (*sbx_getifaddrs_fn)(struct ifaddrs**);
+typedef int   (*sbx_sysinfo_fn)(struct sysinfo*);
 
 static sbx_open_fn   orig_open   = nullptr;
 static sbx_openat_fn orig_openat = nullptr;
@@ -550,6 +563,7 @@ static sbx_sysprop_read_fn    orig_sysprop_read    = nullptr;
 static sbx_sysprop_read_cb_fn  orig_sysprop_read_cb  = nullptr;
 static sbx_ioctl_fn      orig_ioctl      = nullptr;
 static sbx_getifaddrs_fn orig_getifaddrs = nullptr;
+static sbx_sysinfo_fn    orig_sysinfo    = nullptr;
 
 static std::atomic<bool> g_native_read_active{false};
 static std::string g_boot_id;
@@ -667,6 +681,20 @@ static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& o
             std::string real = sbx_read_real("/proc/cpuinfo");
             if (real.empty()) return false;
             return sbxnr::patch_cpuinfo(real, g_cpu_action, g_cpu_repl, out);
+        }
+        case sbxnr::UPTIME: {
+            if (g_boot_off_sec <= 0) return false;
+            std::string real = sbx_read_real("/proc/uptime");
+            if (real.empty()) return false;
+            out = sbxnr::patch_uptime(real, static_cast<long long>(g_boot_off_sec));
+            return true;
+        }
+        case sbxnr::STAT: {
+            if (g_boot_off_sec <= 0) return false;
+            std::string real = sbx_read_real("/proc/stat");
+            if (real.empty()) return false;
+            out = sbxnr::patch_stat_btime(real, static_cast<long long>(g_boot_off_sec));
+            return true;
         }
         case sbxnr::APPLOG_XML: {
             if (!g_applog_ok) return false;
@@ -797,6 +825,31 @@ static int sbx_getifaddrs(struct ifaddrs** ifap) {
     return r;
 }
 
+static int sbx_sysinfo(struct sysinfo* info) {
+    int r = orig_sysinfo ? orig_sysinfo(info)
+                         : (int)syscall(__NR_sysinfo, info);
+    if (r != 0 || !info || !g_native_read_active) return r;
+    // Selaraskan totalram dengan /proc/meminfo (tier marketing yang sama) dan
+    // uptime dengan offset boottime L8, supaya sysinfo(2) tak membocorkan RAM
+    // asli atau uptime asli ketika app membacanya lewat jalur syscall langsung.
+    unsigned long unit = info->mem_unit ? info->mem_unit : 1UL;
+    uint64_t target_kb = 0;
+    if (g_ram_gb > 0) {
+        target_kb = sbxnr::ram_gb_to_memtotal_kb(g_ram_gb);
+    } else if (info->totalram) {
+        uint64_t real_kb = static_cast<uint64_t>(info->totalram) * unit / 1024ULL;
+        target_kb = sbxnr::ram_gb_to_memtotal_kb(
+            static_cast<int>(sbxnr::round_up_marketing_gb(real_kb)));
+    }
+    if (target_kb) {
+        uint64_t target_bytes = target_kb * 1024ULL;
+        info->totalram = static_cast<unsigned long>(target_bytes / unit);
+        if (info->freeram > info->totalram) info->freeram = info->totalram;
+    }
+    if (g_boot_off_sec > 0) info->uptime += static_cast<long>(g_boot_off_sec);
+    return r;
+}
+
 static void sbx_register_lib_hooks(Api* api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "__system_property_get",
                          reinterpret_cast<void*>(sbx_sysprop_get),  reinterpret_cast<void**>(&orig_sysprop_get));
@@ -820,6 +873,8 @@ static void sbx_register_lib_hooks(Api* api, dev_t dev, ino_t ino) {
                          reinterpret_cast<void*>(sbx_ioctl),  reinterpret_cast<void**>(&orig_ioctl));
     api->pltHookRegister(dev, ino, "getifaddrs",
                          reinterpret_cast<void*>(sbx_getifaddrs), reinterpret_cast<void**>(&orig_getifaddrs));
+    api->pltHookRegister(dev, ino, "sysinfo",
+                         reinterpret_cast<void*>(sbx_sysinfo), reinterpret_cast<void**>(&orig_sysinfo));
 }
 
 static int sbx_register_across_libs(Api* api) {
@@ -863,7 +918,8 @@ static void install_native_read_hooks(Api* api) {
 
     g_proc_version = sbxnr::synth_proc_version(val("RELEASE"), val("INCREMENTAL"),
                                                val("BOARD_PLATFORM"), val("HOST"), seed);
-    g_ram_gb     = sbxnr::pixel_ram_gb(val("MODEL"));
+    int persona_ram = std::atoi(val("RAM_GB").c_str());
+    g_ram_gb     = persona_ram > 0 ? persona_ram : sbxnr::pixel_ram_gb(val("MODEL"));
     g_cpu_action = sbxnr::cpu_action_for(val("SOC_MANUFACTURER"), val("SOC_MODEL"), g_cpu_repl);
 
     if (!g_pkg.empty()) {
@@ -886,6 +942,7 @@ static void install_native_read_hooks(Api* api) {
     if (!orig_fopen)  orig_fopen  = reinterpret_cast<sbx_fopen_fn>(dlsym(RTLD_DEFAULT, "fopen"));
     if (!orig_ioctl)      orig_ioctl      = reinterpret_cast<sbx_ioctl_fn>(dlsym(RTLD_DEFAULT, "ioctl"));
     if (!orig_getifaddrs) orig_getifaddrs = reinterpret_cast<sbx_getifaddrs_fn>(dlsym(RTLD_DEFAULT, "getifaddrs"));
+    if (!orig_sysinfo)    orig_sysinfo    = reinterpret_cast<sbx_sysinfo_fn>(dlsym(RTLD_DEFAULT, "sysinfo"));
 
     int libs = sbx_register_across_libs(api);
     if (libs == 0) {
@@ -1223,10 +1280,6 @@ public:
         ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
 
-        if (!api_->exemptFd(fd))
-            LOGW("exemptFd(fd=%d) returned false — companion socket may be closed by "
-                 "zygote; bind-mount step will be skipped for this process", fd);
-
         uint8_t cmd   = sandboxid::CMD_GET_IDENTITY;
         uint16_t plen = (uint16_t)pkg.size();
         if (!sandboxid::write_full(fd, &cmd, 1) ||
@@ -1247,9 +1300,15 @@ public:
         blob_.resize(len);
         if (!sandboxid::read_full(fd, blob_.data(), len)) { ::close(fd); unload(); return; }
 
+        // Jangan bawa socket companion melewati specialize: zygote menyapu fd
+        // (exemptFd tak selalu tersedia) dan jeda multi-detik sampai DO_MOUNTS
+        // (setelah semua hook L3/L9 terpasang) melampaui SO_RCVTIMEO companion.
+        // Tutup di sini; sambung ulang fresh di postAppSpecialize untuk
+        // DO_MOUNTS/DO_HIDE — SO_PEERCRED tetap valid karena pid app stabil.
+        ::close(fd);
+
         active_  = true;
         pkg_     = pkg;
-        comp_fd_ = fd;
 
         LOGI("target active (%u B) [%s]", len, SBX_VARIANT_TAG);
         LOGD("target pkg='%s'", pkg.c_str());
@@ -1304,12 +1363,22 @@ public:
         }
 #endif
 
-        if (comp_fd_ >= 0) {
-            request_companion_mounts(comp_fd_);
-
-            if (val("SBX_HIDE") == "1") request_companion_hide(comp_fd_);
-            ::close(comp_fd_);
-            comp_fd_ = -1;
+        // Sambungan companion baru khusus bind-mount pasca-specialize. Socket
+        // pre-specialize sudah ditutup; ini menghilangkan ketergantungan pada
+        // exemptFd dan menghindari jeda idle yang memicu SO_RCVTIMEO companion.
+        // Otorisasi DO_MOUNTS (SO_PEERCRED pid==peer.pid) tetap lolos karena pid
+        // app stabil melewati specialize.
+        {
+            int mfd = api_->connectCompanion();
+            if (mfd >= 0) {
+                ::setsockopt(mfd, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
+                ::setsockopt(mfd, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
+                request_companion_mounts(mfd);
+                if (val("SBX_HIDE") == "1") request_companion_hide(mfd);
+                ::close(mfd);
+            } else {
+                LOGW("connectCompanion() pasca-specialize gagal — bind-mount dilewati");
+            }
         }
     }
 
@@ -1320,7 +1389,6 @@ private:
     JNIEnv* env_ = nullptr;
     std::string pkg_;
     bool active_ = false;
-    int comp_fd_ = -1;
     std::vector<uint8_t> blob_;
 
     void unload() {
@@ -1337,6 +1405,18 @@ private:
             if (eq == std::string::npos) continue;
             std::string k = line.substr(0, eq);
             std::string v = line.substr(eq + 1);
+            // Rapikan spasi di sekitar key ("KEY = val" -> "KEY") agar cocok
+            // dengan lookup val()/prop_to_identity_map; tanpa ini key "KEY "
+            // tak pernah match dan spoof-nya diam-diam terlewat.
+            while (!k.empty() && (k.back()==' ' || k.back()=='\t' || k.back()=='\r'))
+                k.pop_back();
+            size_t ks = 0;
+            while (ks < k.size() && (k[ks]==' ' || k[ks]=='\t')) ++ks;
+            if (ks) k.erase(0, ks);
+            // symmetric trim of value (mirror the key handling)
+            size_t vs = 0;
+            while (vs < v.size() && (v[vs]==' ' || v[vs]=='\t')) ++vs;
+            if (vs) v.erase(0, vs);
             while (!v.empty() && (v.back()=='\r' || v.back()=='\n' || v.back()==' '))
                 v.pop_back();
             if (!k.empty()) g_identity[k] = v;

@@ -341,6 +341,57 @@ inline std::string patch_meminfo(const std::string& real, int target_gb) {
     return out;
 }
 
+// /proc/uptime: "UPTIME IDLE\n". L8 menggeser boottime +off detik, jadi
+// perangkat tampak sudah menyala lebih lama; tambahkan off ke field pertama
+// (uptime). Field kedua (idle) dibiarkan.
+inline std::string patch_uptime(const std::string& real, long long off_sec) {
+    if (off_sec <= 0) return real;
+    size_t i = 0, n = real.size();
+    while (i < n && (real[i] == ' ' || real[i] == '\t')) ++i;
+    size_t start = i;
+    while (i < n && real[i] != ' ' && real[i] != '\t' && real[i] != '\n') ++i;
+    if (i == start) return real;
+    double up = std::strtod(real.substr(start, i - start).c_str(), nullptr);
+    if (up <= 0.0) return real;
+    up += static_cast<double>(off_sec);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.2f", up);
+    std::string out;
+    out.reserve(real.size() + 8);
+    out.append(real, 0, start);
+    out.append(buf);
+    out.append(real, i, std::string::npos);
+    return out;
+}
+
+// /proc/stat: baris "btime <epoch>". Boottime yang digeser maju +off berarti
+// sistem seolah boot lebih awal, jadi btime dikurangi off detik agar konsisten
+// dengan elapsedRealtime yang bertambah (hindari mismatch mustahil).
+inline std::string patch_stat_btime(const std::string& real, long long off_sec) {
+    if (off_sec <= 0) return real;
+    size_t pos = real.find("btime ");
+    while (pos != std::string::npos && pos != 0 && real[pos - 1] != '\n')
+        pos = real.find("btime ", pos + 1);
+    if (pos == std::string::npos) return real;
+    size_t vstart = pos + 6;
+    size_t vend = vstart;
+    while (vend < real.size() && real[vend] >= '0' && real[vend] <= '9') ++vend;
+    if (vend == vstart) return real;
+    unsigned long long bt =
+        std::strtoull(real.substr(vstart, vend - vstart).c_str(), nullptr, 10);
+    if (bt == 0) return real;
+    unsigned long long ub = static_cast<unsigned long long>(off_sec);
+    unsigned long long nb = (bt > ub) ? bt - ub : bt;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%llu", nb);
+    std::string out;
+    out.reserve(real.size() + 4);
+    out.append(real, 0, vstart);
+    out.append(buf);
+    out.append(real, vend, std::string::npos);
+    return out;
+}
+
 enum CpuAction { CPU_NONE = 0, CPU_QUALCOMM = 1, CPU_MTK = 2, CPU_STRIP = 3 };
 
 inline bool ci_contains(const std::string& hay, const char* needle) {
@@ -414,7 +465,7 @@ inline bool patch_cpuinfo(const std::string& real, int action,
 
 enum Kind {
     NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE,
-    ARP,
+    ARP, UPTIME, STAT,
 
     APPLOG_XML,
     BD_RAW_DID,
@@ -452,6 +503,8 @@ inline Kind classify(const char* path) {
     if (std::strcmp(path, "/proc/version") == 0) return VERSION;
     if (std::strcmp(path, "/proc/meminfo") == 0) return MEMINFO;
     if (std::strcmp(path, "/proc/cpuinfo") == 0) return CPUINFO;
+    if (std::strcmp(path, "/proc/uptime") == 0) return UPTIME;
+    if (std::strcmp(path, "/proc/stat") == 0) return STAT;
 
     if (std::strcmp(path, "/sys/fs/selinux/enforce") == 0) return SELINUX_ENFORCE;
 
