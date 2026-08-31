@@ -143,8 +143,10 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
   // (R|X == R|X) di-bypass kernel (newflags==oldflags) sehingga bit exec tak
   // dipulihkan.
   if (sbx_write_via_proc_self_mem(address, buffer, buffer_size)) {
-    mprotect((void *)start_page, range_len, PROT_READ);
-    if (mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
+    if (mprotect((void *)start_page, range_len, PROT_READ) != 0) {
+      SBX_DOBBY_LOGE("CodePatch: drop-exec (PROT_READ) gagal @%p len=%zu (errno=%d %s)",
+                     (void *)start_page, range_len, errno, strerror(errno));
+    } else if (mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
       patched = true;
       static bool sbx_logged_once = false;
       if (!sbx_logged_once) {
@@ -153,8 +155,18 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
                        page_size);
       }
     } else {
-      SBX_DOBBY_LOGE("CodePatch: pulihkan exec gagal @%p len=%zu (errno=%d %s)",
+      SBX_DOBBY_LOGE("CodePatch: pulihkan exec gagal @%p len=%zu (errno=%d %s) — mencoba pulihkan R|X sekali lagi",
                      (void *)start_page, range_len, errno, strerror(errno));
+      // Halaman sekarang tersangkut di PROT_READ (non-exec, non-write) karena
+      // restore gagal. Jangan biarkan begitu saja / jangan turun ke Jalur 2
+      // (yang akan mprotect R|W lalu memcpy ULANG byte yang SUDAH ditulis) —
+      // coba sekali lagi pulihkan R|X agar minimal exec-bit balik seperti semula.
+      if (mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
+        patched = true;
+      } else {
+        SBX_DOBBY_LOGE("CodePatch: percobaan ulang pulihkan R|X gagal @%p len=%zu (errno=%d %s)",
+                       (void *)start_page, range_len, errno, strerror(errno));
+      }
     }
   }
 
