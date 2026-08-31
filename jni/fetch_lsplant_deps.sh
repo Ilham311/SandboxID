@@ -82,6 +82,27 @@ if [ ! -f "$EXT/dobby/include/dobby.h" ]; then
   echo "ERROR: unexpected Dobby layout — missing $EXT/dobby/include/dobby.h" >&2
   exit 1
 fi
+
+# Patch Dobby agar CodePatch() ramah W^X (Android 15 / API 35).
+# Dobby yang di-pin (2021) menulis kode via mprotect(RWX)+memcpy; di Android 15
+# kernel menolak halaman jadi writable+executable (W^X) sehingga memcpy menabrak
+# halaman R-X -> SIGSEGV SEGV_ACCERR saat lsplant::Init memasang hook. Versi
+# pengganti menulis lewat /proc/self/mem (pwrite64) yang menembus proteksi
+# halaman tanpa RWX. external/ di-gitignore + CI meng-clone Dobby dari awal,
+# jadi patch WAJIB disuntik di sini (edit working copy saja tak sampai ke CI).
+DOBBY_CODEPATCH="$EXT/dobby/source/UserMode/ExecMemory/code-patch-tool-posix.cc"
+DOBBY_CODEPATCH_FIX="$SCRIPT_DIR/patches/dobby_code_patch_tool_posix.cc"
+if [ ! -f "$DOBBY_CODEPATCH" ]; then
+  echo "ERROR: target patch Dobby tidak ada: $DOBBY_CODEPATCH" >&2
+  echo "  (layout Dobby berubah dari pin $DOBBY_REF; sesuaikan path patch)" >&2
+  exit 1
+fi
+if [ ! -f "$DOBBY_CODEPATCH_FIX" ]; then
+  echo "ERROR: file pengganti tidak ada: $DOBBY_CODEPATCH_FIX" >&2
+  exit 1
+fi
+cp "$DOBBY_CODEPATCH_FIX" "$DOBBY_CODEPATCH"
+echo "==> patched Dobby CodePatch (W^X /proc/self/mem) -> $DOBBY_CODEPATCH"
 if [ ! -f "$EXT/xz/linux/lib/xz/xz_dec_stream.c" ] \
    || [ ! -f "$EXT/xz/linux/include/linux/xz.h" ] \
    || [ ! -f "$EXT/xz/userspace/xz_config.h" ]; then
