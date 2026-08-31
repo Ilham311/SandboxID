@@ -102,6 +102,11 @@ if(SBX_ENABLE_LSPLANT)
     endif()
 
     set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
+    # Kita cuma pakai lsplant_static. Target SHARED liblsplant.so v6.4 punya bug
+    # POST_BUILD: make_directory ${DEBUG_SYMBOLS_PATH}/${ANDROID_ABI} dipakai
+    # SEBELUM DEBUG_SYMBOLS_PATH diset -> jadi "/arm64-v8a" (root) -> link gagal
+    # "Error creating directory". Matikan shared build supaya blok itu dilewati.
+    set(LSPLANT_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     add_subdirectory("${SBX_LSP_JNI}" lsplant_build)
     add_subdirectory("${SBX_EXT}/dobby" dobby_build)
     target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby sbx_xz)
