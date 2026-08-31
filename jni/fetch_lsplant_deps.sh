@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EXT="$SCRIPT_DIR/external"
 
 LSPLANT_REPO="${LSPLANT_REPO:-https://github.com/LSPosed/LSPlant.git}"
-LSPLANT_REF="${LSPLANT_REF:-v2.0}"
+LSPLANT_REF="${LSPLANT_REF:-v6.4}"
 DOBBY_REPO="${DOBBY_REPO:-https://github.com/LSPosed/Dobby.git}"
 DOBBY_REF="${DOBBY_REF:-edb2af1216313cf6c0d6771be2b279c1db573faf}"
 XZ_REPO="${XZ_REPO:-https://github.com/tukaani-project/xz-embedded.git}"
@@ -17,14 +17,40 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 mkdir -p "$EXT"
 
+# clone_at repo ref dest [submodule_path ...]
+# Tanpa arg submodule: --recurse-submodules penuh (perilaku lama; dobby/xz).
+# Dengan arg submodule: clone TANPA recurse, lalu init HANYA path yang diminta.
+# Wajib untuk LSPlant v6.4 — .gitmodules-nya punya submodule test-only
+# (test/.../lsparself, test/.../lsprism) berURL SSH git@github.com yang GAGAL di
+# CI (tanpa kunci SSH). Build cuma butuh dex_builder (HTTPS), yang recursively
+# menarik parallel_hashmap (HTTPS). depth di-drop pada submodule: SHA yang
+# di-pin bisa bukan tip branch, jadi shallow fetch gagal.
 clone_at() {
   local repo="$1" ref="$2" dest="$3"
+  shift 3
+  local submods=("$@")
   if [ -d "$dest/.git" ]; then
     echo "==> $dest already present; leaving as-is (rm -rf to refetch)"
     return 0
   fi
   echo "==> cloning $repo @ $ref -> $dest"
   rm -rf "$dest"
+
+  if [ "${#submods[@]}" -gt 0 ]; then
+    if ! git clone --depth 1 --branch "$ref" "$repo" "$dest" 2>/dev/null; then
+      echo "   (shallow --branch '$ref' failed; retrying with full clone + checkout)"
+      rm -rf "$dest"
+      git clone "$repo" "$dest"
+      git -C "$dest" checkout "$ref"
+    fi
+    local sm
+    for sm in "${submods[@]}"; do
+      echo "   -> init submodule: $sm"
+      git -C "$dest" submodule update --init --recursive -- "$sm"
+    done
+    return 0
+  fi
+
   if git clone --depth 1 --branch "$ref" --recurse-submodules --shallow-submodules \
         "$repo" "$dest" 2>/dev/null; then
     return 0
@@ -36,7 +62,8 @@ clone_at() {
   git -C "$dest" submodule update --init --recursive
 }
 
-clone_at "$LSPLANT_REPO" "$LSPLANT_REF" "$EXT/lsplant"
+clone_at "$LSPLANT_REPO" "$LSPLANT_REF" "$EXT/lsplant" \
+         "lsplant/src/main/jni/external/dex_builder"
 clone_at "$DOBBY_REPO"   "$DOBBY_REF"   "$EXT/dobby"
 clone_at "$XZ_REPO"      "$XZ_REF"      "$EXT/xz"
 
