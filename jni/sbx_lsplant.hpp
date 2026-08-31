@@ -137,17 +137,38 @@ inline void sbx_probe_sig_handler(int) { sbx_probe_fault = 1; siglongjmp(sbx_pro
 // bersamaan selagi probe berjalan (mis. crash handler pihak ketiga).
 inline std::mutex sbx_probe_mutex;
 
+// Alt-stack sinyal per-thread: SA_ONSTACK butuh sigaltstack aktif di thread yang
+// SEDANG mendapat sinyal — tanpanya, SIGSEGV akibat stack-overflow (SP sudah
+// invalid) tak bisa dikirim ke handler sama sekali (kernel diam-diam re-raise
+// SIGSEGV default -> proses mati) sekalipun sa_flags berisi SA_ONSTACK. Dipasang
+// sekali per-thread & dibiarkan terpasang (thread_local, dialokasikan statik agar
+// tak butuh unwind saat siglongjmp). Ref: sigaltstack(2), signal-safety(7).
+inline bool sbx_ensure_sigaltstack() {
+    thread_local bool installed = false;
+    if (installed) return true;
+    static thread_local uint8_t stack_mem[SIGSTKSZ > 32768 ? SIGSTKSZ : 32768];
+    stack_t ss{};
+    ss.ss_sp = stack_mem;
+    ss.ss_size = sizeof(stack_mem);
+    ss.ss_flags = 0;
+    installed = sigaltstack(&ss, nullptr) == 0;
+    return installed;
+}
+
 // Coba eksekusi fn (leaf 'ret') di bawah guard sinyal; true bila kembali normal.
 // Menjaga SIGSEGV, SIGBUS, DAN SIGILL — halaman throwaway hasil COW/mmap bisa
 // memicu ketiganya (instruksi tak valid pada level-PTE juga observasinya SIGILL
 // di sejumlah kernel/arch), bukan cuma SEGV/BUS. Akses ke handler proses-lebar
 // diserialisasi lewat sbx_probe_mutex agar tidak balapan dengan thread lain.
+// SA_ONSTACK + sigaltstack terpasang: bila fault sesungguhnya adalah stack-overflow
+// (SP rusak), handler tetap jalan di alt-stack yang sehat alih-alih re-fault diam.
 inline bool sbx_can_execute(void* fn) {
     std::lock_guard<std::mutex> lock(sbx_probe_mutex);
+    sbx_ensure_sigaltstack();
     struct sigaction sa{}, old_segv{}, old_bus{}, old_ill{};
     sa.sa_handler = sbx_probe_sig_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = SA_ONSTACK;
     if (sigaction(SIGSEGV, &sa, &old_segv) != 0) return false;
     if (sigaction(SIGBUS, &sa, &old_bus) != 0) {
         sigaction(SIGSEGV, &old_segv, nullptr);
@@ -169,6 +190,41 @@ inline bool sbx_can_execute(void* fn) {
     sigaction(SIGILL, &old_ill, nullptr);
     return ran && !sbx_probe_fault;
 }
+// Tulis patch ke dst (RWX anon langsung, tanpa ladder mprotect) di bawah guard
+// sinyal yang sama dengan sbx_can_execute — sebagian ROM/hardened-kernel memicu
+// SIGSEGV/SIGBUS saat MENULIS ke halaman anon RWX yang baru di-mmap (bukan cuma
+// saat eksekusi), mis. lewat MTE/PKEY atau kebijakan W^X yang menjebol write itu
+// sendiri. Tanpa guard ini, probe B (lsplant.cc:539 gaya trampolin) bisa
+// meng-crash proses sebelum sempat memutuskan L3 harus dilewati.
+inline bool sbx_write_direct_guarded(void* dst, const uint8_t* patch, size_t patch_len) {
+    std::lock_guard<std::mutex> lock(sbx_probe_mutex);
+    sbx_ensure_sigaltstack();
+    struct sigaction sa{}, old_segv{}, old_bus{}, old_ill{};
+    sa.sa_handler = sbx_probe_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_ONSTACK;
+    if (sigaction(SIGSEGV, &sa, &old_segv) != 0) return false;
+    if (sigaction(SIGBUS, &sa, &old_bus) != 0) {
+        sigaction(SIGSEGV, &old_segv, nullptr);
+        return false;
+    }
+    if (sigaction(SIGILL, &sa, &old_ill) != 0) {
+        sigaction(SIGSEGV, &old_segv, nullptr);
+        sigaction(SIGBUS, &old_bus, nullptr);
+        return false;
+    }
+    sbx_probe_fault = 0;
+    volatile bool wrote = false;
+    if (sigsetjmp(sbx_probe_jmp, 1) == 0) {
+        memcpy(dst, patch, patch_len);
+        wrote = true;
+    }
+    sigaction(SIGSEGV, &old_segv, nullptr);
+    sigaction(SIGBUS, &old_bus, nullptr);
+    sigaction(SIGILL, &old_ill, nullptr);
+    return wrote && !sbx_probe_fault;
+}
+
 // true bila SELURUH rentang [addr, addr+len) tercakup region 'x' di maps.
 inline bool sbx_perms_has_exec(uintptr_t addr, size_t len) {
     FILE* f = fopen("/proc/self/maps", "re");
@@ -346,14 +402,17 @@ inline bool sbx_run_execmem_probe() {
                      errno, strerror(errno));
         return false;
     }
-    memcpy(b, patch, patch_len);
-    bool b_exec = sbx_perms_has_exec((uintptr_t)b, patch_len);
+    bool b_wrote = sbx_write_direct_guarded(b, patch, patch_len);
+    int b_errno = errno;
+    bool b_exec = b_wrote && sbx_perms_has_exec((uintptr_t)b, patch_len);
 #ifdef SBX_LSP_HAVE_EXEC_PROBE
     if (b_exec) { __builtin___clear_cache((char*)b, (char*)b + page); b_exec = sbx_can_execute(b); }
 #endif
     munmap(b, page);
     if (!b_exec) {
-        SBX_LSP_LOGE("probe execmem B (trampolin LSPlant): TAK mampu — RWX anon tak executable; L3 DILEWATI");
+        SBX_LSP_LOGE("probe execmem B (trampolin LSPlant): TAK mampu (wrote=%d errno=%d %s) — "
+                     "RWX anon tak tertulis/executable; L3 DILEWATI",
+                     b_wrote, b_errno, strerror(b_errno));
         return false;
     }
 
@@ -367,15 +426,35 @@ inline bool sbx_run_execmem_probe() {
 // / objek stack ber-destructor di antara sigsetjmp & panggilan: siglongjmp TIDAK
 // meng-unwind stack, jadi tak ada yang bocor. init() satu-shot & sekuensial setelah
 // codepatch_capable() memoized, jadi tak ada probe lain yang balapan pasang handler.
-inline sigjmp_buf              sbx_init_jmp;
-inline volatile sig_atomic_t   sbx_init_fault = 0;
-inline void sbx_init_sig_handler(int) { sbx_init_fault = 1; siglongjmp(sbx_init_jmp, 1); }
+// PENTING: siglongjmp keluar dari lsplant::Init (kode pihak ketiga, di luar
+// kendali kita) TIDAK bisa "bersih" dalam arti penuh — bila fault terjadi persis
+// selagi Init memegang mutex internal (lsplant/ART) atau di tengah malloc/free,
+// lock tersebut TETAP terkunci selamanya (siglongjmp tak memanggil destructor
+// ataupun unlock) & heap arena bisa tertinggal dalam keadaan tak konsisten.
+// Melanjutkan proses seolah aman (mis. lanjut ke install_all/hook lain yang
+// mengambil lock/alokasi baru) berisiko deadlock atau korupsi heap tertunda
+// yang jauh lebih sulit didiagnosis daripada crash asli. Karena itu fault di
+// sini diperlakukan FATAL bagi seluruh proses (bukan sekadar L3 dinonaktifkan):
+// proses dihentikan segera via _exit() dari dalam handler, sebelum kembali ke
+// kode apa pun yang mungkin menyentuh lock/heap yang tertinggal rusak. Zygote
+// akan me-restart proses aplikasi bersih (tanpa state fault ini).
+inline void sbx_init_sig_handler(int sig) {
+    // Async-signal-safe: hanya write(2) mentah, lalu _exit(2) — TIDAK memanggil
+    // siglongjmp (yang akan melanjutkan eksekusi C++ arbitrer di atas lock/heap
+    // yang mungkin rusak). Proses tak akan lanjut, jadi tak ada jmp_buf/flag
+    // untuk dibaca balik.
+    static const char msg[] = "SandboxID: lsplant::Init execute-fault — proses dihentikan (bukan di-recover)\n";
+    (void)sig;
+    ::write(2, msg, sizeof(msg) - 1);
+    ::_exit(127);
+}
 
 inline bool sbx_guarded_lsplant_init(JNIEnv* env, const lsplant::InitInfo& info) {
+    sbx_ensure_sigaltstack();   // SA_ONSTACK: fault SP-rusak (stack-overflow) tetap tertangani
     struct sigaction sa {}, old_segv {}, old_bus {}, old_ill {};
     sa.sa_handler = sbx_init_sig_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = SA_ONSTACK;
     bool h_segv = sigaction(SIGSEGV, &sa, &old_segv) == 0;
     bool h_bus  = h_segv && sigaction(SIGBUS, &sa, &old_bus) == 0;
     bool h_ill  = h_bus  && sigaction(SIGILL, &sa, &old_ill) == 0;
@@ -384,19 +463,11 @@ inline bool sbx_guarded_lsplant_init(JNIEnv* env, const lsplant::InitInfo& info)
         if (h_segv) sigaction(SIGSEGV, &old_segv, nullptr);
         return lsplant::Init(env, info);
     }
-    sbx_init_fault = 0;
-    bool r = false;
-    if (sigsetjmp(sbx_init_jmp, 1) == 0) {
-        r = lsplant::Init(env, info);
-    } else {
-        SBX_LSP_LOGE("lsplant::Init execute-fault (SIGSEGV/BUS/ILL ditangkap) — "
-                     "L3 dinonaktifkan proses ini; L1/L2 tetap jalan");
-        r = false;
-    }
+    bool r = lsplant::Init(env, info);   // fault di sini -> handler _exit() langsung, tak kembali ke sini
     sigaction(SIGILL,  &old_ill,  nullptr);
     sigaction(SIGBUS,  &old_bus,  nullptr);
     sigaction(SIGSEGV, &old_segv, nullptr);
-    return r && !sbx_init_fault;
+    return r;
 }
 
 // Kapabilitas inline-hook, dihitung sekali lalu di-cache (thread-safe). Perlu KEDUA:
