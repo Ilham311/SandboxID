@@ -98,37 +98,47 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
   uintptr_t page_align_address = ALIGN_FLOOR(address, page_size);
   int offset = (uintptr_t)address - page_align_address;
 
-#if defined(__ANDROID__) || defined(__linux__)
   bool patched = false;
 
+#if defined(__ANDROID__) || defined(__linux__)
   // Jalur utama: tulis lewat /proc/self/mem. Portabel lintas versi Android dan
   // tidak pernah butuh halaman writable — inilah yang membuatnya lolos W^X.
   patched = sbx_write_via_proc_self_mem(address, buffer, buffer_size);
+#endif
 
-  // Fallback: kernel lama / tanpa W^X, atau /proc/self/mem dibatasi kebijakan.
-  // Ubah izin halaman jadi RWX, memcpy, lalu kembalikan ke R-X. Nilai balik
-  // mprotect diperiksa agar tidak pernah lagi menulis ke halaman non-writable.
-  // Tangani juga halaman AKHIR bila patch melintasi batas halaman — paritas
-  // dengan Dobby upstream terbaru yang memperbaiki bug cross-page versi 2021
-  // (versi lama cuma mem-mprotect halaman awal).
+  // Fallback: kernel lama / tanpa W^X, atau /proc/self/mem dibatasi kebijakan
+  // (atau platform POSIX non-Linux/Android yang tak punya /proc/self/mem sama
+  // sekali). Ubah izin halaman jadi RWX, memcpy, lalu kembalikan ke R-X. Nilai
+  // balik mprotect diperiksa agar tidak pernah lagi menulis ke halaman
+  // non-writable. Tangani SEMUA halaman yang dilintasi patch (awal, tengah,
+  // akhir) — paritas dengan Dobby upstream terbaru yang memperbaiki bug
+  // cross-page versi 2021 (versi lama cuma mem-mprotect halaman awal).
   if (!patched) {
-    uintptr_t end_page = ALIGN_FLOOR((uintptr_t)address + buffer_size, page_size);
-    int r1 = mprotect((void *)page_align_address, page_size, PROT_READ | PROT_WRITE | PROT_EXEC);
-    int r2 = (end_page != page_align_address)
-                 ? mprotect((void *)end_page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC)
-                 : 0;
-    if (r1 == 0 && r2 == 0) {
+    uintptr_t start_page = page_align_address;
+    uintptr_t end_page = ALIGN_FLOOR((uintptr_t)address + buffer_size - 1, page_size);
+    size_t page_count = ((end_page - start_page) / (uintptr_t)page_size) + 1;
+
+    bool mprotect_ok = true;
+    for (size_t i = 0; i < page_count; ++i) {
+      uintptr_t p = start_page + i * (uintptr_t)page_size;
+      if (mprotect((void *)p, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        mprotect_ok = false;
+        break;
+      }
+    }
+
+    if (mprotect_ok) {
       memcpy((void *)((addr_t)page_align_address + offset), buffer, buffer_size);
-      mprotect((void *)page_align_address, page_size, PROT_READ | PROT_EXEC);
-      if (end_page != page_align_address)
-        mprotect((void *)end_page, page_size, PROT_READ | PROT_EXEC);
+      for (size_t i = 0; i < page_count; ++i) {
+        uintptr_t p = start_page + i * (uintptr_t)page_size;
+        mprotect((void *)p, page_size, PROT_READ | PROT_EXEC);
+      }
       patched = true;
     }
   }
 
   if (!patched)
     return kMemoryOperationError;
-#endif
 
   addr_t clear_start_ = (addr_t)page_align_address + offset;
   ClearCache((void *)clear_start_, (void *)(clear_start_ + buffer_size));
