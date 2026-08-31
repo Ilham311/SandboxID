@@ -89,6 +89,7 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <string.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <errno.h>
 
@@ -155,7 +156,26 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
   // ketat (custom A15) MENCABUT PROT_EXEC halaman COW itu permanen → fungsi
   // se-halaman yang DIPANGGIL langsung LSPlant (SetRuntimeDebugState) execute-
   // fault. Karena itu jalur mprotect kini DIDAHULUKAN (akar masalah crash #3).
+  //
+  // Catatan concurrency: mprotect(R|W) mencabut PROT_EXEC selama jendela
+  // singkat sebelum mprotect(R|X) dipanggil kembali — thread LAIN yang
+  // sedang mengeksekusi halaman yang sama berpotensi execute-fault selama
+  // jendela ini. Dobby tidak memiliki mekanisme stop-the-world/suspend
+  // thread, jadi mitigasi yang mungkin di titik ini adalah MEMPERSEMPIT
+  // jendela non-exec: seluruh kerja tambahan (alokasi backup, dsb.)
+  // dilakukan SEBELUM mprotect(R|W) sehingga di antara kedua mprotect() itu
+  // hanya ada satu memcpy() murni.
+  uint8_t *orig_backup = (uint8_t *)malloc(buffer_size);
+  bool have_backup = orig_backup != nullptr;
+  if (have_backup)
+    memcpy(orig_backup, address, buffer_size);
+
   if (mprotect((void *)start_page, range_len, PROT_READ | PROT_WRITE) == 0) {
+    // Simpan byte asli sudah dilakukan DI ATAS (sebelum mprotect) agar bisa
+    // di-rollback bila mprotect R|X pasca-tulis gagal — tanpa ini, kegagalan
+    // restore-exec akan meninggalkan memori dalam kondisi rusak: sudah
+    // ter-overwrite (buffer baru) TAPI masih R|W (non-exec), alih-alih tetap
+    // R|X dengan isi asli.
     memcpy(address, buffer, buffer_size);
     if (mprotect((void *)start_page, range_len, PROT_READ | PROT_EXEC) == 0) {
       patched = true;
@@ -167,11 +187,18 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
     } else {
       SBX_DOBBY_LOGE("CodePatch: R|X pasca-R|W gagal @%p len=%zu (errno=%d %s)",
                      (void *)start_page, range_len, errno, strerror(errno));
+      // Rollback: pulihkan byte asli selagi VMA masih writable, sebelum
+      // jalur fallback mencoba mprotect lain — mencegah memori "setengah
+      // tertulis & non-exec" bila semua jalur berikutnya juga gagal.
+      if (have_backup)
+        memcpy(address, orig_backup, buffer_size);
     }
   } else {
     SBX_DOBBY_LOGE("CodePatch: mprotect R|W gagal @%p len=%zu (errno=%d %s) — coba /proc/self/mem",
                    (void *)start_page, range_len, errno, strerror(errno));
   }
+  if (have_backup)
+    free(orig_backup);
 
   // -- Jalur 2 (fallback): /proc/self/mem (pwrite64) + PAKSA pulihkan exec. --
   // Untuk .text yang tak boleh ditambah PROT_WRITE (execute-only / tersegel) di
