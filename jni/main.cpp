@@ -844,6 +844,7 @@ static int sbx_sysinfo(struct sysinfo* info) {
     if (target_kb) {
         uint64_t target_bytes = target_kb * 1024ULL;
         info->totalram = static_cast<unsigned long>(target_bytes / unit);
+        if (info->freeram > info->totalram) info->freeram = info->totalram;
     }
     if (g_boot_off_sec > 0) info->uptime += static_cast<long>(g_boot_off_sec);
     return r;
@@ -1412,6 +1413,10 @@ private:
             size_t ks = 0;
             while (ks < k.size() && (k[ks]==' ' || k[ks]=='\t')) ++ks;
             if (ks) k.erase(0, ks);
+            // symmetric trim of value (mirror the key handling)
+            size_t vs = 0;
+            while (vs < v.size() && (v[vs]==' ' || v[vs]=='\t')) ++vs;
+            if (vs) v.erase(0, vs);
             while (!v.empty() && (v.back()=='\r' || v.back()=='\n' || v.back()==' '))
                 v.pop_back();
             if (!k.empty()) g_identity[k] = v;
