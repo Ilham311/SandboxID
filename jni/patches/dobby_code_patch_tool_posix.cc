@@ -15,18 +15,31 @@
 // FIX: tulis byte kode lewat /proc/self/mem (pwrite64). Kernel melayani
 //   tulisan ini dengan FOLL_FORCE sehingga menembus proteksi halaman R-X
 //   tanpa perlu mengubahnya jadi RWX — untuk mapping file-backed (libart)
-//   memicu COW, untuk halaman anonim (arena) di-fault-in lalu ditulis. Teknik
-//   ini dipakai luas oleh framework hooking modern untuk melewati W^X.
+//   memicu COW, untuk halaman anonim (arena) di-fault-in lalu ditulis. Ini
+//   juga TIDAK meminta izin SELinux `execmem` (yang diminta mprotect saat
+//   menambah PROT_EXEC/PROT_WRITE), jadi tetap jalan di ROM/kernel yang
+//   solusi root-nya gagal memuat sepolicy `execmem` (persis pemicu crash).
+//
+//   CATATAN: Dobby upstream TERBARU (jmpews & LSPosed master) pun MASIH pakai
+//   mprotect(RWX)+memcpy — mereka bergantung pada root solution menyuntik
+//   sepolicy `execmem`. Pendekatan /proc/self/mem di sini lebih tahan banting
+//   untuk Android 15/16 yang W^X-nya ketat.
 //
 //   CodePatch() adalah SATU-SATUNYA choke point tulisan ke memori eksekusi di
 //   Dobby (InterceptRouting + AssemblyCodeBuilder + ClosureTrampoline), jadi
-//   perbaikan di sini menutup semua jalur.
+//   perbaikan di sini menutup semua jalur. Bila /proc/self/mem DAN mprotect
+//   sama-sama gagal, fungsi kini mengembalikan kMemoryOperationError (bukan
+//   menulis paksa) sehingga hook gagal dengan rapi, bukan meng-crash proses.
 //
 // KREDIT / REFERENSI:
 //   - Dobby (upstream)      : https://github.com/jmpews/Dobby (LSPosed fork)
 //   - Teknik /proc/self/mem : ShadowHook (bytedance/android-inline-hook),
-//                             YAHFA, dan Dobby versi baru memakai pola yang sama
-//                             untuk menembus proteksi halaman kode.
+//                             YAHFA, HookZz — pola sama untuk menembus
+//                             proteksi halaman kode tanpa RWX.
+//   - Crash identik + akar  : JingMatrix/Vector#559 & JingMatrix/LSPosed#560
+//     masalah (execmem/W^X)   (SEGV_ACCERR di __memcpy_aarch64_simd saat
+//                             lsplant menulis memori ART read-only; avc denied
+//                             { execmem } karena sepolicy tak termuat).
 //
 // File ini disalin menimpa
 //   external/dobby/source/UserMode/ExecMemory/code-patch-tool-posix.cc
@@ -95,10 +108,20 @@ PUBLIC MemoryOperationError CodePatch(void *address, uint8_t *buffer, uint32_t b
   // Fallback: kernel lama / tanpa W^X, atau /proc/self/mem dibatasi kebijakan.
   // Ubah izin halaman jadi RWX, memcpy, lalu kembalikan ke R-X. Nilai balik
   // mprotect diperiksa agar tidak pernah lagi menulis ke halaman non-writable.
+  // Tangani juga halaman AKHIR bila patch melintasi batas halaman — paritas
+  // dengan Dobby upstream terbaru yang memperbaiki bug cross-page versi 2021
+  // (versi lama cuma mem-mprotect halaman awal).
   if (!patched) {
-    if (mprotect((void *)page_align_address, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+    uintptr_t end_page = ALIGN_FLOOR((uintptr_t)address + buffer_size, page_size);
+    int r1 = mprotect((void *)page_align_address, page_size, PROT_READ | PROT_WRITE | PROT_EXEC);
+    int r2 = (end_page != page_align_address)
+                 ? mprotect((void *)end_page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC)
+                 : 0;
+    if (r1 == 0 && r2 == 0) {
       memcpy((void *)((addr_t)page_align_address + offset), buffer, buffer_size);
       mprotect((void *)page_align_address, page_size, PROT_READ | PROT_EXEC);
+      if (end_page != page_align_address)
+        mprotect((void *)end_page, page_size, PROT_READ | PROT_EXEC);
       patched = true;
     }
   }
