@@ -345,6 +345,31 @@ static void test_applog_classify() {
     CHECK(classify("/data/data/x/files/.cdid")                  == BD_RAW_CDID,
           "files/.cdid classify");
 
+    // Cakupan diperluas sinkron dengan applog_wipe() (scripts/lib/helpers.sh).
+    CHECK(classify("/data/data/x/shared_prefs/applog_stats.xml")
+          == APPLOG_XML, "applog_stats.xml classify");
+    CHECK(classify("/data/data/x/shared_prefs/header_custom.xml")
+          == APPLOG_XML, "header_custom.xml classify");
+    CHECK(classify("/data/data/x/shared_prefs/ug_install_settings_pref.xml")
+          == APPLOG_XML, "ug_install_settings_pref.xml classify");
+    CHECK(classify("/data/data/x/no_backup/applog_device_id.dat") == BD_RAW_DID,
+          "no_backup/applog_device_id.dat classify");
+    CHECK(classify("/data/data/x/no_backup/bd_device_id") == BD_RAW_DID,
+          "no_backup/bd_device_id classify");
+    CHECK(classify("/data/data/x/no_backup/.cdid") == BD_RAW_CDID,
+          "no_backup/.cdid classify");
+
+    // Gating sintesis: hanya peta ID kanonis yang boleh disintesis dari nol.
+    CHECK(applog_xml_is_synthable("/data/data/x/shared_prefs/applog.xml"),
+          "applog.xml synthable");
+    CHECK(applog_xml_is_synthable("/data/data/x/shared_prefs/applog_stats.xml"),
+          "applog_stats.xml synthable");
+    CHECK(!applog_xml_is_synthable("/data/data/x/shared_prefs/header_custom.xml"),
+          "header_custom.xml NOT synthable (patch-only)");
+    CHECK(!applog_xml_is_synthable("/data/data/x/shared_prefs/ug_install_settings_pref.xml"),
+          "ug_install_settings_pref.xml NOT synthable (patch-only)");
+    CHECK(!applog_xml_is_synthable(nullptr), "null path not synthable");
+
     CHECK(classify("/data/data/x/shared_prefs/applog_other.xml") == NONE,
           "applog_other.xml not matched");
     CHECK(classify("/data/data/x/files/other.cdid")             == NONE,

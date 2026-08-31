@@ -18,6 +18,7 @@ public final class EnvCompatState {
     public Object handle(Object[] args) {
 
         if (retType == 9) return watchClassLoad(args);
+        if (retType == 8) return rewriteInstallTime(args);
         try {
             if (keyArgIndex < 0 || matches(args)) {
                 Object v = spoofValue(args);
@@ -46,6 +47,10 @@ public final class EnvCompatState {
                 return (sval == null) ? null : Boolean.valueOf(Boolean.parseBoolean(sval));
             case 6:
                 return new java.util.ArrayList<Object>();
+            case 10:
+                return new java.util.HashSet<Object>();
+            case 11:
+                return "";
             case 7:
                 return buildGservicesCursor(args);
             default:
@@ -72,6 +77,23 @@ public final class EnvCompatState {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private Object rewriteInstallTime(Object[] args) {
+        Object result = invokeOriginal(args);
+        try {
+            if (result != null && sval != null
+                    && (keyArgIndex < 0 || matches(args))) {
+                long t = Long.parseLong(sval);
+                java.lang.reflect.Field fi = result.getClass().getField("firstInstallTime");
+                fi.setLong(result, t);
+                java.lang.reflect.Field lu = result.getClass().getField("lastUpdateTime");
+                lu.setLong(result, t);
+            }
+        } catch (Throwable ignored) {
+
+        }
+        return result;
     }
 
     private Object watchClassLoad(Object[] args) {

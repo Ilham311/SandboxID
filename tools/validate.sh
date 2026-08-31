@@ -3,6 +3,13 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 rc=0
 
+echo "=== 0/4 ensure pinned zygisk.hpp present ==="
+if bash jni/tools/fetch_zygisk_hpp.sh; then
+  echo "OK: zygisk.hpp ready"
+else
+  echo "FAIL: could not obtain jni/zygisk.hpp"; rc=1
+fi
+
 echo "=== 1/4 clang++ -fsyntax-only (debug + release) ==="
 SBX_CXX="clang++"
 SBX_ANDROID_TARGET=""

@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 
 #ifndef SBX_LSP_TAG
@@ -42,6 +43,9 @@ struct HookValues {
     std::string carrier_id;
     std::string gaid;
     std::string app_set_id;
+    std::string model;           // untuk BluetoothAdapter.getName()
+    std::string self_pkg;        // paket aplikasi sendiri (target waktu instal)
+    std::string build_time_utc;  // detik epoch build (jangkar waktu instal)
     uint64_t    seed = 0;
     bool gms_watch = false;
 
@@ -180,6 +184,8 @@ enum ValId {
 
     V_EMPTY_LIST,
 
+    V_BT_NAME,
+
     V_GSERVICES
 };
 
@@ -293,6 +299,19 @@ inline const HookSpec* hook_specs(size_t& n) {
           false, -1, nullptr, 0, V_WIFI_MAC },
         { "android/bluetooth/BluetoothAdapter", "getAddress", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_BT_ADDR },
+        { "android/bluetooth/BluetoothAdapter", "getName", "()Ljava/lang/String;",
+          false, -1, nullptr, 0, V_BT_NAME },
+        { "android/bluetooth/BluetoothAdapter", "getBondedDevices", "()Ljava/util/Set;",
+          false, -1, nullptr, 10, V_NONE },
+
+        { "android/telephony/TelephonyManager", "getLine1Number", "()Ljava/lang/String;",
+          false, -1, nullptr, 11, V_NONE },
+        { "android/telephony/TelephonyManager", "getLine1Number", "(I)Ljava/lang/String;",
+          false, -1, nullptr, 11, V_NONE },
+        { "android/telephony/TelephonyManager", "getVoiceMailNumber", "()Ljava/lang/String;",
+          false, -1, nullptr, 11, V_NONE },
+        { "android/telephony/SubscriptionInfo", "getNumber", "()Ljava/lang/String;",
+          false, -1, nullptr, 11, V_NONE },
 
         { "android/net/wifi/WifiInfo", "getSSID", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_WIFI_SSID },
@@ -468,6 +487,7 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_OP_ISO:     return v.op_iso;
         case V_WIFI_MAC:   return wifi;
         case V_BT_ADDR:    return bt;
+        case V_BT_NAME:    return v.model;
 
         case V_WIFI_SSID:  return "<unknown ssid>";
         case V_WIFI_BSSID: return "02:00:00:00:00:00";
@@ -529,6 +549,40 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
             continue;
         std::string sval = sbx_value_for(vid, v, ids, wifi, bt, gaid, appset, gsf);
         if (hook_one(env, specs[i], sval, ids.widevine_hex)) ++good;
+    }
+
+    // Widevine provisioningUniqueId (byte[]): dibangun terpisah dari tabel agar
+    // memakai byte yang BERBEDA dari deviceUniqueId (nilai asli keduanya memang
+    // beda; menyamakannya bisa jadi tell saat app membaca keduanya).
+    {
+        std::string prov_hex = sbxid::synth_widevine_prov_hex(v.seed);
+        HookSpec pv{ "android/media/MediaDrm", "getPropertyByteArray",
+                     "(Ljava/lang/String;)[B",
+                     false, 1, "provisioningUniqueId", 1, V_WIDEVINE };
+        if (hook_one(env, pv, std::string(), prov_hex)) ++good;
+    }
+
+    // Waktu instal/update aplikasi (retType 8): hanya paket sendiri, dijangkar
+    // ke tanggal build agar stabil lintas restart dan plausibel (instal setelah
+    // perangkat dibuat). firstInstallTime == lastUpdateTime → tampak belum
+    // pernah di-update, pola yang lazim dan aman.
+    if (!v.self_pkg.empty() && !v.build_time_utc.empty()) {
+        long long bt_s = atoll(v.build_time_utc.c_str());
+        if (bt_s > 0) {
+            uint64_t off_days = 1 + (v.seed % 120);
+            long long first_ms = (bt_s + (long long)off_days * 86400LL) * 1000LL;
+            std::string install_ms = std::to_string(first_ms);
+            static const char* const pm_sigs[] = {
+                "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;",
+                "(Ljava/lang/String;Landroid/content/pm/PackageManager$PackageInfoFlags;)"
+                    "Landroid/content/pm/PackageInfo;",
+            };
+            for (const char* psig : pm_sigs) {
+                HookSpec ps{ "android/app/ApplicationPackageManager", "getPackageInfo", psig,
+                             false, 1, v.self_pkg.c_str(), 8, V_NONE };
+                if (hook_one(env, ps, install_ms, std::string())) ++good;
+            }
+        }
     }
 
     if (v.gms_watch) {

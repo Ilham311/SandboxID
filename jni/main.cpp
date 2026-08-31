@@ -671,7 +671,13 @@ static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& o
         case sbxnr::APPLOG_XML: {
             if (!g_applog_ok) return false;
             std::string real = sbx_read_real(path);
-            if (real.empty()) { out = sbxnr::applog_xml_synth(g_applog); return true; }
+            if (real.empty()) {
+                // Hanya sintesis stub untuk file yang memang peta ID kanonis;
+                // file lain (header_custom, dsb.) hanya di-patch bila sudah ada.
+                if (!sbxnr::applog_xml_is_synthable(path)) return false;
+                out = sbxnr::applog_xml_synth(g_applog);
+                return true;
+            }
             return sbxnr::patch_applog_xml(real, g_applog, out);
         }
         case sbxnr::BD_RAW_DID:        if (g_applog_ok) { out = g_applog.did;        out.push_back('\n'); return true; } return false;
@@ -1281,6 +1287,11 @@ public:
             hv.carrier_id = val("GSM_CARRIER_ID");
             hv.gaid       = val("GOOGLE_AID");
             hv.app_set_id = val("APP_SET_ID");
+            hv.model      = val("MODEL");
+            hv.build_time_utc = val("BUILD_TIME_UTC");
+            // Nama proses bisa berimbuhan ":suffix"; getPackageInfo dipanggil
+            // dengan nama paket dasar, jadi ambil bagian sebelum ':'.
+            hv.self_pkg   = pkg_.substr(0, pkg_.find(':'));
             hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                          val("ANDROID_ID"));
 
