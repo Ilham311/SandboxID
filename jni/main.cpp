@@ -1368,8 +1368,15 @@ public:
             if (!sbxlsp::install_all(env_, hv))
                 LOGE("L3 hooks not installed (continuing with L1/L2/L9)");
 
-            if (!sbxdrm::install(hv.seed))
-                LOGD("NDK MediaDrm hook not armed (Java MediaDrm hook still covers the common path)");
+            // Gate sama seperti L3: DobbyHook di sbxdrm::install mem-patch .text
+            // libmediandk. Bila perangkat mencabut exec pasca-patch (probe gagal),
+            // lewati agar tak crash execute-fault. Probe di-cache, tak diulang.
+            if (sbxlsp::codepatch_capable()) {
+                if (!sbxdrm::install(hv.seed))
+                    LOGD("NDK MediaDrm hook not armed (Java MediaDrm hook still covers the common path)");
+            } else {
+                LOGE("L3 DRM (NDK MediaDrm): dilewati — perangkat menolak patch .text (probe gagal)");
+            }
         }
 #endif
 

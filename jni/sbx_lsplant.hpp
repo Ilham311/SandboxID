@@ -1,4 +1,10 @@
 #pragma once
+// pwrite64/off64_t butuh _GNU_SOURCE / _LARGEFILE64_SOURCE di glibc (dipakai oleh
+// tools/validate.sh saat men-syntax-check L3 di host Linux). No-op di bionic
+// (Android NDK) yang selalu mendeklarasikannya. Harus sebelum header sistem apa pun.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
 #include <jni.h>
 #include <android/log.h>
 #include <string>
@@ -11,6 +17,7 @@
 #define SBX_LSP_TAG "SandboxID"
 #endif
 #define SBX_LSP_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, SBX_LSP_TAG, __VA_ARGS__)
+#define SBX_LSP_LOGI(...) __android_log_print(ANDROID_LOG_INFO, SBX_LSP_TAG, __VA_ARGS__)
 #ifdef SBX_DEBUG
 #define SBX_LSP_LOGD(...) __android_log_print(ANDROID_LOG_INFO, SBX_LSP_TAG, "[D] " __VA_ARGS__)
 #else
@@ -24,6 +31,18 @@
 #include <lsparself.hpp>
 #include "sbx_ident_synth.hpp"
 #include "sbx_native_drm.hpp"
+// Header POSIX untuk preflight kapabilitas code-patch (mmap/mprotect/pwrite64/
+// sinyal). Hanya diperlukan pada jalur L3. Pakai bentuk C <signal.h>/<setjmp.h>
+// karena sigaction/sigsetjmp/siglongjmp adalah POSIX (global namespace), bukan
+// std:: — <csignal>/<csetjmp> tak menjaminnya.
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/mman.h>
+#include <signal.h>
+#include <setjmp.h>
+#include <stdio.h>
+#include <string.h>
 #if __has_include("hook_dex.h")
 #include "hook_dex.h"
 #define SBX_HAVE_HOOK_DEX 1
@@ -54,6 +73,7 @@ struct HookValues {
 #ifndef SBX_ENABLE_LSPLANT
 
 inline bool available()                              { return false; }
+inline bool codepatch_capable()                      { return false; }
 inline bool init(JNIEnv*)                            { return false; }
 inline bool install_all(JNIEnv*, const HookValues&)  { return false; }
 
@@ -67,6 +87,197 @@ inline void* sbx_inline_hooker(void* target, void* hooker) {
     return nullptr;
 }
 inline bool sbx_inline_unhooker(void* func) { return DobbyDestroy(func) == 0; }
+
+// ── Preflight kapabilitas code-patch (W^X / SELinux) ────────────────────────
+// Menjawab satu pertanyaan sebelum lsplant::Init menyentuh libart hidup: pada
+// kernel/SELinux perangkat INI, bisakah proses menulis byte ke halaman .text
+// file-backed r-x LALU halaman itu TETAP executable? Jika tidak (untrusted_app
+// ditolak execmem/execmod, atau kernel mencabut PROT_EXEC saat COW FOLL_FORCE),
+// lsplant::Init akan meng-COW halaman libart lalu MEMANGGIL
+// art::Runtime::SetRuntimeDebugState (langkah TERAKHIR InitNative, runtime.hpp:85)
+// pada halaman yang kehilangan exec → SIGSEGV SEGV_ACCERR EXECUTE di +0.
+//
+// Uji dijalankan pada SALINAN throwaway MAP_PRIVATE dari libart.so (file & label
+// SELinux sama) sehingga perilaku kernel/SELinux teruji APA ADANYA tanpa pernah
+// menyentuh halaman libart hidup — koreksi kritis: menulis-balik ke halaman
+// libart nyata bisa MENGUPAS exec-nya sendiri dan MEMICU crash yang mau dicegah.
+// Ladder tulis mencerminkan CodePatch (pwrite64 /proc/self/mem → fallback
+// mprotect RWX). Verifikasi exec: cek 'x' di /proc/self/maps DAN (arm64/x86)
+// benar-benar EKSEKUSI sebyte 'ret' di bawah guard SIGSEGV/SIGBUS — satu-satunya
+// cara memastikan halaman executable, termasuk pengupasan exec level-PTE yang
+// tak tampak di maps. Hasil di-cache. Referensi: Frida/YAHFA/ShadowHook (gagal
+// anggun, jangan crash host), offlinemark "obscure quirk of /proc", CVE-2022-50014.
+#if defined(__aarch64__)
+#  define SBX_LSP_RET_BYTES {0xC0, 0x03, 0x5F, 0xD6}   // ret
+#  define SBX_LSP_HAVE_EXEC_PROBE 1
+#elif defined(__x86_64__) || defined(__i386__)
+#  define SBX_LSP_RET_BYTES {0xC3}                      // ret
+#  define SBX_LSP_HAVE_EXEC_PROBE 1
+#elif defined(__arm__)
+#  define SBX_LSP_RET_BYTES {0x1E, 0xFF, 0x2F, 0xE1}    // bx lr (ARM)
+#else
+#  define SBX_LSP_RET_BYTES {0x00}                      // arch lain: cek maps saja
+#endif
+
+inline sigjmp_buf              sbx_probe_jmp;
+inline volatile sig_atomic_t   sbx_probe_fault = 0;
+inline void sbx_probe_sig_handler(int) { sbx_probe_fault = 1; siglongjmp(sbx_probe_jmp, 1); }
+
+// Coba eksekusi fn (leaf 'ret') di bawah guard sinyal; true bila kembali normal.
+inline bool sbx_can_execute(void* fn) {
+    struct sigaction sa{}, old_segv{}, old_bus{};
+    sa.sa_handler = sbx_probe_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGSEGV, &sa, &old_segv) != 0) return false;
+    sigaction(SIGBUS, &sa, &old_bus);
+    sbx_probe_fault = 0;
+    volatile bool ran = false;
+    if (sigsetjmp(sbx_probe_jmp, 1) == 0) {
+        reinterpret_cast<void (*)()>(fn)();
+        ran = true;
+    }
+    sigaction(SIGSEGV, &old_segv, nullptr);
+    sigaction(SIGBUS, &old_bus, nullptr);
+    return ran && !sbx_probe_fault;
+}
+// true bila SELURUH rentang [addr, addr+len) tercakup region 'x' di maps.
+inline bool sbx_perms_has_exec(uintptr_t addr, size_t len) {
+    FILE* f = fopen("/proc/self/maps", "re");
+    if (!f) return false;
+    char line[512];
+    uintptr_t want_end = addr + len;
+    bool covered = false;
+    while (fgets(line, sizeof(line), f)) {
+        uintptr_t lo = 0, hi = 0;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3) continue;
+        if (addr >= lo && want_end <= hi) {
+            covered = (perms[2] == 'x');
+            break;
+        }
+    }
+    fclose(f);
+    return covered;
+}
+
+// Temukan region r-x libart.so hidup: path & offset file untuk mmap salinan.
+inline bool sbx_find_libart_text(std::string& path_out, unsigned long& off_out) {
+    FILE* f = fopen("/proc/self/maps", "re");
+    if (!f) return false;
+    char line[512];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        uintptr_t lo = 0, hi = 0;
+        char perms[8] = {0}, path[400] = {0};
+        unsigned long off = 0;
+        int n = sscanf(line, "%lx-%lx %7s %lx %*x:%*x %*lu %399[^\n]",
+                       &lo, &hi, perms, &off, path);
+        if (n < 5) continue;
+        if (perms[0] != 'r' || perms[2] != 'x') continue;
+        size_t plen = strlen(path);
+        static const char kSuffix[] = "/libart.so";
+        size_t slen = sizeof(kSuffix) - 1;
+        if (plen >= slen && strcmp(path + plen - slen, kSuffix) == 0) {
+            path_out.assign(path);
+            off_out = off;
+            found = true;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+// Jalankan probe satu kali: petakan throwaway r-x libart, tulis 'ret' via ladder
+// CodePatch, verifikasi byte + exec-retention. TIDAK menyentuh libart hidup.
+inline bool sbx_run_codepatch_probe() {
+    std::string libart;
+    unsigned long file_off = 0;
+    if (!sbx_find_libart_text(libart, file_off)) {
+        SBX_LSP_LOGE("probe: region r-x libart.so tak ditemukan di maps — anggap TAK mampu");
+        return false;
+    }
+
+    long ps = sysconf(_SC_PAGESIZE);
+    size_t page = (ps > 0) ? (size_t)ps : 4096;
+    unsigned long aligned_off = file_off & ~(unsigned long)(page - 1);
+
+    int fd = open(libart.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        SBX_LSP_LOGE("probe: open(%s) gagal (errno=%d %s) — anggap TAK mampu",
+                     libart.c_str(), errno, strerror(errno));
+        return false;
+    }
+    // Salinan privat file-backed: label SELinux & sifat COW = libart hidup.
+    void* map = mmap(nullptr, page, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, (off_t)aligned_off);
+    close(fd);
+    if (map == MAP_FAILED) {
+        SBX_LSP_LOGE("probe: mmap(PROT_EXEC libart, off=%lu) gagal (errno=%d %s) — anggap TAK mampu",
+                     aligned_off, errno, strerror(errno));
+        return false;
+    }
+
+    const uint8_t patch[] = SBX_LSP_RET_BYTES;
+    const size_t patch_len = sizeof(patch);
+    bool wrote = false;
+
+    // Ladder tulis identik CodePatch: (1) /proc/self/mem pwrite64 FOLL_FORCE.
+    int mem = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
+    if (mem >= 0) {
+        size_t total = 0;
+        bool ok = true;
+        while (total < patch_len) {
+            ssize_t w = pwrite64(mem, patch + total, patch_len - total,
+                                 (off64_t)((uintptr_t)map + total));
+            if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
+            if (w == 0) { ok = false; break; }
+            total += (size_t)w;
+        }
+        close(mem);
+        wrote = ok && total == patch_len;
+    }
+    // (2) fallback mprotect(RWX)→memcpy→restore R|X bila /proc/self/mem gagal.
+    if (!wrote) {
+        if (mprotect(map, page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            memcpy(map, patch, patch_len);
+            mprotect(map, page, PROT_READ | PROT_EXEC);
+            wrote = true;
+        }
+    }
+
+    bool bytes_ok = wrote && memcmp(map, patch, patch_len) == 0;
+    bool maps_exec = bytes_ok && sbx_perms_has_exec((uintptr_t)map, patch_len);
+    bool exec_ok = maps_exec;
+#ifdef SBX_LSP_HAVE_EXEC_PROBE
+    if (maps_exec) {
+        __builtin___clear_cache((char*)map, (char*)map + page);
+        exec_ok = sbx_can_execute(map);   // eksekusi 'ret' sungguhan di bawah guard
+    }
+#endif
+    munmap(map, page);
+
+    if (!exec_ok) {
+        SBX_LSP_LOGE("probe: patch .text TAK aman (wrote=%d bytes_ok=%d maps_exec=%d exec_ok=%d) "
+                     "— perangkat mencabut exec pasca-tulis; L3 inline-hook DILEWATI",
+                     wrote, bytes_ok, maps_exec, exec_ok);
+    } else {
+        SBX_LSP_LOGI("probe: patch .text AMAN (exec dipertahankan) — L3 inline-hook diaktifkan");
+    }
+    return exec_ok;
+}
+
+// Kapabilitas code-patch, dihitung sekali lalu di-cache (thread-safe).
+inline bool codepatch_capable() {
+    static std::mutex mu;
+    static bool computed = false, capable = false;
+    std::lock_guard<std::mutex> lk(mu);
+    if (!computed) {
+        capable = sbx_run_codepatch_probe();
+        computed = true;
+    }
+    return capable;
+}
 
 inline bool init(JNIEnv* env) {
     if (!env) { SBX_LSP_LOGE("L3 init: env NULL — dibatalkan"); return false; }
@@ -105,6 +316,19 @@ inline bool init(JNIEnv* env) {
     info.generated_class_name  = kCls;
     info.generated_source_name = kSrc;
     info.generated_field_name  = kFld;
+
+    // Gate kapabilitas: pada perangkat yang mencabut exec setelah .text di-patch
+    // (untrusted_app ditolak execmem/execmod, atau kernel strip-exec saat COW),
+    // lsplant::Init akan MEMANGGIL SetRuntimeDebugState pada halaman libart yang
+    // sudah kehilangan exec → SIGSEGV SEGV_ACCERR EXECUTE +0. Probe throwaway
+    // menjawabnya TANPA menyentuh libart hidup; kalau tak mampu, lewati L3 dan
+    // kembalikan false secara bersih (L1/L2 native tetap jalan via mekanisme aman).
+    if (!codepatch_capable()) {
+        SBX_LSP_LOGE("L3 init: perangkat menolak patch .text (probe gagal) — "
+                     "lsplant::Init DILEWATI demi mencegah crash SetRuntimeDebugState");
+        ok = false;
+        return ok;
+    }
 
     // Diagnostik: apakah resolver ELF menemukan simbol libart? art.valid()==0
     // berarti /libart.so tak ketemu di /proc/self/maps atau symtab/.gnu_debugdata
