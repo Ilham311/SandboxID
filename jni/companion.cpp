@@ -142,43 +142,71 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
         ::close(pipefd[0]);
         MountResult r;
 
+        // BUG FIX 11 & 12: TOCTOU + snprintf truncation check
+        // (11) Line 170: access(e.dst, F_OK) lalu mount() — race window TOCTOU. Attacker
+        //      bisa swap symlink antara cek & mount. Sudah di-fix: src_fds dibuka dengan
+        //      O_RDONLY (bukan O_PATH) jadi fstat bisa verifikasi, dan mount via /proc/self/fd.
+        //      Perbaikan tambahan: verifikasi dst bukan symlink dengan lstat.
+        // (12) Line 148, 154, 172: snprintf tidak dicek truncation → path terpotong diam-diam.
         std::array<int, sandboxid::BIND_ENTRIES_N> src_fds{};
         for (size_t i = 0; i < sandboxid::BIND_ENTRIES_N; ++i) {
             char src[512];
-            ::snprintf(src, sizeof(src), "%s/%s",
+            int n = ::snprintf(src, sizeof(src), "%s/%s",
                        sandboxid::MOUNTDIR, sandboxid::BIND_ENTRIES[i].src_rel);
+            // Fix: cek truncation snprintf
+            if (n < 0 || (size_t)n >= sizeof(src)) {
+                src_fds[i] = -1;  // path terlalu panjang, tandai gagal
+                continue;
+            }
             src_fds[i] = ::open(src, O_RDONLY | O_CLOEXEC);
         }
 
         char path[64];
-        ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
-        int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
-        if (tgt_ns < 0) {
-            r.ns_open_errno = errno;
-        } else if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
-            r.setns_errno = errno;
-            ::close(tgt_ns);
+        int pn = ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
+        int tgt_ns = -1;
+        if (pn < 0 || (size_t)pn >= sizeof(path)) {
+            r.ns_open_errno = ENAMETOOLONG;  // path terlalu panjang
         } else {
-
-            bool propagation_isolated =
-                (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) == 0);
-            if (!propagation_isolated) r.slave_errno = errno;
-
-            for (size_t i = 0; propagation_isolated && i < sandboxid::BIND_ENTRIES_N; ++i) {
-                const auto& e = sandboxid::BIND_ENTRIES[i];
-                if (src_fds[i] < 0) { r.skip_src++; r.skip++; continue; }
-                if (::access(e.dst, F_OK) != 0) { r.skip_dst++; r.skip++; continue; }
-
-                char proc_fd_path[32];
-                ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
-                if (::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr) == 0) {
-                    r.ok++;
-                } else {
-                    if (r.first_fail_idx < 0) { r.first_fail_idx = (int)i; r.first_fail_errno = errno; }
-                    r.fail++;
-                }
+            tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
+            if (tgt_ns < 0) {
+                r.ns_open_errno = errno;
             }
-            ::close(tgt_ns);
+        }
+
+        if (tgt_ns >= 0) {
+            if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
+                r.setns_errno = errno;
+                ::close(tgt_ns);
+            } else {
+
+                bool propagation_isolated =
+                    (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) == 0);
+                if (!propagation_isolated) r.slave_errno = errno;
+
+                for (size_t i = 0; propagation_isolated && i < sandboxid::BIND_ENTRIES_N; ++i) {
+                    const auto& e = sandboxid::BIND_ENTRIES[i];
+                    if (src_fds[i] < 0) { r.skip_src++; r.skip++; continue; }
+
+                    // Fix TOCTOU: gunakan lstat (bukan access) untuk cek dst bukan symlink
+                    struct stat dst_st;
+                    if (::lstat(e.dst, &dst_st) != 0) { r.skip_dst++; r.skip++; continue; }
+                    if (S_ISLNK(dst_st.st_mode)) { r.skip_dst++; r.skip++; continue; }  // tolak symlink
+
+                    char proc_fd_path[32];
+                    int fn = ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
+                    if (fn < 0 || (size_t)fn >= sizeof(proc_fd_path)) {
+                        r.fail++;  // path fd terlalu panjang (sangat jarang)
+                        continue;
+                    }
+                    if (::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr) == 0) {
+                        r.ok++;
+                    } else {
+                        if (r.first_fail_idx < 0) { r.first_fail_idx = (int)i; r.first_fail_errno = errno; }
+                        r.fail++;
+                    }
+                }
+                ::close(tgt_ns);
+            }
         }
 
         for (size_t i = 0; i < sandboxid::BIND_ENTRIES_N; ++i)

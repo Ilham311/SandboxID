@@ -28,3 +28,8 @@ jni/hook_dex.h
 # Runtime-generated operator selection (ditulis rotate_ids.sh saat runtime;
 # jangan pernah di-commit — sumber datanya adalah data/carriers.tsv)
 carrier.conf
+
+# Host-compiled unit-test binaries (source: tests/*_test.cpp; run via tools/validate.sh)
+/carrier_test
+/native_read_test
+/ident_synth_test

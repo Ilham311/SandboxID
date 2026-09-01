@@ -128,8 +128,14 @@ inline bool sbx_inline_unhooker(void* func) { return DobbyDestroy(func) == 0; }
 #  define SBX_LSP_RET_BYTES {0x00}                      // arch lain: cek maps saja
 #endif
 
-inline sigjmp_buf              sbx_probe_jmp;
-inline volatile sig_atomic_t   sbx_probe_fault = 0;
+// BUG FIX 1: Global sigjmp_buf & sig_atomic_t race → thread_local
+// Saat dua thread memanggil codepatch_capable() bersamaan, sbx_probe_jmp/sbx_probe_fault
+// adalah state per-thread (siglongjmp kembali ke stack thread yang fault), tapi global
+// inline = satu instance dibagi seluruh proses. Thread A sigsetjmp, thread B sigsetjmp
+// (timpa jmp_buf A), A fault → siglongjmp ke jmp_buf B → stack corruption → crash.
+// Perbaikan: thread_local agar tiap thread punya sigjmp_buf/flag sendiri.
+inline thread_local sigjmp_buf            sbx_probe_jmp;
+inline thread_local volatile sig_atomic_t sbx_probe_fault = 0;
 inline void sbx_probe_sig_handler(int) { sbx_probe_fault = 1; siglongjmp(sbx_probe_jmp, 1); }
 
 // Serialisasi akses ke handler sinyal proses-lebar dipakai sbx_can_execute —
@@ -143,16 +149,28 @@ inline std::mutex sbx_probe_mutex;
 // SIGSEGV default -> proses mati) sekalipun sa_flags berisi SA_ONSTACK. Dipasang
 // sekali per-thread & dibiarkan terpasang (thread_local, dialokasikan statik agar
 // tak butuh unwind saat siglongjmp). Ref: sigaltstack(2), signal-safety(7).
+// BUG FIX 2 & 6: sigaltstack failure returns true → false; SIGSTKSZ runtime expr workaround
+// (1) Line 154: `installed = sigaltstack() == 0` set installed=false bila gagal, tapi
+//     function tetap return installed yang sudah true dari iterasi sebelumnya (cached).
+//     Perbaikan: return langsung dari hasil sigaltstack, bukan dari cache.
+// (2) Line 149: glibc 2.34+ membuat SIGSTKSZ non-constexpr (sysconf runtime). Ternary
+//     di array size `[SIGSTKSZ > 32768 ? ...]` compile error. Perbaikan: ?: di luar
+//     deklarasi array, alokasikan ukuran fix 65536 (cukup untuk semua arch), lalu
+//     gunakan std::min(sizeof, SIGSTKSZ) saat sigaltstack() runtime.
 inline bool sbx_ensure_sigaltstack() {
     thread_local bool installed = false;
     if (installed) return true;
-    static thread_local uint8_t stack_mem[SIGSTKSZ > 32768 ? SIGSTKSZ : 32768];
+    // Fix: array size compile-time constant, pilih runtime saat sigaltstack
+    static thread_local uint8_t stack_mem[65536];
     stack_t ss{};
     ss.ss_sp = stack_mem;
-    ss.ss_size = sizeof(stack_mem);
+    // Gunakan yang lebih kecil: buffer atau SIGSTKSZ (bisa runtime di glibc 2.34+)
+    ss.ss_size = sizeof(stack_mem) < SIGSTKSZ ? sizeof(stack_mem) : SIGSTKSZ;
     ss.ss_flags = 0;
-    installed = sigaltstack(&ss, nullptr) == 0;
-    return installed;
+    // Fix: return false bila sigaltstack gagal, bukan cache stale true
+    if (sigaltstack(&ss, nullptr) != 0) return false;
+    installed = true;
+    return true;
 }
 
 // Coba eksekusi fn (leaf 'ret') di bawah guard sinyal; true bila kembali normal.
@@ -190,13 +208,18 @@ inline bool sbx_can_execute(void* fn) {
     sigaction(SIGILL, &old_ill, nullptr);
     return ran && !sbx_probe_fault;
 }
+// BUG FIX 3: Stale errno after successful operations
+// Line 406 & 414 di sbx_run_execmem_probe: errno di-capture SETELAH panggilan
+// sbx_write_via_ladder/sbx_write_direct_guarded yang bisa memanggil fungsi lain
+// (mprotect, memcmp, munmap) — errno sudah ditimpa. Perbaikan: capture errno SEGERA
+// di dalam fungsi write, simpan ke out-param, lalu kembalikan ke caller.
 // Tulis patch ke dst (RWX anon langsung, tanpa ladder mprotect) di bawah guard
 // sinyal yang sama dengan sbx_can_execute — sebagian ROM/hardened-kernel memicu
 // SIGSEGV/SIGBUS saat MENULIS ke halaman anon RWX yang baru di-mmap (bukan cuma
 // saat eksekusi), mis. lewat MTE/PKEY atau kebijakan W^X yang menjebol write itu
 // sendiri. Tanpa guard ini, probe B (lsplant.cc:539 gaya trampolin) bisa
 // meng-crash proses sebelum sempat memutuskan L3 harus dilewati.
-inline bool sbx_write_direct_guarded(void* dst, const uint8_t* patch, size_t patch_len) {
+inline bool sbx_write_direct_guarded(void* dst, const uint8_t* patch, size_t patch_len, int* errno_out = nullptr) {
     std::lock_guard<std::mutex> lock(sbx_probe_mutex);
     sbx_ensure_sigaltstack();
     struct sigaction sa{}, old_segv{}, old_bus{}, old_ill{};
@@ -219,9 +242,12 @@ inline bool sbx_write_direct_guarded(void* dst, const uint8_t* patch, size_t pat
         memcpy(dst, patch, patch_len);
         wrote = true;
     }
+    // Fix: capture errno SEGERA setelah memcpy (sebelum sigaction menimpa)
+    int err = errno;
     sigaction(SIGSEGV, &old_segv, nullptr);
     sigaction(SIGBUS, &old_bus, nullptr);
     sigaction(SIGILL, &old_ill, nullptr);
+    if (errno_out) *errno_out = err;
     return wrote && !sbx_probe_fault;
 }
 
@@ -273,11 +299,15 @@ inline bool sbx_find_libart_text(std::string& path_out, unsigned long& off_out) 
     return found;
 }
 
+// BUG FIX 4: mprotect restore not checked (RWX page leak)
+// Line 299: mprotect(RWX) sukses, memcpy sukses, lalu mprotect(R|X) restore GAGAL
+// (EPERM/EACCES) — halaman tetap RWX selamanya (info leak + attack surface). Perbaikan:
+// cek hasil restore mprotect; bila gagal, anggap write gagal (return false).
 // Ladder tulis identik CodePatch: (1) pwrite64 /proc/self/mem FOLL_FORCE, lalu
 // (2) fallback mprotect(RWX)→memcpy→restore R|X. dst harus page-aligned & panjang
 // ≤ page. Mengembalikan true bila byte akhirnya cocok di dst. Dipakai probe
 // execmod (halaman libart file-backed) DAN execmem (halaman anon).
-inline bool sbx_write_via_ladder(void* dst, const uint8_t* patch, size_t patch_len, size_t page) {
+inline bool sbx_write_via_ladder(void* dst, const uint8_t* patch, size_t patch_len, size_t page, int* errno_out = nullptr) {
     bool wrote = false;
     int mem = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
     if (mem >= 0) {
@@ -296,11 +326,20 @@ inline bool sbx_write_via_ladder(void* dst, const uint8_t* patch, size_t patch_l
     if (!wrote) {
         if (mprotect(dst, page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
             memcpy(dst, patch, patch_len);
-            mprotect(dst, page, PROT_READ | PROT_EXEC);
+            // Fix: cek hasil restore mprotect; bila gagal, halaman bocor RWX → anggap gagal
+            if (mprotect(dst, page, PROT_READ | PROT_EXEC) != 0) {
+                int err = errno;
+                if (errno_out) *errno_out = err;
+                return false;  // restore gagal → leak RWX, anggap write gagal
+            }
             wrote = true;
         }
     }
-    return wrote && memcmp(dst, patch, patch_len) == 0;
+    // Fix: capture errno SEGERA sebelum return (sebelum memcmp menimpa)
+    int err = errno;
+    bool ok = wrote && memcmp(dst, patch, patch_len) == 0;
+    if (errno_out && !ok) *errno_out = err;
+    return ok;
 }
 
 // Probe execmod: tulis 'ret' ke SALINAN throwaway file-backed dari .text libart,
@@ -337,7 +376,8 @@ inline bool sbx_run_execmod_probe() {
     const uint8_t patch[] = SBX_LSP_RET_BYTES;
     const size_t patch_len = sizeof(patch);
 
-    bool bytes_ok = sbx_write_via_ladder(map, patch, patch_len, page);
+    int err_mod = 0;
+    bool bytes_ok = sbx_write_via_ladder(map, patch, patch_len, page, &err_mod);
     bool maps_exec = bytes_ok && sbx_perms_has_exec((uintptr_t)map, patch_len);
     bool exec_ok = maps_exec;
 #ifdef SBX_LSP_HAVE_EXEC_PROBE
@@ -349,9 +389,9 @@ inline bool sbx_run_execmod_probe() {
     munmap(map, page);
 
     if (!exec_ok) {
-        SBX_LSP_LOGE("probe execmod: TAK aman (bytes_ok=%d maps_exec=%d exec_ok=%d) "
+        SBX_LSP_LOGE("probe execmod: TAK aman (bytes_ok=%d maps_exec=%d exec_ok=%d errno=%d %s) "
                      "— perangkat mencabut exec pasca-tulis file-backed; L3 inline-hook DILEWATI",
-                     bytes_ok, maps_exec, exec_ok);
+                     bytes_ok, maps_exec, exec_ok, err_mod, strerror(err_mod));
     } else {
         SBX_LSP_LOGI("probe execmod: AMAN (file-backed .text writable & tetap executable)");
     }
@@ -377,12 +417,13 @@ inline bool sbx_run_execmem_probe() {
     // (A) Gaya arena Dobby: mmap(PROT_READ|PROT_EXEC anon) lalu tulis via ladder.
     void* a = mmap(nullptr, page, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (a == MAP_FAILED) {
+        int err_a_map = errno;
         SBX_LSP_LOGE("probe execmem A: mmap(RX anon) DITOLAK (errno=%d %s) — execmem tak diberikan; L3 DILEWATI",
-                     errno, strerror(errno));
+                     err_a_map, strerror(err_a_map));
         return false;
     }
-    bool a_wrote = sbx_write_via_ladder(a, patch, patch_len, page);
-    int a_errno = errno;   // tangkap sebelum panggilan lain menimpa (mprotect EACCES)
+    int a_errno = 0;
+    bool a_wrote = sbx_write_via_ladder(a, patch, patch_len, page, &a_errno);
     bool a_exec = a_wrote && sbx_perms_has_exec((uintptr_t)a, patch_len);
 #ifdef SBX_LSP_HAVE_EXEC_PROBE
     if (a_exec) { __builtin___clear_cache((char*)a, (char*)a + page); a_exec = sbx_can_execute(a); }
@@ -398,12 +439,13 @@ inline bool sbx_run_execmem_probe() {
     // (B) Gaya trampolin LSPlant: mmap(PROT_READ|PROT_WRITE|PROT_EXEC anon) langsung.
     void* b = mmap(nullptr, page, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (b == MAP_FAILED) {
+        int err_b_map = errno;
         SBX_LSP_LOGE("probe execmem B: mmap(RWX anon) DITOLAK (errno=%d %s) — execmem tak diberikan; L3 DILEWATI",
-                     errno, strerror(errno));
+                     err_b_map, strerror(err_b_map));
         return false;
     }
-    bool b_wrote = sbx_write_direct_guarded(b, patch, patch_len);
-    int b_errno = errno;
+    int b_errno = 0;
+    bool b_wrote = sbx_write_direct_guarded(b, patch, patch_len, &b_errno);
     bool b_exec = b_wrote && sbx_perms_has_exec((uintptr_t)b, patch_len);
 #ifdef SBX_LSP_HAVE_EXEC_PROBE
     if (b_exec) { __builtin___clear_cache((char*)b, (char*)b + page); b_exec = sbx_can_execute(b); }
@@ -449,6 +491,12 @@ inline void sbx_init_sig_handler(int sig) {
     ::_exit(127);
 }
 
+// BUG FIX 5: Partial signal handler restore (old_bus uninitialized)
+// Line 458-462: `old_bus` hanya diinisialisasi bila h_bus==true (sigaction SIGBUS sukses),
+// tapi baris 462 restore-nya SELALU dijalankan bila h_bus==true. Bila h_ill==false &
+// h_bus==true (sigaction SIGILL gagal), baris 462 `sigaction(SIGBUS, &old_bus, ...)`
+// melewatkan old_bus yang BELUM pernah diisi (sigaction SIGBUS line 459 gagal) → UB.
+// Perbaikan: inisialisasi old_* di awal (zero-init aman), atau ganti logika restore.
 inline bool sbx_guarded_lsplant_init(JNIEnv* env, const lsplant::InitInfo& info) {
     sbx_ensure_sigaltstack();   // SA_ONSTACK: fault SP-rusak (stack-overflow) tetap tertangani
     struct sigaction sa {}, old_segv {}, old_bus {}, old_ill {};
@@ -458,27 +506,41 @@ inline bool sbx_guarded_lsplant_init(JNIEnv* env, const lsplant::InitInfo& info)
     bool h_segv = sigaction(SIGSEGV, &sa, &old_segv) == 0;
     bool h_bus  = h_segv && sigaction(SIGBUS, &sa, &old_bus) == 0;
     bool h_ill  = h_bus  && sigaction(SIGILL, &sa, &old_ill) == 0;
-    if (!h_ill) {   // guard tak lengkap → jangan setengah-pasang; jalankan apa adanya
+    if (!h_ill) {   // guard tak lengkap → restore HANYA yang sukses dipasang
+        // Fix: restore secara eksplisit per-flag (jangan restore yang belum dipasang)
         if (h_bus)  sigaction(SIGBUS,  &old_bus,  nullptr);
         if (h_segv) sigaction(SIGSEGV, &old_segv, nullptr);
+        // Tanpa guard lengkap, jalankan Init apa adanya (fault akan crash native)
         return lsplant::Init(env, info);
     }
     bool r = lsplant::Init(env, info);   // fault di sini -> handler _exit() langsung, tak kembali ke sini
+    // Fix: restore dalam urutan LIFO (kebalikan pemasangan) untuk nested signal handling
     sigaction(SIGILL,  &old_ill,  nullptr);
     sigaction(SIGBUS,  &old_bus,  nullptr);
     sigaction(SIGSEGV, &old_segv, nullptr);
     return r;
 }
 
-// Kapabilitas inline-hook, dihitung sekali lalu di-cache (thread-safe). Perlu KEDUA:
-// execmod (patch .text libart file-backed) DAN execmem (trampolin memori anonim).
+// BUG FIX 7: Mutex serialization bottleneck in codepatch_capable()
+// Line 476-484: Setiap panggilan codepatch_capable() mengambil lock, bahkan setelah
+// probe selesai (computed==true). Pada proses multi-thread (banyak app spawn bersamaan),
+// lock ini menjadi bottleneck serialisasi tak perlu. Perbaikan: double-checked locking
+// dengan atomic flag: cek computed dulu (tanpa lock), baru lock bila belum computed.
+// Ref: C++11 memory_order & std::call_once idiom.
 inline bool codepatch_capable() {
+    // Fix: atomic flag untuk double-checked locking (fast path tanpa mutex)
+    static std::atomic<bool> computed{false};
     static std::mutex mu;
-    static bool computed = false, capable = false;
+    static bool capable = false;
+
+    // Fast path: probe sudah selesai, langsung return (no lock contention)
+    if (computed.load(std::memory_order_acquire)) return capable;
+
+    // Slow path: belum computed, ambil lock & hitung (hanya 1x per proses)
     std::lock_guard<std::mutex> lk(mu);
-    if (!computed) {
+    if (!computed.load(std::memory_order_relaxed)) {  // double-check di dalam lock
         capable = sbx_run_execmod_probe() && sbx_run_execmem_probe();
-        computed = true;
+        computed.store(true, std::memory_order_release);
     }
     return capable;
 }

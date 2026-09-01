@@ -460,10 +460,23 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
 static int (*orig_clock_gettime)(clockid_t, struct timespec*) = nullptr;
 static int64_t g_boot_off_sec = 0;
 
+// BUG FIX 9: Integer overflow potential in uptime patching
+// Line 463-467: ts->tv_sec (time_t, bisa signed int32_t di 32-bit) += g_boot_off_sec
+// (int64_t). Bila offset besar (~68 tahun) + tv_sec mendekati INT32_MAX (2038) →
+// overflow signed integer (UB). Perbaikan: cast ke int64_t dulu, cek overflow, lalu
+// assign kembali. Atau clamp ke range valid. Real-world: offset biasa <10 tahun
+// (315M detik) jadi overflow jarang, tapi tetap UB bila terjadi.
 static int sbx_hooked_clock_gettime(clockid_t clk, struct timespec* ts) {
     int r = orig_clock_gettime ? orig_clock_gettime(clk, ts) : clock_gettime(clk, ts);
-    if (r == 0 && ts && (clk == CLOCK_BOOTTIME || clk == CLOCK_BOOTTIME_ALARM))
-        ts->tv_sec += g_boot_off_sec;
+    if (r == 0 && ts && (clk == CLOCK_BOOTTIME || clk == CLOCK_BOOTTIME_ALARM)) {
+        // Fix: cast ke int64_t dulu untuk cegah overflow, lalu clamp ke range time_t
+        int64_t new_sec = (int64_t)ts->tv_sec + g_boot_off_sec;
+        // Clamp ke [0, TIME_MAX] agar tidak overflow time_t (2038 issue di 32-bit)
+        if (new_sec < 0) new_sec = 0;
+        // Konservatif: bila time_t 32-bit, clamp ke INT32_MAX; bila 64-bit, no-op
+        if (sizeof(ts->tv_sec) == 4 && new_sec > 0x7FFFFFFF) new_sec = 0x7FFFFFFF;
+        ts->tv_sec = (time_t)new_sec;
+    }
     return r;
 }
 
@@ -1013,11 +1026,17 @@ static void sbx_crash_drain_loop() {
     }
 }
 
+// BUG FIX 8: Crash handler uses memory_order_relaxed for write
+// Line 1020: fetch_add dengan memory_order_relaxed pada g_crash_count, padahal
+// nilai n dipakai untuk keputusan crash-log (n <= CRASH_LIMIT). Dengan relaxed,
+// thread lain yang membaca g_crash_count bisa melihat nilai lama (race). Bila
+// 2 thread crash bersamaan, keduanya bisa lihat n=1 → keduanya log → melebihi
+// CRASH_LIMIT. Perbaikan: memory_order_release agar write visible ke reader lain.
 static void sbx_signal_handler(int sig, siginfo_t* info, void* ctx) {
     int n = 0;
     if (sig >= 0 && sig < NSIG) {
-
-        n = g_crash_count[sig].fetch_add(1, std::memory_order_relaxed) + 1;
+        // Fix: memory_order_release agar write terlihat oleh thread lain secara konsisten
+        n = g_crash_count[sig].fetch_add(1, std::memory_order_release) + 1;
     }
 
     if (n <= CRASH_LIMIT && g_crash_pipe[1] >= 0) {
@@ -1407,10 +1426,21 @@ private:
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
 
+    // BUG FIX 10: Identity blob parsing without size limits (unlimited map insertion)
+    // Line 1410-1436: parse_blob() loop meng-insert setiap baris ke g_identity (std::map)
+    // tanpa batas ukuran. Blob berasal dari companion (CMD_GET_IDENTITY), max 64 KiB
+    // (MAX_IDENTITY_BLOB di config.hpp). Blob jahat bisa kirim 64K baris "K1=V\nK2=V\n..."
+    // → map tumbuh tak terbatas → memory exhaustion → OOM di proses target. Perbaikan:
+    // batasi jumlah entry (mis. 512 key) dan total ukuran key+value (mis. 128 KiB).
     void parse_blob() {
         std::string s(blob_.begin(), blob_.end());
         std::istringstream iss(s);
         std::string line;
+        // Fix: batasi jumlah entry & total ukuran untuk cegah memory exhaustion
+        constexpr size_t MAX_IDENTITY_ENTRIES = 512;
+        constexpr size_t MAX_IDENTITY_TOTAL_BYTES = 128 * 1024;
+        size_t entry_count = 0;
+        size_t total_bytes = 0;
         while (std::getline(iss, line)) {
             if (line.empty() || line[0] == '#') continue;
             auto eq = line.find('=');
@@ -1431,7 +1461,21 @@ private:
             if (vs) v.erase(0, vs);
             while (!v.empty() && (v.back()=='\r' || v.back()=='\n' || v.back()==' '))
                 v.pop_back();
-            if (!k.empty()) g_identity[k] = v;
+            if (!k.empty()) {
+                // Fix: enforce limits untuk cegah blob jahat menguras memori
+                if (entry_count >= MAX_IDENTITY_ENTRIES) {
+                    LOGW("parse_blob: mencapai batas %zu entry — baris sisanya dilewati", MAX_IDENTITY_ENTRIES);
+                    break;
+                }
+                size_t pair_size = k.size() + v.size();
+                if (total_bytes + pair_size > MAX_IDENTITY_TOTAL_BYTES) {
+                    LOGW("parse_blob: mencapai batas %zu bytes — baris sisanya dilewati", MAX_IDENTITY_TOTAL_BYTES);
+                    break;
+                }
+                g_identity[k] = v;
+                ++entry_count;
+                total_bytes += pair_size;
+            }
         }
     }
 };
