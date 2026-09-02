@@ -4,9 +4,6 @@ const MODDIR = '/data/adb/modules/sandboxid';
 const ROTATE_SH = `${MODDIR}/rotate_ids.sh`;
 const IDENTITY = `${MODDIR}/identity.prop`;
 const TARGETS = `${MODDIR}/target.txt`;
-const CARRIERS = `${MODDIR}/carriers.tsv`;
-const CARRIER_CONF = `${MODDIR}/carrier.conf`;
-const SELFTEST_SH = `${MODDIR}/selftest.sh`;
 
 const ROTATE_LOG = `${MODDIR}/debug/rotate.log`;
 const ACTION_LOG = `${MODDIR}/debug/action.log`;
@@ -85,7 +82,7 @@ function toast(title, opts) {
   T.el.className = 'toast show ' + kind;
   T.exp.hidden = !hasDetail;
   T.detail.hidden = true;
-  T.detail.innerHTML = hasDetail ? renderLogHtml(detail) : '';
+  T.detail.innerHTML = hasDetail ? renderLogHtml(detail).html : '';
   T.title.style.cursor = hasDetail ? 'pointer' : 'default';
   clearTimeout(toast._t);
   const sticky = opts.sticky || kind === 'error';
@@ -141,27 +138,54 @@ function classifyLine(raw) {
   const m = raw.match(/^(\[\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d\])\s?(.*)$/);
   if (m) { ts = m[1]; rest = m[2]; }
   let lvl = 'info';
-  if (/^==>/.test(rest)) lvl = 'step';
-  else if (/^\[OK\]/.test(rest) || /^OK\b/.test(rest)) lvl = 'ok';
-  else if (/^\[WARN\]/.test(rest)) lvl = 'warn';
-  else if (/^\[ERR\]/.test(rest) || /^!/.test(rest)) lvl = 'err';
+  if (/^==>/.test(rest) || /^===/.test(rest)) lvl = 'step';
+  else if (/^\[OK\]/.test(rest) || /^OK\b/.test(rest) || /\bSELESAI\b/i.test(rest)) lvl = 'ok';
+  else if (/^\[WARN\]/.test(rest) || /\bREBOOT REQUIRED\b/i.test(rest)) lvl = 'warn';
+  else if (/^\[ERR\]/.test(rest) || /^!/.test(rest) || /^\s*(Gagal|FAIL(ED)?)\b/i.test(rest)) lvl = 'err';
   else {
-    const lc = rest.match(/^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+([VDIWEF])\//);
+    // logcat "MM-DD HH:MM:SS.mmm  PID  TID L Tag: msg" (L = V/D/I/W/E/F)
+    const lc = rest.match(/^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+(?:\d+\s+\d+\s+)?([VDIWEF])[\/\s]/);
     const p = lc ? lc[1] : '';
     if (p === 'E' || p === 'F') lvl = 'err';
     else if (p === 'W') lvl = 'warn';
-    else if (p === 'V' || p === 'D') lvl = 'info';
+    else if (p === 'I') lvl = 'info';
+    else if (p === 'V' || p === 'D') lvl = 'muted';
+    else if (/\b(error|exception|denied|cannot|not found|no such|refused|fatal|crash|segfault|abort)\b/i.test(rest)) lvl = 'err';
+    else if (/\b(warn(ing)?|skip(ped)?|dilewati|belum|missing)\b/i.test(rest)) lvl = 'warn';
   }
   return { ts, rest, lvl };
 }
 
-function renderLogHtml(text) {
-  return String(text).replace(/\r/g, '').split('\n').map(line => {
-    if (line === '') return '<div class="ln">&nbsp;</div>';
+// Level-rank untuk penyaringan: err menyaring err saja; warn menyaring warn+err; ok = ok saja.
+const LOG_LVL_MATCH = {
+  err:  l => l === 'err',
+  warn: l => l === 'warn',
+  ok:   l => l === 'ok',
+};
+
+function renderLogHtml(text, filter) {
+  filter = filter || {};
+  const q = (filter.q || '').toLowerCase();
+  const lvl = filter.lvl && filter.lvl !== 'all' ? filter.lvl : '';
+  const counts = { err: 0, warn: 0, ok: 0, step: 0, info: 0, muted: 0 };
+  const lines = String(text).replace(/\r/g, '').split('\n');
+  let shown = 0;
+  const html = lines.map(line => {
+    if (line === '') {
+      if (q || lvl) return '';
+      return '<div class="ln">&nbsp;</div>';
+    }
     const c = classifyLine(line);
+    if (counts[c.lvl] !== undefined) counts[c.lvl]++;
+    if (lvl && !(LOG_LVL_MATCH[lvl] && LOG_LVL_MATCH[lvl](c.lvl))) return '';
+    if (q && line.toLowerCase().indexOf(q) === -1) return '';
+    shown++;
     const ts = c.ts ? `<span class="ts">${escapeHtml(c.ts)}</span> ` : '';
-    return `<div class="ln lvl-${c.lvl}">${ts}${escapeHtml(c.rest)}</div>`;
+    const badge = (c.lvl === 'err' || c.lvl === 'warn' || c.lvl === 'ok')
+      ? `<span class="ln-tag ln-tag-${c.lvl}">${c.lvl.toUpperCase()}</span>` : '';
+    return `<div class="ln lvl-${c.lvl}">${badge}${ts}${escapeHtml(c.rest)}</div>`;
   }).join('');
+  return { html, counts, shown, total: lines.filter(l => l !== '').length };
 }
 
 function summarizeAction(out) {
@@ -220,11 +244,10 @@ function moveIndicator() {
 }
 
 function onTab(id) {
+  if (id !== 'log') stopLogAuto();
   if (id === 'persona') loadPersona();
   else if (id === 'rotate') loadRotate();
-  else if (id === 'sim') loadSim();
   else if (id === 'targets') loadTargets();
-  else if (id === 'selftest') loadSelftest();
   else if (id === 'log') loadLog();
 }
 
@@ -332,6 +355,38 @@ document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoad
   if (document.getElementById('rotate').classList.contains('active')) loadRotate();
 }));
 
+let rebootArmed = false;
+let rebootArmTimer = null;
+document.getElementById('rebootBtn').addEventListener('click', (ev) => {
+  const btn = ev.currentTarget;
+  if (!rebootArmed) {
+    // Klik pertama: arm (butuh klik kedua untuk konfirmasi — cegah reboot tak sengaja).
+    rebootArmed = true;
+    btn.classList.add('armed');
+    btn.textContent = 'Ketuk lagi untuk reboot';
+    toast('Ketuk sekali lagi untuk reboot sekarang', { kind: 'warn' });
+    clearTimeout(rebootArmTimer);
+    rebootArmTimer = setTimeout(() => {
+      rebootArmed = false;
+      btn.classList.remove('armed');
+      btn.textContent = 'Reboot';
+    }, 4000);
+    return;
+  }
+  clearTimeout(rebootArmTimer);
+  rebootArmed = false;
+  btn.classList.remove('armed');
+  btn.textContent = 'Reboot';
+  withLoading(btn, async () => {
+    toast('Menjalankan reboot…', { kind: 'info' });
+    // Fallback berlapis: svc power reboot → setprop → reboot(8). Salah satu pasti jalan di root.
+    const cmd = 'svc power reboot 2>/dev/null || setprop sys.powerctl reboot 2>/dev/null || reboot 2>/dev/null';
+    const r = await run(cmd);
+    // Jika perintah sukses, sistem biasanya sudah turun sebelum callback tiba.
+    if (!r.ok) toast(trimTitle(r.err.message || 'Gagal reboot'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
+  });
+});
+
 const ROT_CARDS = [
   { key: 'ssaid',       name: 'SSAID',         desc: 'Android ID per-aplikasi (Settings.Secure) — dihapus, dibuat ulang setelah reboot', get: 'ANDROID_ID' },
   { key: 'gaid',        name: 'Google AID',    desc: 'Advertising ID (Settings.Global + XML GMS)',        get: 'GOOGLE_AID' },
@@ -423,236 +478,345 @@ document.getElementById('rotAll').addEventListener('click', (ev) => withLoading(
   finishRotate(r, 'Rotasi semua');
 }));
 
-let SIM_DB = null;
+// ---- Target: pemilih aplikasi (saklar on/off + cari) --------------------
+let TGT_APPS = [];          // [{pkg, label, user}]
+let TGT_SELECTED = new Set(); // paket yang aktif (dari target.txt)
+let TGT_HEADER = '';        // baris komentar di atas target.txt, dipertahankan
+let TGT_FILTER = 'user';    // user | all | on
+let TGT_LOADED = false;
 
-function parseCarriersTsv(text) {
-  const rows = [];
-  for (const line of String(text).split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t[0] === '#') continue;
-    const f = line.split('\t');
-    if (f.length < 4) continue;
-    const name = f[0].trim(), mcc = f[1].trim(), mnc = f[2].trim(), iso = f[3].trim();
-    if (!name || !mcc || !mnc) continue;
-    const carrierId = (f[4] || '').trim();
-    rows.push({ name, mcc, mnc, iso, carrierId });
+// Ubah nama paket \u2192 label yang enak dibaca: ambil segmen bermakna terakhir,
+// buang TLD umum & suffix (.android/.app), Title-Case-kan. Contoh:
+// com.zhiliaoapp.musically \u2192 "Musically"; com.google.android.youtube \u2192 "Youtube".
+function labelFromPkg(pkg) {
+  const parts = String(pkg).split('.').filter(Boolean);
+  const drop = new Set(['com', 'org', 'net', 'io', 'app', 'apps', 'android', 'mobile', 'co']);
+  let seg = '';
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (!drop.has(parts[i].toLowerCase())) { seg = parts[i]; break; }
   }
-  return rows;
+  if (!seg) seg = parts[parts.length - 1] || pkg;
+  seg = seg.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+  return seg.replace(/\b\w/g, c => c.toUpperCase());
 }
 
-function simFillCarriers(current) {
-  const iso = document.getElementById('simCountry').value;
-  const carSel = document.getElementById('simCarrier');
-  const list = SIM_DB.filter(r => !iso || r.iso === iso)
-    .sort((a, b) => a.name.localeCompare(b.name));
-  carSel.innerHTML = '<option value="">Operator…</option>' +
-    list.map(r => {
-      const val = `${r.mcc}|${r.mnc}|${r.name}|${r.iso}`;
-      return `<option value="${escapeHtml(val)}" data-cid="${escapeHtml(r.carrierId || '')}">${escapeHtml(r.name)} · ${escapeHtml(r.mcc + r.mnc)}</option>`;
-    }).join('');
-  if (current && current.MCC && current.MNC) {
-    const want = `${current.MCC}|${current.MNC}|`;
-    for (const opt of carSel.options) {
-      if (opt.value.startsWith(want)) { carSel.value = opt.value; break; }
-    }
+// Baca daftar paket. -3 = user apps saja; tanpa -3 = semua. Universal di semua Android.
+async function fetchApps(all) {
+  const flag = all ? '' : '-3';
+  const r = await run(`pm list packages ${flag} 2>/dev/null | sed 's/^package://' | sort -u`);
+  if (!r.ok) return [];
+  const userSet = new Set();
+  if (all) {
+    const ru = await run(`pm list packages -3 2>/dev/null | sed 's/^package://'`);
+    if (ru.ok) ru.out.split(/\r?\n/).forEach(p => { p = p.trim(); if (p) userSet.add(p); });
+  }
+  return String(r.out).split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(pkg => ({
+    pkg,
+    label: labelFromPkg(pkg),
+    user: all ? userSet.has(pkg) : true,
+  }));
+}
+
+function parseTargetsFile(text) {
+  const sel = new Set();
+  const header = [];
+  let sawPkg = false;
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (!line) { if (!sawPkg && raw.trim().startsWith('#')) header.push(raw); continue; }
+    sel.add(line);
+    sawPkg = true;
+  }
+  return { sel, header: header.join('\n') };
+}
+
+function tgtVisibleApps() {
+  const q = (document.getElementById('tgtSearch').value || '').trim().toLowerCase();
+  let list = TGT_APPS.slice();
+  if (TGT_FILTER === 'user') list = list.filter(a => a.user);
+  else if (TGT_FILTER === 'on') list = list.filter(a => TGT_SELECTED.has(a.pkg));
+  if (q) list = list.filter(a => a.pkg.toLowerCase().indexOf(q) !== -1 || a.label.toLowerCase().indexOf(q) !== -1);
+  // Yang aktif tampil di atas, lalu alfabet by label.
+  list.sort((a, b) => {
+    const sa = TGT_SELECTED.has(a.pkg) ? 0 : 1, sb = TGT_SELECTED.has(b.pkg) ? 0 : 1;
+    if (sa !== sb) return sa - sb;
+    return a.label.localeCompare(b.label);
+  });
+  return list;
+}
+
+function tgtUpdateCount() {
+  const el = document.getElementById('tgtCount');
+  if (el) el.textContent = `${TGT_SELECTED.size} dipilih`;
+  const badge = document.getElementById('tgtBadge');
+  if (badge) {
+    const n = TGT_SELECTED.size;
+    badge.textContent = n > 99 ? '99+' : String(n);
+    badge.hidden = n === 0;
   }
 }
 
-function simFill(current) {
-  const cSel = document.getElementById('simCountry');
-  const isos = Array.from(new Set(SIM_DB.map(r => r.iso).filter(Boolean))).sort();
-  cSel.innerHTML = '<option value="">Negara…</option>' +
-    isos.map(i => `<option value="${escapeHtml(i)}">${escapeHtml(i.toUpperCase())}</option>`).join('');
-  const curIso = (current && current.ISO) ? current.ISO.toLowerCase() : '';
-  if (curIso && isos.includes(curIso)) cSel.value = curIso;
-  simFillCarriers(current);
+// Baca cepat jumlah target aktif untuk badge nav (tanpa enumerasi aplikasi penuh).
+async function prefetchTgtCount() {
+  const r = await run(`cat ${shq(TARGETS)} 2>/dev/null || true`);
+  if (!r.ok) return;
+  const parsed = parseTargetsFile(r.out);
+  if (!TGT_LOADED) { TGT_SELECTED = parsed.sel; TGT_HEADER = parsed.header; }
+  tgtUpdateCount();
 }
 
-function renderSimCurrent(cc) {
-  const el = document.getElementById('simCurrent');
-  const st = document.getElementById('simState');
-  if (!cc || !cc.MCC) {
-    st.textContent = 'Bawaan';
-    st.className = 'chip';
-    el.className = 'kv';
-    el.innerHTML = '<div class="empty">Belum ada operator dipilih — pakai bawaan.</div>';
+// Paket terpilih yang tak ada di daftar (mis. aplikasi sudah dihapus) tetap ditampilkan
+// agar bisa dimatikan, dengan penanda.
+function renderTgtList() {
+  const wrap = document.getElementById('tgtList');
+  if (!wrap) return;
+  const list = tgtVisibleApps();
+  const known = new Set(TGT_APPS.map(a => a.pkg));
+  const ghosts = (TGT_FILTER !== 'on') ? [] :
+    [...TGT_SELECTED].filter(p => !known.has(p)).map(p => ({ pkg: p, label: labelFromPkg(p), user: true, ghost: true }));
+  const all = list.concat(ghosts);
+  if (!all.length) {
+    wrap.innerHTML = `<div class="empty">${TGT_LOADED ? 'Tidak ada aplikasi cocok.' : 'Memuat daftar aplikasi\u2026'}</div>`;
     return;
   }
-  st.textContent = (cc.PHANTOM === '1') ? 'Aktif · phantom' : 'Aktif';
-  st.className = 'chip chip-on';
-  const rows = [
-    ['Operator', cc.NAME || ''],
-    ['Kode (MCC+MNC)', (cc.MCC || '') + (cc.MNC || '')],
-    ['Negara', (cc.ISO || '').toUpperCase()],
-    ['Carrier ID', cc.CARRIER_ID ? cc.CARRIER_ID : 'UNKNOWN (-1)'],
-    ['Mode Tambah SIM', cc.PHANTOM === '1' ? 'Ya' : 'Tidak'],
-  ];
-  el.className = 'kv in';
-  el.innerHTML = rows.map(([k, v]) => v !== ''
-    ? `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>` : '').join('');
+  wrap.innerHTML = all.map(a => {
+    const on = TGT_SELECTED.has(a.pkg);
+    const initial = escapeHtml((a.label[0] || '?').toUpperCase());
+    return `<label class="approw${on ? ' on' : ''}" data-pkg="${escapeHtml(a.pkg)}">
+      <span class="app-ic" aria-hidden="true">${initial}</span>
+      <span class="app-txt">
+        <span class="app-name">${escapeHtml(a.label)}${a.ghost ? ' <span class="app-ghost">(tidak terpasang)</span>' : ''}</span>
+        <span class="app-pkg">${escapeHtml(a.pkg)}</span>
+      </span>
+      <span class="switch"><input type="checkbox" ${on ? 'checked' : ''} aria-label="${escapeHtml(a.label)}"><span class="track"></span></span>
+    </label>`;
+  }).join('');
+  wrap.querySelectorAll('.approw').forEach(row => {
+    const cb = row.querySelector('input[type="checkbox"]');
+    cb.addEventListener('change', () => {
+      const pkg = row.dataset.pkg;
+      if (cb.checked) TGT_SELECTED.add(pkg); else TGT_SELECTED.delete(pkg);
+      row.classList.toggle('on', cb.checked);
+      tgtUpdateCount();
+      markTgtDirty();
+    });
+  });
 }
 
-async function loadSim() {
-  const el = document.getElementById('simCurrent');
-  el.className = 'kv';
-  el.innerHTML = skKv(3);
-  if (!SIM_DB || !SIM_DB.length) {
-    const r = await run(`cat ${shq(CARRIERS)} 2>/dev/null || true`);
-    SIM_DB = (r.ok && r.out.trim()) ? parseCarriersTsv(r.out) : [];
+let TGT_DIRTY = false;
+function markTgtDirty() {
+  TGT_DIRTY = true;
+  const s = document.getElementById('tgtStatus');
+  if (s) s.textContent = 'Perubahan belum disimpan \u2014 tekan "Simpan pilihan".';
+}
+
+function buildTargetsContent() {
+  const head = TGT_HEADER ? TGT_HEADER.replace(/\s*$/, '') + '\n' : '';
+  const body = [...TGT_SELECTED].sort().join('\n');
+  return head + body + (body ? '\n' : '');
+}
+
+async function saveTargets(okMsg) {
+  const content = buildTargetsContent();
+  const b64 = btoa(unescape(encodeURIComponent(content)));
+  const cmd = `echo ${shq(b64)} | base64 -d > ${shq(TARGETS)} && chmod 0644 ${shq(TARGETS)}`;
+  const r = await safeExec(cmd, okMsg);
+  if (r.ok) {
+    TGT_DIRTY = false;
+    document.getElementById('tgtStatus').textContent =
+      `${TGT_SELECTED.size} paket tersimpan \u00b7 dimuat ulang saat aplikasi target dibuka lagi`;
   }
-  if (!SIM_DB.length) {
-    document.getElementById('simState').textContent = '—';
-    el.className = 'kv';
-    el.innerHTML = '<div class="empty">carriers.tsv tidak terbaca.</div>';
-    return;
-  }
-  const rc = await run(`cat ${shq(CARRIER_CONF)} 2>/dev/null || true`);
-  const cc = (rc.ok && rc.out.trim()) ? parseProp(rc.out) : {};
-  simFill(cc);
-  document.getElementById('simPhantom').checked = (cc.PHANTOM === '1');
-  renderSimCurrent(cc);
+  return r;
 }
 
-function carrierCmd(arg) {
-  return `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
-    `{ printf '[%s] ==> carrier ${arg.split('|')[0] === 'off' ? 'off' : 'set'} (webui)\\n' "$(date '+%F %T')"; ` +
-    `sh ${shq(ROTATE_SH)} carrier ${shq(arg)} 2>&1; } | tee -a ${shq(ROTATE_LOG)}`;
-}
-
-document.getElementById('simCountry').addEventListener('change', () => simFillCarriers(null));
-
-document.getElementById('simApply').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
-  const carSel = document.getElementById('simCarrier');
-  const sel = carSel.value;
-  if (!sel) { toast('Pilih operator dulu', { kind: 'warn' }); return; }
-  const phantom = document.getElementById('simPhantom').checked ? '1' : '0';
-  const opt = carSel.options[carSel.selectedIndex];
-  const cid = (opt && opt.dataset ? opt.dataset.cid : '') || '';
-  const r = await run(carrierCmd(`${sel}|${phantom}|${cid}`));
-  finishRotate(r, 'SIM / operator');
-  loadSim();
-}));
-
-document.getElementById('simOff').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
-  const r = await run(carrierCmd('off'));
-  finishRotate(r, 'SIM / operator');
-  document.getElementById('simPhantom').checked = false;
-  loadSim();
-}));
-
-async function loadTargets() {
+async function loadTargets(force) {
+  const wrap = document.getElementById('tgtList');
+  if (wrap && (!TGT_LOADED || force)) wrap.innerHTML = skTargets(6);
+  // Baca target.txt & daftar aplikasi paralel.
+  const [rt, apps] = await Promise.all([
+    run(`cat ${shq(TARGETS)} 2>/dev/null || true`),
+    fetchApps(TGT_FILTER === 'all'),
+  ]);
+  const parsed = parseTargetsFile(rt.ok ? rt.out : '');
+  TGT_SELECTED = parsed.sel;
+  TGT_HEADER = parsed.header;
+  TGT_APPS = apps;
+  TGT_LOADED = true;
+  TGT_DIRTY = false;
+  // Sinkronkan textarea manual (mode lanjutan).
   const ta = document.getElementById('tgtArea');
-  const r = await safeExec(`cat ${shq(TARGETS)} 2>/dev/null || true`);
-  ta.value = r.ok ? r.out : '';
-  document.getElementById('tgtStatus').textContent = '';
+  if (ta) ta.value = rt.ok ? rt.out : '';
+  tgtUpdateCount();
+  renderTgtList();
+  const s = document.getElementById('tgtStatus');
+  if (s && !TGT_DIRTY) s.textContent = apps.length ? `${apps.length} aplikasi terbaca` : 'Daftar aplikasi kosong / pm tidak tersedia.';
 }
-document.getElementById('tgtReload').addEventListener('click', loadTargets);
-document.getElementById('tgtSave').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
+
+function skTargets(n) {
+  let s = '';
+  for (let i = 0; i < n; i++) {
+    s += '<div class="approw sk-row"><span class="app-ic sk sk-ic"></span>' +
+      '<span class="app-txt"><span class="sk sk-line sk-name"></span>' +
+      '<span class="sk sk-line sk-sub"></span></span>' +
+      '<span class="sk sk-sw"></span></div>';
+  }
+  return s;
+}
+
+// Cari & saring (debounce ringan biar mulus di list besar).
+let tgtSearchTimer = null;
+document.getElementById('tgtSearch').addEventListener('input', () => {
+  clearTimeout(tgtSearchTimer);
+  tgtSearchTimer = setTimeout(renderTgtList, 120);
+});
+document.getElementById('tgtFilter').querySelectorAll('.seg-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (btn.classList.contains('active')) return;
+    document.getElementById('tgtFilter').querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', b === btn));
+    const nf = btn.dataset.filter;
+    const needReload = (nf === 'all') !== (TGT_FILTER === 'all');
+    TGT_FILTER = nf;
+    if (needReload) {
+      // Beralih user\u2194all butuh baca ulang daftar (ambil superset atau subset).
+      const keep = new Set(TGT_SELECTED);
+      TGT_APPS = await fetchApps(TGT_FILTER === 'all');
+      TGT_SELECTED = keep;
+    }
+    renderTgtList();
+  });
+});
+document.getElementById('tgtRefresh').addEventListener('click', (ev) =>
+  withLoading(ev.currentTarget, () => loadTargets(true)));
+document.getElementById('tgtSave').addEventListener('click', (ev) =>
+  withLoading(ev.currentTarget, () => saveTargets('Pilihan target tersimpan')));
+document.getElementById('tgtApplyNow').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
+  const r = await saveTargets(null);
+  if (!r.ok) return;
+  // "Terapkan sekarang": reset aplikasi target agar langsung baca identitas baru.
+  toast('Menerapkan & mereset aplikasi target\u2026', { kind: 'info' });
+  const rr = await run(`${ENV} && sh ${shq(ROTATE_SH)} applog 2>&1`);
+  if (rr.ok) toast(`Diterapkan \u00b7 ${TGT_SELECTED.size} target`, { kind: 'ok', detail: rr.out });
+  else toast(trimTitle(rr.err.message || 'Sebagian gagal'), { kind: 'warn', detail: rr.err.stdout || rr.err.stderr || '' });
+}));
+
+// Mode teks manual (lanjutan) \u2014 tetap tersedia untuk power user.
+document.getElementById('tgtRawToggle').addEventListener('click', () => {
+  const wrap = document.getElementById('tgtRawWrap');
+  wrap.hidden = !wrap.hidden;
+  if (!wrap.hidden) {
+    document.getElementById('tgtArea').value = buildTargetsContent();
+  }
+});
+document.getElementById('tgtRawSave').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
   const ta = document.getElementById('tgtArea');
   const content = ta.value.replace(/\r\n/g, '\n');
   const b64 = btoa(unescape(encodeURIComponent(content)));
   const cmd = `echo ${shq(b64)} | base64 -d > ${shq(TARGETS)} && chmod 0644 ${shq(TARGETS)}`;
   const r = await safeExec(cmd, 'target.txt tersimpan');
-  if (r.ok) {
-    const lines = content.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length;
-    document.getElementById('tgtStatus').textContent = `${lines} paket \u00b7 dimuat ulang saat spawn berikutnya`;
-  }
+  if (r.ok) { await loadTargets(true); }
 }));
+document.getElementById('tgtReload').addEventListener('click', () => loadTargets(true));
 
-const ST_CAT = {
-  identitas: 'Identitas', koherensi: 'Koherensi', vbmeta: 'Verified boot', build: 'Build',
-  selinux: 'SELinux', rom: 'Emulator / ROM', root: 'Root', mount: 'Mount', hosts: 'Hosts',
-  hooks: 'Hook per-app',
-};
-const ST_KIND = {
-  PASS: 'st-pass', WARN: 'st-warn', FAIL: 'st-fail', INFO: 'st-info',
-};
+let LOG_RAW = '';       // teks log mentah terakhir (untuk filter tanpa fetch ulang)
+let LOG_LEVEL = 'all';  // all | err | warn | ok
 
-function parseSelftest(out) {
-  const rows = [];
-  let summary = null;
-  for (const line of String(out || '').replace(/\r/g, '').split('\n')) {
-    const s = line.match(/^SELFTEST\s+SUMMARY\s+(.*)$/);
-    if (s) {
-      const g = {};
-      s[1].replace(/(\w+)=(\d+)/g, (_, k, v) => { g[k] = Number(v); return ''; });
-      summary = g;
-      continue;
-    }
-    const m = line.match(/^SELFTEST\s+(\S+)\s+(PASS|WARN|FAIL|INFO)\s*(.*)$/);
-    if (m) rows.push({ cat: m[1], status: m[2], detail: m[3] });
+function applyLogFilter() {
+  const body = document.getElementById('logBody');
+  // Ikuti ke bawah hanya jika sudah dekat dasar (biar auto-refresh tak menarik view saat baca).
+  const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+  const prevTop = body.scrollTop;
+  const q = document.getElementById('logSearch').value || '';
+  const res = renderLogHtml(LOG_RAW, { q, lvl: LOG_LEVEL });
+  body.innerHTML = res.html || `<div class="empty">Tidak ada baris cocok${q || LOG_LEVEL !== 'all' ? ' \u2014 coba ubah filter/pencarian.' : '.'}</div>`;
+  // Perbarui angka di tombol level & ringkasan.
+  const setCount = (lvl, n) => {
+    const b = document.querySelector(`#logLevels .seg-btn[data-lvl="${lvl}"]`);
+    if (b) b.dataset.count = String(n);
+  };
+  setCount('err', res.counts.err);
+  setCount('warn', res.counts.warn);
+  setCount('ok', res.counts.ok);
+  const sum = document.getElementById('logSummary');
+  if (sum) {
+    const parts = [];
+    if (res.counts.err) parts.push(`<span class="chip-err">${res.counts.err} error</span>`);
+    if (res.counts.warn) parts.push(`<span class="chip-warn">${res.counts.warn} warn</span>`);
+    if (res.counts.ok) parts.push(`<span class="chip-ok">${res.counts.ok} ok</span>`);
+    const filtered = (q || LOG_LEVEL !== 'all');
+    const tail = filtered ? ` \u00b7 ${res.shown}/${res.total} baris` : ` \u00b7 ${res.total} baris`;
+    sum.innerHTML = (parts.join(' ') || '<span class="chip-muted">tidak ada error/warning</span>') + tail;
   }
-  return { rows, summary };
+  if (nearBottom) body.scrollTop = body.scrollHeight;
+  else body.scrollTop = prevTop;
 }
 
-function renderSelftest(out) {
-  const { rows, summary } = parseSelftest(out);
-  const body = document.getElementById('stBody');
-  const sum = document.getElementById('stSummary');
-  if (!rows.length) {
-    body.innerHTML = '<div class="empty">Tidak ada hasil uji. Coba jalankan lagi.</div>';
-    sum.textContent = '';
-    return;
-  }
-  body.innerHTML = rows.map(r => {
-    const cls = ST_KIND[r.status] || ST_KIND.INFO;
-    const cat = ST_CAT[r.cat] || r.cat;
-    return `<div class="card st ${cls}">` +
-      `<div class="st-head"><span class="st-badge">${escapeHtml(r.status)}</span>` +
-      `<span class="name">${escapeHtml(cat)}</span></div>` +
-      `<div class="desc">${escapeHtml(r.detail)}</div></div>`;
-  }).join('');
-  body.querySelectorAll('.card').forEach((el, i) => el.style.setProperty('--i', i));
-  if (summary) {
-    const p = summary.pass || 0, w = summary.warn || 0, f = summary.fail || 0, inf = summary.info || 0;
-    sum.textContent = `${p} pass · ${w} warn · ${f} fail · ${inf} info`;
-  } else {
-    sum.textContent = '';
-  }
-}
-
-async function runSelftest(showToast) {
-  const body = document.getElementById('stBody');
-  body.innerHTML = skLines(8);
-  const r = await run(`${ENV} && sh ${shq(SELFTEST_SH)} 2>&1`);
-  if (!r.ok) {
-    const msg = (r.err && r.err.message) || 'error';
-    body.innerHTML = `<div class="empty">Gagal menjalankan uji: ${escapeHtml(msg)}</div>`;
-    document.getElementById('stSummary').textContent = '';
-    if (showToast) toast(trimTitle(msg), { kind: 'error', detail: (r.err && (r.err.stdout || r.err.stderr)) || '' });
-    return;
-  }
-  renderSelftest(r.out);
-  if (showToast) {
-    const { summary } = parseSelftest(r.out);
-    const f = (summary && summary.fail) || 0, w = (summary && summary.warn) || 0, p = (summary && summary.pass) || 0;
-    const kind = f > 0 ? 'error' : (w > 0 ? 'warn' : 'ok');
-    toast(`Uji selesai · ${p} pass · ${w} warn · ${f} fail`, { kind, detail: r.out });
-  }
-}
-
-async function loadSelftest() { return runSelftest(false); }
-
-document.getElementById('stRun').addEventListener('click', (ev) =>
-  withLoading(ev.currentTarget, () => runSelftest(true)));
-
-async function loadLog() {
+async function loadLog(opts) {
+  opts = (opts && typeof opts === 'object' && !opts.type) ? opts : {};
   const src = document.getElementById('logSrc').value;
   const body = document.getElementById('logBody');
-  body.innerHTML = skLines(10);
+  if (!opts.silent) body.innerHTML = skLines(10);
   let cmd;
-  if (src === 'action')  cmd = `tail -n 400 ${shq(ACTION_LOG)} 2>/dev/null || echo '(belum ada action.log \u2014 tekan "Acak perangkat baru" atau tombol Action di KSU/APatch)'`;
+  if (src === 'action')  cmd = `tail -n 400 ${shq(ACTION_LOG)} 2>/dev/null || echo '(belum ada action.log \u2014 tekan "Acak semua \u00b7 1 klik" atau tombol Action di KSU/APatch)'`;
   else if (src === 'rotate') cmd = `tail -n 400 ${shq(ROTATE_LOG)} 2>/dev/null || echo '(belum ada rotate.log \u2014 tekan tombol Rotasi)'`;
   else if (src === 'session') cmd = `ls -t ${shq(MODDIR)}/debug/session-*.log 2>/dev/null | head -n 1 | xargs -r tail -n 400 || echo '(tidak ada session log \u2014 pasang varian debug)'`;
   else if (src === 'crashes') cmd = `tail -n 400 ${shq(MODDIR)}/debug/crashes.log 2>/dev/null || echo '(belum ada crashes.log)'`;
   else if (src === 'logcat') cmd = `logcat -d -t 200 -v time -s SandboxID:V SandboxIDCompanion:V 2>&1 | tail -n 200`;
   const r = await safeExec(cmd);
-  const text = (r.ok ? r.out : (r.err && r.err.message) || 'error') || '(kosong)';
-  body.innerHTML = renderLogHtml(text);
-  body.scrollTop = body.scrollHeight;
+  LOG_RAW = (r.ok ? r.out : (r.err && r.err.message) || 'error') || '(kosong)';
+  applyLogFilter();
 }
-document.getElementById('logRefresh').addEventListener('click', loadLog);
-document.getElementById('logSrc').addEventListener('change', loadLog);
+document.getElementById('logRefresh').addEventListener('click', (ev) => withLoading(ev.currentTarget, loadLog));
+document.getElementById('logSrc').addEventListener('change', () => loadLog());
+
+// Auto-refresh: tail berkala tanpa flicker (silent), berhenti saat pindah tab.
+let LOG_AUTO = false;
+let LOG_AUTO_TIMER = null;
+function stopLogAuto() {
+  LOG_AUTO = false;
+  if (LOG_AUTO_TIMER) { clearInterval(LOG_AUTO_TIMER); LOG_AUTO_TIMER = null; }
+  const b = document.getElementById('logAuto');
+  if (b) { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); }
+}
+function startLogAuto() {
+  LOG_AUTO = true;
+  const b = document.getElementById('logAuto');
+  if (b) { b.classList.add('active'); b.setAttribute('aria-pressed', 'true'); }
+  clearInterval(LOG_AUTO_TIMER);
+  LOG_AUTO_TIMER = setInterval(() => loadLog({ silent: true }), 3000);
+  loadLog();
+}
+document.getElementById('logAuto').addEventListener('click', () => {
+  if (LOG_AUTO) stopLogAuto(); else startLogAuto();
+});
+let logSearchTimer = null;
+document.getElementById('logSearch').addEventListener('input', () => {
+  clearTimeout(logSearchTimer);
+  logSearchTimer = setTimeout(applyLogFilter, 130);
+});
+document.getElementById('logLevels').querySelectorAll('.seg-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('logLevels').querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', b === btn));
+    LOG_LEVEL = btn.dataset.lvl;
+    applyLogFilter();
+  });
+});
+document.getElementById('logCopy').addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(LOG_RAW);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = LOG_RAW; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+    }
+    const old = btn.textContent; btn.textContent = 'Tersalin \u2713';
+    setTimeout(() => { btn.textContent = old; }, 1400);
+  } catch (e) {
+    toast('Gagal menyalin log', { kind: 'warn' });
+  }
+});
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
@@ -700,5 +864,6 @@ function initTheme() {
     if (v.ok && v.out.trim()) document.getElementById('version').textContent = v.out.trim();
     await run(`mkdir -p ${shq(MODDIR)}/debug && touch ${shq(ROTATE_LOG)} ${shq(ACTION_LOG)}`);
     loadPersona();
+    prefetchTgtCount();
   })();
 })();

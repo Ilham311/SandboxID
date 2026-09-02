@@ -31,9 +31,7 @@
 <nav id="nav">
   <button class="tab active" data-tab="persona">Perangkat</button>
   <button class="tab" data-tab="rotate">Rotasi</button>
-  <button class="tab" data-tab="sim">SIM</button>
-  <button class="tab" data-tab="targets">Target</button>
-  <button class="tab" data-tab="selftest">Uji</button>
+  <button class="tab" data-tab="targets">Target<span class="tab-badge" id="tgtBadge" hidden></span></button>
   <button class="tab" data-tab="log">Log</button>
   <span class="nav-ind" id="navInd"></span>
 </nav>
@@ -41,9 +39,11 @@
 <main>
   <section id="persona" class="page active">
     <div class="row">
-      <button id="freshenBtn" class="primary">Acak perangkat baru</button>
+      <button id="freshenBtn" class="primary">Acak semua &middot; 1 klik</button>
+      <button id="rebootBtn" class="danger">Reboot</button>
       <button id="refreshBtn" class="ghost">Muat ulang</button>
     </div>
+    <div class="hint">Satu klik: acak perangkat (Build/prop), terapkan, reset aplikasi target, lalu rotasi semua ID (SSAID &middot; GAID &middot; MAC &middot; nama &middot; boot count &middot; AppLog) &mdash; sama seperti tombol Action di KSU/APatch.</div>
     <div id="hero" class="hero"></div>
     <div id="tiles" class="tiles"></div>
     <div id="identity" class="kv"></div>
@@ -58,59 +58,61 @@
     <div class="cards" id="rotCards"></div>
   </section>
 
-  <section id="sim" class="page">
-    <div class="row spread">
-      <div class="hint">Pilih operator yang dilihat aplikasi. Berlaku saat aplikasi target dibuka lagi.</div>
-      <span class="chip" id="simState">&mdash;</span>
-    </div>
-    <div id="simCurrent" class="kv"></div>
-    <div class="row">
-      <select id="simCountry" aria-label="Negara"><option value="">Negara&hellip;</option></select>
-      <select id="simCarrier" aria-label="Operator"><option value="">Operator&hellip;</option></select>
-    </div>
-    <label class="row simrow" for="simPhantom">
-      <input type="checkbox" id="simPhantom">
-      <span>Mode Tambah SIM &mdash; slot kosong ikut melaporkan SIM ada</span>
-    </label>
-    <div class="row spread">
-      <button id="simApply" class="primary sm">Terapkan</button>
-      <button id="simOff" class="ghost sm">Nonaktifkan</button>
-    </div>
-    <div class="hint">Kode operator, nama, dan negara dilaporkan konsisten lewat properti. Carrier ID (getSimCarrierId) dibaca aplikasi lewat layanan telepon (binder): dicakup lapisan telepon opsional yang bawaannya nonaktif.</div>
-  </section>
-
   <section id="targets" class="page">
-    <div class="row spread">
-      <div class="hint">Satu paket per baris. Baris kosong dan diawali # diabaikan. Companion memuat ulang otomatis.</div>
-      <button id="tgtSave" class="primary sm">Simpan</button>
+    <div class="hint">Nyalakan aplikasi yang identitasnya mau dikelabui. Perubahan dimuat ulang otomatis saat aplikasi target dibuka lagi.</div>
+    <div class="row tgt-search">
+      <input id="tgtSearch" type="search" placeholder="Cari nama / paket aplikasi&hellip;" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Cari aplikasi">
+      <button id="tgtRefresh" class="ghost sm" title="Muat ulang daftar aplikasi" aria-label="Muat ulang daftar">&#8635;</button>
     </div>
-    <textarea id="tgtArea" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
-    <div class="row">
-      <button id="tgtReload" class="ghost sm">Muat ulang dari disk</button>
-      <div id="tgtStatus" class="hint"></div>
+    <div class="row spread tgt-controls">
+      <div class="seg" id="tgtFilter" role="group" aria-label="Saring aplikasi">
+        <button class="seg-btn active" data-filter="user">Pengguna</button>
+        <button class="seg-btn" data-filter="all">Semua</button>
+        <button class="seg-btn" data-filter="on">Dipilih</button>
+      </div>
+      <span class="chip" id="tgtCount">0 dipilih</span>
     </div>
-  </section>
-
-  <section id="selftest" class="page">
-    <div class="row spread">
-      <button id="stRun" class="primary">Jalankan uji</button>
-      <span id="stSummary" class="hint"></span>
+    <div id="tgtList" class="applist"></div>
+    <div class="row tgt-foot">
+      <button id="tgtSave" class="primary sm">Simpan pilihan</button>
+      <button id="tgtApplyNow" class="ghost sm">Terapkan sekarang</button>
+      <button id="tgtRawToggle" class="ghost sm">Edit manual</button>
     </div>
-    <div class="hint">Pemeriksaan hanya-baca: melaporkan jejak yang akan dilihat aplikasi detektor. Tidak mengubah apa pun. Cek per-aplikasi (hook properti, redirect baca, bind build.prop, hider) ditandai INFO &mdash; verifikasi di dalam aplikasi target, bukan dari sini.</div>
-    <div id="stBody" class="cards"></div>
+    <div id="tgtStatus" class="hint"></div>
+    <div id="tgtRawWrap" class="tgt-raw" hidden>
+      <textarea id="tgtArea" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Daftar paket manual"></textarea>
+      <div class="row">
+        <button id="tgtRawSave" class="ghost sm">Simpan teks</button>
+        <button id="tgtReload" class="ghost sm">Muat ulang dari disk</button>
+      </div>
+    </div>
   </section>
 
   <section id="log" class="page">
     <div class="row spread">
       <select id="logSrc">
         <option value="logcat">Logcat langsung (200 baris)</option>
-        <option value="action">Log Action (acak perangkat)</option>
+        <option value="action">Log Action (acak semua)</option>
         <option value="rotate">Log Rotasi</option>
         <option value="session">Sesi terbaru (varian debug)</option>
         <option value="crashes">Crash</option>
       </select>
-      <button id="logRefresh" class="ghost sm">Muat ulang</button>
+      <div class="row log-tools">
+        <button id="logRefresh" class="ghost sm">Muat ulang</button>
+        <button id="logAuto" class="ghost sm" aria-pressed="false" title="Segarkan otomatis tiap 3 detik">Auto</button>
+        <button id="logCopy" class="ghost sm">Salin</button>
+      </div>
     </div>
+    <div class="row log-filter">
+      <input id="logSearch" type="search" placeholder="Cari di log&hellip;" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Cari di log">
+      <div class="seg" id="logLevels" role="group" aria-label="Saring level">
+        <button class="seg-btn active" data-lvl="all">Semua</button>
+        <button class="seg-btn" data-lvl="err" data-count="0">Error</button>
+        <button class="seg-btn" data-lvl="warn" data-count="0">Warn</button>
+        <button class="seg-btn" data-lvl="ok" data-count="0">OK</button>
+      </div>
+    </div>
+    <div class="log-summary" id="logSummary"></div>
     <div id="logBody" class="logbody"></div>
   </section>
 </main>
