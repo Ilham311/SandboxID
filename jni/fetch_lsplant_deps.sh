@@ -103,6 +103,77 @@ if [ ! -f "$DOBBY_CODEPATCH_FIX" ]; then
 fi
 cp "$DOBBY_CODEPATCH_FIX" "$DOBBY_CODEPATCH"
 echo "==> patched Dobby CodePatch (W^X /proc/self/mem) -> $DOBBY_CODEPATCH"
+
+# ----------------------------------------------------------------------------
+# Patch tambahan Dobby untuk device W^X keras (Android 15/16; SELinux execmem
+# ditolak / execmod non-uniform). Dua bug hulu Dobby yang memicu FORCE-CLOSE:
+#
+#  (1) OSMemory::SetPermission() memanggil FATAL()=abort() saat mprotect gagal.
+#      Di lib hook yang disuntik ke proses asing, SATU mprotect exec yang ditolak
+#      meng-ABORT seluruh proses target (force close). Diganti ERROR_LOG (tanpa
+#      abort); fungsi tetap `return ret == 0` -> pemanggil membatalkan hook mulus.
+#  (2) NearMemoryArena::AllocateChunk() mengabaikan nilai balik SetPermission lalu
+#      memakai page yang gagal dijadikan exec -> lompatan ke page non-exec = SIGSEGV
+#      (half-apply). Diperbaiki: cek nilai balik; bila gagal Free page & jatuh ke
+#      pencarian island exec (execmod) yang SUDAH ada di bawahnya (ala ShadowHook).
+#
+# Referensi: Frida/ShadowHook tak pernah abort host saat proteksi ditolak; ART JIT
+# & LSPlant menulis ke region exec file-backed (execmod), bukan anon execmem.
+# Disuntik in-place via sed/awk (TANPA perl -- Termux tak punya perl). Idempotent
+# + fail-loud bila layout hulu berubah dari pin DOBBY_REF.
+# ----------------------------------------------------------------------------
+DOBBY_POSIX="$EXT/dobby/source/UserMode/UnifiedInterface/platform-posix.cc"
+DOBBY_NEARARENA="$EXT/dobby/source/MemoryAllocator/NearMemoryArena.cc"
+for _sbxf in "$DOBBY_POSIX" "$DOBBY_NEARARENA"; do
+  if [ ! -f "$_sbxf" ]; then
+    echo "ERROR: target patch Dobby tidak ada: $_sbxf" >&2
+    echo "  (layout Dobby berubah dari pin $DOBBY_REF; sesuaikan path/patch)" >&2
+    exit 1
+  fi
+done
+
+# (1) SetPermission: FATAL(abort) -> ERROR_LOG (tanpa abort)
+if grep -qF "[SandboxID] OSMemory::SetPermission" "$DOBBY_POSIX"; then
+  echo "==> Dobby SetPermission sudah dipatch (skip)"
+else
+  if ! grep -qE '^ *FATAL\("\[!\] %s.*strerror\(errno\)' "$DOBBY_POSIX"; then
+    echo "ERROR: pola FATAL SetPermission tak ditemukan di $DOBBY_POSIX (layout hulu berubah)" >&2
+    exit 1
+  fi
+  sed -i 's#^\( *\)FATAL("\[!\] %s.*strerror(errno).*;#\1ERROR_LOG("[SandboxID] OSMemory::SetPermission mprotect gagal (errno=%d) - hook dibatalkan, proses target TIDAK di-abort", errno);#' "$DOBBY_POSIX"
+  grep -qF "[SandboxID] OSMemory::SetPermission" "$DOBBY_POSIX" || {
+    echo "ERROR: gagal menerapkan patch SetPermission di $DOBBY_POSIX" >&2; exit 1; }
+  echo "==> patched Dobby SetPermission (FATAL->ERROR_LOG, tanpa abort) -> $DOBBY_POSIX"
+fi
+
+# (2) NearMemoryArena::AllocateChunk: cek nilai balik SetPermission + fallthrough island
+if grep -qF "jatuh ke pencarian island exec" "$DOBBY_NEARARENA"; then
+  echo "==> Dobby NearMemoryArena sudah dipatch (skip)"
+else
+  if ! grep -qE '^    OSMemory::SetPermission\(\(void \*\)blank_page_addr' "$DOBBY_NEARARENA"; then
+    echo "ERROR: pola AllocateChunk blank_page tak ditemukan di $DOBBY_NEARARENA (layout hulu berubah)" >&2
+    exit 1
+  fi
+  awk '
+  /^    OSMemory::SetPermission\(\(void \*\)blank_page_addr, OSMemory::PageSize\(\), permission\);$/ {
+      print "    // SandboxID: SetPermission (mprotect exec) bisa ditolak di device W^X. Cek";
+      print "    // nilai baliknya; bila gagal lepaskan page & JANGAN dipakai (cegah lompatan";
+      print "    // ke page non-exec = SIGSEGV), jatuh ke pencarian island exec (execmod).";
+      print "    if (OSMemory::SetPermission((void *)blank_page_addr, OSMemory::PageSize(), permission)) {";
+      print "      NearMemoryArena::PushPage(blank_page_addr, permission);";
+      print "      goto search_once_more;";
+      print "    }";
+      print "    OSMemory::Free((void *)blank_page_addr, OSMemory::PageSize());";
+      skip = 2; next;
+  }
+  skip > 0 { skip--; next; }
+  { print }
+  ' "$DOBBY_NEARARENA" > "$DOBBY_NEARARENA.sbxtmp" && mv "$DOBBY_NEARARENA.sbxtmp" "$DOBBY_NEARARENA"
+  grep -qF "jatuh ke pencarian island exec" "$DOBBY_NEARARENA" || {
+    echo "ERROR: gagal menerapkan patch NearMemoryArena di $DOBBY_NEARARENA" >&2; exit 1; }
+  echo "==> patched Dobby NearMemoryArena (cek SetPermission + island fallthrough) -> $DOBBY_NEARARENA"
+fi
+
 if [ ! -f "$EXT/xz/linux/lib/xz/xz_dec_stream.c" ] \
    || [ ! -f "$EXT/xz/linux/include/linux/xz.h" ] \
    || [ ! -f "$EXT/xz/userspace/xz_config.h" ]; then
