@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <atomic>
 
 #ifndef SBX_LSP_TAG
 #define SBX_LSP_TAG "SandboxID"
@@ -164,8 +165,11 @@ inline bool sbx_ensure_sigaltstack() {
     static thread_local uint8_t stack_mem[65536];
     stack_t ss{};
     ss.ss_sp = stack_mem;
-    // Gunakan yang lebih kecil: buffer atau SIGSTKSZ (bisa runtime di glibc 2.34+)
-    ss.ss_size = sizeof(stack_mem) < SIGSTKSZ ? sizeof(stack_mem) : SIGSTKSZ;
+    // Gunakan yang lebih kecil: buffer atau SIGSTKSZ (bisa runtime di glibc 2.34+).
+    // Cast SIGSTKSZ ke size_t: di glibc 2.34+ ia _SC_SIGSTKSZ (sysconf → long signed),
+    // banding langsung dgn sizeof (size_t unsigned) memicu -Wsign-compare.
+    const size_t want_sz = (size_t)(SIGSTKSZ);
+    ss.ss_size = sizeof(stack_mem) < want_sz ? sizeof(stack_mem) : want_sz;
     ss.ss_flags = 0;
     // Fix: return false bila sigaltstack gagal, bukan cache stale true
     if (sigaltstack(&ss, nullptr) != 0) return false;
