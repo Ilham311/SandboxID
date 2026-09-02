@@ -303,6 +303,36 @@ inline bool sbx_find_libart_text(std::string& path_out, unsigned long& off_out) 
     return found;
 }
 
+// Temukan region r-x libart.so HIDUP: alamat-virtual awal + panjang. Berbeda dari
+// sbx_find_libart_text (yang mengembalikan offset FILE untuk mmap salinan throwaway),
+// ini mengembalikan VA hidup agar probe /proc/self/mem bisa menulis-BALIK byte
+// identik ke .text libart yang benar-benar dipatch CodePatch — bukan salinannya.
+inline bool sbx_find_libart_text_va(uintptr_t& lo_out, size_t& len_out) {
+    FILE* f = fopen("/proc/self/maps", "re");
+    if (!f) return false;
+    char line[512];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        uintptr_t lo = 0, hi = 0;
+        char perms[8] = {0}, path[400] = {0};
+        int n = sscanf(line, "%lx-%lx %7s %*x %*x:%*x %*lu %399[^\n]",
+                       &lo, &hi, perms, path);
+        if (n < 4) continue;
+        if (perms[0] != 'r' || perms[2] != 'x') continue;
+        size_t plen = strlen(path);
+        static const char kSuffix[] = "/libart.so";
+        size_t slen = sizeof(kSuffix) - 1;
+        if (plen >= slen && strcmp(path + plen - slen, kSuffix) == 0) {
+            lo_out = lo;
+            len_out = (hi > lo) ? (size_t)(hi - lo) : 0;
+            found = true;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
 // BUG FIX 4: mprotect restore not checked (RWX page leak)
 // Line 299: mprotect(RWX) sukses, memcpy sukses, lalu mprotect(R|X) restore GAGAL
 // (EPERM/EACCES) — halaman tetap RWX selamanya (info leak + attack surface). Perbaikan:
@@ -466,6 +496,71 @@ inline bool sbx_run_execmem_probe() {
     return true;
 }
 
+// Probe /proc/self/mem pada LIBART HIDUP — menguji JALUR UTAMA CodePatch, bukan
+// salinan throwaway. Ini menutup lubang false-positive probe execmod/execmem:
+// keduanya menulis ke halaman throwaway (salinan MAP_PRIVATE libart / anon segar)
+// di mana pwrite64 /proc/self/mem SELALU berhasil (COW anon/privat sepele), sehingga
+// keduanya LOLOS meski /proc/self/mem ke libart HIDUP sebenarnya DITOLAK kernel.
+// Saat itu terjadi, tiap CodePatch jatuh ke fallback mprotect(RWX) yang NON-UNIFORM
+// pada ROM W^X keras (execmod diizinkan untuk .text libart @0x7b tapi DITOLAK untuk
+// region file-backed lain @0x31) → satu situs hook tertulis, situs lain gagal →
+// inline-hook SETENGAH-JADI → SIGSEGV EXECUTE saat cabang rusak dieksekusi (persis
+// crash target yang diadukan: pwrite64 EACCES @libart lalu mprotect EACCES @arena).
+//
+// Uji: baca 8 byte awal .text libart hidup (halaman r → readable) lalu tulis-BALIK
+// byte YANG SAMA lewat pwrite64 (NON-DESTRUKTIF: isi tak berubah). Hanya menguji
+// apakah kernel mengizinkan tulis /proc/self/mem (FOLL_FORCE COW) ke halaman
+// file-backed r-x hidup. Bila DITERIMA → Dobby memakai /proc/self/mem SERAGAM untuk
+// SEMUA tulisan (origin di libart + trampolin arena anon) → tak ada mprotect, tak
+// ada ketidakkonsistenan execmod/execmem → aman. Bila DITOLAK → L3 DILEWATI total;
+// L1/L2/L7/L8/L9 (Build/SystemProperties/getter/clock/native-read) tetap menutup
+// mayoritas fingerprint tanpa risiko crash. Konsisten dgn filosofi header CodePatch:
+// "/proc/self/mem ... Inilah kuncinya — mprotect TIDAK dipakai di jalur utama."
+inline bool sbx_run_proc_self_mem_libart_probe() {
+    uintptr_t lo = 0;
+    size_t len = 0;
+    if (!sbx_find_libart_text_va(lo, len) || len < 8) {
+        SBX_LSP_LOGE("probe /proc/self/mem: region r-x libart hidup tak ditemukan di maps "
+                     "— jalur utama CodePatch tak bisa diverifikasi; L3 inline-hook DILEWATI");
+        return false;
+    }
+
+    int fd = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        SBX_LSP_LOGE("probe /proc/self/mem: open(/proc/self/mem) gagal (errno=%d %s) — L3 DILEWATI",
+                     errno, strerror(errno));
+        return false;
+    }
+
+    // Snapshot 8 byte awal .text (readable via 'r'), lalu tulis-balik identik.
+    uint8_t saved[8];
+    memcpy(saved, reinterpret_cast<const void*>(lo), sizeof(saved));
+
+    bool ok = true;
+    size_t total = 0;
+    while (total < sizeof(saved)) {
+        ssize_t w = pwrite64(fd, saved + total, sizeof(saved) - total,
+                             (off64_t)(lo + total));
+        if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
+        if (w == 0) { ok = false; break; }
+        total += (size_t)w;
+    }
+    int err = errno;
+    close(fd);
+    ok = ok && total == sizeof(saved);
+
+    if (!ok) {
+        SBX_LSP_LOGE("probe /proc/self/mem: tulis-balik byte-IDENTIK ke .text libart HIDUP "
+                     "DITOLAK (errno=%d %s) — jalur utama CodePatch mati; fallback mprotect "
+                     "non-uniform akan menanam hook setengah-jadi → SIGSEGV. L3 inline-hook "
+                     "DILEWATI (L1/L2/L7/L8/L9 tetap jalan).", err, strerror(err));
+    } else {
+        SBX_LSP_LOGI("probe /proc/self/mem: AMAN (tulis-balik .text libart hidup diterima) — "
+                     "CodePatch pakai /proc/self/mem seragam utk origin+trampolin; L3 boleh lanjut");
+    }
+    return ok;
+}
+
 // Guard sinyal untuk lsplant::Init: jaring TERAKHIR bila kedua probe lolos tapi
 // Init tetap execute-fault di jalur tak teruji. Mengubah SIGSEGV/SIGBUS/SIGILL
 // fatal menjadi skip bersih (return false) alih-alih crash proses. Tanpa lock_guard
@@ -543,7 +638,13 @@ inline bool codepatch_capable() {
     // Slow path: belum computed, ambil lock & hitung (hanya 1x per proses)
     std::lock_guard<std::mutex> lk(mu);
     if (!computed.load(std::memory_order_relaxed)) {  // double-check di dalam lock
-        capable = sbx_run_execmod_probe() && sbx_run_execmem_probe();
+        // Urutan penting (short-circuit): probe /proc/self/mem-libart-hidup DULU —
+        // ia menguji JALUR UTAMA CodePatch pada memori nyata & menutup false-positive
+        // dua probe berikutnya (yang menulis ke halaman throwaway). Bila jalur utama
+        // mati, mprotect fallback non-uniform → hook setengah-jadi → crash: skip L3.
+        capable = sbx_run_proc_self_mem_libart_probe()
+               && sbx_run_execmod_probe()
+               && sbx_run_execmem_probe();
         computed.store(true, std::memory_order_release);
     }
     return capable;
@@ -587,16 +688,21 @@ inline bool init(JNIEnv* env) {
     info.generated_source_name = kSrc;
     info.generated_field_name  = kFld;
 
-    // Gate kapabilitas: L3 butuh execmod (patch .text libart) DAN execmem (trampolin
-    // memori anonim untuk arena Dobby + trampolin per-metode LSPlant). Perangkat W^X
-    // keras (untrusted_app A15/16) sering mengizinkan execmod tapi menolak execmem →
-    // salah satu langkah InitNative gagal mengalokasikan trampolin anon → cabang rusak
-    // → langkah TERAKHIR memanggil SetRuntimeDebugState pada alamat non-exec → SIGSEGV
-    // SEGV_ACCERR EXECUTE +0. Probe throwaway menguji KEDUA kelas TANPA menyentuh
-    // libart hidup; kalau tak mampu, lewati L3 & kembalikan false bersih (L1/L2 jalan).
+    // Gate kapabilitas: L3 butuh JALUR TULIS-KODE yang SERAGAM & tak-crash. Tiga
+    // probe (short-circuit, urut): (1) /proc/self/mem ke .text libart HIDUP — jalur
+    // utama CodePatch; bila mati, Dobby jatuh ke fallback mprotect(RWX) yang pada ROM
+    // W^X keras (A15/16) NON-UNIFORM (execmod diizinkan utk libart tapi ditolak utk
+    // region/arena lain) → hook SETENGAH-JADI → SIGSEGV EXECUTE saat cabang rusak
+    // dieksekusi (persis crash target yang diadukan). (2) execmod: tulis .text
+    // file-backed lalu tetap exec. (3) execmem: memori anon writable-code + exec.
+    // Probe (1) memakai libart hidup (byte tulis-balik identik, non-destruktif);
+    // (2)&(3) di halaman throwaway. Kalau tak mampu, lewati L3 & kembalikan false
+    // bersih — L1/L2/L7/L8/L9 (Build/SystemProperties/getter/clock/native-read) tetap
+    // menutup mayoritas fingerprint tanpa risiko crash.
     if (!codepatch_capable()) {
-        SBX_LSP_LOGE("L3 init: perangkat menolak execmod/execmem (probe gagal) — "
-                     "lsplant::Init DILEWATI demi mencegah crash SetRuntimeDebugState");
+        SBX_LSP_LOGE("L3 init: jalur tulis-kode aman tak tersedia (probe /proc/self/mem "
+                     "libart-hidup / execmod / execmem gagal) — lsplant::Init DILEWATI demi "
+                     "mencegah hook setengah-jadi & crash SetRuntimeDebugState");
         ok = false;
         return ok;
     }
