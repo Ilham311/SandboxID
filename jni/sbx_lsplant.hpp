@@ -739,6 +739,7 @@ inline std::vector<jobject> g_keep;
 
 inline std::string g_gms_gaid;
 inline std::string g_gms_appset;
+inline bool        g_gms_client_done = false;
 inline bool        g_gms_adv_done   = false;
 inline bool        g_gms_appset_done = false;
 inline std::mutex  g_gms_mu;
@@ -960,6 +961,16 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/adservices/appsetid/AppSetId", "getId", "()Ljava/lang/String;",
           false, -1, nullptr, 0, V_APP_SET_ID },
 
+        // Entry AdServices (API 34+): async lewat OutcomeReceiver. Disintesis di
+        // handler (retType 13/14) lalu di-deliver via executor; kelas framework
+        // jadi FindClass di sini berhasil (tak perlu class-load watcher).
+        { "android/adservices/appsetid/AppSetIdManager", "getAppSetId",
+          "(Ljava/util/concurrent/Executor;Landroid/os/OutcomeReceiver;)V",
+          false, -1, nullptr, 13, V_APP_SET_ID },
+        { "android/adservices/adid/AdIdManager", "getAdId",
+          "(Ljava/util/concurrent/Executor;Landroid/os/OutcomeReceiver;)V",
+          false, -1, nullptr, 14, V_GAID },
+
         { "android/content/ContentResolver", "query",
           "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
           false, -1, nullptr, 7, V_GSERVICES, true },
@@ -1070,6 +1081,20 @@ inline void hook_gms_getters(JNIEnv* env, jclass cls, bool is_advertising) {
     }
 }
 
+// getAdvertisingIdInfo(Context) melakukan binder-IPC ke servis ad-id GMS dan
+// melempar IOException bila servis tak tersedia — getter terminal (Info.getId)
+// tak pernah tercapai. Hook entry point ini agar mengembalikan Info sintetik
+// (retType 12), sehingga GAID dilayani in-process tanpa menyentuh GMS.
+inline void hook_advertising_client(JNIEnv* env, jclass cls) {
+    if (!cls) return;
+    HookSpec gi{ "com/google/android/gms/ads/identifier/AdvertisingIdClient",
+                 "getAdvertisingIdInfo",
+                 "(Landroid/content/Context;)"
+                 "Lcom/google/android/gms/ads/identifier/AdvertisingIdClient$Info;",
+                 true, -1, nullptr, 12, V_NONE, true };
+    hook_one_on_class(env, cls, gi, g_gms_gaid, std::string());
+}
+
 inline void sbx_on_class_loaded(JNIEnv* env, jclass , jstring jname, jobject clsObj) {
     if (!env || !jname || !clsObj) return;
     const char* nm = env->GetStringUTFChars(jname, nullptr);
@@ -1077,7 +1102,11 @@ inline void sbx_on_class_loaded(JNIEnv* env, jclass , jstring jname, jobject cls
     std::string name(nm);
     env->ReleaseStringUTFChars(jname, nm);
     std::lock_guard<std::mutex> lk(g_gms_mu);
-    if (!g_gms_adv_done &&
+    if (!g_gms_client_done &&
+        name == "com.google.android.gms.ads.identifier.AdvertisingIdClient") {
+        g_gms_client_done = true;
+        hook_advertising_client(env, static_cast<jclass>(clsObj));
+    } else if (!g_gms_adv_done &&
         name == "com.google.android.gms.ads.identifier.AdvertisingIdClient$Info") {
         g_gms_adv_done = true;
         hook_gms_getters(env, static_cast<jclass>(clsObj), true);

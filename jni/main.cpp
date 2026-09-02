@@ -1410,7 +1410,7 @@ public:
             hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
                                          val("ANDROID_ID"));
 
-            hv.gms_watch  = (val("SBX_GMS_HOOK") == "1");
+            hv.gms_watch  = (val("SBX_GMS_HOOK") != "0");
             if (!sbxlsp::install_all(env_, hv))
                 LOGE("L3 hooks not installed (continuing with L1/L2/L9)");
 

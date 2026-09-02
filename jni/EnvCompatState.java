@@ -19,6 +19,8 @@ public final class EnvCompatState {
 
         if (retType == 9) return watchClassLoad(args);
         if (retType == 8) return rewriteInstallTime(args);
+        if (retType == 13) return deliverOutcome(args, true);
+        if (retType == 14) return deliverOutcome(args, false);
         try {
             if (keyArgIndex < 0 || matches(args)) {
                 Object v = spoofValue(args);
@@ -53,8 +55,80 @@ public final class EnvCompatState {
                 return "";
             case 7:
                 return buildGservicesCursor(args);
+            case 12:
+                return buildAdvertisingIdInfo();
             default:
                 return sval;
+        }
+    }
+
+    private Object buildAdvertisingIdInfo() {
+        if (backup == null || sval == null) return null;
+        try {
+            Class<?> infoCls = backup.getReturnType();
+            if (infoCls == null) return null;
+            java.lang.reflect.Constructor<?> c;
+            try {
+                c = infoCls.getConstructor(String.class, boolean.class);
+            } catch (NoSuchMethodException e) {
+                c = infoCls.getDeclaredConstructor(String.class, boolean.class);
+                c.setAccessible(true);
+            }
+            return c.newInstance(sval, Boolean.FALSE);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    // Entry AdServices getAppSetId/getAdId: void, hasil dikirim async via
+    // OutcomeReceiver.onResult di executor pemanggil. Sintesis objek lalu
+    // jadwalkan deliver; bila apa pun gagal -> invokeOriginal (alur asli
+    // jalan) supaya callback app tak pernah menggantung.
+    private Object deliverOutcome(Object[] args, boolean appset) {
+        try {
+            if (args != null && args.length >= 3 && sval != null
+                    && args[1] != null && args[2] != null) {
+                final Object executor = args[1];
+                final Object receiver = args[2];
+                final Object result = appset ? buildAppSetId() : buildAdId();
+                if (result != null) {
+                    final Method onResult =
+                            receiver.getClass().getMethod("onResult", Object.class);
+                    onResult.setAccessible(true);
+                    Runnable task = new Runnable() {
+                        @Override public void run() {
+                            try { onResult.invoke(receiver, result); }
+                            catch (Throwable ignored) {}
+                        }
+                    };
+                    executor.getClass().getMethod("execute", Runnable.class)
+                            .invoke(executor, task);
+                    return null;
+                }
+            }
+        } catch (Throwable ignored) {
+
+        }
+        return invokeOriginal(args);
+    }
+
+    private Object buildAppSetId() {
+        try {
+            Class<?> cls = Class.forName("android.adservices.appsetid.AppSetId");
+            return cls.getConstructor(String.class, int.class)
+                      .newInstance(sval, Integer.valueOf(1)); // SCOPE_APP
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private Object buildAdId() {
+        try {
+            Class<?> cls = Class.forName("android.adservices.adid.AdId");
+            return cls.getConstructor(String.class, boolean.class)
+                      .newInstance(sval, Boolean.FALSE);
+        } catch (Throwable t) {
+            return null;
         }
     }
 
