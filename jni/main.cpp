@@ -1292,6 +1292,28 @@ public:
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
         if (pkg.empty()) { unload(); return; }
 
+        // ── GMS / DroidGuard guard ─────────────────────────────────────
+        // Google Play Services (com.google.android.gms*) — khususnya DroidGuard
+        // (com.google.android.gms.unstable) — sangat sensitif-deteksi & TAK PERNAH
+        // jadi target SandboxID. Ikuti pola PlayIntegrityFix: paksa unmount jejak
+        // Magisk/modul dari mount-ns GMS lalu unload SEGERA — tanpa connectCompanion,
+        // tanpa hook apa pun — agar modul tak meninggalkan artefak di proses ini
+        // (mitigasi anti-tamper). FORCE_DENYLIST_UNMOUNT hanya sah di preAppSpecialize
+        // (jni/zygisk.hpp:185) & berjalan saat specialize.
+        // Catatan (riset referensi): SIGSEGV di SystemProperties_get_integral[H] pada
+        // gms.unstable yang teramati BUKAN dari injeksi modul (di sini kita tak inject
+        // apa pun). Akar paling mungkin = handle prop_info* BASI: get_integralH men-cast
+        // Java-long ke prop_info* tanpa validasi lalu deref; handle jadi dangling saat
+        // resetprop delete+recreate prop ro.* (immutable) setelah GMS men-cache Handle.
+        // Unmount TAK meng-undangle handle itu — perbaikan sebenarnya = resetprop HANYA
+        // di post-fs-data (sebelum zygote/GMS), di luar guard ini (lihat catatan commit).
+        if (pkg.rfind("com.google.android.gms", 0) == 0) {
+            api_->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+            LOGD("GMS '%s' -> FORCE_DENYLIST_UNMOUNT + unload (disembunyikan dari DroidGuard)", pkg.c_str());
+            unload();
+            return;
+        }
+
         int fd = api_->connectCompanion();
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { unload(); return; }
