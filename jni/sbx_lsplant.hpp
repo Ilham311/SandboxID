@@ -435,13 +435,25 @@ inline bool sbx_run_execmod_probe() {
 // Probe execmem: uji kapabilitas yang BENAR-BENAR runtuh di perangkat W^X keras —
 // memori ANONIM yang bisa ditulis-kode lalu dieksekusi (`self:process execmem`).
 // Inilah yang ditolak untrusted_app A15/16 dan yang tak pernah diuji probe lama.
-// Dua sub-uji mencerminkan dua situs alokasi anon nyata yang dipakai lsplant::Init:
-//   (A) arena trampolin Dobby     — mmap(RX anon) + tulis-kode via ladder CodePatch
-//   (B) trampolin per-metode LSPlant — mmap(RWX anon) langsung (lsplant.cc:539)
-// KEDUANYA harus lolos: sebagian ROM mengizinkan satu gaya alokasi tapi menolak
-// yang lain (mmap RX sukses tapi mprotect+W ditolak, atau sebaliknya). Semua
-// halaman throwaway & di-munmap; eksekusi 'ret' di bawah guard sinyal. Log bertag
-// SandboxID + errno agar KONKLUSIF di logcat. Ref: AOSP jit_memory_region.cc.
+// Yang butuh execmem di jalur lsplant::Init adalah ARENA TRAMPOLIN DOBBY (mmap anon
+// PROT_NONE lalu mprotect +EXEC). Dua sub-uji menguji gate execmem itu dalam dua gaya
+// alokasi anon-exec agar KONKLUSIF pada ROM yang tak seragam:
+//   (A) gaya arena Dobby — mmap(RX anon) + tulis-kode via ladder CodePatch
+//   (B) mmap(RWX anon) langsung — permintaan W+X SIMULTAN yang lebih ketat; menjaring
+//       ROM yang mengizinkan RX-anon+tulis-belakangan tapi menolak RWX sekaligus
+// KEDUANYA harus lolos: sebagian ROM mengizinkan satu gaya tapi menolak yang lain.
+//
+// KOREKSI (riset referensi vs LSPlant/Dobby upstream): sub-uji (B) BUKAN model
+// trampolin LSPlant. LSPlant TIDAK pernah memakai anon-RWX — trampolin per-metode-nya
+// pakai memfd DUAL-MAP via CreateDualMapping (alias RW untuk tulis + alias RX untuk
+// eksekusi) yang TAK butuh execmem; mmap PROT_NONE di lsplant.cc (~L539) hanya
+// RESERVASI ruang-alamat, bukan RWX. Jadi (B) memodelkan alokator anon-RWX gaya
+// YAHFA/Whale + uji-ketat gate execmem, bukan LSPlant. Bila kelak arena Dobby dipindah
+// ke memfd dual-map, sub-uji (B) HARUS diganti probe memfd-dual-map (bukan anon-RWX).
+//
+// Semua halaman throwaway & di-munmap; eksekusi 'ret' di bawah guard sinyal. Log
+// bertag SandboxID + errno agar KONKLUSIF di logcat. Ref: AOSP jit_memory_region.cc,
+// LSPosed/LSPlant lsplant.cc (CreateDualMapping), jmpews/Dobby NearMemoryAllocator.
 inline bool sbx_run_execmem_probe() {
     long ps = sysconf(_SC_PAGESIZE);
     size_t page = (ps > 0) ? (size_t)ps : 4096;
@@ -470,7 +482,7 @@ inline bool sbx_run_execmem_probe() {
         return false;
     }
 
-    // (B) Gaya trampolin LSPlant: mmap(PROT_READ|PROT_WRITE|PROT_EXEC anon) langsung.
+    // (B) Uji-ketat execmem (W+X simultan): mmap(PROT_READ|PROT_WRITE|PROT_EXEC anon).
     void* b = mmap(nullptr, page, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (b == MAP_FAILED) {
         int err_b_map = errno;
@@ -486,7 +498,7 @@ inline bool sbx_run_execmem_probe() {
 #endif
     munmap(b, page);
     if (!b_exec) {
-        SBX_LSP_LOGE("probe execmem B (trampolin LSPlant): TAK mampu (wrote=%d errno=%d %s) — "
+        SBX_LSP_LOGE("probe execmem B (RWX anon simultan): TAK mampu (wrote=%d errno=%d %s) — "
                      "RWX anon tak tertulis/executable; L3 DILEWATI",
                      b_wrote, b_errno, strerror(b_errno));
         return false;
