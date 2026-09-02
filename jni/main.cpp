@@ -1300,13 +1300,18 @@ public:
         // tanpa hook apa pun — agar modul tak meninggalkan artefak di proses ini
         // (mitigasi anti-tamper). FORCE_DENYLIST_UNMOUNT hanya sah di preAppSpecialize
         // (jni/zygisk.hpp:185) & berjalan saat specialize.
-        // Catatan (riset referensi): SIGSEGV di SystemProperties_get_integral[H] pada
-        // gms.unstable yang teramati BUKAN dari injeksi modul (di sini kita tak inject
-        // apa pun). Akar paling mungkin = handle prop_info* BASI: get_integralH men-cast
-        // Java-long ke prop_info* tanpa validasi lalu deref; handle jadi dangling saat
-        // resetprop delete+recreate prop ro.* (immutable) setelah GMS men-cache Handle.
-        // Unmount TAK meng-undangle handle itu — perbaikan sebenarnya = resetprop HANYA
-        // di post-fs-data (sebelum zygote/GMS), di luar guard ini (lihat catatan commit).
+        // Catatan (riset + audit skrip): SIGSEGV di SystemProperties_get_integral[H]
+        // pada gms.unstable yang teramati BUKAN dari injeksi modul (di sini kita tak
+        // inject apa pun) DAN bukan dari churn fingerprint oleh modul ini: Build/
+        // fingerprint di-spoof IN-PROCESS (L1/L2/L7/L8/L9), TIDAK di-resetprop global.
+        // Satu-satunya ro.* yang lewat resetprop = ro.boot.btmacaddr (Bluetooth, hanya
+        // saat rotasi manual via action.sh -> rotate_ids.sh). get_integralH men-cast
+        // Java-long ke prop_info* tanpa validasi lalu deref; crash muncul saat handle
+        // ter-cache itu BASI (dangling akibat delete+recreate prop). Karena modul tak
+        // men-churn ro.build/ro.product, penyebab paling mungkin = anti-tamper GMS
+        // sendiri (atau churn btmacaddr satu-kali). Guard ini = hygiene deteksi yang
+        // benar & cukup; JIKA kelak ada spoof prop via resetprop, jalankan HANYA di
+        // post-fs-data (sebelum zygote/GMS men-cache Handle). Lihat catatan commit.
         if (pkg.rfind("com.google.android.gms", 0) == 0) {
             api_->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
             LOGD("GMS '%s' -> FORCE_DENYLIST_UNMOUNT + unload (disembunyikan dari DroidGuard)", pkg.c_str());
