@@ -21,7 +21,7 @@ if [ -x "$BIN" ]; then
             case "$key:$value" in
                 SBX_NATIVE_READ:[01]|SBX_HIDE:[01]|SBX_CPU_REVISION:[01]|\
                 SBX_PROC_VERSION:[01]|SBX_MEMINFO:[01]|SBX_SYSFS_MAC:[01])
-                    "$BIN" set-flag "$key" "$value" >> "$LOG" 2>&1 || exit $?
+                    "$BIN" set-flag "$key" "$value" >> "$LOG" 2>&1 || echo "[post-fs-data] set-flag $key failed rc=$?" >> "$LOG" 2>&1
                     ;;
             esac
         done < "$MODDIR/.operational-flags"

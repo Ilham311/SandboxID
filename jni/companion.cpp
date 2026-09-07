@@ -143,6 +143,12 @@ static void reload_targets_if_changed_locked() {
         next.push_back(line);
     }
 
+    if (next.empty() && !g_targets.empty()) {
+        LOGW("target.txt now yields zero targets (was %zu); spoofing will be "
+             "disabled for all packages until target.txt is repopulated",
+             g_targets.size());
+    }
+
     g_targets = std::move(next);
     g_target_set = std::move(next_set);
     g_targets_stamp = {
