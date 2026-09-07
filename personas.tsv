@@ -18,17 +18,17 @@
 #   brand  manufacturer  marketname  soc_manufacturer  soc_model  radio
 #
 # Google/Tensor Pixel rows OMIT cols 11-16: brand defaults to `google`,
-# marketname to `model`, and the SoC model + modem/RADIO prefix are derived from
+# marketname to `model`, and internal SoC + modem/RADIO metadata is derived from
 # `platform`, which MUST then be one of {gs101, gs201, zuma, zumapro, laguna}
 # (kept in sync with autopif.sh).
 #
 # A NON-Tensor device (any other `platform`) MUST fill at least `brand` and
 # `soc_model` (marketname strongly recommended) — otherwise the row is rejected,
-# because it can't safely inherit the Tensor google/GS*/g5* values. `radio` is
-# the LAST column and is OPTIONAL: no public baseband data exists for most OEM
-# builds, so leave it off and the device keeps its REAL baseband (safer than a
-# fabricated one). board == platform is fine for OEM rows (both hold the SoC
-# platform, e.g. `pineapple`), and ro.hardware then tracks that too.
+# because it cannot safely inherit Tensor google/GS*/g5* metadata. `radio` is the
+# LAST column and is OPTIONAL: no public baseband data exists for most OEM builds,
+# so leave it off and the device keeps its REAL baseband. Board/platform/SoC
+# columns are internal validation/derivation metadata; runtime Build.BOARD,
+# Build.HARDWARE, ro.hardware, ro.board.platform, and ro.soc.* remain genuine.
 #
 # SDK<->Android:  31=12  32=12L  33=13  34=14  35=15  36=16
 # The CLI matches a persona to the device's real SDK and NEVER presents a higher

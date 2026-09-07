@@ -1,5 +1,6 @@
 #!/system/bin/sh
 MODDIR="${0%/*}"
+SERVICE_RC=0
 until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 2; done
 sleep 5
 BIN="$MODDIR/bin/sandboxid"
@@ -13,8 +14,18 @@ if [ ! -x "$BIN" ]; then
 fi
 
 if grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
-    [ -f "$MODDIR/identity.prop" ] && [ -x "$BIN" ] && \
-        "$BIN" apply-boot >> /cache/sandboxid-boot.log 2>&1
+    if [ -f "$MODDIR/identity.prop" ] && [ -x "$BIN" ]; then
+        {
+            echo "[service] apply-boot begin"
+            if "$BIN" apply-boot; then
+                echo "[service] apply-boot ok"
+            else
+                rc=$?
+                SERVICE_RC=$rc
+                echo "[service] apply-boot failed rc=$rc"
+            fi
+        } >> /cache/sandboxid-boot.log 2>&1
+    fi
 fi
 
 if [ -f "$MODDIR/debug_variant" ]; then
@@ -61,3 +72,5 @@ if [ -f "$MODDIR/debug_variant" ]; then
     ) &
     echo "$!" > "$MODDIR/debug/journal.pid"
 fi
+
+exit "$SERVICE_RC"

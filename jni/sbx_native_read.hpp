@@ -319,74 +319,72 @@ inline std::string patch_meminfo(const std::string& real, int target_gb) {
     return out;
 }
 
-enum CpuAction { CPU_NONE = 0, CPU_QUALCOMM = 1, CPU_MTK = 2, CPU_STRIP = 3 };
+inline bool patch_cpuinfo_aggregate_revision(const std::string& real,
+                                             std::string& out) {
+    static constexpr char prefix[] = "Processor\t: AArch64 Processor rev ";
+    size_t line_end = real.find('\n');
+    if (line_end == std::string::npos) line_end = real.size();
+    if (line_end < sizeof(prefix) - 1 ||
+        real.compare(0, sizeof(prefix) - 1, prefix) != 0)
+        return false;
 
-inline bool ci_contains(const std::string& hay, const char* needle) {
-    std::string h = hay, n = needle;
-    for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    for (char& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return h.find(n) != std::string::npos;
-}
+    size_t revision_begin = sizeof(prefix) - 1;
+    size_t revision_end = revision_begin;
+    while (revision_end < line_end && real[revision_end] >= '0' &&
+           real[revision_end] <= '9')
+        ++revision_end;
+    static constexpr char suffix[] = " (aarch64)";
+    if (revision_end == revision_begin ||
+        line_end - revision_end != sizeof(suffix) - 1 ||
+        real.compare(revision_end, sizeof(suffix) - 1, suffix) != 0)
+        return false;
 
-inline bool starts_with(const std::string& s, const char* p) {
-    size_t n = std::strlen(p);
-    return s.size() >= n && std::memcmp(s.data(), p, n) == 0;
-}
-
-inline int cpu_action_for(const std::string& soc_manuf, const std::string& soc_model,
-                          std::string& repl_out) {
-    repl_out.clear();
-    bool qcom = ci_contains(soc_manuf, "qualcomm") ||
-                starts_with(soc_model, "SM") || starts_with(soc_model, "MSM") ||
-                starts_with(soc_model, "SDM") || starts_with(soc_model, "QCM") ||
-                starts_with(soc_model, "APQ");
-    bool mtk  = ci_contains(soc_manuf, "mediatek") || starts_with(soc_model, "MT");
-    if (qcom) {
-        repl_out = soc_model.empty() ? std::string("Qualcomm Technologies, Inc")
-                                     : ("Qualcomm Technologies, Inc " + soc_model);
-        return CPU_QUALCOMM;
-    }
-    if (mtk) {
-        repl_out = soc_model.empty() ? std::string("MT6893") : soc_model;
-        return CPU_MTK;
-    }
-
-    return CPU_STRIP;
-}
-
-inline bool patch_cpuinfo(const std::string& real, int action,
-                          const std::string& repl, std::string& out) {
-    if (action == CPU_NONE) return false;
-    out.clear();
-    out.reserve(real.size() + 16);
-    bool changed = false;
-    size_t i = 0, n = real.size();
-    while (i < n) {
-        size_t eol = real.find('\n', i);
-        size_t line_end = (eol == std::string::npos) ? n : eol;
-
-        bool is_hw = false;
-        if (line_end - i >= 8 && std::memcmp(real.data() + i, "Hardware", 8) == 0) {
-            size_t j = i + 8;
-            while (j < line_end && (real[j] == ' ' || real[j] == '\t')) ++j;
-            if (j < line_end && real[j] == ':') is_hw = true;
-        }
-        if (is_hw) {
-            changed = true;
-            if (action != CPU_STRIP) {
-                out.append("Hardware\t: ");
-                out.append(repl);
-                if (eol != std::string::npos) out.push_back('\n');
+    size_t cursor = line_end == real.size() ? line_end : line_end + 1;
+    bool have_revision = false;
+    unsigned int aggregate = 0;
+    while (cursor < real.size()) {
+        size_t end = real.find('\n', cursor);
+        if (end == std::string::npos) end = real.size();
+        static constexpr char field[] = "CPU revision";
+        if (end - cursor >= sizeof(field) - 1 &&
+            real.compare(cursor, sizeof(field) - 1, field) == 0) {
+            size_t value = cursor + sizeof(field) - 1;
+            while (value < end && (real[value] == ' ' || real[value] == '\t'))
+                ++value;
+            if (value < end && real[value] == ':') {
+                ++value;
+                while (value < end && (real[value] == ' ' || real[value] == '\t'))
+                    ++value;
+                size_t digits = value;
+                while (digits < end && real[digits] >= '0' && real[digits] <= '9')
+                    ++digits;
+                if (digits > value) {
+                    errno = 0;
+                    const std::string revision(
+                        real, value, digits - value);
+                    char* parsed_end = nullptr;
+                    unsigned long parsed =
+                        std::strtoul(revision.c_str(), &parsed_end, 10);
+                    if (errno == 0 && parsed_end && *parsed_end == '\0' &&
+                        parsed <= 255) {
+                        if (!have_revision || parsed > aggregate)
+                            aggregate = static_cast<unsigned int>(parsed);
+                        have_revision = true;
+                    }
+                }
             }
-
-        } else {
-            out.append(real, i, line_end - i);
-            if (eol != std::string::npos) out.push_back('\n');
         }
-        if (eol == std::string::npos) break;
-        i = eol + 1;
+        if (end == real.size()) break;
+        cursor = end + 1;
     }
-    if (!changed) { out.clear(); return false; }
+    if (!have_revision) return false;
+
+    std::string replacement = std::to_string(aggregate);
+    if (real.compare(revision_begin, revision_end - revision_begin,
+                     replacement) == 0)
+        return false;
+    out = real;
+    out.replace(revision_begin, revision_end - revision_begin, replacement);
     return true;
 }
 
@@ -401,6 +399,26 @@ enum Kind {
     BD_RAW_CDID,
 };
 
+struct EnvironmentGates {
+    bool native_read = false;
+    bool proc_version = false;
+    bool meminfo = false;
+    bool sysfs_mac = false;
+    bool cpu_revision = false;
+};
+
+inline bool environment_surface_enabled(Kind kind,
+                                        const EnvironmentGates& gates) {
+    if (!gates.native_read) return false;
+    switch (kind) {
+        case VERSION: return gates.proc_version;
+        case MEMINFO: return gates.meminfo;
+        case MAC: return gates.sysfs_mac;
+        case CPUINFO: return gates.cpu_revision;
+        default: return true;
+    }
+}
+
 inline bool ends_with(const char* s, size_t sl, const char* suffix) {
     size_t xl = std::strlen(suffix);
     return sl >= xl && std::memcmp(s + sl - xl, suffix, xl) == 0;
@@ -408,6 +426,53 @@ inline bool ends_with(const char* s, size_t sl, const char* suffix) {
 
 inline bool ends_with(const std::string& s, const char* suffix) {
     return ends_with(s.c_str(), s.size(), suffix);
+}
+
+inline bool is_absolute_path(const std::string& path) {
+    return !path.empty() && path[0] == '/';
+}
+
+inline bool normalize_absolute_path(const std::string& path,
+                                    std::string& out) {
+    if (!is_absolute_path(path) || path.size() > 4096 ||
+        path.find('\0') != std::string::npos)
+        return false;
+
+    out.clear();
+    out.push_back('/');
+    size_t i = 1;
+    while (i <= path.size()) {
+        size_t slash = path.find('/', i);
+        if (slash == std::string::npos) slash = path.size();
+        std::string part = path.substr(i, slash - i);
+        if (!part.empty() && part != ".") {
+            if (part == "..") {
+                if (out.size() == 1) return false;
+                size_t prev = out.find_last_of('/', out.size() - 2);
+                out.erase(prev == std::string::npos ? 1 : prev + 1);
+            } else {
+                if (out.size() > 1 && out.back() != '/') out.push_back('/');
+                out.append(part);
+            }
+        }
+        if (slash == path.size()) break;
+        i = slash + 1;
+    }
+    return true;
+}
+
+inline bool join_and_normalize_path(const std::string& base,
+                                    const std::string& relative,
+                                    std::string& out) {
+    if (!is_absolute_path(base) || relative.empty() ||
+        is_absolute_path(relative) || relative.size() > 4096 ||
+        relative.find('\0') != std::string::npos)
+        return false;
+    std::string joined = base;
+    if (joined.empty() || joined.back() != '/') joined.push_back('/');
+    joined.append(relative);
+    if (joined.size() > 4096) return false;
+    return normalize_absolute_path(joined, out);
 }
 
 inline Kind classify(const char* path) {
@@ -542,6 +607,8 @@ inline bool is_native_unsafe_prop(const char* name) {
         "ro.hardware",
         "ro.product.board",
         "ro.board.platform",
+        "ro.soc.manufacturer",
+        "ro.soc.model",
         "ro.arch",
         "ro.zygote",
         "ro.vendor.api_level",

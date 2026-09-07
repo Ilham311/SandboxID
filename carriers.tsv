@@ -14,10 +14,10 @@
 #   mnc         Mobile Network Code (2-3 digits, width preserved for numeric)
 #   iso         SIM/network country ISO-3166 alpha-2 (lowercase)
 #   carrier_id  OPTIONAL 5th column: Android canonical carrier id, taken verbatim
-#               from AOSP carrier_list.textpb (TelephonyManager.getSimCarrierId()).
-#               Consumed by the L3 telephony hook. Leave blank when the operator is
-#               not in Google's carrier DB — a real device reports -1 (UNKNOWN) there,
-#               so blank is the truthful value. Do NOT invent numbers.
+#               from AOSP carrier_list.textpb. Stored as profile metadata only;
+#               this build does not hook TelephonyManager.getSimCarrierId().
+#               Leave blank when the operator is not in Google's carrier DB —
+#               the platform reports -1 (UNKNOWN) there. Do NOT invent numbers.
 #
 Etisalat	424	02	ae
 du	424	03	ae

@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <array>
 #include <fstream>
 #include <sstream>
@@ -45,24 +46,88 @@ static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 
 static void watch_target_death(uint32_t pid, int client_fd);
 
+struct TargetFileStamp {
+    dev_t dev = 0;
+    ino_t ino = 0;
+    off_t size = 0;
+    time_t mtime_sec = 0;
+    long mtime_nsec = 0;
+    time_t ctime_sec = 0;
+    long ctime_nsec = 0;
+    bool valid = false;
+};
+
 static std::vector<std::string> g_targets;
-static time_t                   g_targets_mtime_sec = 0;
-static long                     g_targets_mtime_nsec = 0;
-static std::recursive_mutex     g_targets_mtx;
+static std::unordered_set<std::string> g_target_set;
+static TargetFileStamp g_targets_stamp;
+static std::mutex g_targets_mtx;
 
-static void reload_targets_if_changed() {
-    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
-    struct stat st{};
-    bool have = (::stat(sandboxid::TARGET_FILE, &st) == 0);
-    if (!have) return;
+static bool same_target_stamp(const TargetFileStamp& stamp,
+                              const struct stat& st) {
+    return stamp.valid && stamp.dev == st.st_dev && stamp.ino == st.st_ino &&
+           stamp.size == st.st_size && stamp.mtime_sec == st.st_mtim.tv_sec &&
+           stamp.mtime_nsec == st.st_mtim.tv_nsec &&
+           stamp.ctime_sec == st.st_ctim.tv_sec &&
+           stamp.ctime_nsec == st.st_ctim.tv_nsec;
+}
 
-    if (!g_targets.empty() &&
-        st.st_mtim.tv_sec == g_targets_mtime_sec &&
-        st.st_mtim.tv_nsec == g_targets_mtime_nsec)
+static bool same_file_state(const struct stat& a, const struct stat& b) {
+    return a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
+           a.st_size == b.st_size && a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
+           a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
+           a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
+           a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
+}
+
+static void reload_targets_if_changed_locked() {
+    int fd = ::open(sandboxid::TARGET_FILE, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+
+    struct stat before{};
+    if (::fstat(fd, &before) != 0) {
+        ::close(fd);
         return;
+    }
 
-    std::ifstream f(sandboxid::TARGET_FILE);
+    if (same_target_stamp(g_targets_stamp, before)) {
+        ::close(fd);
+        return;
+    }
+
+    std::string contents;
+    if (before.st_size > 0)
+        contents.reserve(static_cast<size_t>(before.st_size));
+    char buf[4096];
+    bool complete = false;
+    for (;;) {
+        ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n > 0) {
+            contents.append(buf, static_cast<size_t>(n));
+            continue;
+        }
+        if (n == 0) {
+            complete = true;
+            break;
+        }
+        if (errno == EINTR) continue;
+        int read_errno = errno;
+        LOGW("target.txt reload aborted after read failure errno=%d", read_errno);
+        break;
+    }
+
+    struct stat after{};
+    bool stable = complete && (::fstat(fd, &after) == 0) &&
+                  same_file_state(before, after);
+    ::close(fd);
+    if (!stable) {
+        if (complete)
+            LOGW("target.txt changed during reload; keeping previous target set");
+        return;
+    }
+
+    std::istringstream f(contents);
     std::vector<std::string> next;
+    std::unordered_set<std::string> next_set;
     std::string line;
     while (std::getline(f, line)) {
         size_t hash = line.find('#');
@@ -74,30 +139,40 @@ static void reload_targets_if_changed() {
         size_t s = line.find_first_not_of(" \t");
         if (s == std::string::npos) continue;
         line = line.substr(s);
-        if (line.empty()) continue;
+        if (line.empty() || !next_set.insert(line).second) continue;
         next.push_back(line);
     }
-    if (next.empty()) {
 
-        LOGW("target.txt has 0 valid entries; keeping previous list (%zu pkgs)", g_targets.size());
-    } else {
-        g_targets = std::move(next);
-        LOGI("target.txt loaded: %zu pkg(s) mtime=%ld.%09ld", g_targets.size(),
-             (long)st.st_mtim.tv_sec, (long)st.st_mtim.tv_nsec);
-#ifdef SBX_DEBUG
-        for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
-#endif
+    if (next.empty() && !g_targets.empty()) {
+        LOGW("target.txt now yields zero targets (was %zu); spoofing will be "
+             "disabled for all packages until target.txt is repopulated",
+             g_targets.size());
     }
-    g_targets_mtime_sec  = st.st_mtim.tv_sec;
-    g_targets_mtime_nsec = st.st_mtim.tv_nsec;
+
+    g_targets = std::move(next);
+    g_target_set = std::move(next_set);
+    g_targets_stamp = {
+        after.st_dev, after.st_ino, after.st_size,
+        after.st_mtim.tv_sec, after.st_mtim.tv_nsec,
+        after.st_ctim.tv_sec, after.st_ctim.tv_nsec, true,
+    };
+    LOGI("target.txt loaded: %zu pkg(s) dev=%llu ino=%llu size=%lld "
+         "mtime=%ld.%09ld", g_targets.size(),
+         static_cast<unsigned long long>(after.st_dev),
+         static_cast<unsigned long long>(after.st_ino),
+         static_cast<long long>(after.st_size),
+         static_cast<long>(after.st_mtim.tv_sec),
+         static_cast<long>(after.st_mtim.tv_nsec));
+#ifdef SBX_DEBUG
+    for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
+#endif
 }
 
 static bool is_target(const std::string& pkg) {
     if (pkg.empty()) return false;
-    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
-    reload_targets_if_changed();
-    for (const auto& t : g_targets) if (t == pkg) return true;
-    return false;
+    std::lock_guard<std::mutex> lock(g_targets_mtx);
+    reload_targets_if_changed_locked();
+    return g_target_set.find(pkg) != g_target_set.end();
 }
 
 static std::string read_file(const char* p) {
@@ -106,6 +181,37 @@ static std::string read_file(const char* p) {
     std::stringstream ss;
     ss << f.rdbuf();
     return ss.str();
+}
+
+static void upsert_identity_value(std::string& data, const std::string& key,
+                                  const std::string& value) {
+    const std::string prefix = key + "=";
+    std::string next;
+    next.reserve(data.size() + prefix.size() + value.size() + 1);
+    bool replaced = false;
+    size_t pos = 0;
+    while (pos < data.size()) {
+        size_t eol = data.find('\n', pos);
+        size_t end = eol == std::string::npos ? data.size() : eol + 1;
+        if (data.compare(pos, prefix.size(), prefix) == 0) {
+            if (!replaced) {
+                next += prefix;
+                next += value;
+                next.push_back('\n');
+                replaced = true;
+            }
+        } else {
+            next.append(data, pos, end - pos);
+        }
+        pos = end;
+    }
+    if (!replaced) {
+        if (!next.empty() && next.back() != '\n') next.push_back('\n');
+        next += prefix;
+        next += value;
+        next.push_back('\n');
+    }
+    data.swap(next);
 }
 
 struct MountResult {
@@ -402,7 +508,7 @@ extern "C" void sandboxid_companion(int client) {
     bool have_peer = (::getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) == 0
                       && peer_len == sizeof(peer));
     if (!have_peer)
-        LOGW("SO_PEERCRED gagal errno=%d — otorisasi DO_MOUNTS fail-open", errno);
+        LOGW("SO_PEERCRED failed errno=%d — mount/hide authorization will fail closed", errno);
     else
         LOGD("peer creds pid=%d uid=%d gid=%d", peer.pid, peer.uid, peer.gid);
 
@@ -469,16 +575,12 @@ extern "C" void sandboxid_companion(int client) {
                 std::string nrkill = std::string(sandboxid::MODDIR) + "/no_native_read";
                 struct stat nrst;
                 if (::stat(nrkill.c_str(), &nrst) == 0) {
-
-                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
-                    d += "SBX_NATIVE_READ=0\n";
+                    upsert_identity_value(d, "SBX_NATIVE_READ", "0");
                     LOGD("no_native_read aktif -> SBX_NATIVE_READ=0 utk '%s'", pkg.c_str());
                 }
 
                 if (::stat(sandboxid::ENABLE_HIDE, &nrst) == 0) {
-
-                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
-                    d += "SBX_HIDE=1\n";
+                    upsert_identity_value(d, "SBX_HIDE", "1");
                     LOGD("enable_hide aktif -> SBX_HIDE=1 utk '%s'", pkg.c_str());
                 }
             }

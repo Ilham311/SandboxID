@@ -223,6 +223,7 @@ function onTab(id) {
   if (id === 'persona') loadPersona();
   else if (id === 'rotate') loadRotate();
   else if (id === 'sim') loadSim();
+  else if (id === 'settings') loadSettings();
   else if (id === 'targets') loadTargets();
   else if (id === 'selftest') loadSelftest();
   else if (id === 'log') loadLog();
@@ -253,10 +254,9 @@ function skKv(n) {
 }
 
 const DETAIL_KEYS = [
-  ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'], ['BOARD', 'Board'],
-  ['SOC_MANUFACTURER', 'SoC vendor'], ['SOC_MODEL', 'SoC'],
+  ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'],
   ['SECURITY_PATCH', 'Security patch'],
-  ['SERIAL', 'Serial'], ['ANDROID_ID', 'Android ID'], ['GOOGLE_AID', 'Google AID'],
+  ['SERIAL', 'Serial'], ['ANDROID_ID', 'Entropy profil'], ['GOOGLE_AID', 'GAID lokal'],
   ['WIFI_MAC', 'WiFi MAC'], ['BLUETOOTH_ADDR', 'BT MAC'], ['BLUETOOTH_NAME', 'Nama BT'],
   ['RADIO', 'Radio'], ['FIRST_BOOT', 'Boot awal'], ['LAST_BOOT', 'Boot terakhir'],
 ];
@@ -333,8 +333,8 @@ document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoad
 }));
 
 const ROT_CARDS = [
-  { key: 'ssaid',       name: 'SSAID',         desc: 'Android ID per-aplikasi (Settings.Secure) — dihapus, dibuat ulang setelah reboot', get: 'ANDROID_ID' },
-  { key: 'gaid',        name: 'Google AID',    desc: 'Advertising ID (Settings.Global + XML GMS)',        get: 'GOOGLE_AID' },
+  { key: 'ssaid',       name: 'Regenerasi SSAID', desc: 'Hapus penyimpanan SSAID sistem; Android membuat ulang saat reboot (bukan hook API per-aplikasi)', get: null },
+  { key: 'gaid',        name: 'GAID lokal',      desc: 'Tulis Settings.Global + XML GMS best-effort; nilai nol mempertahankan opt-out lokal, API tetap milik layanan', get: 'GOOGLE_AID' },
   { key: 'wlan-mac',    name: 'WiFi MAC',      desc: 'MAC wlan0 + reset WifiConfigStore',                 get: 'WIFI_MAC' },
   { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'MAC adapter BT + Address di bt_config.conf',        get: 'BLUETOOTH_ADDR' },
   { key: 'device-name', name: 'Nama perangkat', desc: 'device_name = MODEL dari identity.prop',           get: 'MODEL' },
@@ -539,6 +539,56 @@ document.getElementById('simOff').addEventListener('click', (ev) => withLoading(
   document.getElementById('simPhantom').checked = false;
   loadSim();
 }));
+
+const EXPERIMENT_FLAGS = [
+  'SBX_NATIVE_READ', 'SBX_PROC_VERSION', 'SBX_MEMINFO',
+  'SBX_SYSFS_MAC', 'SBX_CPU_REVISION',
+];
+
+function renderSettingsState(kv, available = true) {
+  const master = kv.SBX_NATIVE_READ !== '0';
+  for (const key of EXPERIMENT_FLAGS) {
+    const input = document.querySelector(`input[data-flag="${key}"]`);
+    if (!input) continue;
+    input.checked = key === 'SBX_NATIVE_READ' ? master : kv[key] === '1';
+    input.disabled = !available || (key !== 'SBX_NATIVE_READ' && !master);
+  }
+  document.getElementById('settingsStatus').textContent = !available
+    ? 'identity.prop belum ada. Buat persona terlebih dahulu.'
+    : master
+      ? 'Master aktif. Opsi anak tetap independen dan default-nonaktif.'
+      : 'Master nonaktif: seluruh presentasi native dilewatkan genuine.';
+}
+
+async function loadSettings() {
+  const status = document.getElementById('settingsStatus');
+  status.textContent = 'Memuat pengaturan…';
+  const r = await run(`cat ${shq(IDENTITY)} 2>/dev/null || true`);
+  if (!r.ok || !r.out.trim()) {
+    renderSettingsState({}, false);
+    return;
+  }
+  renderSettingsState(parseProp(r.out));
+}
+
+document.getElementById('settingsReload').addEventListener('click', loadSettings);
+document.querySelectorAll('#settings input[data-flag]').forEach(input => {
+  input.addEventListener('change', async () => {
+    const key = input.dataset.flag;
+    const value = input.checked ? '1' : '0';
+    input.disabled = true;
+    const cmd = `${ENV} && sandboxid set-flag ${shq(key)} ${value}`;
+    const r = await run(cmd);
+    if (!r.ok) {
+      toast(trimTitle(r.err.message || 'Gagal menyimpan pengaturan'), {
+        kind: 'error', detail: r.err.stdout || r.err.stderr || '',
+      });
+    } else {
+      toast(`${key}=${value} tersimpan`, { kind: 'ok', detail: r.out });
+    }
+    await loadSettings();
+  });
+});
 
 async function loadTargets() {
   const ta = document.getElementById('tgtArea');
