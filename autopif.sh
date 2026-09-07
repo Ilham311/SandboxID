@@ -241,6 +241,8 @@ assemble_identity() {
   GAID=$(rand_uuid)
   HOSTN="$(printf '%s' "$BRAND" | tr '[:upper:]' '[:lower:]')-build-$(rand_range 100 999)"
 
+  APPLOG_EPOCH="$(date +%s 2>/dev/null || echo 1700000000)000"
+
   BUILD_UTC=""; BUILD_DATE_STR=""
   case "$SECPATCH" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
@@ -279,7 +281,7 @@ DISPLAY=$BUILD_ID
 DESCRIPTION=$DESCRIPTION
 BOOTLOADER=unknown
 HOST=$HOSTN
-USER=builder
+USER=android-build
 TYPE=user
 TAGS=release-keys
 INCREMENTAL=$INCREMENTAL
@@ -301,6 +303,15 @@ USAGE_PROFILE=$PROFILE
 FRESH=$FRESH
 VBMETA_DIGEST=$(rand_hex 32)
 FLAVOR=$FLAVOR_STR
+APPLOG_EPOCH=$APPLOG_EPOCH
+SUPPORTED_ABIS=arm64-v8a,armeabi-v7a,armeabi
+SUPPORTED_64_BIT_ABIS=arm64-v8a
+SUPPORTED_32_BIT_ABIS=armeabi-v7a,armeabi
+CPU_ABI=arm64-v8a
+CPU_ABI2=
+PREVIEW_SDK_INT=0
+PREVIEW_SDK_FINGERPRINT=REL
+FIRST_API_LEVEL=$SDK
 EOF
 )
   if [ -n "$BUILD_UTC" ]; then

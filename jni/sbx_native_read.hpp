@@ -11,7 +11,7 @@
 namespace sbxnr {
 
 inline uint64_t fnv1a(const std::string& s) {
-    uint64_t h = 1469598103934665603ULL;
+    uint64_t h = 14695981039346656037ULL;
     for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
     return h;
 }
@@ -488,8 +488,51 @@ inline bool is_custom_rom_prop(const char* name) {
     return false;
 }
 
+inline bool is_identity_leak_prop(const char* name) {
+    if (!name) return false;
+    static const char* const exact[] = {
+        "ro.ril.factory_id",
+        "persist.odm.ril.factory_id",
+        "ro.ril.oem.imei",  "ro.ril.oem.imei0", "ro.ril.oem.imei1", "ro.ril.oem.imei2",
+        "ro.ril.miui.imei", "ro.ril.miui.imei0", "ro.ril.miui.imei1", "ro.ril.miui.imei2",
+        "ro.ril.oem.meid",  "ro.ril.oem.psno",  "ro.ril.oem.btmac",
+        "persist.odm.ril.oem.imei0", "persist.odm.ril.oem.imei1", "persist.odm.ril.oem.imei2",
+        "persist.odm.ril.oem.sno", "persist.odm.ril.oem.psno",
+        "persist.odm.ril.oem.wifimac", "persist.odm.ril.oem.btmac",
+        "persist.radio.imei", "persist.radio.imei0", "persist.radio.imei1", "persist.radio.imei2",
+        "ro.product.serial", "ro.build.serial",
+        "ro.kernel.androidboot.serialno", "ril.serialnumber",
+        "gsm.sim.preiccid_0", "gsm.sim.preiccid_1",
+        "persist.vendor.radio.cfu.iccid.1",
+        "persist.netd.stable_secret",
+    };
+    for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
+    return false;
+}
+
+inline bool is_oem_leak_prop(const char* name) {
+    if (!name) return false;
+    static const char* const exact[] = {
+        "ro.product.cert",
+        "ro.product.mod_device",
+        "ro.fota.oem",
+        "ro.netflix.bsp_rev",
+        "ro.baseband",
+        "persist.sys.hardcoder.name",
+        "persist.vendor.sys.fp.module",
+        "persist.vendor.sys.fp.vendor",
+    };
+    for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
+    if (std::strncmp(name, "ro.miui.", 8) == 0)              return true;
+    if (std::strncmp(name, "persist.sys.miui.", 17) == 0)    return true;
+    if (std::strncmp(name, "ro.com.google.clientidbase", 26) == 0) return true;
+    if (std::strncmp(name, "ro.vendor.miui.", 15) == 0)      return true;
+    return false;
+}
+
 inline bool should_hide_prop(const char* name) {
-    return is_emulator_prop(name) || is_custom_rom_prop(name);
+    return is_emulator_prop(name) || is_custom_rom_prop(name) ||
+           is_identity_leak_prop(name) || is_oem_leak_prop(name);
 }
 
 inline bool is_native_unsafe_prop(const char* name) {

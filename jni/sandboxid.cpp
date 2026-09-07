@@ -179,6 +179,7 @@ struct Identity {
             "SUPPORTED_ABIS","SUPPORTED_64_BIT_ABIS","SUPPORTED_32_BIT_ABIS",
             "CPU_ABI","CPU_ABI2","SKU","ODM_SKU","BASE_OS",
             "MEDIA_PERFORMANCE_CLASS","PREVIEW_SDK_INT","PREVIEW_SDK_FINGERPRINT",
+            "FIRST_API_LEVEL",
 
             "BUILD_TIME_UTC","BUILD_DATE",
 
@@ -500,6 +501,7 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["BASE_OS"] = "";
 
     auto mpc_for_model = [](const std::string& m) -> const char* {
+        if (m.rfind("Pixel 10", 0) == 0) return "36";
         if (m.rfind("Pixel 9", 0) == 0)  return "35";
         if (m.rfind("Pixel 8", 0) == 0)  return "34";
         if (m.rfind("Pixel 7", 0) == 0)  return "33";
@@ -513,6 +515,27 @@ static Identity derive_identity(const PixelEntry& p) {
 
     id.kv["PREVIEW_SDK_INT"]         = "0";
     id.kv["PREVIEW_SDK_FINGERPRINT"] = "REL";
+
+    auto first_api_for_device = [](const std::string& dev) -> int {
+        struct DA { const char* device; int api; };
+        static const DA tbl[] = {
+            {"oriole",31},{"raven",31},
+            {"bluejay",32},
+            {"panther",33},{"cheetah",33},{"lynx",33},
+            {"shiba",34},{"husky",34},{"akita",34},
+            {"tokay",35},{"caiman",35},{"komodo",35},{"tegu",35},
+            {"frankel",36},{"blazer",36},
+            {"fuxi",33},{"garnet",33},{"marble",33},{"gale",33},
+            {"Infinix-X6833B",33},
+            {"houji",34},{"e3q",34},{"e1q",34},{"duchamp",34},{"OP573DL1",34},
+            {"OP56D3L1",34},{"e5q",35},{"e1s",35},{"manet",35},{"PD2339",35},
+        };
+        for (const auto& e : tbl) if (dev == e.device) return e.api;
+        return 0;
+    };
+    int first_api = first_api_for_device(p.device);
+    if (first_api <= 0) first_api = p.sdk;
+    id.kv["FIRST_API_LEVEL"] = std::to_string(first_api);
 
     return id;
 }
@@ -577,6 +600,7 @@ static void apply_native(const Identity& id) {
     const std::string ODM_SKU    = get("ODM_SKU");
     const std::string BASE_OS    = get("BASE_OS");
     const std::string MPC        = get("MEDIA_PERFORMANCE_CLASS");
+    const std::string FIRST_API  = get("FIRST_API_LEVEL");
 
     const std::string FLAVOR     = get("FLAVOR");
     const std::string BUILD_UTC  = get("BUILD_TIME_UTC");
@@ -636,6 +660,10 @@ static void apply_native(const Identity& id) {
         {"ro.soc.manufacturer",                SOC_MANUF},
         {"ro.soc.model",                       SOC_MODEL},
         {"ro.product.marketname",              MARKETNAME},
+        {"ro.product.vendor.marketname",       MARKETNAME},
+        {"ro.product.odm.marketname",          MARKETNAME},
+        {"ro.product.system.marketname",       MARKETNAME},
+        {"ro.product.product.marketname",      MARKETNAME},
 
         {"ro.product.brand_for_attestation",        BRAND},
         {"ro.product.name_for_attestation",         PRODUCT},
@@ -662,6 +690,62 @@ static void apply_native(const Identity& id) {
         {"ro.build.version.security_patch",    SECPATCH},
         {"ro.vendor.build.security_patch",     SECPATCH},
         {"ro.build.version.incremental",       INCREMENTAL},
+
+        {"ro.product.build.id",                  ID_},
+        {"ro.system.build.id",                   ID_},
+        {"ro.system_ext.build.id",               ID_},
+        {"ro.vendor.build.id",                   ID_},
+        {"ro.odm.build.id",                      ID_},
+
+        {"ro.product.build.version.incremental",     INCREMENTAL},
+        {"ro.system.build.version.incremental",      INCREMENTAL},
+        {"ro.system_ext.build.version.incremental",  INCREMENTAL},
+        {"ro.vendor.build.version.incremental",      INCREMENTAL},
+        {"ro.odm.build.version.incremental",         INCREMENTAL},
+
+        {"ro.product.build.version.release",         RELEASE},
+        {"ro.system.build.version.release",          RELEASE},
+        {"ro.system_ext.build.version.release",      RELEASE},
+        {"ro.vendor.build.version.release",          RELEASE},
+        {"ro.odm.build.version.release",             RELEASE},
+
+        {"ro.product.build.version.release_or_codename",  RELEASE},
+        {"ro.system.build.version.release_or_codename",   RELEASE},
+        {"ro.system_ext.build.version.release_or_codename", RELEASE},
+        {"ro.vendor.build.version.release_or_codename",   RELEASE},
+        {"ro.odm.build.version.release_or_codename",      RELEASE},
+
+        {"ro.product.build.version.sdk",             get("SDK_INT")},
+        {"ro.system.build.version.sdk",              get("SDK_INT")},
+        {"ro.system_ext.build.version.sdk",          get("SDK_INT")},
+        {"ro.vendor.build.version.sdk",              get("SDK_INT")},
+        {"ro.odm.build.version.sdk",                 get("SDK_INT")},
+
+        {"ro.product.build.date.utc",                BUILD_UTC},
+        {"ro.system.build.date.utc",                 BUILD_UTC},
+        {"ro.system_ext.build.date.utc",             BUILD_UTC},
+        {"ro.vendor.build.date.utc",                 BUILD_UTC},
+        {"ro.odm.build.date.utc",                    BUILD_UTC},
+        {"ro.bootimage.build.date.utc",              BUILD_UTC},
+
+        {"ro.product.build.date",                    BUILD_DATE},
+        {"ro.system.build.date",                     BUILD_DATE},
+        {"ro.system_ext.build.date",                 BUILD_DATE},
+        {"ro.vendor.build.date",                     BUILD_DATE},
+        {"ro.odm.build.date",                        BUILD_DATE},
+        {"ro.bootimage.build.date",                  BUILD_DATE},
+
+        {"ro.product.build.type",                    TYPE},
+        {"ro.system.build.type",                     TYPE},
+        {"ro.system_ext.build.type",                 TYPE},
+        {"ro.vendor.build.type",                     TYPE},
+        {"ro.odm.build.type",                        TYPE},
+
+        {"ro.product.build.tags",                    TAGS},
+        {"ro.system.build.tags",                     TAGS},
+        {"ro.system_ext.build.tags",                 TAGS},
+        {"ro.vendor.build.tags",                     TAGS},
+        {"ro.odm.build.tags",                        TAGS},
 
         {"gsm.version.baseband",               RADIO, true},
         {"ro.build.expect.baseband",           RADIO, true},
@@ -691,6 +775,18 @@ static void apply_native(const Identity& id) {
         {"ro.build.version.preview_sdk_fingerprint", std::string("REL")},
 
         {"ro.odm.build.media_performance_class", MPC},
+
+        {"ro.product.first_api_level",             FIRST_API},
+        {"ro.board.first_api_level",               FIRST_API},
+
+        {"dalvik.vm.isa.arm64.variant",  std::string("generic")},
+        {"dalvik.vm.isa.arm64.features", std::string("default")},
+        {"dalvik.vm.isa.arm.variant",    std::string("generic")},
+        {"dalvik.vm.isa.arm.features",   std::string("default")},
+        {"dalvik.vm.heapsize",           std::string("512m")},
+        {"dalvik.vm.heapgrowthlimit",    std::string("256m")},
+        {"ro.zygote",                    std::string("zygote64_32")},
+        {"ro.dalvik.vm.native.bridge",   std::string("0")},
     };
 
     bool have_bundled = (::access(RESETPROP, X_OK) == 0);
@@ -727,6 +823,90 @@ static void apply_native(const Identity& id) {
         if (applied == 0 && failed > 0)
             fprintf(stderr, "! SEMUA resetprop gagal%s — cek ketersediaan resetprop / resetprop-rs\n",
                     have_bundled ? "" : " (bundled absent + PATH fallback gagal)");
+    }
+
+    {
+        static const char* const emu_props[] = {
+            "ro.kernel.qemu",
+            "ro.kernel.qemu.gles",
+            "ro.boot.qemu",
+            "ro.boot.qemu.gltransport",
+            "ro.hardware.virtual_device",
+            "qemu.hw.mainkeys",
+            "init.svc.qemud",
+            "init.svc.qemu-props",
+            "init.svc.goldfish-logcat",
+            "init.svc.goldfish-setup",
+            "init.svc.ranchu-net",
+        };
+        static const char* const identity_props[] = {
+            "ro.ril.factory_id",
+            "persist.odm.ril.factory_id",
+            "ro.ril.oem.imei",  "ro.ril.oem.imei0", "ro.ril.oem.imei1", "ro.ril.oem.imei2",
+            "ro.ril.miui.imei", "ro.ril.miui.imei0", "ro.ril.miui.imei1", "ro.ril.miui.imei2",
+            "ro.ril.oem.meid",  "ro.ril.oem.psno",  "ro.ril.oem.btmac",
+            "persist.odm.ril.oem.imei0", "persist.odm.ril.oem.imei1", "persist.odm.ril.oem.imei2",
+            "persist.odm.ril.oem.sno", "persist.odm.ril.oem.psno",
+            "persist.odm.ril.oem.wifimac", "persist.odm.ril.oem.btmac",
+            "persist.radio.imei", "persist.radio.imei0", "persist.radio.imei1", "persist.radio.imei2",
+            "ro.product.serial", "ro.build.serial",
+            "ro.kernel.androidboot.serialno", "ril.serialnumber",
+            "gsm.sim.preiccid_0", "gsm.sim.preiccid_1",
+            "persist.vendor.radio.cfu.iccid.1",
+            "persist.netd.stable_secret",
+        };
+        static const char* const custom_rom_props[] = {
+            "ro.modversion",
+            "ro.cm.version",
+            "ro.cm.build.date",
+        };
+        static const char* const oem_props[] = {
+            "ro.product.cert",
+            "ro.product.mod_device",
+            "ro.fota.oem",
+            "ro.netflix.bsp_rev",
+            "ro.baseband",
+            "persist.sys.hardcoder.name",
+            "persist.vendor.sys.fp.module",
+            "persist.vendor.sys.fp.vendor",
+            "ro.com.google.clientidbase",
+            "ro.com.google.clientidbase.ms",
+            "ro.com.google.clientidbase.tx",
+            "ro.com.google.clientidbase.vs",
+            "ro.com.google.clientidbase.am",
+            "ro.com.google.clientidbase.yt",
+            "ro.miui.build.region",
+            "ro.miui.ui.version.code",
+            "ro.miui.ui.version.name",
+            "ro.miui.cust_variant",
+            "ro.miui.region",
+            "ro.miui.mcc",
+            "ro.miui.mnc",
+            "ro.vendor.miui.region",
+            "ro.vendor.miui.mcc",
+            "ro.vendor.miui.mnc",
+            "ro.vendor.miui.cust_variant",
+        };
+        int del_ok = 0, del_skip = 0;
+        auto try_delete = [&](const char* prop) {
+            char buf[PROP_VALUE_MAX] = {0};
+            if (__system_property_get(prop, buf) <= 0) { del_skip++; return; }
+            int rc;
+            if (have_bundled) {
+                rc = run_bin(RESETPROP, {"resetprop-rs", "--delete", prop});
+            } else {
+                rc = run_bin_path("resetprop", {"resetprop", "--delete", prop});
+                if (rc != 0)
+                    rc = run_bin_path("resetprop-rs", {"resetprop-rs", "--delete", prop});
+            }
+            if (rc == 0) del_ok++;
+        };
+        for (const char* p : emu_props) try_delete(p);
+        for (const char* p : identity_props) try_delete(p);
+        for (const char* p : custom_rom_props) try_delete(p);
+        for (const char* p : oem_props) try_delete(p);
+        if (del_ok > 0)
+            printf("  Sanitized: %d prop(s) deleted, %d absent\n", del_ok, del_skip);
     }
 
     std::string aid = get("ANDROID_ID");
@@ -826,6 +1006,10 @@ static void generate_mount_files(const Identity& id) {
     add("ro.soc.manufacturer",                SOC_MANUF);
     add("ro.soc.model",                       SOC_MODEL);
     add("ro.product.marketname",              MARKETNAME);
+    add("ro.product.vendor.marketname",       MARKETNAME);
+    add("ro.product.odm.marketname",          MARKETNAME);
+    add("ro.product.system.marketname",       MARKETNAME);
+    add("ro.product.product.marketname",      MARKETNAME);
     add("ro.product.brand_for_attestation",        BRAND);
     add("ro.product.name_for_attestation",         PRODUCT);
     add("ro.product.device_for_attestation",       DEVICE);
@@ -853,6 +1037,9 @@ static void generate_mount_files(const Identity& id) {
     add("ro.build.version.preview_sdk",       std::string("0"));
     add("ro.build.version.preview_sdk_fingerprint", std::string("REL"));
     add("ro.odm.build.media_performance_class", g("MEDIA_PERFORMANCE_CLASS"));
+
+    add("ro.product.first_api_level",             g("FIRST_API_LEVEL"));
+    add("ro.board.first_api_level",               g("FIRST_API_LEVEL"));
 
     add("ro.product.cpu.abilist",             g("SUPPORTED_ABIS"));
     add("ro.product.cpu.abilist32",           g("SUPPORTED_32_BIT_ABIS"));
@@ -895,6 +1082,23 @@ static void generate_mount_files(const Identity& id) {
         if (!MANUFACTURER.empty()) c += pfx + "manufacturer=" + MANUFACTURER + "\n";
         if (!DEVICE.empty())       c += pfx + "device="       + DEVICE       + "\n";
         if (!PRODUCT.empty())      c += pfx + "name="         + PRODUCT      + "\n";
+        if (!MARKETNAME.empty())   c += pfx + "marketname="   + MARKETNAME   + "\n";
+        std::string ppfx = std::string("ro.") + p.dir + ".build.";
+        c += ppfx + "id=" + ID_ + "\n";
+        c += ppfx + "fingerprint=" + FP + "\n";
+        c += ppfx + "type=" + TYPE + "\n";
+        c += ppfx + "tags=" + TAGS + "\n";
+        c += ppfx + "version.incremental=" + INCREMENTAL + "\n";
+        c += ppfx + "version.release=" + RELEASE + "\n";
+        c += ppfx + "version.release_or_codename=" + RELEASE + "\n";
+        c += ppfx + "version.sdk=" + SDK + "\n";
+        if (!g("BUILD_TIME_UTC").empty()) {
+            c += ppfx + "date.utc=" + g("BUILD_TIME_UTC") + "\n";
+            c += ppfx + "date=" + g("BUILD_DATE") + "\n";
+        }
+        if (std::string(p.dir) == "vendor") {
+            c += "ro.vendor.build.security_patch=" + SECPATCH + "\n";
+        }
         std::string path = std::string(MOUNTDIR) + "/" + p.dir + "/build.prop";
         atomic_write(path, c);
         ::chmod(path.c_str(), 0644);
