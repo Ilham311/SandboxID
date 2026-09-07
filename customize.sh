@@ -4,18 +4,16 @@ SKIPUNZIP=0
 
 SBX_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
 ui_print "- SandboxID ${SBX_VER:-(versi ?)}"
-ui_print "- Persona disimpan lokal di modul dan disajikan hanya ke proses target:"
-ui_print "-   Build.*, properti terpilih, dan view build.prop per-target"
-ui_print "- Catatan: SandboxID tidak menghapus atau menulis penyimpanan SSAID."
+ui_print "- Membuat aplikasi melihat perangkat ini sebagai perangkat lain:"
+ui_print "-   model, brand, pabrikan, fingerprint, serial"
+ui_print "-   plus Android ID / SSAID per-aplikasi"
 ui_print "- Identitas perangkat diacak dari banyak brand:"
 ui_print "-   Pixel, Samsung, Xiaomi, POCO, OPPO, vivo, Redmi, Infinix"
 ui_print "-   peluang tiap brand sama rata."
-ui_print "- Lifecycle normal tidak memublikasikan properti global atau menulis Settings."
-ui_print "- Kemampuan runtime dan attestation hardware tetap asli."
-ui_print "- /proc version, meminfo, sysfs MAC, agregat CPU, dan hide properti luas"
-ui_print "-   bersifat opt-in, parsial, dan default-nonaktif."
-ui_print "- Tombol Action hanya mengganti persona lokal; data aplikasi tidak dihapus."
-ui_print "- Operasi shared-device di WebUI/rotate_ids.sh selalu individual dan manual."
+ui_print "- Spoof berjalan pre-zygote, sebelum aplikasi terbuka."
+ui_print "- Aman: hanya mengganti string identitas, tidak menyentuh HW/framework."
+ui_print "- Tombol Action (sekali tekan): acak perangkat, terapkan, rotasi ID"
+ui_print "-   (SSAID, GAID, WiFi/BT MAC, nama, boot count)"
 ui_print "- Aplikasi target diatur sendiri di target.txt (kosong = modul nonaktif)."
 ui_print "- WebUI: buka modul ini di manajer KernelSU/APatch."
 ui_print ""
@@ -32,25 +30,6 @@ LIVE_CARRIER="/data/adb/modules/sandboxid/carrier.conf"
 if [ -s "$LIVE_CARRIER" ]; then
     ui_print "- carrier.conf (pilihan operator) dari instalasi sebelumnya dipertahankan"
     cp -f "$LIVE_CARRIER" "$MODPATH/carrier.conf"
-fi
-
-LIVE_IDENTITY="/data/adb/modules/sandboxid/identity.prop"
-if [ -r "$LIVE_IDENTITY" ]; then
-    cp -f "$LIVE_IDENTITY" "$MODPATH/identity.prop"
-    ui_print "- identity.prop dari instalasi sebelumnya dipertahankan"
-    : > "$MODPATH/.operational-flags"
-    for key in SBX_NATIVE_READ SBX_HIDE SBX_CPU_REVISION \
-               SBX_PROC_VERSION SBX_MEMINFO SBX_SYSFS_MAC; do
-        value=$(awk -F= -v k="$key" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$LIVE_IDENTITY" 2>/dev/null)
-        case "$value" in
-            0|1) printf '%s=%s\n' "$key" "$value" >> "$MODPATH/.operational-flags" ;;
-        esac
-    done
-    if [ -s "$MODPATH/.operational-flags" ]; then
-        ui_print "- Pengaturan native-read eksperimental dari instalasi sebelumnya dipertahankan"
-    else
-        rm -f "$MODPATH/.operational-flags"
-    fi
 fi
 
 if [ -f "$MODPATH/debug_variant" ]; then
@@ -139,5 +118,4 @@ mkdir -p $MODPATH/mount/system_ext
 set_perm_recursive $MODPATH/mount 0 0 0755 0644
 
 ui_print ""
-ui_print "- Selesai dipasang. Reboot sekali untuk memulihkan state properti ROM asli,"
-ui_print "- lalu tekan Action dan buka ulang aplikasi target secara manual."
+ui_print "- Selesai dipasang. Reboot, lalu tekan Action untuk mengacak perangkat baru."

@@ -15,8 +15,6 @@ local.properties
 
 .DS_Store
 Thumbs.db
-__pycache__/
-*.py[cod]
 
 jni/zygisk.hpp
 

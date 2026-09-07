@@ -129,16 +129,16 @@ fi
 
 _vbs="$(gp ro.boot.verifiedbootstate)"
 case "$_vbs" in
-    green|verified)    emit vbmeta PASS "verifiedbootstate=$_vbs (status platform asli/ditandatangani)" ;;
-    orange|yellow|red) emit vbmeta FAIL "verifiedbootstate=$_vbs (status platform asli: bootloader tidak terkunci/termodifikasi)" ;;
-    "")                emit vbmeta WARN "verifiedbootstate kosong — status platform tidak tersedia" ;;
-    *)                 emit vbmeta WARN "verifiedbootstate=$_vbs (status platform tak dikenal)" ;;
+    green)             emit vbmeta PASS "verifiedbootstate=green" ;;
+    orange|yellow|red) emit vbmeta FAIL "verifiedbootstate=$_vbs (bootloader tidak terkunci/termodifikasi)" ;;
+    "")                emit vbmeta WARN "verifiedbootstate kosong — apply-boot belum jalan?" ;;
+    *)                 emit vbmeta WARN "verifiedbootstate=$_vbs (tak dikenal)" ;;
 esac
 
 _ds="$(gp ro.boot.vbmeta.device_state)"
 case "$_ds" in
-    locked)   emit vbmeta PASS "vbmeta.device_state=locked (status platform asli)" ;;
-    unlocked) emit vbmeta FAIL "vbmeta.device_state=unlocked (status platform asli)" ;;
+    locked)   emit vbmeta PASS "vbmeta.device_state=locked" ;;
+    unlocked) emit vbmeta FAIL "vbmeta.device_state=unlocked" ;;
     "")       emit vbmeta WARN "vbmeta.device_state kosong" ;;
     *)        emit vbmeta WARN "vbmeta.device_state=$_ds" ;;
 esac
@@ -164,7 +164,7 @@ case "$_dig" in
     *)
         _clean="$(printf '%s' "$_dig" | tr -d '0-9a-f')"
         if [ -z "$_clean" ] && [ "${#_dig}" -eq 64 ]; then
-        emit vbmeta PASS "vbmeta.digest terpasang (64-hex, nilai platform asli; bukan bukti yang dipalsukan)"
+            emit vbmeta PASS "vbmeta.digest terpasang (64-hex)"
         else
             emit vbmeta WARN "vbmeta.digest bentuk tak lazim (len=${#_dig})"
         fi
@@ -217,26 +217,17 @@ case "$_se" in
 esac
 emit selinux INFO "ro.build.selinux + node enforce di-mask per-app — verifikasi di dalam app target"
 
-_hide="$(id_get SBX_HIDE)"; [ -n "$_hide" ] || _hide=0
 _qemu="$(gp ro.kernel.qemu)$(gp ro.boot.qemu)"
 _hw="$(gp ro.hardware)"
-if [ "$_hide" = 1 ]; then
-    if [ -n "$_qemu" ] || [ "$_hw" = "goldfish" ] || [ "$_hw" = "ranchu" ]; then
-        emit rom INFO "prop emulator/qemu genuine ada device-wide; SBX_HIDE=1 menyembunyikan klasifikasi ini hanya di target"
-    else
-        emit rom PASS "tidak ada prop qemu device-wide"
-    fi
+if [ -n "$_qemu" ] || [ "$_hw" = "goldfish" ] || [ "$_hw" = "ranchu" ]; then
+    emit rom FAIL "prop emulator/qemu terdeteksi device-wide (hw=$_hw)"
 else
-    emit rom INFO "SBX_HIDE=0: prop emulator/OEM/custom-ROM diteruskan genuine ke target"
+    emit rom PASS "tidak ada prop qemu device-wide"
 fi
 
 _lin="$(gp ro.modversion)$(gp ro.lineage.version)$(gp ro.cm.version)"
 if [ -n "$_lin" ]; then
-    if [ "$_hide" = 1 ]; then
-        emit rom INFO "prop custom-ROM genuine ada; SBX_HIDE=1 menyembunyikannya hanya di target"
-    else
-        emit rom INFO "prop custom-ROM genuine ada dan diteruskan karena SBX_HIDE=0"
-    fi
+    emit rom WARN "prop custom-ROM device-wide ada (di-mask per-app oleh hook)"
 else
     emit rom PASS "tidak ada prop custom-ROM device-wide"
 fi
@@ -254,10 +245,10 @@ _mgr=""
 _mgr="${_mgr# }"
 emit root INFO "root solution: ${_mgr:-tidak terdeteksi di /data/adb}"
 
-if [ "$_hide" = 1 ]; then
-    emit root INFO "hider mount-trace: AKTIF via SBX_HIDE=1 — berlaku di dalam app target"
+if [ -f "$MODDIR/enable_hide" ]; then
+    emit root INFO "hider mount-trace: AKTIF (opt-in) — berlaku di dalam app target"
 else
-    emit root INFO "hider mount-trace: nonaktif — set SBX_HIDE=1 secara eksplisit untuk mengaktifkan"
+    emit root INFO "hider mount-trace: nonaktif (default) — touch enable_hide untuk mengaktifkan"
 fi
 
 _mi=/proc/self/mountinfo
@@ -281,26 +272,8 @@ else
     emit hosts INFO "/system/etc/hosts tidak terbaca"
 fi
 
-_native="$(id_get SBX_NATIVE_READ)"; [ -n "$_native" ] || _native=1
-_proc="$(id_get SBX_PROC_VERSION)"; [ -n "$_proc" ] || _proc=0
-_mem="$(id_get SBX_MEMINFO)"; [ -n "$_mem" ] || _mem=0
-_mac="$(id_get SBX_SYSFS_MAC)"; [ -n "$_mac" ] || _mac=0
-_cpu="$(id_get SBX_CPU_REVISION)"; [ -n "$_cpu" ] || _cpu=0
-[ -f "$MODDIR/no_native_read" ] && _native=0
-
-if [ "$_native" = 1 ]; then
-    emit hooks INFO "native-read master: AKTIF (boot_id, SELinux enforce, AppLog sesuai allowlist)"
-else
-    emit hooks INFO "native-read master: nonaktif — seluruh surface native pass-through"
-fi
-for _entry in "proc/version:$_proc" "proc/meminfo:$_mem" "sysfs MAC:$_mac" "CPU revision:$_cpu"; do
-    _name=${_entry%:*}; _flag=${_entry##*:}
-    if [ "$_native" = 1 ] && [ "$_flag" = 1 ]; then
-        emit hooks INFO "eksperimental $_name: AKTIF (presentasi parsial; API lintas-lensa tetap genuine)"
-    else
-        emit hooks INFO "eksperimental $_name: nonaktif"
-    fi
-done
+_nnr="nonaktif"; [ -f "$MODDIR/no_native_read" ] && _nnr="AKTIF (native-read dimatikan)"
+emit hooks INFO "redirect baca /proc,/sys (boot_id, MAC, /proc/version, meminfo, cpuinfo, enforce): kill-switch no_native_read=$_nnr"
 emit hooks INFO "hook properti L2/L9 + bind build.prop: hanya di app target — verifikasi dengan app detektor"
 
 printf 'SELFTEST SUMMARY pass=%d warn=%d fail=%d info=%d\n' "$PASS" "$WARN" "$FAIL" "$INFO"

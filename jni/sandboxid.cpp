@@ -18,20 +18,18 @@
 #include <cstdlib>
 #include "config.hpp"
 #include "sbx_carrier.hpp"
-#include "sbx_identity.hpp"
 #include "sbx_native_read.hpp"
-#include "sbx_property.hpp"
 #include <sys/system_properties.h>
 
 static const char* IDENTITY_FILE  = sandboxid::IDENTITY_FILE;
 static const char* IDENTITY_BAK   = sandboxid::IDENTITY_BAK;
 static const char* MODE_FILE      = sandboxid::MODE_FILE;
+static const char* RESETPROP      = sandboxid::RESETPROP;
 static const char* MOUNTDIR       = sandboxid::MOUNTDIR;
 static const char* TARGET_FILE    = sandboxid::TARGET_FILE;
 static const char* PERSONAS_FILE  = sandboxid::PERSONAS_FILE;
 static const char* PERSONA_OVERRIDE = sandboxid::PERSONA_OVERRIDE;
 static const char* CARRIER_CONF   = sandboxid::CARRIER_CONF;
-static const char* LEGACY_SETTINGS_OVERLAY = sandboxid::LEGACY_SETTINGS_OVERLAY;
 
 static std::vector<std::string> load_targets() {
     std::vector<std::string> out;
@@ -127,26 +125,73 @@ static int run_bin(const char* path, std::vector<const char*> argv, bool null_io
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
+static int run_bin_path(const char* file, std::vector<const char*> argv) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        argv.push_back(nullptr);
+        execvp(file, const_cast<char* const*>(argv.data()));
+        _exit(127);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid) return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+static void wait_boot_completed(int max_ms) {
+    char b[PROP_VALUE_MAX];
+    for (int waited = 0; waited < max_ms; waited += 200) {
+        b[0] = 0;
+        if (__system_property_get("sys.boot_completed", b) > 0 && b[0] == '1')
+            return;
+        ::usleep(200 * 1000);
+    }
+}
+
+static int run_framework(const char* path, std::vector<const char*> argv,
+                         const std::string& label) {
+    const int attempts = 2;
+    int rc = -1;
+    for (int i = 0; i < attempts; ++i) {
+        rc = run_bin(path, argv, true);
+        if (rc == 0) return 0;
+        if (i + 1 < attempts) ::usleep(200 * 1000);
+    }
+    fprintf(stderr, "! %s gagal (exit=%d) setelah %d percobaan — binder transaction ditolak (SELinux/FD)\n",
+            label.c_str(), rc, attempts);
+    return rc;
+}
+
 struct Identity {
     std::map<std::string, std::string> kv;
 
     std::string serialize() const {
-        static constexpr std::string_view order[] = {
-        "BRAND","MANUFACTURER","MODEL","MARKETNAME","DEVICE","PRODUCT",
-        "BOARD","HARDWARE","BOARD_PLATFORM","SOC_MANUFACTURER","SOC_MODEL",
-        "FINGERPRINT","ID","DISPLAY","DESCRIPTION",
-        "BOOTLOADER","HOST","USER","TYPE","TAGS",
-        "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
-        "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
-        "GSM_OPERATOR_NUMERIC","GSM_OPERATOR_ALPHA","GSM_OPERATOR_ISO","GSM_SIM_STATE",
-        "SKU","ODM_SKU","BUILD_TIME_UTC","BUILD_DATE","FLAVOR","APPLOG_EPOCH",
-        "SBX_NATIVE_READ","SBX_HIDE","SBX_CPU_REVISION",
-        "SBX_PROC_VERSION","SBX_MEMINFO","SBX_SYSFS_MAC",
+        static const std::vector<std::string> order = {
+            "BRAND","MANUFACTURER","MODEL","MARKETNAME","DEVICE","PRODUCT",
+            "BOARD","HARDWARE","BOARD_PLATFORM","SOC_MANUFACTURER","SOC_MODEL",
+            "FINGERPRINT","ID","DISPLAY","DESCRIPTION",
+            "BOOTLOADER","HOST","USER","TYPE","TAGS",
+            "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
+            "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
+            "GSM_OPERATOR_NUMERIC","GSM_OPERATOR_ALPHA","GSM_OPERATOR_ISO","GSM_SIM_STATE",
+            "VBMETA_DIGEST",
+
+            "SUPPORTED_ABIS","SUPPORTED_64_BIT_ABIS","SUPPORTED_32_BIT_ABIS",
+            "CPU_ABI","CPU_ABI2","SKU","ODM_SKU","BASE_OS",
+            "MEDIA_PERFORMANCE_CLASS","PREVIEW_SDK_INT","PREVIEW_SDK_FINGERPRINT",
+            "FIRST_API_LEVEL",
+
+            "BUILD_TIME_UTC","BUILD_DATE",
+
+            "FLAVOR",
+
+            "APPLOG_EPOCH",
         };
         std::string out;
-        if (!sbxid::serialize_identity_values(
-                kv, order, sizeof(order) / sizeof(order[0]), out))
-            return {};
+        for (const auto& k : order) {
+            auto it = kv.find(k);
+            if (it != kv.end()) out += k + "=" + it->second + "\n";
+        }
         return out;
     }
 };
@@ -169,15 +214,6 @@ static int device_sdk() {
     char b[PROP_VALUE_MAX] = {0};
     if (__system_property_get("ro.build.version.sdk", b) > 0) return atoi(b);
     return 0;
-}
-
-static bool runtime_is_stable_release() {
-    char preview_sdk[PROP_VALUE_MAX] = {0};
-    char codename[PROP_VALUE_MAX] = {0};
-    if (__system_property_get("ro.build.version.preview_sdk", preview_sdk) <= 0 ||
-        __system_property_get("ro.build.version.codename", codename) <= 0)
-        return false;
-    return sbxprop::stable_release_runtime(preview_sdk, codename);
 }
 
 static std::string gen_host_suffix() {
@@ -319,28 +355,39 @@ static std::vector<PixelEntry> load_personas() {
     return pool;
 }
 
-static bool pick_persona(PixelEntry& out, std::string& error) {
+static PixelEntry pick_persona() {
     std::random_device rd;
     std::mt19937 g(rd());
 
     std::vector<PixelEntry> pool = load_personas();
-    const int dev = device_sdk();
-    if (dev <= 0) {
-        error = "device SDK is unavailable";
-        return false;
+    const size_t N = pool.size();
+
+    int dev = device_sdk();
+
+    std::vector<size_t> cand;
+    for (size_t i = 0; i < N; ++i)
+        if (dev > 0 && pool[i].sdk == dev) cand.push_back(i);
+
+    if (cand.empty()) {
+
+        fprintf(stderr, "! tidak ada persona SDK %d persis — fallback SDK lebih rendah, "
+                "TERIMA RISIKO inkonsistensi lintas-permukaan "
+                "(SDK_INT vs RELEASE vs FINGERPRINT)\n", dev);
+        for (size_t i = 0; i < N; ++i)
+            if (dev > 0 && pool[i].sdk <= dev) cand.push_back(i);
     }
 
-    std::vector<size_t> candidates;
-    for (size_t i = 0; i < pool.size(); ++i)
-        if (pool[i].sdk == dev) candidates.push_back(i);
-    if (candidates.empty()) {
-        error = "no exact persona for runtime SDK " + std::to_string(dev);
-        return false;
-    }
+    size_t idx;
+    if (!cand.empty()) {
+        idx = cand[g() % cand.size()];
+    } else {
 
-    out = pool[candidates[g() % candidates.size()]];
-    error.clear();
-    return true;
+        idx = 0;
+        for (size_t i = 1; i < N; ++i) if (pool[i].sdk < pool[idx].sdk) idx = i;
+        fprintf(stderr, "! device SDK %d below all personas; using SDK %d (upgrade, risky)\n",
+                dev, pool[idx].sdk);
+    }
+    return pool[idx];
 }
 
 static Identity derive_identity(const PixelEntry& p) {
@@ -442,23 +489,59 @@ static Identity derive_identity(const PixelEntry& p) {
         }
     }
 
+    id.kv["VBMETA_DIGEST"] =
+        sbxnr::hex_from_seed(sbxnr::fnv1a(id.kv["FINGERPRINT"] + "|" + id.kv["SERIAL"]), 32);
+
+    id.kv["SUPPORTED_ABIS"]        = "arm64-v8a,armeabi-v7a,armeabi";
+    id.kv["SUPPORTED_64_BIT_ABIS"] = "arm64-v8a";
+    id.kv["SUPPORTED_32_BIT_ABIS"] = "armeabi-v7a,armeabi";
+    id.kv["CPU_ABI"]               = "arm64-v8a";
+    id.kv["CPU_ABI2"]              = "";
+
+    id.kv["BASE_OS"] = "";
+
+    auto mpc_for_model = [](const std::string& m) -> const char* {
+        if (m.rfind("Pixel 10", 0) == 0) return "36";
+        if (m.rfind("Pixel 9", 0) == 0)  return "35";
+        if (m.rfind("Pixel 8", 0) == 0)  return "34";
+        if (m.rfind("Pixel 7", 0) == 0)  return "33";
+        if (m.rfind("Pixel 6", 0) == 0)  return "31";
+        return "";
+    };
+    id.kv["MEDIA_PERFORMANCE_CLASS"] = mpc_for_model(p.model);
+
     id.kv["SKU"]     = "";
     id.kv["ODM_SKU"] = "";
-    id.kv["SBX_NATIVE_READ"] = "1";
-    id.kv["SBX_HIDE"] = "0";
-    id.kv["SBX_CPU_REVISION"] = "0";
-    id.kv["SBX_PROC_VERSION"] = "0";
-    id.kv["SBX_MEMINFO"] = "0";
-    id.kv["SBX_SYSFS_MAC"] = "0";
+
+    id.kv["PREVIEW_SDK_INT"]         = "0";
+    id.kv["PREVIEW_SDK_FINGERPRINT"] = "REL";
+
+    auto first_api_for_device = [](const std::string& dev) -> int {
+        struct DA { const char* device; int api; };
+        static const DA tbl[] = {
+            {"oriole",31},{"raven",31},
+            {"bluejay",32},
+            {"panther",33},{"cheetah",33},{"lynx",33},
+            {"shiba",34},{"husky",34},{"akita",34},
+            {"tokay",35},{"caiman",35},{"komodo",35},{"tegu",35},
+            {"frankel",36},{"blazer",36},
+            {"fuxi",33},{"garnet",33},{"marble",33},{"gale",33},
+            {"Infinix-X6833B",33},
+            {"houji",34},{"e3q",34},{"e1q",34},{"duchamp",34},{"OP573DL1",34},
+            {"OP56D3L1",34},{"e5q",35},{"e1s",35},{"manet",35},{"PD2339",35},
+        };
+        for (const auto& e : tbl) if (dev == e.device) return e.api;
+        return 0;
+    };
+    int first_api = first_api_for_device(p.device);
+    if (first_api <= 0) first_api = p.sdk;
+    id.kv["FIRST_API_LEVEL"] = std::to_string(first_api);
 
     return id;
 }
 
-static bool gen_identity(Identity& out, std::string& error) {
-    PixelEntry persona;
-    if (!pick_persona(persona, error)) return false;
-    out = derive_identity(persona);
-    return true;
+static Identity gen_identity() {
+    return derive_identity(pick_persona());
 }
 
 static bool take_persona_override(PixelEntry& out) {
@@ -482,6 +565,381 @@ static bool take_persona_override(PixelEntry& out) {
 #define DBG(...) ((void)0)
 #endif
 
+static void apply_native(const Identity& id) {
+    DBG("apply_native: enter (identity has %zu kv pairs)", id.kv.size());
+    auto get = [&](const char* k) -> std::string {
+        auto it = id.kv.find(k);
+        return it != id.kv.end() ? it->second : std::string();
+    };
+
+    struct Rp { const char* key; std::string val; bool del_if_empty = false; };
+
+    const std::string SERIAL       = get("SERIAL");
+    const std::string MODEL        = get("MODEL");
+    const std::string BRAND        = get("BRAND");
+    const std::string MANUFACTURER = get("MANUFACTURER");
+    const std::string DEVICE       = get("DEVICE");
+    const std::string PRODUCT      = get("PRODUCT");
+    const std::string ID_          = get("ID");
+    const std::string FP           = get("FINGERPRINT");
+    const std::string DISPLAY      = get("DISPLAY");
+    const std::string DESC         = get("DESCRIPTION");
+    const std::string RELEASE      = get("RELEASE");
+    const std::string SECPATCH     = get("SECURITY_PATCH");
+    const std::string INCREMENTAL  = get("INCREMENTAL");
+    const std::string RADIO        = get("RADIO");
+    const std::string TAGS         = get("TAGS");
+    const std::string TYPE         = get("TYPE");
+    const std::string USER_        = get("USER");
+    const std::string HOST         = get("HOST");
+    const std::string SOC_MANUF    = get("SOC_MANUFACTURER");
+    const std::string SOC_MODEL    = get("SOC_MODEL");
+    const std::string MARKETNAME   = get("MARKETNAME");
+
+    const std::string SKU        = get("SKU");
+    const std::string ODM_SKU    = get("ODM_SKU");
+    const std::string BASE_OS    = get("BASE_OS");
+    const std::string MPC        = get("MEDIA_PERFORMANCE_CLASS");
+    const std::string FIRST_API  = get("FIRST_API_LEVEL");
+
+    const std::string FLAVOR     = get("FLAVOR");
+    const std::string BUILD_UTC  = get("BUILD_TIME_UTC");
+    const std::string BUILD_DATE = get("BUILD_DATE");
+
+    std::vector<Rp> rp = {
+        {"ro.serialno",                        SERIAL},
+        {"ro.boot.serialno",                   SERIAL},
+
+        {"ro.build.fingerprint",               FP},
+        {"ro.bootimage.build.fingerprint",     FP},
+        {"ro.system.build.fingerprint",        FP},
+        {"ro.vendor.build.fingerprint",        FP},
+        {"ro.odm.build.fingerprint",           FP},
+        {"ro.product.build.fingerprint",       FP},
+        {"ro.system_ext.build.fingerprint",    FP},
+        {"ro.vendor_dlkm.build.fingerprint",   FP},
+        {"ro.odm_dlkm.build.fingerprint",      FP},
+
+        {"ro.product.model",                   MODEL},
+        {"ro.product.system.model",            MODEL},
+        {"ro.product.vendor.model",            MODEL},
+        {"ro.product.odm.model",               MODEL},
+        {"ro.product.product.model",           MODEL},
+        {"ro.product.system_ext.model",        MODEL},
+
+        {"ro.product.brand",                   BRAND},
+        {"ro.product.system.brand",            BRAND},
+        {"ro.product.vendor.brand",            BRAND},
+        {"ro.product.odm.brand",               BRAND},
+        {"ro.product.product.brand",           BRAND},
+        {"ro.product.system_ext.brand",        BRAND},
+
+        {"ro.product.manufacturer",            MANUFACTURER},
+        {"ro.product.system.manufacturer",     MANUFACTURER},
+        {"ro.product.vendor.manufacturer",     MANUFACTURER},
+        {"ro.product.odm.manufacturer",        MANUFACTURER},
+        {"ro.product.product.manufacturer",    MANUFACTURER},
+        {"ro.product.system_ext.manufacturer", MANUFACTURER},
+
+        {"ro.product.device",                  DEVICE},
+        {"ro.product.system.device",           DEVICE},
+        {"ro.product.vendor.device",           DEVICE},
+        {"ro.product.odm.device",              DEVICE},
+        {"ro.product.product.device",          DEVICE},
+        {"ro.product.system_ext.device",       DEVICE},
+
+        {"ro.product.name",                    PRODUCT},
+        {"ro.product.system.name",             PRODUCT},
+        {"ro.product.vendor.name",             PRODUCT},
+        {"ro.product.odm.name",                PRODUCT},
+        {"ro.product.product.name",            PRODUCT},
+        {"ro.product.system_ext.name",         PRODUCT},
+
+        {"ro.build.product",                   DEVICE},
+
+        {"ro.soc.manufacturer",                SOC_MANUF},
+        {"ro.soc.model",                       SOC_MODEL},
+        {"ro.product.marketname",              MARKETNAME},
+        {"ro.product.vendor.marketname",       MARKETNAME},
+        {"ro.product.odm.marketname",          MARKETNAME},
+        {"ro.product.system.marketname",       MARKETNAME},
+        {"ro.product.product.marketname",      MARKETNAME},
+
+        {"ro.product.brand_for_attestation",        BRAND},
+        {"ro.product.name_for_attestation",         PRODUCT},
+        {"ro.product.device_for_attestation",       DEVICE},
+        {"ro.product.model_for_attestation",        MODEL},
+        {"ro.product.manufacturer_for_attestation", MANUFACTURER},
+
+        {"ro.build.id",                        ID_},
+        {"ro.build.display.id",                DISPLAY},
+        {"ro.build.description",               DESC},
+        {"ro.build.tags",                      TAGS},
+        {"ro.build.type",                      TYPE},
+        {"ro.build.user",                      USER_},
+        {"ro.build.host",                      HOST},
+        {"ro.build.flavor",                    FLAVOR},
+        {"ro.build.date.utc",                  BUILD_UTC},
+        {"ro.build.date",                      BUILD_DATE},
+
+        {"ro.build.version.codename",          std::string("REL")},
+        {"ro.build.version.all_codenames",     std::string("REL")},
+
+        {"ro.build.version.release",           RELEASE},
+        {"ro.build.version.release_or_codename", RELEASE},
+        {"ro.build.version.security_patch",    SECPATCH},
+        {"ro.vendor.build.security_patch",     SECPATCH},
+        {"ro.build.version.incremental",       INCREMENTAL},
+
+        {"ro.product.build.id",                  ID_},
+        {"ro.system.build.id",                   ID_},
+        {"ro.system_ext.build.id",               ID_},
+        {"ro.vendor.build.id",                   ID_},
+        {"ro.odm.build.id",                      ID_},
+
+        {"ro.product.build.version.incremental",     INCREMENTAL},
+        {"ro.system.build.version.incremental",      INCREMENTAL},
+        {"ro.system_ext.build.version.incremental",  INCREMENTAL},
+        {"ro.vendor.build.version.incremental",      INCREMENTAL},
+        {"ro.odm.build.version.incremental",         INCREMENTAL},
+
+        {"ro.product.build.version.release",         RELEASE},
+        {"ro.system.build.version.release",          RELEASE},
+        {"ro.system_ext.build.version.release",      RELEASE},
+        {"ro.vendor.build.version.release",          RELEASE},
+        {"ro.odm.build.version.release",             RELEASE},
+
+        {"ro.product.build.version.release_or_codename",  RELEASE},
+        {"ro.system.build.version.release_or_codename",   RELEASE},
+        {"ro.system_ext.build.version.release_or_codename", RELEASE},
+        {"ro.vendor.build.version.release_or_codename",   RELEASE},
+        {"ro.odm.build.version.release_or_codename",      RELEASE},
+
+        {"ro.product.build.version.sdk",             get("SDK_INT")},
+        {"ro.system.build.version.sdk",              get("SDK_INT")},
+        {"ro.system_ext.build.version.sdk",          get("SDK_INT")},
+        {"ro.vendor.build.version.sdk",              get("SDK_INT")},
+        {"ro.odm.build.version.sdk",                 get("SDK_INT")},
+
+        {"ro.product.build.date.utc",                BUILD_UTC},
+        {"ro.system.build.date.utc",                 BUILD_UTC},
+        {"ro.system_ext.build.date.utc",             BUILD_UTC},
+        {"ro.vendor.build.date.utc",                 BUILD_UTC},
+        {"ro.odm.build.date.utc",                    BUILD_UTC},
+        {"ro.bootimage.build.date.utc",              BUILD_UTC},
+
+        {"ro.product.build.date",                    BUILD_DATE},
+        {"ro.system.build.date",                     BUILD_DATE},
+        {"ro.system_ext.build.date",                 BUILD_DATE},
+        {"ro.vendor.build.date",                     BUILD_DATE},
+        {"ro.odm.build.date",                        BUILD_DATE},
+        {"ro.bootimage.build.date",                  BUILD_DATE},
+
+        {"ro.product.build.type",                    TYPE},
+        {"ro.system.build.type",                     TYPE},
+        {"ro.system_ext.build.type",                 TYPE},
+        {"ro.vendor.build.type",                     TYPE},
+        {"ro.odm.build.type",                        TYPE},
+
+        {"ro.product.build.tags",                    TAGS},
+        {"ro.system.build.tags",                     TAGS},
+        {"ro.system_ext.build.tags",                 TAGS},
+        {"ro.vendor.build.tags",                     TAGS},
+        {"ro.odm.build.tags",                        TAGS},
+
+        {"gsm.version.baseband",               RADIO, true},
+        {"ro.build.expect.baseband",           RADIO, true},
+
+        {"ro.bootloader",                      std::string("unknown")},
+        {"ro.boot.bootloader",                 std::string("unknown")},
+
+        {"ro.boot.verifiedbootstate",          std::string("green")},
+        {"ro.boot.vbmeta.device_state",        std::string("locked")},
+        {"ro.boot.flash.locked",               std::string("1")},
+        {"ro.boot.veritymode",                 std::string("enforcing")},
+        {"ro.boot.vbmeta.hash_alg",            std::string("sha256")},
+        {"ro.boot.vbmeta.avb_version",         std::string("1.0")},
+        {"ro.boot.vbmeta.invalidate_on_error", std::string("yes")},
+        {"ro.boot.vbmeta.digest",              get("VBMETA_DIGEST")},
+        {"ro.secure",                          std::string("1")},
+        {"ro.debuggable",                      std::string("0")},
+        {"ro.build.selinux",                   std::string("1")},
+
+        {"sys.oem_unlock_allowed",             std::string("0")},
+
+        {"ro.boot.hardware.sku",               SKU},
+        {"ro.boot.product.hardware.sku",       ODM_SKU},
+
+        {"ro.build.version.base_os",           BASE_OS},
+        {"ro.build.version.preview_sdk",       std::string("0")},
+        {"ro.build.version.preview_sdk_fingerprint", std::string("REL")},
+
+        {"ro.odm.build.media_performance_class", MPC},
+
+        {"ro.product.first_api_level",             FIRST_API},
+        {"ro.board.first_api_level",               FIRST_API},
+
+        {"dalvik.vm.isa.arm64.variant",  std::string("generic")},
+        {"dalvik.vm.isa.arm64.features", std::string("default")},
+        {"dalvik.vm.isa.arm.variant",    std::string("generic")},
+        {"dalvik.vm.isa.arm.features",   std::string("default")},
+        {"dalvik.vm.heapsize",           std::string("512m")},
+        {"dalvik.vm.heapgrowthlimit",    std::string("256m")},
+        {"ro.zygote",                    std::string("zygote64_32")},
+        {"ro.dalvik.vm.native.bridge",   std::string("0")},
+    };
+
+    bool have_bundled = (::access(RESETPROP, X_OK) == 0);
+    {
+        int applied = 0, failed = 0;
+        for (const auto& r : rp) {
+            if (r.val.empty() && !r.del_if_empty) continue;
+            int rc;
+            if (r.val.empty()) {
+
+                if (have_bundled) {
+                    rc = run_bin(RESETPROP, {"resetprop-rs", "--delete", r.key});
+                } else {
+                    rc = run_bin_path("resetprop", {"resetprop", "--delete", r.key});
+                    if (rc != 0)
+                        rc = run_bin_path("resetprop-rs", {"resetprop-rs", "--delete", r.key});
+                }
+            } else if (have_bundled) {
+                rc = run_bin(RESETPROP, {"resetprop-rs", "-n", r.key, r.val.c_str()});
+            } else {
+                rc = run_bin_path("resetprop", {"resetprop", "-n", r.key, r.val.c_str()});
+                if (rc != 0)
+                    rc = run_bin_path("resetprop-rs", {"resetprop-rs", "-n", r.key, r.val.c_str()});
+            }
+            if (rc == 0) {
+                applied++;
+            } else {
+                failed++;
+                fprintf(stderr, "! resetprop gagal (exit!=0): %s\n", r.key);
+            }
+        }
+        printf("  Native prop: %d ok, %d gagal%s\n", applied, failed,
+               have_bundled ? "" : " [fallback PATH]");
+        if (applied == 0 && failed > 0)
+            fprintf(stderr, "! SEMUA resetprop gagal%s — cek ketersediaan resetprop / resetprop-rs\n",
+                    have_bundled ? "" : " (bundled absent + PATH fallback gagal)");
+    }
+
+    {
+        static const char* const emu_props[] = {
+            "ro.kernel.qemu",
+            "ro.kernel.qemu.gles",
+            "ro.boot.qemu",
+            "ro.boot.qemu.gltransport",
+            "ro.hardware.virtual_device",
+            "qemu.hw.mainkeys",
+            "init.svc.qemud",
+            "init.svc.qemu-props",
+            "init.svc.goldfish-logcat",
+            "init.svc.goldfish-setup",
+            "init.svc.ranchu-net",
+        };
+        static const char* const identity_props[] = {
+            "ro.ril.factory_id",
+            "persist.odm.ril.factory_id",
+            "ro.ril.oem.imei",  "ro.ril.oem.imei0", "ro.ril.oem.imei1", "ro.ril.oem.imei2",
+            "ro.ril.miui.imei", "ro.ril.miui.imei0", "ro.ril.miui.imei1", "ro.ril.miui.imei2",
+            "ro.ril.oem.meid",  "ro.ril.oem.psno",  "ro.ril.oem.btmac",
+            "persist.odm.ril.oem.imei0", "persist.odm.ril.oem.imei1", "persist.odm.ril.oem.imei2",
+            "persist.odm.ril.oem.sno", "persist.odm.ril.oem.psno",
+            "persist.odm.ril.oem.wifimac", "persist.odm.ril.oem.btmac",
+            "persist.radio.imei", "persist.radio.imei0", "persist.radio.imei1", "persist.radio.imei2",
+            "ro.product.serial", "ro.build.serial",
+            "ro.kernel.androidboot.serialno", "ril.serialnumber",
+            "gsm.sim.preiccid_0", "gsm.sim.preiccid_1",
+            "persist.vendor.radio.cfu.iccid.1",
+            "persist.netd.stable_secret",
+        };
+        static const char* const custom_rom_props[] = {
+            "ro.modversion",
+            "ro.cm.version",
+            "ro.cm.build.date",
+        };
+        static const char* const oem_props[] = {
+            "ro.product.cert",
+            "ro.product.mod_device",
+            "ro.fota.oem",
+            "ro.netflix.bsp_rev",
+            "ro.baseband",
+            "persist.sys.hardcoder.name",
+            "persist.vendor.sys.fp.module",
+            "persist.vendor.sys.fp.vendor",
+            "ro.com.google.clientidbase",
+            "ro.com.google.clientidbase.ms",
+            "ro.com.google.clientidbase.tx",
+            "ro.com.google.clientidbase.vs",
+            "ro.com.google.clientidbase.am",
+            "ro.com.google.clientidbase.yt",
+            "ro.miui.build.region",
+            "ro.miui.ui.version.code",
+            "ro.miui.ui.version.name",
+            "ro.miui.cust_variant",
+            "ro.miui.region",
+            "ro.miui.mcc",
+            "ro.miui.mnc",
+            "ro.vendor.miui.region",
+            "ro.vendor.miui.mcc",
+            "ro.vendor.miui.mnc",
+            "ro.vendor.miui.cust_variant",
+        };
+        int del_ok = 0, del_skip = 0;
+        auto try_delete = [&](const char* prop) {
+            char buf[PROP_VALUE_MAX] = {0};
+            if (__system_property_get(prop, buf) <= 0) { del_skip++; return; }
+            int rc;
+            if (have_bundled) {
+                rc = run_bin(RESETPROP, {"resetprop-rs", "--delete", prop});
+            } else {
+                rc = run_bin_path("resetprop", {"resetprop", "--delete", prop});
+                if (rc != 0)
+                    rc = run_bin_path("resetprop-rs", {"resetprop-rs", "--delete", prop});
+            }
+            if (rc == 0) del_ok++;
+        };
+        for (const char* p : emu_props) try_delete(p);
+        for (const char* p : identity_props) try_delete(p);
+        for (const char* p : custom_rom_props) try_delete(p);
+        for (const char* p : oem_props) try_delete(p);
+        if (del_ok > 0)
+            printf("  Sanitized: %d prop(s) deleted, %d absent\n", del_ok, del_skip);
+    }
+
+    std::string aid = get("ANDROID_ID");
+    if (!aid.empty() || !MODEL.empty()) {
+        wait_boot_completed(5000);
+        int sok = 0, sfail = 0;
+        if (!aid.empty()) {
+            int rc = run_framework("/system/bin/settings",
+                    {"settings", "put", "--user", "0", "secure", "android_id", aid.c_str()},
+                    "settings put secure android_id");
+            if (rc == 0) sok++; else sfail++;
+        }
+        if (!MODEL.empty()) {
+
+            int rc1 = run_framework("/system/bin/settings",
+                    {"settings", "put", "--user", "0", "global", "device_name", MODEL.c_str()},
+                    "settings put global device_name");
+            if (rc1 == 0) sok++; else sfail++;
+
+            int rc2 = run_framework("/system/bin/settings",
+                    {"settings", "put", "--user", "0", "system", "device_name", MODEL.c_str()},
+                    "settings put system device_name");
+
+            if (rc2 == 0) {
+                sok++;
+            } else if (rc1 != 0) {
+                sfail++;
+            }
+        }
+        printf("  Settings put: %d ok, %d gagal\n", sok, sfail);
+    }
+}
+
 static void generate_mount_files(const Identity& id) {
     DBG("generate_mount_files: MOUNTDIR=%s", MOUNTDIR);
     auto g = [&](const char* k) -> std::string {
@@ -501,11 +959,13 @@ static void generate_mount_files(const Identity& id) {
     const std::string MANUFACTURER = g("MANUFACTURER");
     const std::string DEVICE       = g("DEVICE");
     const std::string PRODUCT      = g("PRODUCT");
+    const std::string BOARD        = g("BOARD");
     const std::string ID_          = g("ID");
     const std::string FP           = g("FINGERPRINT");
     const std::string DISPLAY      = g("DISPLAY");
     const std::string DESC         = g("DESCRIPTION");
     const std::string RELEASE      = g("RELEASE");
+    const std::string SDK          = g("SDK_INT");
     const std::string SECPATCH     = g("SECURITY_PATCH");
     const std::string INCREMENTAL  = g("INCREMENTAL");
     const std::string RADIO        = g("RADIO");
@@ -513,8 +973,11 @@ static void generate_mount_files(const Identity& id) {
     const std::string TYPE         = g("TYPE");
     const std::string USER_        = g("USER");
     const std::string HOST         = g("HOST");
+    const std::string HARDWARE     = g("HARDWARE");
+    const std::string PLATFORM     = g("BOARD_PLATFORM");
+    const std::string SOC_MANUF    = g("SOC_MANUFACTURER");
+    const std::string SOC_MODEL    = g("SOC_MODEL");
     const std::string MARKETNAME   = g("MARKETNAME");
-    const bool stable_release      = runtime_is_stable_release();
 
     std::string base;
     base += "# begin build properties\n";
@@ -537,11 +1000,21 @@ static void generate_mount_files(const Identity& id) {
     add("ro.product.manufacturer",            MANUFACTURER);
     add("ro.product.device",                  DEVICE);
     add("ro.product.name",                    PRODUCT);
+    add("ro.product.board",                   BOARD);
+    add("ro.hardware",                        HARDWARE);
+    add("ro.board.platform",                  PLATFORM);
+    add("ro.soc.manufacturer",                SOC_MANUF);
+    add("ro.soc.model",                       SOC_MODEL);
     add("ro.product.marketname",              MARKETNAME);
     add("ro.product.vendor.marketname",       MARKETNAME);
     add("ro.product.odm.marketname",          MARKETNAME);
     add("ro.product.system.marketname",       MARKETNAME);
     add("ro.product.product.marketname",      MARKETNAME);
+    add("ro.product.brand_for_attestation",        BRAND);
+    add("ro.product.name_for_attestation",         PRODUCT);
+    add("ro.product.device_for_attestation",       DEVICE);
+    add("ro.product.model_for_attestation",        MODEL);
+    add("ro.product.manufacturer_for_attestation", MANUFACTURER);
     add("ro.build.id",                        ID_);
     add("ro.build.display.id",                DISPLAY);
     add("ro.build.description",               DESC);
@@ -552,12 +1025,27 @@ static void generate_mount_files(const Identity& id) {
     add("ro.build.flavor",                    g("FLAVOR"));
     add("ro.build.date.utc",                  g("BUILD_TIME_UTC"));
     add("ro.build.date",                      g("BUILD_DATE"));
+    add("ro.build.version.codename",          std::string("REL"));
+    add("ro.build.version.all_codenames",     std::string("REL"));
     add("ro.build.version.release",           RELEASE);
-    if (stable_release)
-        add("ro.build.version.release_or_codename", RELEASE);
+    add("ro.build.version.release_or_codename", RELEASE);
+    add("ro.build.version.sdk",               SDK);
     add("ro.build.version.security_patch",    SECPATCH);
     add("ro.build.version.incremental",       INCREMENTAL);
 
+    add("ro.build.version.base_os",           g("BASE_OS"));
+    add("ro.build.version.preview_sdk",       std::string("0"));
+    add("ro.build.version.preview_sdk_fingerprint", std::string("REL"));
+    add("ro.odm.build.media_performance_class", g("MEDIA_PERFORMANCE_CLASS"));
+
+    add("ro.product.first_api_level",             g("FIRST_API_LEVEL"));
+    add("ro.board.first_api_level",               g("FIRST_API_LEVEL"));
+
+    add("ro.product.cpu.abilist",             g("SUPPORTED_ABIS"));
+    add("ro.product.cpu.abilist32",           g("SUPPORTED_32_BIT_ABIS"));
+    add("ro.product.cpu.abilist64",           g("SUPPORTED_64_BIT_ABIS"));
+    add("ro.product.cpu.abi",                 g("CPU_ABI"));
+    add("ro.product.cpu.abi2",                g("CPU_ABI2"));
     add("ro.boot.hardware.sku",               g("SKU"));
     add("ro.boot.product.hardware.sku",       g("ODM_SKU"));
 
@@ -566,6 +1054,18 @@ static void generate_mount_files(const Identity& id) {
     add("ro.build.product",                   DEVICE);
     add("gsm.version.baseband",               RADIO);
     add("ro.build.expect.baseband",           RADIO);
+
+    add("ro.boot.verifiedbootstate",          std::string("green"));
+    add("ro.boot.vbmeta.device_state",        std::string("locked"));
+    add("ro.boot.flash.locked",               std::string("1"));
+    add("ro.boot.veritymode",                 std::string("enforcing"));
+    add("ro.boot.vbmeta.hash_alg",            std::string("sha256"));
+    add("ro.boot.vbmeta.avb_version",         std::string("1.0"));
+    add("ro.boot.vbmeta.invalidate_on_error", std::string("yes"));
+    add("ro.boot.vbmeta.digest",              g("VBMETA_DIGEST"));
+    add("ro.secure",                          std::string("1"));
+    add("ro.debuggable",                      std::string("0"));
+    add("ro.build.selinux",                   std::string("1"));
 
     struct { const char* dir; const char* pfx; } parts[] = {
         {"system",     "ro.product.system."},
@@ -590,8 +1090,8 @@ static void generate_mount_files(const Identity& id) {
         c += ppfx + "tags=" + TAGS + "\n";
         c += ppfx + "version.incremental=" + INCREMENTAL + "\n";
         c += ppfx + "version.release=" + RELEASE + "\n";
-        if (stable_release)
-            c += ppfx + "version.release_or_codename=" + RELEASE + "\n";
+        c += ppfx + "version.release_or_codename=" + RELEASE + "\n";
+        c += ppfx + "version.sdk=" + SDK + "\n";
         if (!g("BUILD_TIME_UTC").empty()) {
             c += ppfx + "date.utc=" + g("BUILD_TIME_UTC") + "\n";
             c += ppfx + "date=" + g("BUILD_DATE") + "\n";
@@ -604,6 +1104,30 @@ static void generate_mount_files(const Identity& id) {
         ::chmod(path.c_str(), 0644);
     }
 
+    std::string aid  = g("ANDROID_ID");
+    std::string gaid = g("GOOGLE_AID");
+    if (aid.empty()) aid = "0000000000000000";
+
+    std::string xml;
+    xml += "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n";
+    xml += "<settings version=\"217\">\n";
+    xml += "  <setting id=\"1\" name=\"android_id\" value=\"" + aid
+         + "\" package=\"android\" defaultValue=\"" + aid
+         + "\" defaultSysSet=\"true\" />\n";
+    if (!gaid.empty()) {
+        xml += "  <setting id=\"2\" name=\"advertising_id\" value=\"" + gaid
+             + "\" package=\"com.google.android.gms\" />\n";
+        xml += "  <setting id=\"3\" name=\"limit_ad_tracking\" value=\"0\" "
+               "package=\"com.google.android.gms\" />\n";
+    }
+    xml += "</settings>\n";
+
+    std::string xml_path = std::string(MOUNTDIR) + "/settings_secure.xml";
+    atomic_write(xml_path, xml);
+
+    ::chmod(xml_path.c_str(), 0600);
+    ::chown(xml_path.c_str(), 1000, 1000);
+
     struct { const char* sub; const char* ctx; } part_ctx[] = {
         {"system",     "u:object_r:system_file:s0"},
         {"vendor",     "u:object_r:vendor_file:s0"},
@@ -615,9 +1139,32 @@ static void generate_mount_files(const Identity& id) {
         std::string p = std::string(MOUNTDIR) + "/" + pc.sub + "/build.prop";
         run_bin("/system/bin/chcon", {"chcon", pc.ctx, p.c_str()});
     }
+    run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_data_file:s0",
+            xml_path.c_str()});
 
-    ::unlink(LEGACY_SETTINGS_OVERLAY);
-    printf("  Mount overlay: 5 build.prop trees -> %s\n", MOUNTDIR);
+    printf("  Mount overlay: 5 build.prop + settings_secure.xml -> %s\n", MOUNTDIR);
+}
+
+static int wipe_target_data() {
+    auto pkgs = load_targets();
+    if (pkgs.empty()) return 0;
+    wait_boot_completed(5000);
+
+    int fail = 0;
+    for (const auto& pkg : pkgs) {
+
+        run_framework("/system/bin/am",
+                {"am", "force-stop", "--user", "0", pkg.c_str()},
+                "am force-stop " + pkg);
+        int rc_clear = run_framework("/system/bin/pm",
+                {"pm", "clear", "--user", "0", pkg.c_str()},
+                "pm clear " + pkg);
+        if (rc_clear != 0) {
+            fail++;
+            fprintf(stderr, "! %s: pm clear gagal (rc=%d)\n", pkg.c_str(), rc_clear);
+        }
+    }
+    return fail;
 }
 
 static int cmd_targets() {
@@ -633,46 +1180,21 @@ static int cmd_targets() {
     return 0;
 }
 
-static bool load_identity_file(const char* path, Identity& id, std::string& error,
-                               bool* needs_migration = nullptr) {
-    if (needs_migration) *needs_migration = false;
-    const std::string blob = read_file(path);
-    if (blob.empty()) {
-        error = std::string(path) + " is empty or unreadable";
-        return false;
+static Identity load_identity() {
+    Identity id;
+    std::istringstream iss(read_file(IDENTITY_FILE));
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = trim(line.substr(0, eq));
+        std::string v = line.substr(eq + 1);
+        while (!v.empty() && (v.back()=='\r' || v.back()=='\n' || v.back()==' '))
+            v.pop_back();
+        if (!k.empty()) id.kv[k] = v;
     }
-    const int sdk = device_sdk();
-    if (sdk <= 0) {
-        error = "device SDK is unavailable";
-        return false;
-    }
-    sbxid::IdentitySnapshot snapshot;
-    sbxid::ValidationContext context;
-    context.runtime_sdk = sdk;
-    context.max_blob = sandboxid::MAX_IDENTITY_BLOB;
-    context.drop_legacy_capabilities = true;
-    if (!sbxid::parse_and_validate_identity(blob, context, snapshot, error))
-        return false;
-    if (!snapshot.dropped_legacy_capabilities.empty()) {
-        fprintf(stderr, "* ignored %zu legacy runtime-capability key(s) in %s\n",
-                snapshot.dropped_legacy_capabilities.size(), path);
-        if (needs_migration) *needs_migration = true;
-    }
-    id.kv = std::move(snapshot.values);
-    return true;
-}
-
-static bool validate_identity(const Identity& id, std::string& error) {
-    const int sdk = device_sdk();
-    if (sdk <= 0) {
-        error = "device SDK is unavailable";
-        return false;
-    }
-    sbxid::IdentitySnapshot snapshot;
-    sbxid::ValidationContext context;
-    context.runtime_sdk = sdk;
-    context.max_blob = sandboxid::MAX_IDENTITY_BLOB;
-    return sbxid::parse_and_validate_identity(id.serialize(), context, snapshot, error);
+    return id;
 }
 
 static bool merge_carrier(Identity& id) {
@@ -700,104 +1222,57 @@ static int cmd_freshen() {
     }
 
     std::string old = read_file(IDENTITY_FILE);
+    if (!old.empty()) atomic_write(IDENTITY_BAK, old);
 
     PixelEntry ov;
     Identity id;
-    std::string identity_error;
     const int dev_sdk = device_sdk();
     if (take_persona_override(ov)) {
-        if (dev_sdk <= 0 || ov.sdk != dev_sdk) {
+        if (dev_sdk > 0 && ov.sdk > dev_sdk) {
             fprintf(stderr,
-                    "! autopif persona %s uses SDK %d but runtime SDK is %d; "
-                    "exact SDK match is required\n",
+                    "! autopif persona %s (SDK %d) is newer than device SDK %d — "
+                    "refusing upgrade-spoof (would crash/leak on this Android "
+                    "version); using SDK-matched pool pick instead\n",
                     ov.model.c_str(), ov.sdk, dev_sdk);
-            return 1;
+            id = gen_identity();
+        } else {
+            fprintf(stderr, "* autopif persona: %s (%s/%s, SDK %d) — applied directly, no pool pick\n",
+                    ov.model.c_str(), ov.device.c_str(), ov.platform.c_str(), ov.sdk);
+            id = derive_identity(ov);
         }
-        fprintf(stderr, "* autopif persona: %s (%s/%s, SDK %d) — exact runtime match\n",
-                ov.model.c_str(), ov.device.c_str(), ov.platform.c_str(), ov.sdk);
-        id = derive_identity(ov);
-    } else if (!gen_identity(id, identity_error)) {
-        fprintf(stderr, "! cannot generate identity: %s\n", identity_error.c_str());
-        return 1;
+    } else {
+        id = gen_identity();
     }
 
-    if (!old.empty()) {
-        Identity old_identity;
-        std::string old_error;
-        if (load_identity_file(IDENTITY_FILE, old_identity, old_error))
-            sbxid::preserve_operational_flags(old_identity.kv, id.kv);
-    }
     merge_carrier(id);
-    if (!validate_identity(id, identity_error)) {
-        fprintf(stderr, "! generated identity rejected: %s\n", identity_error.c_str());
-        return 1;
-    }
-    if (!old.empty() && !atomic_write(IDENTITY_BAK, old)) {
-        fprintf(stderr, "! failed to preserve existing identity backup\n");
-        return 1;
-    }
     if (!atomic_write(IDENTITY_FILE, id.serialize())) {
         fprintf(stderr, "! failed to write identity.prop\n");
         return 1;
     }
 
+    apply_native(id);
     generate_mount_files(id);
+    int wipe_fail = wipe_target_data();
 
-    printf("OK - fresh persona stored locally\n");
+    printf("OK - fresh persona ready\n");
     printf("  MODEL       : %s\n", id.kv["MODEL"].c_str());
     printf("  DEVICE      : %s\n", id.kv["DEVICE"].c_str());
     printf("  RELEASE     : %s (SDK %s)\n",
            id.kv["RELEASE"].c_str(), id.kv["SDK_INT"].c_str());
     printf("  FINGERPRINT : %s\n", id.kv["FINGERPRINT"].c_str());
     printf("  SERIAL      : %s\n", id.kv["SERIAL"].c_str());
-    printf("  ENTROPY ID  : %s (profile metadata; not an SSAID API result)\n",
-           id.kv["ANDROID_ID"].c_str());
-    printf("  LOCAL GAID  : %s (desired storage value; service API remains genuine)\n",
-           id.kv["GOOGLE_AID"].c_str());
+    printf("  ANDROID_ID  : %s\n", id.kv["ANDROID_ID"].c_str());
+    printf("  GAID        : %s\n", id.kv["GOOGLE_AID"].c_str());
     printf("  SEC PATCH   : %s\n", id.kv["SECURITY_PATCH"].c_str());
     printf("  HOST        : %s\n", id.kv["HOST"].c_str());
     printf("  RADIO       : %s\n", id.kv["RADIO"].c_str());
 
-    printf("  Restart target apps manually; no app data was cleared.\n");
-    return 0;
-}
-
-static int cmd_import(const char* path) {
-    if (!ensure_root()) return 1;
-    if (!path || !*path) {
-        fprintf(stderr, "Usage: sandboxid import <identity-file>\n");
-        return 2;
-    }
-
-    Identity candidate;
-    std::string error;
-    if (!load_identity_file(path, candidate, error)) {
-        fprintf(stderr, "! imported identity rejected: %s\n", error.c_str());
-        return 1;
-    }
-
-    const std::string old = read_file(IDENTITY_FILE);
-    if (!old.empty()) {
-        Identity current;
-        std::string current_error;
-        if (load_identity_file(IDENTITY_FILE, current, current_error))
-            sbxid::preserve_operational_flags(current.kv, candidate.kv);
-    }
-    merge_carrier(candidate);
-    if (!validate_identity(candidate, error)) {
-        fprintf(stderr, "! imported identity rejected: %s\n", error.c_str());
-        return 1;
-    }
-    if (!old.empty() && !atomic_write(IDENTITY_BAK, old)) {
-        fprintf(stderr, "! failed to preserve existing identity backup\n");
-        return 1;
-    }
-    if (!atomic_write(IDENTITY_FILE, candidate.serialize())) {
-        fprintf(stderr, "! failed to import identity.prop\n");
-        return 1;
-    }
-    generate_mount_files(candidate);
-    printf("OK: imported module-local identity; restart target apps manually\n");
+    auto pkgs = load_targets();
+    printf("  Wiped: %zu pkg(s) from target.txt\n", pkgs.size());
+    for (const auto& p : pkgs) printf("    - %s\n", p.c_str());
+    if (wipe_fail > 0)
+        fprintf(stderr, "! WARN: %d wipe step(s) gagal (pm clear/am force-stop) — lihat log di atas\n",
+                wipe_fail);
     return 0;
 }
 
@@ -811,81 +1286,30 @@ static int cmd_status() {
     return 0;
 }
 
-static bool load_current_identity(Identity& id);
-
-static bool operational_flag(const char* key) {
-    return key && sbxid::operational_flag_key(key);
-}
-
-static int cmd_set_flag(const char* key, const char* value) {
+static int cmd_apply_boot() {
     if (!ensure_root()) return 1;
-    if (!key || !value || !operational_flag(key) ||
-        (strcmp(value, "0") && strcmp(value, "1"))) {
-        fprintf(stderr, "Usage: sandboxid set-flag <SBX_* flag> <0|1>\n");
-        return 2;
+    Identity id = load_identity();
+    if (id.kv.empty()) {
+        printf("no identity yet\n");
+        return 0;
     }
-    Identity id;
-    if (!load_current_identity(id)) return 1;
-    id.kv[key] = value;
-    std::string error;
-    if (!validate_identity(id, error)) {
-        fprintf(stderr, "! updated identity rejected: %s\n", error.c_str());
-        return 1;
-    }
-    if (!atomic_write(IDENTITY_FILE, id.serialize())) {
-        fprintf(stderr, "! failed to write identity.prop\n");
-        return 1;
-    }
-    printf("OK: %s=%s (restart target app to apply)\n", key, value);
+    apply_native(id);
+    generate_mount_files(id);
+    printf("OK: native prop re-applied + mount overlay refreshed\n");
     return 0;
-}
-
-static bool load_current_identity(Identity& id) {
-    std::string error;
-    if (load_identity_file(IDENTITY_FILE, id, error)) return true;
-    fprintf(stderr, "! identity rejected: %s\n", error.c_str());
-    return false;
-}
-
-static int cmd_retired_device_wide(const char* command) {
-    if (!ensure_root()) return 1;
-    fprintf(stderr,
-            "! %s retired: SandboxID no longer mutates device-wide properties "
-            "or framework Settings. Use seed/freshen and restart target apps.\n",
-            command ? command : "command");
-    return 2;
 }
 
 static int cmd_seed() {
     if (!ensure_root()) return 1;
     Identity id;
-    std::string error;
     std::string existing = read_file(IDENTITY_FILE);
     if (!existing.empty()) {
-        bool needs_migration = false;
-        if (!load_identity_file(IDENTITY_FILE, id, error, &needs_migration)) {
-            fprintf(stderr, "! seed: existing identity rejected: %s\n", error.c_str());
-            return 1;
-        }
-        if (needs_migration) {
-            if (!atomic_write(IDENTITY_FILE, id.serialize())) {
-                fprintf(stderr, "! seed: failed to migrate legacy identity\n");
-                return 1;
-            }
-            DBG("seed: migrated legacy identity to presentation-only format");
-        }
+        id = load_identity();
         DBG("seed: reusing existing identity (%zu keys)", id.kv.size());
     } else {
         DBG("seed: no identity yet, generating fresh");
-        if (!gen_identity(id, error)) {
-            fprintf(stderr, "! seed: cannot generate identity: %s\n", error.c_str());
-            return 1;
-        }
+        id = gen_identity();
         merge_carrier(id);
-        if (!validate_identity(id, error)) {
-            fprintf(stderr, "! seed: generated identity rejected: %s\n", error.c_str());
-            return 1;
-        }
         if (!atomic_write(IDENTITY_FILE, id.serialize())) {
             fprintf(stderr, "! seed: failed to write %s\n", IDENTITY_FILE);
             return 1;
@@ -912,26 +1336,17 @@ static int cmd_unlock() {
 
 static int cmd_rollback() {
     if (!ensure_root()) return 1;
-    Identity rid;
-    std::string error;
-    if (!load_identity_file(IDENTITY_BAK, rid, error)) {
-        fprintf(stderr, "! backup rejected: %s\n", error.c_str());
+    std::string d = read_file(IDENTITY_BAK);
+    if (d.empty()) {
+        printf("no backup\n");
         return 1;
     }
-    Identity current;
-    std::string current_error;
-    if (load_identity_file(IDENTITY_FILE, current, current_error))
-        sbxid::preserve_operational_flags(current.kv, rid.kv);
-    if (!validate_identity(rid, error)) {
-        fprintf(stderr, "! restored identity rejected: %s\n", error.c_str());
-        return 1;
-    }
-    if (!atomic_write(IDENTITY_FILE, rid.serialize())) {
-        fprintf(stderr, "! failed to restore identity backup\n");
-        return 1;
-    }
+    atomic_write(IDENTITY_FILE, d);
+    Identity rid = load_identity();
+    apply_native(rid);
     generate_mount_files(rid);
-    printf("OK: rolled back locally; restart target apps manually\n");
+    wipe_target_data();
+    printf("OK: rolled back + wiped\n");
     return 0;
 }
 
@@ -940,12 +1355,7 @@ static int cmd_applog_ids(const char* pkg) {
         fprintf(stderr, "applog-ids: butuh nama package\n");
         return 2;
     }
-    Identity id;
-    std::string error;
-    if (!load_identity_file(IDENTITY_FILE, id, error)) {
-        fprintf(stderr, "! identity rejected: %s\n", error.c_str());
-        return 1;
-    }
+    Identity id = load_identity();
     auto g = [&](const char* k) -> std::string {
         auto it = id.kv.find(k);
         return it != id.kv.end() ? it->second : std::string();
@@ -970,17 +1380,14 @@ static void usage(const char* p) {
     fprintf(stderr,
         "SandboxID — Android device identifier privacy research module\n\n"
         "Usage: %s <command>\n\n"
-        "  freshen      Generate and store a module-local persona\n"
-        "  import <file> Validate and atomically import a module-local persona\n"
+        "  freshen      Rotate identity + wipe target app data (main action)\n"
         "  status       Print current identity.prop\n"
-        "  set-flag <key> <0|1>\n"
-        "               Set one operational SBX_* flag atomically\n"
-        "  rollback     Restore previous module-local identity from backup\n"
+        "  rollback     Restore previous identity from backup\n"
         "  lock         Prevent freshen (safety)\n"
         "  unlock       Re-enable freshen\n"
-        "  apply-props  Retired compatibility command (never mutates)\n"
-        "  apply-boot   Retired compatibility command (never mutates)\n"
-        "  seed         Validate/generate identity + target mount files\n"
+        "  apply-boot   Re-apply native prop (used by service.sh)\n"
+        "  seed         Fast bootstrap: identity + mount overlay only\n"
+        "               (used by post-fs-data.sh, no native/wipe)\n"
         "  targets      List current target packages from target.txt\n"
         "  applog-ids <pkg>\n"
         "               Print the AppLog IDs the L9 hook serves for <pkg>\n",
@@ -991,15 +1398,11 @@ int main(int argc, char** argv) {
     if (argc < 2) { usage(argv[0]); return 1; }
     const char* c = argv[1];
     if (!strcmp(c, "freshen"))    return cmd_freshen();
-    if (!strcmp(c, "import"))     return cmd_import(argc > 2 ? argv[2] : nullptr);
     if (!strcmp(c, "status"))     return cmd_status();
-    if (!strcmp(c, "set-flag"))   return cmd_set_flag(argc > 2 ? argv[2] : nullptr,
-                                                        argc > 3 ? argv[3] : nullptr);
     if (!strcmp(c, "rollback"))   return cmd_rollback();
     if (!strcmp(c, "lock"))       return cmd_lock();
     if (!strcmp(c, "unlock"))     return cmd_unlock();
-    if (!strcmp(c, "apply-props")) return cmd_retired_device_wide(c);
-    if (!strcmp(c, "apply-boot")) return cmd_retired_device_wide(c);
+    if (!strcmp(c, "apply-boot")) return cmd_apply_boot();
     if (!strcmp(c, "seed"))       return cmd_seed();
     if (!strcmp(c, "targets"))    return cmd_targets();
     if (!strcmp(c, "applog-ids")) return cmd_applog_ids(argc > 2 ? argv[2] : nullptr);
