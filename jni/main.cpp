@@ -26,7 +26,6 @@
 #include <thread>
 #include "zygisk.hpp"
 #include "config.hpp"
-#include "sbx_lsplant.hpp"
 #include "sbx_native_read.hpp"
 
 #ifndef MFD_CLOEXEC
@@ -1188,15 +1187,6 @@ public:
         for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
         install_crash_watchdog(pkg_);
-
-#ifdef SBX_ENABLE_LSPLANT
-        if (sbxlsp::init(env_)) {
-            if (!sbxlsp::hook_android_id(env_, val("ANDROID_ID")))
-                LOGE("L3 ANDROID_ID hook not installed (continuing with L1/L2)");
-        } else {
-            LOGE("L3 LSPlant init failed (continuing with L1/L2)");
-        }
-#endif
 
         if (comp_fd_ >= 0) {
             request_companion_mounts(comp_fd_);

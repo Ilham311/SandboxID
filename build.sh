@@ -30,20 +30,6 @@ if [ -z "${VERSION:-}" ]; then
   exit 1
 fi
 
-LSP_CMAKE=""
-LSP_STATUS="disabled (set SBX_ENABLE_LSPLANT=ON to enable L3)"
-if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then
-  LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
-  LSP_REV="$(grep -E '^LSPLANT_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
-  DOBBY_REV="$(grep -E '^DOBBY_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
-  LSP_STATUS="enabled [LSPlant=${LSP_REV:-?} Dobby=${DOBBY_REV:-?}]"
-  echo "==> L3 LSPlant $LSP_STATUS — preparing dependencies + callback DEX"
-  bash "$ROOT/jni/fetch_lsplant_deps.sh"
-  if ! bash "$ROOT/jni/tools/gen_hook_dex.sh"; then
-    echo "  WARN: hook_dex.h generation failed — L3 ANDROID_ID hook will be skipped" >&2
-    echo "        at runtime (install a JDK + Android SDK build-tools to enable it)" >&2
-  fi
-fi
 OUT="$ROOT/dist"
 
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
@@ -52,7 +38,6 @@ echo "==> SandboxID $VERSION"
 echo "==> NDK:        $ANDROID_NDK_HOME"
 echo "==> MIN_SDK:    $MIN_SDK"
 echo "==> Variant(s): $VARIANT"
-echo "==> LSPlant:    $LSP_STATUS"
 
 ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
 ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
@@ -109,7 +94,7 @@ build_variant() {
       -DANDROID_ABI="$ABI" \
       -DANDROID_PLATFORM="android-$MIN_SDK" \
       -DCMAKE_BUILD_TYPE=Release \
-      $DBG_FLAG ${LSP_CMAKE:-} >/dev/null
+      $DBG_FLAG >/dev/null
     cmake --build "$BUILD" -j
   done
 

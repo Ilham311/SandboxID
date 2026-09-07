@@ -301,7 +301,6 @@ Environment overrides:
 |-----|---------|---------|
 | `VARIANT` | `both` | `release`, `debug`, or `both` |
 | `MIN_SDK` | `26` | Native min API level (26 = Android 8; low floor so the .so loads across Android 12–16) |
-| `SBX_ENABLE_LSPLANT` | `OFF` | Enable the experimental L3 LSPlant Java-method hook |
 
 Build with `-Wall -Wextra` per ABI. The `debug` variant enables verbose
 `[D]` logs and on-device session capture under
@@ -377,35 +376,13 @@ remains MIT.
 Honest gaps in the current design — documented so you can reason about what a
 detector still sees:
 
-- **Per-app `ANDROID_ID` needs the L3 hook, which ships disabled.** `ANDROID_ID`
+- **Per-app `ANDROID_ID` needs an L3 hook, which is not implemented.** `ANDROID_ID`
   (SSAID) is served over Binder by `SettingsProvider` in `system_server`, which
   caches the value at boot. A normal app calling `Settings.Secure.getString()`
   never reads the `settings_secure.xml` we bind-mount, so the overlay does not
-  change the value it sees. Genuine per-app spoofing needs the L3 `getString`
-  native hook (LSPlant + Dobby), which is **doubly disabled** in released builds:
-  gated behind the `SBX_ENABLE_LSPLANT` compile flag (OFF by default) *and* its
-  generated `hook_dex.h` is not checked in. Treat per-app `ANDROID_ID` spoofing
-  as experimental / not active out of the box.
-
-  To build it in (experimental — verify boot on every target ABI/Android
-  version first):
-
-  ```sh
-  # 1. vendor LSPlant + Dobby + lsparself into jni/external/ (git-ignored)
-  #    lsparself has no public repo (LSPosed keeps it private), so step 1 has
-  #    no default source for it: supply your own copy the first time via
-  #    LSPARSELF_HPP=/path/to/lsparself.hpp, or the script aborts with
-  #    instructions.
-  bash jni/fetch_lsplant_deps.sh
-  # 2. compile the callback class -> jni/hook_dex.h  (needs a JDK + SDK build-tools' d8)
-  bash jni/tools/gen_hook_dex.sh
-  # 3. build with the L3 flag on
-  SBX_ENABLE_LSPLANT=ON ./build.sh
-  ```
-
-  `build.sh` runs steps 1–2 automatically when `SBX_ENABLE_LSPLANT=ON`; the hook
-  itself lives in `jni/sbx_lsplant.hpp` and installs per-app in
-  `postAppSpecialize`. See `prebuilt/lsplant/README.md` for the dependency layout.
+  change the value it sees. Genuine per-app `ANDROID_ID` spoofing would need an
+  L3 `getString` hook in the app process, which this module does not provide.
+  Treat per-app `ANDROID_ID` spoofing as out of scope.
 
 - **Two layers, two scopes.** The module has a *device-wide* layer (boot-time
   `resetprop` via `apply-boot`, active only when `target.txt` is non-empty) and a
