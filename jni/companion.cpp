@@ -47,13 +47,13 @@ static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 static void watch_target_death(uint32_t pid, int client_fd);
 
 struct TargetFileStamp {
-    dev_t dev = 0;
-    ino_t ino = 0;
-    off_t size = 0;
-    time_t mtime_sec = 0;
-    long mtime_nsec = 0;
-    time_t ctime_sec = 0;
-    long ctime_nsec = 0;
+    decltype(((struct stat*)nullptr)->st_dev) dev = 0;
+    decltype(((struct stat*)nullptr)->st_ino) ino = 0;
+    decltype(((struct stat*)nullptr)->st_size) size = 0;
+    decltype(((struct stat*)nullptr)->st_mtim.tv_sec) mtime_sec = 0;
+    decltype(((struct stat*)nullptr)->st_mtim.tv_nsec) mtime_nsec = 0;
+    decltype(((struct stat*)nullptr)->st_ctim.tv_sec) ctime_sec = 0;
+    decltype(((struct stat*)nullptr)->st_ctim.tv_nsec) ctime_nsec = 0;
     bool valid = false;
 };
 
