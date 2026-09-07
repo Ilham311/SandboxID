@@ -17,6 +17,26 @@ inline constexpr size_t kMaxKey = 64u;
 inline constexpr size_t kMaxPropertyValue = 91u;
 inline constexpr size_t kMaxIdentityValue = 1024u;
 
+inline constexpr std::string_view kOperationalFlags[] = {
+    "SBX_NATIVE_READ", "SBX_HIDE", "SBX_CPU_REVISION",
+    "SBX_PROC_VERSION", "SBX_MEMINFO", "SBX_SYSFS_MAC",
+};
+
+inline bool operational_flag_key(std::string_view key) {
+    for (std::string_view candidate : kOperationalFlags)
+        if (key == candidate) return true;
+    return false;
+}
+
+inline void preserve_operational_flags(
+        const std::map<std::string, std::string>& current,
+        std::map<std::string, std::string>& next) {
+    for (std::string_view key : kOperationalFlags) {
+        auto it = current.find(std::string(key));
+        if (it != current.end()) next[it->first] = it->second;
+    }
+}
+
 inline bool presentation_property_key(std::string_view key) {
     static constexpr std::string_view keys[] = {
         "BRAND", "MANUFACTURER", "MODEL", "MARKETNAME", "DEVICE", "PRODUCT",
@@ -310,12 +330,13 @@ inline bool parse_and_validate_identity(std::string_view blob,
         pos = end + 1;
     }
 
-    auto flag = [&](const char* key) -> bool {
-        auto it = out.values.find(key);
+    auto flag = [&](std::string_view key) -> bool {
+        auto it = out.values.find(std::string(key));
         return it == out.values.end() || it->second == "0" || it->second == "1";
     };
-    if (!flag("SBX_NATIVE_READ") || !flag("SBX_HIDE") || !flag("SBX_CPU_REVISION"))
-        return reject(error, "invalid operational boolean flag");
+    for (std::string_view key : kOperationalFlags)
+        if (!flag(key))
+            return reject(error, "invalid operational boolean flag");
     auto uptime = out.values.find("UPTIME_SECONDS");
     uint64_t parsed = 0;
     if (uptime != out.values.end() && !decimal_u64(uptime->second, parsed))

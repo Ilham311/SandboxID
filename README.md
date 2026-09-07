@@ -64,6 +64,36 @@ SandboxID combines three cooperating phases:
 The layers share a canonical persona where their scopes overlap. They do not
 turn denied, empty, redacted, opt-out, or service-owned API results into a
 synthetic success, and they do not claim to replace hardware-backed evidence.
+On preview or unknown runtimes, preview capability state and hybrid
+release/codename fields pass through unchanged. Only a verified stable runtime
+(`preview_sdk=0`, `codename=REL`) receives persona release aliases.
+
+### Native property callback contract
+
+For genuine non-null Bionic `prop_info*` handles, callback reads preserve the
+caller's cookie, property name, and serial and invoke the callback exactly once.
+Unmapped values pass through byte-for-byte; mapped values are not truncated to
+the legacy 92-byte getter buffer, and a hidden existing property completes once
+with an empty value. Null callbacks and missing/null properties remain no-ops.
+SandboxID never fabricates property handles or inspects private `prop_info`
+layouts.
+
+### Experimental native-file presentation
+
+`SBX_NATIVE_READ=1` is the master gate and remains enabled for legacy identity
+files unless explicitly disabled. The following child gates are independent and
+default to `0`:
+
+- `SBX_PROC_VERSION` — presents `/proc/version`; `uname(2)` stays genuine.
+- `SBX_MEMINFO` — presents selected `/proc/meminfo` content;
+  `ActivityManager.MemoryInfo` stays genuine.
+- `SBX_SYSFS_MAC` — presents allowlisted sysfs MAC files;
+  `NetworkInterface` and `WifiInfo` stay genuine or redacted.
+- `SBX_CPU_REVISION` — normalizes only aggregate CPU revision text; topology,
+  features, per-core records, and Hardware text stay genuine.
+
+These opt-ins are partial presentation controls, not full environment
+virtualization. Disabled surfaces are not synthesized.
 
 ---
 
@@ -167,6 +197,7 @@ su -c 'sandboxid <command>'
 |---------|--------------|
 | `freshen` | Generate an exact-SDK persona, apply presentation properties, refresh overlays/Settings, and wipe target app data |
 | `status` | Print the current `identity.prop` |
+| `set-flag <key> <0\|1>` | Atomically set one validated `SBX_*` operational flag; restart the target process to apply |
 | `rollback` | Restore the previous identity and apply the same phases |
 | `lock` / `unlock` | Prevent / re-enable `freshen` (safety after setup) |
 | `apply-props` | Apply presentation properties; boot scripts run this before Zygote |
@@ -231,7 +262,7 @@ Written by `freshen`, read by native prop apply, Zygisk hooks, and
 | `MANUFACTURER` | `freshen` | `Build.MANUFACTURER`, `ro.product.manufacturer` |
 | `DEVICE` | `freshen` | `Build.DEVICE`, `ro.product.device`, `ro.build.product` |
 | `PRODUCT` | `freshen` | `Build.PRODUCT`, `ro.product.name` |
-| `BOARD`, `HARDWARE` | `freshen` | `ro.product.board`, `ro.hardware` |
+| `BOARD`, `HARDWARE`, `BOARD_PLATFORM`, `SOC_*` | persona generator | Internal persona metadata only; runtime hardware properties and `Build` fields pass through genuine |
 | `FINGERPRINT`, `ID`, `DISPLAY` | `freshen` | Build metadata |
 | `SERIAL` | `freshen` | `Build.SERIAL`, `ro.serialno`, `ro.boot.serialno` |
 | `RADIO` | `freshen` | `Build.RADIO`, `gsm.version.baseband` |
@@ -240,9 +271,18 @@ Written by `freshen`, read by native prop apply, Zygisk hooks, and
 | `WIFI_MAC` | `rotate_ids.sh` | Persisted wlan0 MAC |
 | `BLUETOOTH_ADDR` | `rotate_ids.sh` | Persisted BT adapter MAC |
 | `BLUETOOTH_NAME` | `rotate_ids.sh` | Optional override for device/BT name; if unset, uses `MODEL` |
+| `SBX_NATIVE_READ` | generator / `set-flag` | Master native-read gate; defaults to `1`; `no_native_read` still forces it off per spawn |
+| `SBX_PROC_VERSION` | generator / `set-flag` | Experimental `/proc/version` presentation; defaults to `0` |
+| `SBX_MEMINFO` | generator / `set-flag` | Experimental `/proc/meminfo` presentation; defaults to `0` |
+| `SBX_SYSFS_MAC` | generator / `set-flag` | Experimental sysfs MAC presentation; defaults to `0` |
+| `SBX_CPU_REVISION` | generator / `set-flag` | Experimental aggregate CPU revision presentation; defaults to `0` |
+| `SBX_HIDE` | generator / `set-flag` | Existing independent hide gate; defaults to `0` |
 
-Use `identity_get KEY` / `identity_persist KEY VALUE` from `helpers.sh` for
-programmatic access (atomic upsert via `awk` + rename).
+Operational flags are preserved across native `freshen`, `rollback`, multibrand
+Action replacement, and reinstall migration. Shell code should use
+`identity_get KEY` / `identity_persist KEY VALUE` from `helpers.sh`; the latter
+collapses duplicate keys and replaces the file atomically. Interactive callers
+should prefer the validated `sandboxid set-flag` command.
 
 ---
 
@@ -306,6 +346,22 @@ history and dependency metadata for version-specific attribution.
 
 ## Scope & Limitations
 
+### VD-Infos-oriented capability matrix
+
+VD-Infos' public v2.13 documentation is used here as methodology evidence for
+native callback reads; it is not evidence for unpublished source paths or
+symbols. No v2.13 result fixture is claimed without an actual immutable report.
+
+| Class | SandboxID behavior |
+|-------|--------------------|
+| Covered presentation | Selected `Build.*`, Java `SystemProperties` string/typed/genuine-handle reads, Bionic getter/read/callback paths, and allowlisted `build.prop` views |
+| Conditional native coverage | PLT hooks cover `.so` files mapped during the one-time specialization scan; debug logs record basename plus device/inode and registration/commit counts |
+| Stable-runtime fix | Persona release aliases are written only when genuine preview state proves `preview_sdk=0` and `codename=REL`; preview/unknown state passes through |
+| Opt-in-only | `/proc/version`, selected `/proc/meminfo`, sysfs MAC, and aggregate CPU revision presentation are independent, default-off child gates |
+| Preserve genuine/error state | Permission denial, null/empty/redacted/unknown results, opt-out, cancellation, callback/executor errors, dynamic services, runtime hardware, and capability APIs are not converted to success |
+| Immutable evidence | Play Integrity, SafetyNet, Key/ID attestation, attested patch levels, verified-boot hashes, and other hardware/server-signed evidence remain genuine |
+| Explicitly out of scope | Direct-syscall or `mmap` interception, broad loader interception, Java identifier entry hooks, package/signature/installer forgery, and additional concealment |
+
 ### Covered
 
 - Validated presentation identity: selected `Build.*` strings/timestamps,
@@ -315,7 +371,8 @@ history and dependency metadata for version-specific attribution.
   warm/vendor-cached paths.
 - Exact-runtime-SDK persona selection. ABI arrays, `SDK_INT`, SDK extensions,
   preview state, first API level, Zygote/native bridge/ISA/heap configuration,
-  and media performance class remain real runtime capabilities.
+  media performance class, board/hardware/SoC fields, and other runtime
+  capabilities remain genuine.
 - Relative pure-read `openat` path resolution for the small native-read
   allowlist, with fail-open behavior on ambiguity.
 - Optional aggregate `/proc/cpuinfo` revision normalization when
@@ -350,6 +407,14 @@ history and dependency metadata for version-specific attribution.
   for genuine nonzero handles returned by the platform. The module never
   fabricates handles or interprets private `prop_info` layouts. Direct reads of
   `/dev/__properties__` remain outside this boundary.
+- Native PLT registration is a one-time scan of libraries mapped at
+  specialization. Debug builds report each basename and device/inode pair plus
+  registration/commit counts. Libraries loaded later are outside confirmed
+  coverage; no `dlopen`/`android_dlopen_ext` interception is packaged.
+- There is no Java-to-DEX build/embed/load pipeline in `build.sh` or
+  `jni/CMakeLists.txt`; Java identifier entry hooks are therefore not active or
+  packaged. Adding one is a separate opt-in phase requiring API-version,
+  permission/redaction, cancellation, executor, and callback-error contracts.
 - SSAID deletion is a reboot-time regeneration action, not a per-app API
   override. Local GAID writes do not guarantee what Google Play services
   returns and must not override its opt-out sentinel.

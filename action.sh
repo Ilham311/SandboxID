@@ -55,7 +55,12 @@ fi
 
 if [ -x "$BIN" ] && [ -s "$DEVICE_ID" ]; then
     [ -f "$IDENTITY" ] && cp -f "$IDENTITY" "$MODDIR/identity.prop.bak" 2>/dev/null
-    if cp -f "$DEVICE_ID" "$IDENTITY" 2>/dev/null; then
+    if command -v identity_preserve_operational_flags >/dev/null 2>&1 &&
+       ! identity_preserve_operational_flags "$IDENTITY" "$DEVICE_ID"; then
+        say "! Gagal mempertahankan pengaturan eksperimental — hasil acak tidak diterapkan."
+        rm -f "$DEVICE_ID" 2>/dev/null
+    fi
+    if [ -s "$DEVICE_ID" ] && cp -f "$DEVICE_ID" "$IDENTITY" 2>/dev/null; then
         chmod 0644 "$IDENTITY" 2>/dev/null
         "$BIN" unlock >/dev/null 2>&1 || true
         say ""

@@ -223,6 +223,7 @@ function onTab(id) {
   if (id === 'persona') loadPersona();
   else if (id === 'rotate') loadRotate();
   else if (id === 'sim') loadSim();
+  else if (id === 'settings') loadSettings();
   else if (id === 'targets') loadTargets();
   else if (id === 'selftest') loadSelftest();
   else if (id === 'log') loadLog();
@@ -253,8 +254,7 @@ function skKv(n) {
 }
 
 const DETAIL_KEYS = [
-  ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'], ['BOARD', 'Board'],
-  ['SOC_MANUFACTURER', 'SoC vendor'], ['SOC_MODEL', 'SoC'],
+  ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'],
   ['SECURITY_PATCH', 'Security patch'],
   ['SERIAL', 'Serial'], ['ANDROID_ID', 'Entropy profil'], ['GOOGLE_AID', 'GAID lokal'],
   ['WIFI_MAC', 'WiFi MAC'], ['BLUETOOTH_ADDR', 'BT MAC'], ['BLUETOOTH_NAME', 'Nama BT'],
@@ -539,6 +539,56 @@ document.getElementById('simOff').addEventListener('click', (ev) => withLoading(
   document.getElementById('simPhantom').checked = false;
   loadSim();
 }));
+
+const EXPERIMENT_FLAGS = [
+  'SBX_NATIVE_READ', 'SBX_PROC_VERSION', 'SBX_MEMINFO',
+  'SBX_SYSFS_MAC', 'SBX_CPU_REVISION',
+];
+
+function renderSettingsState(kv, available = true) {
+  const master = kv.SBX_NATIVE_READ !== '0';
+  for (const key of EXPERIMENT_FLAGS) {
+    const input = document.querySelector(`input[data-flag="${key}"]`);
+    if (!input) continue;
+    input.checked = key === 'SBX_NATIVE_READ' ? master : kv[key] === '1';
+    input.disabled = !available || (key !== 'SBX_NATIVE_READ' && !master);
+  }
+  document.getElementById('settingsStatus').textContent = !available
+    ? 'identity.prop belum ada. Buat persona terlebih dahulu.'
+    : master
+      ? 'Master aktif. Opsi anak tetap independen dan default-nonaktif.'
+      : 'Master nonaktif: seluruh presentasi native dilewatkan genuine.';
+}
+
+async function loadSettings() {
+  const status = document.getElementById('settingsStatus');
+  status.textContent = 'Memuat pengaturan…';
+  const r = await run(`cat ${shq(IDENTITY)} 2>/dev/null || true`);
+  if (!r.ok || !r.out.trim()) {
+    renderSettingsState({}, false);
+    return;
+  }
+  renderSettingsState(parseProp(r.out));
+}
+
+document.getElementById('settingsReload').addEventListener('click', loadSettings);
+document.querySelectorAll('#settings input[data-flag]').forEach(input => {
+  input.addEventListener('change', async () => {
+    const key = input.dataset.flag;
+    const value = input.checked ? '1' : '0';
+    input.disabled = true;
+    const cmd = `${ENV} && sandboxid set-flag ${shq(key)} ${value}`;
+    const r = await run(cmd);
+    if (!r.ok) {
+      toast(trimTitle(r.err.message || 'Gagal menyimpan pengaturan'), {
+        kind: 'error', detail: r.err.stdout || r.err.stderr || '',
+      });
+    } else {
+      toast(`${key}=${value} tersimpan`, { kind: 'ok', detail: r.out });
+    }
+    await loadSettings();
+  });
+});
 
 async function loadTargets() {
   const ta = document.getElementById('tgtArea');

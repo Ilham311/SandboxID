@@ -20,6 +20,7 @@
 #include "sbx_carrier.hpp"
 #include "sbx_identity.hpp"
 #include "sbx_native_read.hpp"
+#include "sbx_property.hpp"
 #include <sys/system_properties.h>
 
 static const char* IDENTITY_FILE  = sandboxid::IDENTITY_FILE;
@@ -178,6 +179,7 @@ struct Identity {
         "GSM_OPERATOR_NUMERIC","GSM_OPERATOR_ALPHA","GSM_OPERATOR_ISO","GSM_SIM_STATE",
         "SKU","ODM_SKU","BUILD_TIME_UTC","BUILD_DATE","FLAVOR","APPLOG_EPOCH",
         "SBX_NATIVE_READ","SBX_HIDE","SBX_CPU_REVISION",
+        "SBX_PROC_VERSION","SBX_MEMINFO","SBX_SYSFS_MAC",
         };
         std::string out;
         if (!sbxid::serialize_identity_values(
@@ -205,6 +207,15 @@ static int device_sdk() {
     char b[PROP_VALUE_MAX] = {0};
     if (__system_property_get("ro.build.version.sdk", b) > 0) return atoi(b);
     return 0;
+}
+
+static bool runtime_is_stable_release() {
+    char preview_sdk[PROP_VALUE_MAX] = {0};
+    char codename[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("ro.build.version.preview_sdk", preview_sdk) <= 0 ||
+        __system_property_get("ro.build.version.codename", codename) <= 0)
+        return false;
+    return sbxprop::stable_release_runtime(preview_sdk, codename);
 }
 
 static std::string gen_host_suffix() {
@@ -471,6 +482,12 @@ static Identity derive_identity(const PixelEntry& p) {
 
     id.kv["SKU"]     = "";
     id.kv["ODM_SKU"] = "";
+    id.kv["SBX_NATIVE_READ"] = "1";
+    id.kv["SBX_HIDE"] = "0";
+    id.kv["SBX_CPU_REVISION"] = "0";
+    id.kv["SBX_PROC_VERSION"] = "0";
+    id.kv["SBX_MEMINFO"] = "0";
+    id.kv["SBX_SYSFS_MAC"] = "0";
 
     return id;
 }
@@ -530,8 +547,6 @@ static int apply_properties(const Identity& id) {
     const std::string TYPE         = get("TYPE");
     const std::string USER_        = get("USER");
     const std::string HOST         = get("HOST");
-    const std::string SOC_MANUF    = get("SOC_MANUFACTURER");
-    const std::string SOC_MODEL    = get("SOC_MODEL");
     const std::string MARKETNAME   = get("MARKETNAME");
 
     const std::string SKU        = get("SKU");
@@ -592,8 +607,6 @@ static int apply_properties(const Identity& id) {
 
         {"ro.build.product",                   DEVICE},
 
-        {"ro.soc.manufacturer",                SOC_MANUF},
-        {"ro.soc.model",                       SOC_MODEL},
         {"ro.product.marketname",              MARKETNAME},
         {"ro.product.vendor.marketname",       MARKETNAME},
         {"ro.product.odm.marketname",          MARKETNAME},
@@ -611,11 +624,7 @@ static int apply_properties(const Identity& id) {
         {"ro.build.date.utc",                  BUILD_UTC},
         {"ro.build.date",                      BUILD_DATE},
 
-        {"ro.build.version.codename",          std::string("REL")},
-        {"ro.build.version.all_codenames",     std::string("REL")},
-
         {"ro.build.version.release",           RELEASE},
-        {"ro.build.version.release_or_codename", RELEASE},
         {"ro.build.version.security_patch",    SECPATCH},
         {"ro.vendor.build.security_patch",     SECPATCH},
         {"ro.build.version.incremental",       INCREMENTAL},
@@ -637,12 +646,6 @@ static int apply_properties(const Identity& id) {
         {"ro.system_ext.build.version.release",      RELEASE},
         {"ro.vendor.build.version.release",          RELEASE},
         {"ro.odm.build.version.release",             RELEASE},
-
-        {"ro.product.build.version.release_or_codename",  RELEASE},
-        {"ro.system.build.version.release_or_codename",   RELEASE},
-        {"ro.system_ext.build.version.release_or_codename", RELEASE},
-        {"ro.vendor.build.version.release_or_codename",   RELEASE},
-        {"ro.odm.build.version.release_or_codename",      RELEASE},
 
         {"ro.product.build.date.utc",                BUILD_UTC},
         {"ro.system.build.date.utc",                 BUILD_UTC},
@@ -679,6 +682,18 @@ static int apply_properties(const Identity& id) {
         {"ro.boot.hardware.sku",               SKU},
         {"ro.boot.product.hardware.sku",       ODM_SKU},
     };
+
+    if (runtime_is_stable_release()) {
+        rp.push_back({"ro.build.version.release_or_codename", RELEASE});
+        static const char* const aliases[] = {
+            "ro.product.build.version.release_or_codename",
+            "ro.system.build.version.release_or_codename",
+            "ro.system_ext.build.version.release_or_codename",
+            "ro.vendor.build.version.release_or_codename",
+            "ro.odm.build.version.release_or_codename",
+        };
+        for (const char* key : aliases) rp.push_back({key, RELEASE});
+    }
 
     int failures = 0;
     bool have_bundled = (::access(RESETPROP, X_OK) == 0);
@@ -854,7 +869,6 @@ static void generate_mount_files(const Identity& id) {
     const std::string MANUFACTURER = g("MANUFACTURER");
     const std::string DEVICE       = g("DEVICE");
     const std::string PRODUCT      = g("PRODUCT");
-    const std::string BOARD        = g("BOARD");
     const std::string ID_          = g("ID");
     const std::string FP           = g("FINGERPRINT");
     const std::string DISPLAY      = g("DISPLAY");
@@ -867,11 +881,8 @@ static void generate_mount_files(const Identity& id) {
     const std::string TYPE         = g("TYPE");
     const std::string USER_        = g("USER");
     const std::string HOST         = g("HOST");
-    const std::string HARDWARE     = g("HARDWARE");
-    const std::string PLATFORM     = g("BOARD_PLATFORM");
-    const std::string SOC_MANUF    = g("SOC_MANUFACTURER");
-    const std::string SOC_MODEL    = g("SOC_MODEL");
     const std::string MARKETNAME   = g("MARKETNAME");
+    const bool stable_release      = runtime_is_stable_release();
 
     std::string base;
     base += "# begin build properties\n";
@@ -894,11 +905,6 @@ static void generate_mount_files(const Identity& id) {
     add("ro.product.manufacturer",            MANUFACTURER);
     add("ro.product.device",                  DEVICE);
     add("ro.product.name",                    PRODUCT);
-    add("ro.product.board",                   BOARD);
-    add("ro.hardware",                        HARDWARE);
-    add("ro.board.platform",                  PLATFORM);
-    add("ro.soc.manufacturer",                SOC_MANUF);
-    add("ro.soc.model",                       SOC_MODEL);
     add("ro.product.marketname",              MARKETNAME);
     add("ro.product.vendor.marketname",       MARKETNAME);
     add("ro.product.odm.marketname",          MARKETNAME);
@@ -914,10 +920,9 @@ static void generate_mount_files(const Identity& id) {
     add("ro.build.flavor",                    g("FLAVOR"));
     add("ro.build.date.utc",                  g("BUILD_TIME_UTC"));
     add("ro.build.date",                      g("BUILD_DATE"));
-    add("ro.build.version.codename",          std::string("REL"));
-    add("ro.build.version.all_codenames",     std::string("REL"));
     add("ro.build.version.release",           RELEASE);
-    add("ro.build.version.release_or_codename", RELEASE);
+    if (stable_release)
+        add("ro.build.version.release_or_codename", RELEASE);
     add("ro.build.version.security_patch",    SECPATCH);
     add("ro.build.version.incremental",       INCREMENTAL);
 
@@ -953,7 +958,8 @@ static void generate_mount_files(const Identity& id) {
         c += ppfx + "tags=" + TAGS + "\n";
         c += ppfx + "version.incremental=" + INCREMENTAL + "\n";
         c += ppfx + "version.release=" + RELEASE + "\n";
-        c += ppfx + "version.release_or_codename=" + RELEASE + "\n";
+        if (stable_release)
+            c += ppfx + "version.release_or_codename=" + RELEASE + "\n";
         if (!g("BUILD_TIME_UTC").empty()) {
             c += ppfx + "date.utc=" + g("BUILD_TIME_UTC") + "\n";
             c += ppfx + "date=" + g("BUILD_DATE") + "\n";
@@ -1105,6 +1111,12 @@ static int cmd_freshen() {
         return 1;
     }
 
+    if (!old.empty()) {
+        Identity old_identity;
+        std::string old_error;
+        if (load_identity_file(IDENTITY_FILE, old_identity, old_error))
+            sbxid::preserve_operational_flags(old_identity.kv, id.kv);
+    }
     merge_carrier(id);
     if (!validate_identity(id, identity_error)) {
         fprintf(stderr, "! generated identity rejected: %s\n", identity_error.c_str());
@@ -1157,6 +1169,35 @@ static int cmd_status() {
         return 0;
     }
     fputs(d.c_str(), stdout);
+    return 0;
+}
+
+static bool load_current_identity(Identity& id);
+
+static bool operational_flag(const char* key) {
+    return key && sbxid::operational_flag_key(key);
+}
+
+static int cmd_set_flag(const char* key, const char* value) {
+    if (!ensure_root()) return 1;
+    if (!key || !value || !operational_flag(key) ||
+        (strcmp(value, "0") && strcmp(value, "1"))) {
+        fprintf(stderr, "Usage: sandboxid set-flag <SBX_* flag> <0|1>\n");
+        return 2;
+    }
+    Identity id;
+    if (!load_current_identity(id)) return 1;
+    id.kv[key] = value;
+    std::string error;
+    if (!validate_identity(id, error)) {
+        fprintf(stderr, "! updated identity rejected: %s\n", error.c_str());
+        return 1;
+    }
+    if (!atomic_write(IDENTITY_FILE, id.serialize())) {
+        fprintf(stderr, "! failed to write identity.prop\n");
+        return 1;
+    }
+    printf("OK: %s=%s (restart target app to apply)\n", key, value);
     return 0;
 }
 
@@ -1250,6 +1291,14 @@ static int cmd_rollback() {
         fprintf(stderr, "! backup rejected: %s\n", error.c_str());
         return 1;
     }
+    Identity current;
+    std::string current_error;
+    if (load_identity_file(IDENTITY_FILE, current, current_error))
+        sbxid::preserve_operational_flags(current.kv, rid.kv);
+    if (!validate_identity(rid, error)) {
+        fprintf(stderr, "! restored identity rejected: %s\n", error.c_str());
+        return 1;
+    }
     if (!atomic_write(IDENTITY_FILE, rid.serialize())) {
         fprintf(stderr, "! failed to restore identity backup\n");
         return 1;
@@ -1299,6 +1348,8 @@ static void usage(const char* p) {
         "Usage: %s <command>\n\n"
         "  freshen      Rotate identity + wipe target app data (main action)\n"
         "  status       Print current identity.prop\n"
+        "  set-flag <key> <0|1>\n"
+        "               Set one operational SBX_* flag atomically\n"
         "  rollback     Restore previous identity from backup\n"
         "  lock         Prevent freshen (safety)\n"
         "  unlock       Re-enable freshen\n"
@@ -1317,6 +1368,8 @@ int main(int argc, char** argv) {
     const char* c = argv[1];
     if (!strcmp(c, "freshen"))    return cmd_freshen();
     if (!strcmp(c, "status"))     return cmd_status();
+    if (!strcmp(c, "set-flag"))   return cmd_set_flag(argc > 2 ? argv[2] : nullptr,
+                                                        argc > 3 ? argv[3] : nullptr);
     if (!strcmp(c, "rollback"))   return cmd_rollback();
     if (!strcmp(c, "lock"))       return cmd_lock();
     if (!strcmp(c, "unlock"))     return cmd_unlock();

@@ -12,10 +12,24 @@ if [ ! -x "$BIN" ]; then
 fi
 
 TARGET="$MODDIR/target.txt"
-grep -qE '^[[:space:]]*[^[:space:]#]' "$TARGET" 2>/dev/null || exit 0
 
-LOG=/cache/sandboxid-boot.log
+LOG="${LOGFILE:-/cache/sandboxid-boot.log}"
+[ -w "$(dirname "$LOG")" ] || LOG="$MODDIR/sandboxid-boot.log"
 if [ -x "$BIN" ]; then
+    if [ -r "$MODDIR/.operational-flags" ] && [ -f "$MODDIR/identity.prop" ]; then
+        while IFS='=' read -r key value; do
+            case "$key:$value" in
+                SBX_NATIVE_READ:[01]|SBX_HIDE:[01]|SBX_CPU_REVISION:[01]|\
+                SBX_PROC_VERSION:[01]|SBX_MEMINFO:[01]|SBX_SYSFS_MAC:[01])
+                    "$BIN" set-flag "$key" "$value" >> "$LOG" 2>&1 || exit $?
+                    ;;
+            esac
+        done < "$MODDIR/.operational-flags"
+        rm -f "$MODDIR/.operational-flags"
+    fi
+
+    grep -qE '^[[:space:]]*[^[:space:]#]' "$TARGET" 2>/dev/null || exit 0
+
     {
         echo "[post-fs-data] seed begin"
         if "$BIN" seed; then

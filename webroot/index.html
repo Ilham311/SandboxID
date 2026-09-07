@@ -32,6 +32,7 @@
   <button class="tab active" data-tab="persona">Perangkat</button>
   <button class="tab" data-tab="rotate">Rotasi</button>
   <button class="tab" data-tab="sim">SIM</button>
+  <button class="tab" data-tab="settings">Eksperimen</button>
   <button class="tab" data-tab="targets">Target</button>
   <button class="tab" data-tab="selftest">Uji</button>
   <button class="tab" data-tab="log">Log</button>
@@ -77,6 +78,37 @@
       <button id="simOff" class="ghost sm">Nonaktifkan</button>
     </div>
     <div class="hint">Kode operator, nama, dan negara disajikan lewat properti. Carrier ID hanya disimpan sebagai metadata profil; build ini tidak meng-hook TelephonyManager.getSimCarrierId().</div>
+  </section>
+
+  <section id="settings" class="page">
+    <div class="row spread">
+      <div class="hint">Presentasi eksperimental untuk aplikasi target. Perubahan berlaku setelah proses target dimulai ulang.</div>
+      <button id="settingsReload" class="ghost sm">Muat ulang</button>
+    </div>
+    <div class="settings-warn">Opsi anak di bawah default-nonaktif dan parsial; native-read master tetap aktif secara default. Ini bukan virtualisasi lingkungan penuh: /proc/version tidak mengubah uname, /proc/meminfo tidak mengubah ActivityManager, dan sysfs MAC tidak mengubah NetworkInterface atau WifiInfo.</div>
+    <div class="settings-list">
+      <label class="setting-row" for="setNativeRead">
+        <span><strong>Native-read master</strong><small>Mengizinkan presentasi native terkontrol; mematikan ini menonaktifkan semua opsi di bawah.</small></span>
+        <input type="checkbox" id="setNativeRead" data-flag="SBX_NATIVE_READ">
+      </label>
+      <label class="setting-row" for="setProcVersion">
+        <span><strong>/proc/version</strong><small>Presentasi string kernel; uname(2) tetap genuine.</small></span>
+        <input type="checkbox" id="setProcVersion" data-flag="SBX_PROC_VERSION">
+      </label>
+      <label class="setting-row" for="setMeminfo">
+        <span><strong>/proc/meminfo</strong><small>Presentasi file; ActivityManager.MemoryInfo tetap genuine.</small></span>
+        <input type="checkbox" id="setMeminfo" data-flag="SBX_MEMINFO">
+      </label>
+      <label class="setting-row" for="setSysfsMac">
+        <span><strong>sysfs MAC</strong><small>Presentasi /sys/class/net; API Wi-Fi dan NetworkInterface tetap genuine/redacted.</small></span>
+        <input type="checkbox" id="setSysfsMac" data-flag="SBX_SYSFS_MAC">
+      </label>
+      <label class="setting-row" for="setCpuRevision">
+        <span><strong>Agregat CPU revision</strong><small>Hanya agregat revision; topology, features, dan Hardware tetap genuine.</small></span>
+        <input type="checkbox" id="setCpuRevision" data-flag="SBX_CPU_REVISION">
+      </label>
+    </div>
+    <div id="settingsStatus" class="hint settings-status"></div>
   </section>
 
   <section id="targets" class="page">

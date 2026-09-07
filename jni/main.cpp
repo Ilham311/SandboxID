@@ -118,11 +118,6 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.product.system.marketname",    "MARKETNAME"},
         {"ro.product.odm.marketname",       "MARKETNAME"},
         {"ro.product.product.marketname",   "MARKETNAME"},
-        {"ro.product.board",                "BOARD"},
-        {"ro.hardware",                     "HARDWARE"},
-        {"ro.board.platform",               "BOARD_PLATFORM"},
-        {"ro.soc.manufacturer",             "SOC_MANUFACTURER"},
-        {"ro.soc.model",                    "SOC_MODEL"},
         {"ro.build.id",                     "ID"},
         {"ro.build.display.id",             "DISPLAY"},
         {"ro.build.description",            "DESCRIPTION"},
@@ -245,7 +240,11 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
     return m;
 }
 
+static bool g_stable_release_runtime = false;
+
 static bool spoof_prop_value(const std::string& k, std::string& out) {
+    if (sbxprop::release_alias_property(k) && !g_stable_release_runtime)
+        return false;
     const auto& map = prop_to_identity_map();
     auto it = map.find(k);
     if (it != map.end()) {
@@ -724,7 +723,7 @@ static std::string g_boot_id;
 static std::string g_wifi_mac;
 static std::string g_proc_version;
 static int         g_ram_gb = 0;
-static bool        g_cpu_revision_enabled = false;
+static sbxnr::EnvironmentGates g_environment_gates;
 
 static std::string    g_pkg;
 static sbxnr::ApplogIds g_applog;
@@ -741,11 +740,27 @@ static inline bool sbx_nr_spoofable(const char* name) {
     return g_nr_active && name && !sbxnr::is_native_unsafe_prop(name);
 }
 
+static sbxprop::ValueDecision sbx_prop_decision(const char* name) {
+    if (!sbx_nr_spoofable(name)) return {};
+    if (sbx_prop_hidden(name))
+        return sbxprop::decide_value(true, true, nullptr);
+    std::string mapped;
+    if (spoof_prop_value(name, mapped))
+        return sbxprop::decide_value(true, false, &mapped);
+    return {};
+}
+
 static int sbx_spg(const char* name, char* value) {
-    if (sbx_nr_spoofable(name) && value) {
-        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
-        std::string v;
-        if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
+    if (value) {
+        const sbxprop::ValueDecision decision = sbx_prop_decision(name);
+        if (decision.action == sbxprop::ValueAction::kHidden) {
+            value[0] = '\0';
+            return 0;
+        }
+        if (decision.action == sbxprop::ValueAction::kMapped) {
+            sbx_fill_prop(value, decision.mapped);
+            return static_cast<int>(sbxprop::legacy_copy_length(decision.mapped));
+        }
     }
     if (orig_spg) return orig_spg(name, value);
     if (value) value[0] = '\0';
@@ -754,30 +769,33 @@ static int sbx_spg(const char* name, char* value) {
 
 static int sbx_spr(const void* pi, char* name, char* value) {
     int r = orig_spr ? orig_spr(pi, name, value) : -1;
-    if (r >= 0 && sbx_nr_spoofable(name) && value) {
-        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
-        std::string v;
-        if (spoof_prop_value(name, v)) { sbx_fill_prop(value, v); return (int)v.size(); }
+    if (r >= 0 && value) {
+        const sbxprop::ValueDecision decision = sbx_prop_decision(name);
+        if (decision.action == sbxprop::ValueAction::kHidden) {
+            value[0] = '\0';
+            return 0;
+        }
+        if (decision.action == sbxprop::ValueAction::kMapped) {
+            sbx_fill_prop(value, decision.mapped);
+            return static_cast<int>(sbxprop::legacy_copy_length(decision.mapped));
+        }
     }
     return r;
 }
 
-struct SbxCbCtx { sbx_prop_cb cb; void* cookie; };
-static void sbx_cb_tramp(void* cookie, const char* name, const char* value, uint32_t serial) {
+struct SbxCbCtx {
+    sbxprop::CallbackRelay<sbx_prop_cb> relay;
+};
+static void sbx_cb_tramp(void* cookie, const char* name, const char* value,
+                         uint32_t serial) {
     SbxCbCtx* c = static_cast<SbxCbCtx*>(cookie);
-    std::string v;
-    if (sbx_nr_spoofable(name) && sbx_prop_hidden(name))
-        return;
-    else if (sbx_nr_spoofable(name) && spoof_prop_value(name, v))
-        c->cb(c->cookie, name, v.c_str(), serial);
-    else
-        c->cb(c->cookie, name, value, serial);
+    if (!c) return;
+    c->relay.complete(name, value, serial, sbx_prop_decision(name));
 }
 static void sbx_sprcb(const void* pi, sbx_prop_cb cb, void* cookie) {
-    if (!orig_sprcb) return;
-    if (!cb) { orig_sprcb(pi, cb, cookie); return; }
-    SbxCbCtx ctx{cb, cookie};
-    orig_sprcb(pi, sbx_cb_tramp, &ctx);
+    SbxCbCtx ctx{{cb, cookie, false}};
+    (void)sbxprop::dispatch_callback_read(
+        orig_sprcb, pi, cb, sbx_cb_tramp, &ctx);
 }
 
 static int sbx_make_memfd(const std::string& content) {
@@ -811,10 +829,14 @@ static std::string sbx_read_real(const char* path) {
 }
 
 static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& out) {
+    if (!sbxnr::environment_surface_enabled(kind, g_environment_gates))
+        return false;
     switch (kind) {
-        case sbxnr::BOOTID:  out = g_boot_id;      out.push_back('\n'); return true;
-        case sbxnr::MAC:     out = g_wifi_mac;     out.push_back('\n'); return true;
-        case sbxnr::VERSION: out = g_proc_version; out.push_back('\n'); return true;
+        case sbxnr::BOOTID:  out = g_boot_id; out.push_back('\n'); return true;
+        case sbxnr::MAC:
+            out = g_wifi_mac; out.push_back('\n'); return true;
+        case sbxnr::VERSION:
+            out = g_proc_version; out.push_back('\n'); return true;
         case sbxnr::SELINUX_ENFORCE:
 
             out = sbxnr::selinux_enforce_content();
@@ -826,7 +848,6 @@ static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& o
             return true;
         }
         case sbxnr::CPUINFO: {
-            if (!g_cpu_revision_enabled) return false;
             std::string real = sbx_read_real("/proc/cpuinfo");
             if (real.empty()) return false;
             return sbxnr::patch_cpuinfo_aggregate_revision(real, out);
@@ -994,27 +1015,48 @@ static int sbx_register_across_libs(Api* api) {
             if (p.first == st.st_dev && p.second == st.st_ino) { dup = true; break; }
         if (dup) continue;
         seen.push_back(std::make_pair(st.st_dev, st.st_ino));
+        const char* basename = strrchr(path, '/');
+        basename = basename ? basename + 1 : path;
+        LOGD("L9 PLT register %s dev=%llu ino=%llu", basename,
+             static_cast<unsigned long long>(st.st_dev),
+             static_cast<unsigned long long>(st.st_ino));
         sbx_reg_lib(api, st.st_dev, st.st_ino);
     }
     fclose(f);
-    return (int)seen.size();
+    LOGD("L9 PLT scan registered=%zu; libraries loaded after this scan are "
+         "outside confirmed coverage", seen.size());
+    return static_cast<int>(seen.size());
 }
 
 static void install_native_read_hooks(Api* api) {
 
+    g_environment_gates = {};
     if (val("SBX_NATIVE_READ") == "0") { LOGD("L9 disabled via kill switch"); return; }
 
     uint64_t seed = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" + val("ANDROID_ID"));
     g_boot_id = sbxnr::uuid_from_seed(seed);
 
-    const std::string& pmac = val("WIFI_MAC");
-    g_wifi_mac = sbxnr::is_valid_mac(pmac) ? pmac
-                                           : sbxnr::mac_from_seed(seed ^ 0x9E3779B97F4A7C15ULL);
+    g_environment_gates.native_read = true;
+    g_environment_gates.proc_version = val("SBX_PROC_VERSION") == "1";
+    g_environment_gates.meminfo = val("SBX_MEMINFO") == "1";
+    g_environment_gates.sysfs_mac = val("SBX_SYSFS_MAC") == "1";
+    g_environment_gates.cpu_revision = val("SBX_CPU_REVISION") == "1";
 
-    g_proc_version = sbxnr::synth_proc_version(val("RELEASE"), val("INCREMENTAL"),
-                                               val("BOARD_PLATFORM"), val("HOST"), seed);
-    g_ram_gb = sbxnr::pixel_ram_gb(val("MODEL"));
-    g_cpu_revision_enabled = val("SBX_CPU_REVISION") == "1";
+    if (g_environment_gates.sysfs_mac) {
+        const std::string& pmac = val("WIFI_MAC");
+        g_wifi_mac = sbxnr::is_valid_mac(pmac) ? pmac
+            : sbxnr::mac_from_seed(seed ^ 0x9E3779B97F4A7C15ULL);
+    } else {
+        g_wifi_mac.clear();
+    }
+    if (g_environment_gates.proc_version) {
+        g_proc_version = sbxnr::synth_proc_version(
+            val("RELEASE"), val("INCREMENTAL"), val("BOARD_PLATFORM"),
+            val("HOST"), seed);
+    } else {
+        g_proc_version.clear();
+    }
+    g_ram_gb = g_environment_gates.meminfo ? sbxnr::pixel_ram_gb(val("MODEL")) : 0;
 
     if (!g_pkg.empty()) {
         uint64_t epoch_ms = strtoull(val("APPLOG_EPOCH").c_str(), nullptr, 10);
@@ -1040,20 +1082,28 @@ static void install_native_read_hooks(Api* api) {
         LOGW("L9: no mapped .so to hook — native reads not spoofed (kill-switch keeps flag off)");
         return;
     }
-    if (!api->pltHookCommit()) {
-        LOGW("L9: pltHookCommit gagal sebagian (%d libs registered) — coverage "
-             "mungkin parsial, wrapper tetap aman (orig_* via dlsym)", libs);
+    bool committed = api->pltHookCommit();
+    if (!committed) {
+        LOGW("L9: pltHookCommit gagal (%d libs registered) — native-read "
+             "presentation dinonaktifkan agar semua surface fail-open", libs);
+        g_nr_active = false;
+        return;
     }
+    LOGD("L9 PLT commit selesai: %d mapped libraries; late-loaded libraries "
+         "remain outside confirmed coverage", libs);
     g_nr_active = orig_spg || orig_spr || orig_sprcb ||
                   orig_open || orig_openat || orig_fopen;
     if (!g_nr_active) {
         LOGW("L9: no real implementation resolvable — native reads not spoofed");
         return;
     }
-    LOGD("L9 aktif (%d lib): boot_id=%s mac=%s ram=%dGB cpu_revision=%d "
+    LOGD("L9 aktif (%d lib): boot_id=%s proc_version=%d meminfo=%d "
+         "sysfs_mac=%d cpu_revision=%d "
          "[open=%p openat=%p fopen=%p spg=%p spr=%p sprcb=%p]",
-         libs, g_boot_id.c_str(), g_wifi_mac.c_str(), g_ram_gb,
-         g_cpu_revision_enabled ? 1 : 0,
+         libs, g_boot_id.c_str(), g_environment_gates.proc_version ? 1 : 0,
+         g_environment_gates.meminfo ? 1 : 0,
+         g_environment_gates.sysfs_mac ? 1 : 0,
+         g_environment_gates.cpu_revision ? 1 : 0,
          reinterpret_cast<void*>(orig_open),   reinterpret_cast<void*>(orig_openat),
          reinterpret_cast<void*>(orig_fopen),  reinterpret_cast<void*>(orig_spg),
          reinterpret_cast<void*>(orig_spr),    reinterpret_cast<void*>(orig_sprcb));
@@ -1204,6 +1254,37 @@ static void publish_identity(std::map<std::string, std::string>&& next) {
     g_id = std::move(next);
 }
 
+static bool read_runtime_property(const char* name, std::string& out) {
+    out.clear();
+    const prop_info* pi = __system_property_find(name);
+    if (!pi) return false;
+    sbx_sprcb_fn read_callback = reinterpret_cast<sbx_sprcb_fn>(
+        dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
+    if (!read_callback) return false;
+    struct Context {
+        std::string* out;
+        bool called;
+    } context{&out, false};
+    read_callback(
+        pi,
+        [](void* cookie, const char*, const char* value, uint32_t) {
+            Context* context = static_cast<Context*>(cookie);
+            if (!context || context->called) return;
+            context->called = true;
+            context->out->assign(value ? value : "");
+        },
+        &context);
+    return context.called;
+}
+
+static bool runtime_is_stable_release() {
+    std::string preview_sdk;
+    std::string codename;
+    return read_runtime_property("ro.build.version.preview_sdk", preview_sdk) &&
+           read_runtime_property("ro.build.version.codename", codename) &&
+           sbxprop::stable_release_runtime(preview_sdk, codename);
+}
+
 static void install_build_hook(JNIEnv* env) {
     jclass build = env->FindClass("android/os/Build");
     if (build && !env->ExceptionCheck()) {
@@ -1211,8 +1292,6 @@ static void install_build_hook(JNIEnv* env) {
         static const std::pair<const char*, const char*> f[] = {
             {"BRAND","BRAND"}, {"MANUFACTURER","MANUFACTURER"},
             {"MODEL","MODEL"}, {"DEVICE","DEVICE"}, {"PRODUCT","PRODUCT"},
-            {"BOARD","BOARD"}, {"HARDWARE","HARDWARE"},
-            {"SOC_MANUFACTURER","SOC_MANUFACTURER"}, {"SOC_MODEL","SOC_MODEL"},
             {"FINGERPRINT","FINGERPRINT"}, {"ID","ID"},
             {"DISPLAY","DISPLAY"}, {"BOOTLOADER","BOOTLOADER"},
             {"HOST","HOST"}, {"USER","USER"}, {"TYPE","TYPE"},
@@ -1237,13 +1316,11 @@ static void install_build_hook(JNIEnv* env) {
     jclass ver = env->FindClass("android/os/Build$VERSION");
     if (ver && !env->ExceptionCheck()) {
         set_str(env, ver, "RELEASE",        val("RELEASE"));
-
-        set_str(env, ver, "CODENAME",       std::string("REL"));
         set_str(env, ver, "INCREMENTAL",    val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", val("SECURITY_PATCH"));
 
         const std::string& rel = val("RELEASE");
-        if (!rel.empty()) {
+        if (!rel.empty() && g_stable_release_runtime) {
             set_str(env, ver, "RELEASE_OR_CODENAME",        rel);
             set_str(env, ver, "RELEASE_OR_PREVIEW_DISPLAY", rel);
         }
@@ -1359,6 +1436,7 @@ public:
         if (!active_) return;
 
         publish_identity(std::move(validated_identity_));
+        g_stable_release_runtime = runtime_is_stable_release();
         g_build_replacements = 0;
         g_build_failures = 0;
         LOGD("validated identity: %zu keys", g_id.size());

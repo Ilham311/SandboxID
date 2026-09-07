@@ -177,6 +177,37 @@ static std::string read_file(const char* p) {
     return ss.str();
 }
 
+static void upsert_identity_value(std::string& data, const std::string& key,
+                                  const std::string& value) {
+    const std::string prefix = key + "=";
+    std::string next;
+    next.reserve(data.size() + prefix.size() + value.size() + 1);
+    bool replaced = false;
+    size_t pos = 0;
+    while (pos < data.size()) {
+        size_t eol = data.find('\n', pos);
+        size_t end = eol == std::string::npos ? data.size() : eol + 1;
+        if (data.compare(pos, prefix.size(), prefix) == 0) {
+            if (!replaced) {
+                next += prefix;
+                next += value;
+                next.push_back('\n');
+                replaced = true;
+            }
+        } else {
+            next.append(data, pos, end - pos);
+        }
+        pos = end;
+    }
+    if (!replaced) {
+        if (!next.empty() && next.back() != '\n') next.push_back('\n');
+        next += prefix;
+        next += value;
+        next.push_back('\n');
+    }
+    data.swap(next);
+}
+
 struct MountResult {
     uint32_t ok = 0, fail = 0, skip = 0, skip_src = 0, skip_dst = 0;
     int32_t  ns_open_errno   = 0;
@@ -538,16 +569,12 @@ extern "C" void sandboxid_companion(int client) {
                 std::string nrkill = std::string(sandboxid::MODDIR) + "/no_native_read";
                 struct stat nrst;
                 if (::stat(nrkill.c_str(), &nrst) == 0) {
-
-                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
-                    d += "SBX_NATIVE_READ=0\n";
+                    upsert_identity_value(d, "SBX_NATIVE_READ", "0");
                     LOGD("no_native_read aktif -> SBX_NATIVE_READ=0 utk '%s'", pkg.c_str());
                 }
 
                 if (::stat(sandboxid::ENABLE_HIDE, &nrst) == 0) {
-
-                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
-                    d += "SBX_HIDE=1\n";
+                    upsert_identity_value(d, "SBX_HIDE", "1");
                     LOGD("enable_hide aktif -> SBX_HIDE=1 utk '%s'", pkg.c_str());
                 }
             }

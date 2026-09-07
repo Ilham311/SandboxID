@@ -28,9 +28,9 @@
 #   4 model            ro.product.model / Build.MODEL
 #   5 device           ro.product.device / Build.DEVICE (codename)
 #   6 product          ro.product.name               (fingerprint product segment)
-#   7 board            ro.board.platform             (SoC-detect anchor; Exynos erdXXXX; Pixel = Tensor platform)
-#   8 soc_manufacturer ro.soc.manufacturer
-#   9 soc_model        ro.soc.model                  (Exynos s5eXXXX; Snapdragon SMXXXX; MediaTek MTXXXX; Tensor GSxxx)
+#   7 board            internal platform metadata    (Exynos erdXXXX; Pixel = Tensor platform)
+#   8 soc_manufacturer internal SoC-vendor metadata
+#   9 soc_model        internal SoC-model metadata   (Exynos s5eXXXX; Snapdragon SMXXXX; MediaTek MTXXXX; Tensor GSxxx)
 #  10 sdk              ro.build.version.sdk          (int)
 #  11 release          ro.build.version.release      (must map from sdk: 33->13 34->14 35->15 36->16)
 #  12 build_id         ro.build.id                   (fingerprint build_id segment)
@@ -45,11 +45,11 @@
 # other vivo field (model/device/board/soc/sdk/release/build_id/patch) is real.
 # All Oppo/Samsung/Xiaomi/Redmi/POCO/Infinix/Pixel incrementals are retail.
 #
-# CAVEAT (Pixel rows): board = the Tensor SoC platform (gs101/gs201/zuma/
-# zumapro/laguna) so ro.board.platform stays coherent with soc_model (GS101..
-# GS501) and the SoC-detect anchor is correct. Real Pixels expose the codename
-# (e.g. shiba) in ro.product.board while ro.hardware/ro.board.platform is the
-# platform — a minor divergence; the fingerprint (google/<codename>/...) is exact.
+# CAVEAT (Pixel rows): board stores the Tensor platform (gs101/gs201/zuma/
+# zumapro/laguna) so internal SoC validation can match GS101..GS501. It is not
+# published as ro.product.board, ro.hardware, or ro.board.platform; those runtime
+# hardware properties remain genuine. The fingerprint still uses the exact
+# product/device codename (for example shiba).
 Infinix	INFINIX	Infinix Note 30	Infinix X6833B	Infinix-X6833B	X6833B-GL	mt6789	MediaTek	MT6789	33	13	TP1A.220624.014	230817V2345	2023-08-05	2023-05
 Infinix	INFINIX	Infinix GT 10 Pro	Infinix X6739	Infinix-X6739	X6739-GL	mt6893	MediaTek	MT6893	33	13	TP1A.220624.014	231024V2278	2023-10-05	2023-08
 Infinix	INFINIX	Infinix Zero 30 5G	Infinix X6731	Infinix-X6731	X6731-GL	mt6893	MediaTek	MT6893	33	13	TP1A.220624.014	240829V442	2024-07-05	2023-09

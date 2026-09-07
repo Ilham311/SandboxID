@@ -14,6 +14,8 @@ ui_print "-   peluang tiap brand sama rata."
 ui_print "- Properti presentasi diterapkan pre-Zygote; hook aktif saat proses target dibuat."
 ui_print "- Settings framework diterapkan setelah boot selesai."
 ui_print "- Aman: string presentasi berubah; kemampuan runtime dan attestation tetap asli."
+ui_print "- /proc version, meminfo, sysfs MAC, dan agregat CPU bersifat eksperimental,"
+ui_print "-   default-nonaktif, parsial, dan bukan virtualisasi lingkungan penuh."
 ui_print "- Tombol Action (sekali tekan): acak perangkat, terapkan, rotasi ID"
 ui_print "-   (regenerasi SSAID saat reboot, GAID lokal, WiFi/BT MAC, nama, boot count)"
 ui_print "- Aplikasi target diatur sendiri di target.txt (kosong = modul nonaktif)."
@@ -32,6 +34,25 @@ LIVE_CARRIER="/data/adb/modules/sandboxid/carrier.conf"
 if [ -s "$LIVE_CARRIER" ]; then
     ui_print "- carrier.conf (pilihan operator) dari instalasi sebelumnya dipertahankan"
     cp -f "$LIVE_CARRIER" "$MODPATH/carrier.conf"
+fi
+
+LIVE_IDENTITY="/data/adb/modules/sandboxid/identity.prop"
+if [ -r "$LIVE_IDENTITY" ]; then
+    cp -f "$LIVE_IDENTITY" "$MODPATH/identity.prop"
+    ui_print "- identity.prop dari instalasi sebelumnya dipertahankan"
+    : > "$MODPATH/.operational-flags"
+    for key in SBX_NATIVE_READ SBX_HIDE SBX_CPU_REVISION \
+               SBX_PROC_VERSION SBX_MEMINFO SBX_SYSFS_MAC; do
+        value=$(awk -F= -v k="$key" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$LIVE_IDENTITY" 2>/dev/null)
+        case "$value" in
+            0|1) printf '%s=%s\n' "$key" "$value" >> "$MODPATH/.operational-flags" ;;
+        esac
+    done
+    if [ -s "$MODPATH/.operational-flags" ]; then
+        ui_print "- Pengaturan native-read eksperimental dari instalasi sebelumnya dipertahankan"
+    else
+        rm -f "$MODPATH/.operational-flags"
+    fi
 fi
 
 if [ -f "$MODPATH/debug_variant" ]; then

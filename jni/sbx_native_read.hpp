@@ -360,9 +360,11 @@ inline bool patch_cpuinfo_aggregate_revision(const std::string& real,
                     ++digits;
                 if (digits > value) {
                     errno = 0;
+                    const std::string revision(
+                        real, value, digits - value);
                     char* parsed_end = nullptr;
-                    unsigned long parsed = std::strtoul(
-                        real.substr(value, digits - value).c_str(), &parsed_end, 10);
+                    unsigned long parsed =
+                        std::strtoul(revision.c_str(), &parsed_end, 10);
                     if (errno == 0 && parsed_end && *parsed_end == '\0' &&
                         parsed <= 255) {
                         if (!have_revision || parsed > aggregate)
@@ -396,6 +398,26 @@ enum Kind {
     BD_RAW_CLIENTUDID,
     BD_RAW_CDID,
 };
+
+struct EnvironmentGates {
+    bool native_read = false;
+    bool proc_version = false;
+    bool meminfo = false;
+    bool sysfs_mac = false;
+    bool cpu_revision = false;
+};
+
+inline bool environment_surface_enabled(Kind kind,
+                                        const EnvironmentGates& gates) {
+    if (!gates.native_read) return false;
+    switch (kind) {
+        case VERSION: return gates.proc_version;
+        case MEMINFO: return gates.meminfo;
+        case MAC: return gates.sysfs_mac;
+        case CPUINFO: return gates.cpu_revision;
+        default: return true;
+    }
+}
 
 inline bool ends_with(const char* s, size_t sl, const char* suffix) {
     size_t xl = std::strlen(suffix);
@@ -585,6 +607,8 @@ inline bool is_native_unsafe_prop(const char* name) {
         "ro.hardware",
         "ro.product.board",
         "ro.board.platform",
+        "ro.soc.manufacturer",
+        "ro.soc.model",
         "ro.arch",
         "ro.zygote",
         "ro.vendor.api_level",

@@ -67,6 +67,68 @@ else
   echo "FAIL: probe_expectations_test"; rc=1
 fi
 
+SBX_FLAGS='SBX_NATIVE_READ SBX_HIDE SBX_CPU_REVISION SBX_PROC_VERSION SBX_MEMINFO SBX_SYSFS_MAC'
+SBX_LIFECYCLE_TEST="$SBX_TMP/operational-lifecycle"
+mkdir -p "$SBX_LIFECYCLE_TEST/mod/bin"
+cp helpers.sh post-fs-data.sh "$SBX_LIFECYCLE_TEST/mod/"
+printf '\nMODEL=old\nSBX_NATIVE_READ=0\nSBX_HIDE=1\nSBX_CPU_REVISION=1\nSBX_PROC_VERSION=1\nSBX_MEMINFO=0\nSBX_SYSFS_MAC=1\nSBX_HIDE=0\n' \
+  > "$SBX_LIFECYCLE_TEST/mod/identity.prop"
+printf 'MODEL=new\nSBX_NATIVE_READ=1\nSBX_HIDE=0\nSBX_CPU_REVISION=0\nSBX_PROC_VERSION=0\nSBX_MEMINFO=1\nSBX_SYSFS_MAC=0\n' \
+  > "$SBX_LIFECYCLE_TEST/candidate.prop"
+IDENTITY_FILE="$SBX_LIFECYCLE_TEST/mod/identity.prop"
+MODDIR="$SBX_LIFECYCLE_TEST/mod"
+# shellcheck source=helpers.sh
+. "$SBX_LIFECYCLE_TEST/mod/helpers.sh"
+lifecycle_ok=1
+identity_preserve_operational_flags \
+  "$SBX_LIFECYCLE_TEST/mod/identity.prop" \
+  "$SBX_LIFECYCLE_TEST/candidate.prop" || lifecycle_ok=0
+for key in $SBX_FLAGS; do
+  count=$(grep -c "^${key}=" "$SBX_LIFECYCLE_TEST/candidate.prop")
+  [ "$count" = 1 ] || lifecycle_ok=0
+done
+[ "$(awk -F= '$1=="SBX_NATIVE_READ" {print $2}' "$SBX_LIFECYCLE_TEST/candidate.prop")" = 0 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_HIDE" {print $2}' "$SBX_LIFECYCLE_TEST/candidate.prop")" = 1 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_CPU_REVISION" {print $2}' "$SBX_LIFECYCLE_TEST/candidate.prop")" = 1 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_PROC_VERSION" {print $2}' "$SBX_LIFECYCLE_TEST/candidate.prop")" = 1 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_MEMINFO" {print $2}' "$SBX_LIFECYCLE_TEST/candidate.prop")" = 0 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_SYSFS_MAC" {print $2}' "$SBX_LIFECYCLE_TEST/candidate.prop")" = 1 ] || lifecycle_ok=0
+
+cp "$SBX_LIFECYCLE_TEST/candidate.prop" "$SBX_LIFECYCLE_TEST/mod/identity.prop"
+printf 'SBX_NATIVE_READ=1\nSBX_HIDE=0\nSBX_CPU_REVISION=0\nSBX_PROC_VERSION=0\nSBX_MEMINFO=1\nSBX_SYSFS_MAC=0\n' \
+  > "$SBX_LIFECYCLE_TEST/mod/.operational-flags"
+: > "$SBX_LIFECYCLE_TEST/mod/target.txt"
+cat > "$SBX_LIFECYCLE_TEST/mod/bin/sandboxid" <<'EOF'
+#!/bin/sh
+[ "$1" = set-flag ] || exit 1
+key=$2
+value=$3
+tmp="${SBX_TEST_IDENTITY}.tmp.$$"
+awk -F= -v k="$key" '$1!=k {print}' "$SBX_TEST_IDENTITY" > "$tmp" || exit 1
+printf '%s=%s\n' "$key" "$value" >> "$tmp"
+mv "$tmp" "$SBX_TEST_IDENTITY"
+EOF
+chmod 0755 "$SBX_LIFECYCLE_TEST/mod/bin/sandboxid"
+SBX_TEST_IDENTITY="$SBX_LIFECYCLE_TEST/mod/identity.prop" \
+  LOGFILE="$SBX_LIFECYCLE_TEST/post-fs-data.log" \
+  sh "$SBX_LIFECYCLE_TEST/mod/post-fs-data.sh" >/dev/null 2>&1 || lifecycle_ok=0
+[ ! -e "$SBX_LIFECYCLE_TEST/mod/.operational-flags" ] || lifecycle_ok=0
+for key in $SBX_FLAGS; do
+  count=$(grep -c "^${key}=" "$SBX_LIFECYCLE_TEST/mod/identity.prop")
+  [ "$count" = 1 ] || lifecycle_ok=0
+done
+[ "$(awk -F= '$1=="SBX_NATIVE_READ" {print $2}' "$SBX_LIFECYCLE_TEST/mod/identity.prop")" = 1 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_HIDE" {print $2}' "$SBX_LIFECYCLE_TEST/mod/identity.prop")" = 0 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_CPU_REVISION" {print $2}' "$SBX_LIFECYCLE_TEST/mod/identity.prop")" = 0 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_PROC_VERSION" {print $2}' "$SBX_LIFECYCLE_TEST/mod/identity.prop")" = 0 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_MEMINFO" {print $2}' "$SBX_LIFECYCLE_TEST/mod/identity.prop")" = 1 ] || lifecycle_ok=0
+[ "$(awk -F= '$1=="SBX_SYSFS_MAC" {print $2}' "$SBX_LIFECYCLE_TEST/mod/identity.prop")" = 0 ] || lifecycle_ok=0
+if [ "$lifecycle_ok" = 1 ]; then
+  echo "OK: operational flags remain unique through replacement and reinstall restoration"
+else
+  echo "FAIL: operational flag lifecycle preservation"; rc=1
+fi
+
 SBX_ZERO_GAID=00000000-0000-0000-0000-000000000000
 SBX_GAID_TEST="$SBX_TMP/gaid-optout"
 mkdir -p "$SBX_GAID_TEST/mod" "$SBX_GAID_TEST/bin"
