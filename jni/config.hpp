@@ -21,7 +21,6 @@ inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mo
 
 inline constexpr char CARRIER_CONF[]  = "/data/adb/modules/sandboxid/carrier.conf";
 inline constexpr char CARRIERS_FILE[] = "/data/adb/modules/sandboxid/carriers.tsv";
-inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetprop-rs";
 
 inline constexpr char ENABLE_HIDE[]   = "/data/adb/modules/sandboxid/enable_hide";
 

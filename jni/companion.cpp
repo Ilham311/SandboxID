@@ -214,6 +214,18 @@ static void upsert_identity_value(std::string& data, const std::string& key,
     data.swap(next);
 }
 
+static bool has_identity_key(const std::string& data, const std::string& key) {
+    const std::string prefix = key + "=";
+    size_t pos = 0;
+    while (pos < data.size()) {
+        if (data.compare(pos, prefix.size(), prefix) == 0) return true;
+        const size_t nl = data.find('\n', pos);
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    return false;
+}
+
 struct MountResult {
     uint32_t ok = 0, fail = 0, skip = 0, skip_src = 0, skip_dst = 0;
     int32_t  ns_open_errno   = 0;
@@ -579,9 +591,10 @@ extern "C" void sandboxid_companion(int client) {
                     LOGD("no_native_read aktif -> SBX_NATIVE_READ=0 utk '%s'", pkg.c_str());
                 }
 
-                if (::stat(sandboxid::ENABLE_HIDE, &nrst) == 0) {
+                if (::stat(sandboxid::ENABLE_HIDE, &nrst) == 0 &&
+                    !has_identity_key(d, "SBX_HIDE")) {
                     upsert_identity_value(d, "SBX_HIDE", "1");
-                    LOGD("enable_hide aktif -> SBX_HIDE=1 utk '%s'", pkg.c_str());
+                    LOGD("enable_hide legacy fallback -> SBX_HIDE=1 utk '%s'", pkg.c_str());
                 }
             }
             LOGD("ACCEPT pkg='%s' (%zu bytes)", pkg.c_str(), d.size());
@@ -615,7 +628,9 @@ extern "C" void sandboxid_companion(int client) {
         } else if (cmd == sandboxid::CMD_DO_HIDE) {
             uint32_t pid = 0;
             if (!sandboxid::read_full(client, &pid, sizeof(pid))) break;
-            if (pid == 0) {
+            uint32_t requested = 0;
+            if (!sandboxid::read_full(client, &requested, sizeof(requested))) break;
+            if (pid == 0 || requested != 1) {
                 uint32_t z = 0;
                 sandboxid::write_full(client, &z, sizeof(z));
                 break;
@@ -634,10 +649,7 @@ extern "C" void sandboxid_companion(int client) {
 
             struct stat hst{};
             if (::stat(sandboxid::ENABLE_HIDE, &hst) != 0) {
-                LOGD("DO_HIDE: enable_hide hilang -> no-op utk pid=%u", pid);
-                uint32_t z = 0;
-                sandboxid::write_full(client, &z, sizeof(z));
-                continue;
+                LOGD("DO_HIDE: enable_hide marker absent but canonical SBX_HIDE=1 requested pid=%u", pid);
             }
 
             uint32_t n = do_hide_via_fork(pid);

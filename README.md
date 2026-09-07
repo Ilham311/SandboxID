@@ -4,9 +4,10 @@
 
 SandboxID is an open-source Zygisk module for studying and experimenting with
 the device identifier fields that applications read on a device you own. It
-exposes Android `Build.*` properties and per-application identity configuration
-through a userland module plus a CLI/shell layer, so you can observe how apps
-behave against varied device configurations and learn Android internals.
+keeps identity configuration inside the module and presents selected Android
+`Build.*` and property values only inside configured target processes, so you
+can observe how apps behave against varied device configurations and learn
+Android internals.
 
 - Neutral and universal — no opinion about which applications to touch.
 - User data sovereignty — you decide every configuration; the module ships idle.
@@ -25,8 +26,9 @@ SandboxID is intended for:
   mechanism and per-application configuration in a controlled, local setting.
 - **Mobile developers** — validate application behavior against varied device
   configurations without needing many physical devices.
-- **Android internals learners** — explore how pre-zygote property setup and
-  per-application configuration work on a real device.
+- **Android internals learners** — explore how module-local identity and
+  per-application Zygisk/JNI/Bionic/mount-namespace presentation work on a real
+  device.
 
 Philosophy:
 
@@ -43,23 +45,19 @@ to any application until you configure `target.txt`.
 
 ## How it works
 
-SandboxID combines three cooperating phases:
+SandboxID uses a module-local identity plus one per-target presentation path:
 
-1. **Pre-Zygote presentation properties** — `post-fs-data.sh` validates or seeds
-   `identity.prop`, then runs `sandboxid apply-props` before Zygote caches
-   `Build.*`. These are presentation strings; SDK level, ABI lists, preview
-   state, media performance class, first API level, ISA, heap settings, and
-   other runtime capabilities remain sourced from the real platform.
-2. **Per-target process hooks** — during Zygisk specialization, the companion
-   serves one validated identity snapshot. The module updates presentation
-   `Build.*` fields, intercepts string/typed/Handle `SystemProperties` reads and
-   native Bionic property reads, and bind-mounts synthetic `build.prop` files
-   into that target's mount namespace.
-3. **Post-boot lifecycle work** — `service.sh` runs `sandboxid apply-boot` only
-   after Android reports boot completion. This refreshes mount files and
-   framework device-name Settings; `rotate_ids.sh` can separately perform
-   explicit, device-level storage rotations such as SSAID regeneration, local
-   GAID storage, and Wi-Fi/Bluetooth state changes.
+1. **Module-local identity** — `identity.prop` stores the validated persona and
+   operational flags under `/data/adb/modules/sandboxid`. Normal operation does
+   not publish persona properties globally before Zygote or write framework
+   Settings after boot.
+2. **Per-target process presentation** — during Zygisk specialization, the
+   companion serves one validated identity snapshot. JNI updates selected
+   `Build.*` fields, Java and native hooks intercept `SystemProperties` and
+   Bionic property reads, and synthetic `build.prop` files are bind-mounted only
+   in that target's mount namespace. SDK level, ABI lists, preview state, media
+   performance class, first API level, ISA, heap settings, runtime hardware,
+   and other platform capabilities remain genuine.
 
 The layers share a canonical persona where their scopes overlap. They do not
 turn denied, empty, redacted, opt-out, or service-owned API results into a
@@ -114,9 +112,17 @@ virtualization. Disabled surfaces are not synthesized.
    `sandboxid-vX.Y.Z-release.zip`.
 2. Flash it via your root manager (KernelSU / Magisk / APatch) →
    **Modules** → **Install from storage**.
-3. Reboot.
-4. (Optional) Tap the module **Action** button in your root manager to run a
-   full rotation, or configure `target.txt` first (see *Configuration*).
+3. Reboot once.
+4. Configure `target.txt` (see *Configuration*), then generate or select a
+   module-local persona with the module Action if desired.
+
+### Upgrade recovery
+
+If an older build performed global property/Settings or identifier mutations,
+install the corrected build and reboot once. Do **not** edit or delete
+`settings_ssaid.xml` on a live system. Previous app-data, Settings, or identifier
+mutations cannot be detected or automatically reversed by the module; restore
+those from your own backup or platform-supported recovery path where available.
 
 The module path is `/data/adb/modules/sandboxid`.
 
@@ -147,8 +153,8 @@ Your `target.txt` is preserved across reinstalls by `customize.sh`.
 
 ### `identity.prop`
 
-Written by `sandboxid freshen`, read by the native property apply, the Zygisk
-hooks, and `rotate_ids.sh`. Located at
+Written by `sandboxid freshen` and read by the per-target Zygisk/JNI/Bionic and
+mount-namespace presentation layers. Located at
 `/data/adb/modules/sandboxid/identity.prop`. Format:
 
 ```
@@ -158,8 +164,8 @@ MANUFACTURER=Google
 ```
 
 Empty or absent `identity.prop` is handled gracefully (the module continues
-without applying a persona). `rotate_ids.sh` adds `WIFI_MAC`,
-`BLUETOOTH_ADDR`, and `BLUETOOTH_NAME` to the file as they are generated.
+without applying a persona). Operational changes remain module-local until a
+configured target starts.
 
 ### `personas.tsv`
 
@@ -195,65 +201,37 @@ su -c 'sandboxid <command>'
 
 | Command | What it does |
 |---------|--------------|
-| `freshen` | Generate an exact-SDK persona, apply presentation properties, refresh overlays/Settings, and wipe target app data |
+| `freshen` | Generate and atomically store an exact-SDK module-local persona |
+| `import <file>` | Validate and atomically import a generated module-local persona |
 | `status` | Print the current `identity.prop` |
 | `set-flag <key> <0\|1>` | Atomically set one validated `SBX_*` operational flag; restart the target process to apply |
-| `rollback` | Restore the previous identity and apply the same phases |
+| `rollback` | Restore the previous module-local identity |
 | `lock` / `unlock` | Prevent / re-enable `freshen` (safety after setup) |
-| `apply-props` | Apply presentation properties; boot scripts run this before Zygote |
-| `apply-boot` | Apply post-boot framework Settings and refresh mount files |
-| `seed` | Validate or generate identity and mount files before `apply-props` |
+| `seed` | Validate or generate the module-local identity and per-target mount files |
 | `targets` | List the active target list from `target.txt` |
 
-### `rotate_ids.sh`
+### Android identifiers and recovery boundary
 
-```bash
-su -c 'sh /data/adb/modules/sandboxid/rotate_ids.sh <cmd>'
-```
+Android 8+ scopes `Settings.Secure.ANDROID_ID` (SSAID) by signing key, user, and
+device. There is no supported shell command to reset it, and SandboxID does not
+hook or regenerate SSAID. It also does not write post-boot Settings, clear app
+data, or provide an aggregate identifier-rotation workflow. Advertising ID and
+other service-owned identifiers remain controlled by their platform services.
+Do not modify `settings_ssaid.xml` while Android is running.
 
-| Command | Applies | Needs reboot? |
-|---------|---------|---------------|
-| `all` | SSAID storage regeneration + local GAID write + wlan/BT MAC + device name + AppLog (default) | Yes (SSAID regeneration) |
-| `safe` | Local GAID write + BT MAC + device name + AppLog (skips SSAID + wlan) | No |
-| `ssaid` | Back up and delete `settings_ssaid.xml`; Android regenerates it after reboot | Yes |
-| `gaid [uuid]` | Best-effort local Settings/XML GAID write; the all-zero sentinel keeps local opt-out flags, and the command does not hook the advertising-ID API | No |
-| `wlan-mac [xx:xx:...]` | Set `wlan0` MAC + wipe `WifiConfigStore` | No |
-| `bt-mac [xx:xx:...]` | Set Bluetooth adapter MAC + `bt_config.conf` Address | No (toggle BT) |
-| `device-name [name]` | Sync device/BT name to `identity.prop` MODEL | No |
-| `applog [pkg]` | Rotate local ByteDance AppLog cache values served by the native-read layer | No |
-| `applog-wipe [pkg]` | Wipe known AppLog caches without rotating the persona epoch | No |
-| `status` | Read-only snapshot of all identifiers (never dumps AppLog values — privacy) | — |
-| `help` | Print usage | — |
-
-**`applog` in detail.** Some apps built on ByteDance **AppLog /
-RangersAppLog** keep application-owned caches containing keys such as
-`device_id`/`did`, `install_id`/`iid`, `ssid`, `cdid`, `clientudid`, and
-`openudid`. Their source, format, and lifecycle vary by SDK and service version;
-some may be assigned or reconciled remotely rather than controlled by the local
-cache. SandboxID recognizes only the explicitly listed local files and does not
-claim that changing them changes a service's server-side identity, account
-state, registration, or relinking behavior.
-
-The native-read layer can present deterministic per-package cache values from
-the persona identity, package name, and `APPLOG_EPOCH` in `identity.prop`:
-
-- recognized `shared_prefs/{applog,snssdk_openudid,snssdk_did,bd_device_info}.xml`
-  reads patch only known identifier values and preserve unrelated XML entries;
-- recognized `files/bd_setting/*` and `files/.cdid` pure reads receive bounded
-  synthetic text.
-
-`rotate_ids.sh applog` bumps `APPLOG_EPOCH`, backs up and removes recognized
-cache files, and force-stops the selected targets so a warm process does not
-keep old in-memory values. `applog-wipe` performs only the backup/removal step.
-These are local privacy-testing controls, not a promise about remote
-registration, relinking, or service acceptance.
+For a previous build that performed those mutations, follow *Upgrade recovery*:
+install the corrected build and reboot once. Historical data or identifier
+changes cannot be automatically reversed.
 
 ---
 
 ## `identity.prop` schema
 
-Written by `freshen`, read by native prop apply, Zygisk hooks, and
-`rotate_ids.sh`. Located at `/data/adb/modules/sandboxid/identity.prop`.
+Written by `freshen` or Action, then read by the per-target native property,
+Zygisk, and mount-namespace presentation layers. `ANDROID_ID`, `GOOGLE_AID`, and
+other identifier-like fields in this file are profile metadata or desired values
+for explicitly invoked `rotate_ids.sh` commands; they are not claims about the
+corresponding service APIs. Located at `/data/adb/modules/sandboxid/identity.prop`.
 
 | Key | Written by | Purpose |
 |-----|-----------|---------|
@@ -336,10 +314,12 @@ Build with `-Wall -Wextra` per ABI. The `debug` variant enables verbose
 
 ## Credits & References
 
-SandboxID uses documented Android platform commands (`pm clear`,
-`am force-stop`, `settings put`) and root/Zygisk module APIs. External Android
-and AOSP documentation used to explain identifier scope and property behavior
-is linked above. The repository is MIT licensed; inspect your checkout's
+SandboxID uses root/Zygisk module APIs plus documented Android platform commands
+for the explicit, separately requested shared-device operations listed above.
+Normal persona generation and rollback do not clear application data, force-stop
+applications, publish properties globally, or write framework Settings. External
+Android and AOSP documentation used to explain identifier scope and property
+behavior is linked above. The repository is MIT licensed; inspect your checkout's
 history and dependency metadata for version-specific attribution.
 
 ---
@@ -367,20 +347,13 @@ symbols. No v2.13 result fixture is claimed without an actual immutable report.
 - Validated presentation identity: selected `Build.*` strings/timestamps,
   string and typed `SystemProperties` reads, genuine nonzero `Handle` reads,
   native Bionic property reads, and per-target `build.prop` file views.
-- Pre-Zygote property publication plus checked per-process Build fallback for
-  warm/vendor-cached paths.
-- Exact-runtime-SDK persona selection. ABI arrays, `SDK_INT`, SDK extensions,
-  preview state, first API level, Zygote/native bridge/ISA/heap configuration,
-  media performance class, board/hardware/SoC fields, and other runtime
-  capabilities remain genuine.
-- Relative pure-read `openat` path resolution for the small native-read
-  allowlist, with fail-open behavior on ambiguity.
-- Optional aggregate `/proc/cpuinfo` revision normalization when
-  `SBX_CPU_REVISION=1`; per-core records, topology, features, and Hardware lines
-  remain byte-for-byte intact.
-- Device-level lifecycle actions for SSAID storage regeneration, local GAID
-  Settings/XML writes, Wi-Fi/Bluetooth state, device name, and recognized
-  AppLog caches. These actions do not imply active Java identifier API hooks.
+- Module-local persona generation, validation, atomic replacement, backup, and
+  per-target mount artifact generation. Normal lifecycle work does not publish
+  device-wide properties or write framework Settings.
+- Explicit individual shared-device operations for local GAID Settings/XML,
+  Wi-Fi/Bluetooth state, device name, boot count, carrier selection, and
+  recognized AppLog caches. They are never coupled to persona generation and do
+  not imply active Java identifier API hooks.
 - Companion IPC with atomic target-list hot reload, crash logging, and atomic
   configuration writes.
 
@@ -400,9 +373,10 @@ symbols. No v2.13 result fixture is claimed without an actual immutable report.
 
 ### Known limitations
 
-- Presentation properties are device-wide once `apply-props` runs, while
-  per-process Build/property/file hooks are limited to `target.txt`. Keep the
-  list intentional; an empty list leaves the module idle.
+- Persona presentation is per configured target process; `seed`, `freshen`, and
+  rollback only update module-local files. Broad property suppression is
+  independently disabled unless canonical `SBX_HIDE=1`; missing, malformed, or
+  zero flags pass genuine platform values through.
 - `SystemProperties.native_find` and the long-handle getters are covered only
   for genuine nonzero handles returned by the platform. The module never
   fabricates handles or interprets private `prop_info` layouts. Direct reads of
@@ -415,9 +389,10 @@ symbols. No v2.13 result fixture is claimed without an actual immutable report.
   `jni/CMakeLists.txt`; Java identifier entry hooks are therefore not active or
   packaged. Adding one is a separate opt-in phase requiring API-version,
   permission/redaction, cancellation, executor, and callback-error contracts.
-- SSAID deletion is a reboot-time regeneration action, not a per-app API
-  override. Local GAID writes do not guarantee what Google Play services
-  returns and must not override its opt-out sentinel.
+- Android 8+ SSAID is system-managed and scoped by signing key, user, and
+  device. SandboxID does not delete, back up, write, or claim to regenerate its
+  live SettingsProvider storage. Local GAID writes are best-effort and do not
+  guarantee what Google Play services returns or override its opt-out sentinel.
 - Carrier selection presents GSM operator properties. `GSM_CARRIER_ID` is
   retained as profile metadata, but `TelephonyManager.getSimCarrierId()` is not
   hooked by this build.

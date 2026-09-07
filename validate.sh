@@ -123,6 +123,22 @@ done
 [ "$(awk -F= '$1=="SBX_PROC_VERSION" {print $2}' "$SBX_LIFECYCLE_TEST/mod/identity.prop")" = 0 ] || lifecycle_ok=0
 [ "$(awk -F= '$1=="SBX_MEMINFO" {print $2}' "$SBX_LIFECYCLE_TEST/mod/identity.prop")" = 1 ] || lifecycle_ok=0
 [ "$(awk -F= '$1=="SBX_SYSFS_MAC" {print $2}' "$SBX_LIFECYCLE_TEST/mod/identity.prop")" = 0 ] || lifecycle_ok=0
+
+# A non-empty target must run seed only. Record every native command to prove
+# post-fs-data never falls back to retired device-wide publication commands.
+printf 'com.example.target\n' > "$SBX_LIFECYCLE_TEST/mod/target.txt"
+cat > "$SBX_LIFECYCLE_TEST/mod/bin/sandboxid" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$SBX_TEST_CALLS"
+[ "$1" = seed ]
+EOF
+chmod 0755 "$SBX_LIFECYCLE_TEST/mod/bin/sandboxid"
+: > "$SBX_LIFECYCLE_TEST/calls"
+SBX_TEST_CALLS="$SBX_LIFECYCLE_TEST/calls" \
+  LOGFILE="$SBX_LIFECYCLE_TEST/post-fs-data-seed.log" \
+  sh "$SBX_LIFECYCLE_TEST/mod/post-fs-data.sh" >/dev/null 2>&1 || lifecycle_ok=0
+[ "$(wc -l < "$SBX_LIFECYCLE_TEST/calls" | tr -d ' ')" = 1 ] || lifecycle_ok=0
+grep -qx 'seed' "$SBX_LIFECYCLE_TEST/calls" || lifecycle_ok=0
 if [ "$lifecycle_ok" = 1 ]; then
   echo "OK: operational flags remain unique through replacement and reinstall restoration"
 else
@@ -147,6 +163,72 @@ if PATH="$SBX_GAID_TEST/bin:$PATH" MODDIR="$SBX_GAID_TEST/mod" \
   echo "OK: all-zero GAID preserves local opt-out state"
 else
   echo "FAIL: all-zero GAID opt-out semantics"; rc=1
+fi
+
+SBX_ROTATE_GUARD="$SBX_TMP/rotate-guard"
+mkdir -p "$SBX_ROTATE_GUARD/mod"
+cp helpers.sh rotate_ids.sh "$SBX_ROTATE_GUARD/mod/"
+printf 'version=test\n' > "$SBX_ROTATE_GUARD/mod/module.prop"
+printf 'MODEL=unchanged\n' > "$SBX_ROTATE_GUARD/mod/identity.prop"
+printf 'sentinel\n' > "$SBX_ROTATE_GUARD/sentinel"
+rotate_guard_ok=1
+MODDIR="$SBX_ROTATE_GUARD/mod" LOGFILE="$SBX_ROTATE_GUARD/rotate.log" \
+  BACKUP_DIR_ROOT="$SBX_ROTATE_GUARD/backups" \
+  sh "$SBX_ROTATE_GUARD/mod/rotate_ids.sh" >/dev/null 2>&1 || rotate_guard_ok=0
+for retired in ssaid all safe; do
+  if MODDIR="$SBX_ROTATE_GUARD/mod" LOGFILE="$SBX_ROTATE_GUARD/rotate.log" \
+     BACKUP_DIR_ROOT="$SBX_ROTATE_GUARD/backups" \
+     sh "$SBX_ROTATE_GUARD/mod/rotate_ids.sh" "$retired" >/dev/null 2>&1; then
+    rotate_guard_ok=0
+  fi
+done
+[ "$(cat "$SBX_ROTATE_GUARD/mod/identity.prop")" = 'MODEL=unchanged' ] || rotate_guard_ok=0
+[ "$(cat "$SBX_ROTATE_GUARD/sentinel")" = 'sentinel' ] || rotate_guard_ok=0
+if [ "$rotate_guard_ok" = 1 ]; then
+  echo "OK: no-arg rotation is help-only and retired aggregate/SSAID commands fail closed"
+else
+  echo "FAIL: retired rotation command mutated state or returned success"; rc=1
+fi
+
+PROHIBITED_RE='settings_ssaid\.xml|Regenerasi SSAID|Rotasi semua|rotate_ids\.sh all|pm clear'
+if grep -R -n -E "$PROHIBITED_RE" action.sh post-fs-data.sh service.sh rotate_ids.sh webroot customize.sh module.prop devices.tsv >/dev/null 2>&1; then
+  echo "FAIL: runtime/UI source still contains destructive or unsupported lifecycle flow"; rc=1
+else
+  echo "OK: runtime/UI source omits SSAID reset, aggregate rotation, and app-data clearing"
+fi
+if grep -R -n -E 'resetprop.*(--delete|-d)' jni action.sh post-fs-data.sh service.sh >/dev/null 2>&1; then
+  echo "FAIL: normal lifecycle source still deletes global properties"; rc=1
+else
+  echo "OK: normal lifecycle source contains no global property deletion"
+fi
+if grep -n -E 'apply-props|apply-boot' action.sh post-fs-data.sh service.sh >/dev/null 2>&1; then
+  echo "FAIL: boot/action scripts still invoke retired device-wide commands"; rc=1
+else
+  echo "OK: boot/action scripts never invoke retired device-wide commands"
+fi
+if ! grep -q '"$BIN" import "$DEVICE_ID"' action.sh \
+   || grep -n -E 'cp -f .*DEVICE_ID.*IDENTITY|mv -f .*IDENTITY' action.sh >/dev/null 2>&1; then
+  echo "FAIL: Action bypasses validated native identity import"; rc=1
+else
+  echo "OK: Action uses validated atomic native identity import"
+fi
+
+if ! grep -q 'SBX_HIDE=0' autopif.sh \
+   || ! grep -q -E 'should_hide_prop\([^,]+, false\)' tests/native_read_test.cpp \
+   || ! grep -q -E 'should_hide_prop\([^,]+, true\)' tests/native_read_test.cpp; then
+  echo "FAIL: explicit property-hide opt-in coverage missing"; rc=1
+else
+  echo "OK: broad property hiding defaults off and has host regression coverage"
+fi
+
+if grep -n -E 'session-[0-9]|\.claude-tmp' build.sh >/dev/null 2>&1; then
+  echo "FAIL: build script references local session artifacts"; rc=1
+else
+  echo "OK: build script does not package local session artifacts"
+fi
+
+if [ -e "$SBX_TMP_ROOT/session-20260908-043915.log" ]; then
+  echo "FAIL: validation copied the supplied device log into temp output"; rc=1
 fi
 
 echo "=== 4/6 autopif exact-SDK artifact ==="

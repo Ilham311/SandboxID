@@ -266,9 +266,22 @@ static void test_hide_prop() {
     CHECK(!is_custom_rom_prop("ro.cmdline"), "ro.cmdline not custom rom (ro.cm. must be dotted)");
     CHECK(!is_custom_rom_prop(nullptr), "null prop not custom rom");
 
-    CHECK(should_hide_prop("qemu.hw.mainkeys"), "should_hide covers emulator");
-    CHECK(should_hide_prop("ro.lineage.version"), "should_hide covers custom rom");
-    CHECK(!should_hide_prop("ro.product.brand"), "should_hide leaves normal props");
+    CHECK(!should_hide_prop("qemu.hw.mainkeys", false),
+          "disabled hide gate preserves emulator props");
+    CHECK(!should_hide_prop("ro.lineage.version", false),
+          "disabled hide gate preserves custom-ROM props");
+    CHECK(!should_hide_prop("ro.miui.ui.version.code", false),
+          "disabled hide gate preserves OEM numeric props");
+    CHECK(should_hide_prop("qemu.hw.mainkeys", true),
+          "enabled hide gate covers emulator props");
+    CHECK(should_hide_prop("ro.lineage.version", true),
+          "enabled hide gate covers custom-ROM props");
+    CHECK(should_hide_prop("ro.miui.ui.version.code", true),
+          "enabled hide gate covers OEM props");
+    CHECK(!should_hide_prop("ro.product.brand", true),
+          "enabled hide gate leaves ordinary props genuine");
+    CHECK(!should_hide_prop(nullptr, true),
+          "enabled hide gate handles null names safely");
 }
 
 static void test_applog_classify() {

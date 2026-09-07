@@ -184,18 +184,12 @@ function summarizeRotate(out, label) {
   const text = String(out || '');
   const errs = (text.match(/\[ERR\]/g) || []).length;
   const warns = (text.match(/\[WARN\]/g) || []).length;
-  const fail = text.match(/(\d+) step\(s\) reported failure/);
-  const reboot = /REBOOT REQUIRED/i.test(text);
-  const name = label || 'Rotasi';
-  if (errs > 0 || (fail && Number(fail[1]) > 0)) {
-    const n = fail ? fail[1] : String(errs);
-    return { kind: 'error', title: `${name}: ${n} langkah gagal`, detail: text };
+  const name = label || 'Operasi';
+  if (errs > 0) {
+    return { kind: 'error', title: `${name}: ${errs} kesalahan`, detail: text };
   }
-  let note = '';
-  let kind = 'ok';
-  if (reboot) { note = ' \u00b7 perlu reboot'; kind = 'warn'; }
-  else if (warns > 0) { note = ` \u00b7 ${warns} warning`; kind = 'warn'; }
-  return { kind, title: `${name} selesai${note}`, detail: text };
+  const note = warns > 0 ? ` \u00b7 ${warns} warning` : '';
+  return { kind: warns > 0 ? 'warn' : 'ok', title: `${name} selesai${note}`, detail: text };
 }
 
 function wireTabs() {
@@ -333,13 +327,12 @@ document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoad
 }));
 
 const ROT_CARDS = [
-  { key: 'ssaid',       name: 'Regenerasi SSAID', desc: 'Hapus penyimpanan SSAID sistem; Android membuat ulang saat reboot (bukan hook API per-aplikasi)', get: null },
-  { key: 'gaid',        name: 'GAID lokal',      desc: 'Tulis Settings.Global + XML GMS best-effort; nilai nol mempertahankan opt-out lokal, API tetap milik layanan', get: 'GOOGLE_AID' },
-  { key: 'wlan-mac',    name: 'WiFi MAC',      desc: 'MAC wlan0 + reset WifiConfigStore',                 get: 'WIFI_MAC' },
-  { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'MAC adapter BT + Address di bt_config.conf',        get: 'BLUETOOTH_ADDR' },
-  { key: 'device-name', name: 'Nama perangkat', desc: 'device_name = MODEL dari identity.prop',           get: 'MODEL' },
-  { key: 'boot-count',  name: 'Boot count',    desc: 'Settings.Global.boot_count = BOOT_COUNT identity.prop', get: 'BOOT_COUNT' },
-  { key: 'applog',      name: 'AppLog ByteDance', desc: 'did/iid/ssid/openudid/clientudid/cdid untuk TikTok/Douyin — di-spoof in-process oleh hook JNI (L9)', get: null, applog: true },
+  { key: 'gaid',        name: 'GAID lokal',      desc: 'Operasi eksplisit device-wide: tulis Settings.Global + XML GMS best-effort; API tetap milik layanan', get: 'GOOGLE_AID' },
+  { key: 'wlan-mac',    name: 'WiFi MAC',        desc: 'Operasi eksplisit device-wide: MAC wlan0 + reset WifiConfigStore', get: 'WIFI_MAC' },
+  { key: 'bt-mac',      name: 'Bluetooth MAC',   desc: 'Operasi eksplisit device-wide: MAC adapter BT + Address di bt_config.conf', get: 'BLUETOOTH_ADDR' },
+  { key: 'device-name', name: 'Nama perangkat',  desc: 'Operasi eksplisit device-wide: device_name = MODEL dari identity.prop', get: 'MODEL' },
+  { key: 'boot-count',  name: 'Boot count',      desc: 'Operasi eksplisit device-wide: Settings.Global.boot_count = BOOT_COUNT identity.prop', get: 'BOOT_COUNT' },
+  { key: 'applog',      name: 'AppLog ByteDance', desc: 'Operasi target eksplisit: did/iid/ssid/openudid/clientudid/cdid; terpisah dari lifecycle persona', get: null, applog: true },
 ];
 
 async function loadRotate() {
@@ -417,11 +410,6 @@ async function rotateOne(key, btn) {
     finishRotate(r, label);
   });
 }
-
-document.getElementById('rotAll').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
-  const r = await run(rotateCmd('all'));
-  finishRotate(r, 'Rotasi semua');
-}));
 
 let SIM_DB = null;
 

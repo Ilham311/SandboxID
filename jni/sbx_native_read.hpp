@@ -595,9 +595,9 @@ inline bool is_oem_leak_prop(const char* name) {
     return false;
 }
 
-inline bool should_hide_prop(const char* name) {
-    return is_emulator_prop(name) || is_custom_rom_prop(name) ||
-           is_identity_leak_prop(name) || is_oem_leak_prop(name);
+inline bool should_hide_prop(const char* name, bool hide_enabled) {
+    return hide_enabled && (is_emulator_prop(name) || is_custom_rom_prop(name) ||
+                            is_identity_leak_prop(name) || is_oem_leak_prop(name));
 }
 
 inline bool is_native_unsafe_prop(const char* name) {

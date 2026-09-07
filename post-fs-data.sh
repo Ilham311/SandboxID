@@ -36,15 +36,7 @@ if [ -x "$BIN" ]; then
             echo "[post-fs-data] seed ok"
         else
             rc=$?
-            echo "[post-fs-data] seed failed rc=$rc; apply-props skipped"
-            exit "$rc"
-        fi
-        echo "[post-fs-data] apply-props begin"
-        if "$BIN" apply-props; then
-            echo "[post-fs-data] apply-props ok"
-        else
-            rc=$?
-            echo "[post-fs-data] apply-props failed rc=$rc"
+            echo "[post-fs-data] seed failed rc=$rc"
             exit "$rc"
         fi
     } >> "$LOG" 2>&1

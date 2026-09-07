@@ -217,17 +217,26 @@ case "$_se" in
 esac
 emit selinux INFO "ro.build.selinux + node enforce di-mask per-app — verifikasi di dalam app target"
 
+_hide="$(id_get SBX_HIDE)"; [ -n "$_hide" ] || _hide=0
 _qemu="$(gp ro.kernel.qemu)$(gp ro.boot.qemu)"
 _hw="$(gp ro.hardware)"
-if [ -n "$_qemu" ] || [ "$_hw" = "goldfish" ] || [ "$_hw" = "ranchu" ]; then
-    emit rom FAIL "prop emulator/qemu terdeteksi device-wide (hw=$_hw)"
+if [ "$_hide" = 1 ]; then
+    if [ -n "$_qemu" ] || [ "$_hw" = "goldfish" ] || [ "$_hw" = "ranchu" ]; then
+        emit rom INFO "prop emulator/qemu genuine ada device-wide; SBX_HIDE=1 menyembunyikan klasifikasi ini hanya di target"
+    else
+        emit rom PASS "tidak ada prop qemu device-wide"
+    fi
 else
-    emit rom PASS "tidak ada prop qemu device-wide"
+    emit rom INFO "SBX_HIDE=0: prop emulator/OEM/custom-ROM diteruskan genuine ke target"
 fi
 
 _lin="$(gp ro.modversion)$(gp ro.lineage.version)$(gp ro.cm.version)"
 if [ -n "$_lin" ]; then
-    emit rom WARN "prop custom-ROM device-wide ada (di-mask per-app oleh hook)"
+    if [ "$_hide" = 1 ]; then
+        emit rom INFO "prop custom-ROM genuine ada; SBX_HIDE=1 menyembunyikannya hanya di target"
+    else
+        emit rom INFO "prop custom-ROM genuine ada dan diteruskan karena SBX_HIDE=0"
+    fi
 else
     emit rom PASS "tidak ada prop custom-ROM device-wide"
 fi
@@ -245,10 +254,10 @@ _mgr=""
 _mgr="${_mgr# }"
 emit root INFO "root solution: ${_mgr:-tidak terdeteksi di /data/adb}"
 
-if [ -f "$MODDIR/enable_hide" ]; then
-    emit root INFO "hider mount-trace: AKTIF (opt-in) — berlaku di dalam app target"
+if [ "$_hide" = 1 ]; then
+    emit root INFO "hider mount-trace: AKTIF via SBX_HIDE=1 — berlaku di dalam app target"
 else
-    emit root INFO "hider mount-trace: nonaktif (default) — touch enable_hide untuk mengaktifkan"
+    emit root INFO "hider mount-trace: nonaktif — set SBX_HIDE=1 secara eksplisit untuk mengaktifkan"
 fi
 
 _mi=/proc/self/mountinfo

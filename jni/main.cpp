@@ -241,6 +241,7 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
 }
 
 static bool g_stable_release_runtime = false;
+static bool g_hide_enabled = false;
 
 static bool spoof_prop_value(const std::string& k, std::string& out) {
     if (sbxprop::release_alias_property(k) && !g_stable_release_runtime)
@@ -255,7 +256,7 @@ static bool spoof_prop_value(const std::string& k, std::string& out) {
 }
 
 static inline bool sbx_prop_hidden(const char* name) {
-    return name && sbxnr::should_hide_prop(name);
+    return sbxnr::should_hide_prop(name, g_hide_enabled);
 }
 
 static jstring checked_new_string(JNIEnv* env, const std::string& value, jstring fallback) {
@@ -1345,7 +1346,10 @@ static void request_companion_mounts(int fd) {
 static void request_companion_hide(int fd) {
     uint8_t cmd  = sandboxid::CMD_DO_HIDE;
     uint32_t pid = (uint32_t)::getpid();
-    if (!sandboxid::write_full(fd, &cmd, 1) || !sandboxid::write_full(fd, &pid, sizeof(pid))) {
+    uint32_t requested = 1;
+    if (!sandboxid::write_full(fd, &cmd, 1) ||
+        !sandboxid::write_full(fd, &pid, sizeof(pid)) ||
+        !sandboxid::write_full(fd, &requested, sizeof(requested))) {
         LOGW("companion DO_HIDE write failed (socket unusable post-specialize?)");
         return;
     }
@@ -1437,6 +1441,7 @@ public:
 
         publish_identity(std::move(validated_identity_));
         g_stable_release_runtime = runtime_is_stable_release();
+        g_hide_enabled = val("SBX_HIDE") == "1";
         g_build_replacements = 0;
         g_build_failures = 0;
         LOGD("validated identity: %zu keys", g_id.size());
