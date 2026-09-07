@@ -14,6 +14,24 @@ fi
 TARGET="$MODDIR/target.txt"
 grep -qE '^[[:space:]]*[^[:space:]#]' "$TARGET" 2>/dev/null || exit 0
 
+LOG=/cache/sandboxid-boot.log
 if [ -x "$BIN" ]; then
-    "$BIN" seed >> /cache/sandboxid-boot.log 2>&1
+    {
+        echo "[post-fs-data] seed begin"
+        if "$BIN" seed; then
+            echo "[post-fs-data] seed ok"
+        else
+            rc=$?
+            echo "[post-fs-data] seed failed rc=$rc; apply-props skipped"
+            exit "$rc"
+        fi
+        echo "[post-fs-data] apply-props begin"
+        if "$BIN" apply-props; then
+            echo "[post-fs-data] apply-props ok"
+        else
+            rc=$?
+            echo "[post-fs-data] apply-props failed rc=$rc"
+            exit "$rc"
+        fi
+    } >> "$LOG" 2>&1
 fi

@@ -129,16 +129,16 @@ fi
 
 _vbs="$(gp ro.boot.verifiedbootstate)"
 case "$_vbs" in
-    green)             emit vbmeta PASS "verifiedbootstate=green" ;;
-    orange|yellow|red) emit vbmeta FAIL "verifiedbootstate=$_vbs (bootloader tidak terkunci/termodifikasi)" ;;
-    "")                emit vbmeta WARN "verifiedbootstate kosong — apply-boot belum jalan?" ;;
-    *)                 emit vbmeta WARN "verifiedbootstate=$_vbs (tak dikenal)" ;;
+    green|verified)    emit vbmeta PASS "verifiedbootstate=$_vbs (status platform asli/ditandatangani)" ;;
+    orange|yellow|red) emit vbmeta FAIL "verifiedbootstate=$_vbs (status platform asli: bootloader tidak terkunci/termodifikasi)" ;;
+    "")                emit vbmeta WARN "verifiedbootstate kosong — status platform tidak tersedia" ;;
+    *)                 emit vbmeta WARN "verifiedbootstate=$_vbs (status platform tak dikenal)" ;;
 esac
 
 _ds="$(gp ro.boot.vbmeta.device_state)"
 case "$_ds" in
-    locked)   emit vbmeta PASS "vbmeta.device_state=locked" ;;
-    unlocked) emit vbmeta FAIL "vbmeta.device_state=unlocked" ;;
+    locked)   emit vbmeta PASS "vbmeta.device_state=locked (status platform asli)" ;;
+    unlocked) emit vbmeta FAIL "vbmeta.device_state=unlocked (status platform asli)" ;;
     "")       emit vbmeta WARN "vbmeta.device_state kosong" ;;
     *)        emit vbmeta WARN "vbmeta.device_state=$_ds" ;;
 esac
@@ -164,7 +164,7 @@ case "$_dig" in
     *)
         _clean="$(printf '%s' "$_dig" | tr -d '0-9a-f')"
         if [ -z "$_clean" ] && [ "${#_dig}" -eq 64 ]; then
-            emit vbmeta PASS "vbmeta.digest terpasang (64-hex)"
+        emit vbmeta PASS "vbmeta.digest terpasang (64-hex, nilai platform asli; bukan bukti yang dipalsukan)"
         else
             emit vbmeta WARN "vbmeta.digest bentuk tak lazim (len=${#_dig})"
         fi

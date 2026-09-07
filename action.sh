@@ -59,10 +59,18 @@ if [ -x "$BIN" ] && [ -s "$DEVICE_ID" ]; then
         chmod 0644 "$IDENTITY" 2>/dev/null
         "$BIN" unlock >/dev/null 2>&1 || true
         say ""
-        say "==> Menerapkan identitas (apply-boot)"
+        say "==> Menerapkan properti presentasi (apply-props)"
         APPLY_OUT="$MODDIR/debug/.apply.$$"
-        "$BIN" apply-boot </dev/null >"$APPLY_OUT" 2>&1; RC=$?
+        "$BIN" apply-props </dev/null >"$APPLY_OUT" 2>&1; RC=$?
         tee2 < "$APPLY_OUT"; rm -f "$APPLY_OUT" 2>/dev/null
+        if [ "$RC" = 0 ]; then
+            say "==> Menerapkan Settings framework + overlay (apply-boot)"
+            APPLY_OUT="$MODDIR/debug/.apply.$$"
+            "$BIN" apply-boot </dev/null >"$APPLY_OUT" 2>&1; RC=$?
+            tee2 < "$APPLY_OUT"; rm -f "$APPLY_OUT" 2>/dev/null
+        else
+            say "! apply-props gagal — apply-boot dilewati agar identitas tidak tercampur."
+        fi
         "$BIN" lock >/dev/null 2>&1 || true
         [ "$RC" = 0 ] && APPLIED="multibrand"
     else
@@ -113,7 +121,7 @@ fi
 
 if [ -r "$ROTATE" ]; then
     say ""
-    say "==> Rotasi ID lain (SSAID, GAID, WiFi/BT MAC, nama, boot count, AppLog)"
+    say "==> Rotasi penyimpanan perangkat (regenerasi SSAID, GAID lokal, WiFi/BT MAC, nama, boot count, AppLog)"
     ROT_OUT="$MODDIR/debug/.rotate.$$"
     MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all </dev/null >"$ROT_OUT" 2>&1; RC_ROT=$?
     tee_action < "$ROT_OUT"; rm -f "$ROT_OUT" 2>/dev/null
@@ -163,9 +171,9 @@ if [ "$APPLIED" = "multibrand" ]; then
     say "  BOOT COUNT  : $_bc"
     say "  UPTIME      : $_up"
     say "  SERIAL      : $_ser"
-    say "  ANDROID ID  : $_aid"
+    say "  ENTROPY ID  : $_aid (metadata profil; bukan hasil API SSAID)"
     say ""
-    say "Selesai. Buka ulang aplikasi target — sekarang membaca identitas perangkat di atas."
+    say "Selesai. Buka ulang aplikasi target. Properti Java yang sudah di-cache mungkin memerlukan proses baru; reboot memastikan fase pre-Zygote berlaku penuh."
 elif [ "$APPLIED" = "freshen" ]; then
     say "OK - persona cadangan Pixel aktif — lihat detail MODEL di atas."
 else

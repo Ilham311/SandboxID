@@ -256,7 +256,7 @@ const DETAIL_KEYS = [
   ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'], ['BOARD', 'Board'],
   ['SOC_MANUFACTURER', 'SoC vendor'], ['SOC_MODEL', 'SoC'],
   ['SECURITY_PATCH', 'Security patch'],
-  ['SERIAL', 'Serial'], ['ANDROID_ID', 'Android ID'], ['GOOGLE_AID', 'Google AID'],
+  ['SERIAL', 'Serial'], ['ANDROID_ID', 'Entropy profil'], ['GOOGLE_AID', 'GAID lokal'],
   ['WIFI_MAC', 'WiFi MAC'], ['BLUETOOTH_ADDR', 'BT MAC'], ['BLUETOOTH_NAME', 'Nama BT'],
   ['RADIO', 'Radio'], ['FIRST_BOOT', 'Boot awal'], ['LAST_BOOT', 'Boot terakhir'],
 ];
@@ -333,8 +333,8 @@ document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoad
 }));
 
 const ROT_CARDS = [
-  { key: 'ssaid',       name: 'SSAID',         desc: 'Android ID per-aplikasi (Settings.Secure) — dihapus, dibuat ulang setelah reboot', get: 'ANDROID_ID' },
-  { key: 'gaid',        name: 'Google AID',    desc: 'Advertising ID (Settings.Global + XML GMS)',        get: 'GOOGLE_AID' },
+  { key: 'ssaid',       name: 'Regenerasi SSAID', desc: 'Hapus penyimpanan SSAID sistem; Android membuat ulang saat reboot (bukan hook API per-aplikasi)', get: null },
+  { key: 'gaid',        name: 'GAID lokal',      desc: 'Tulis Settings.Global + XML GMS best-effort; nilai nol mempertahankan opt-out lokal, API tetap milik layanan', get: 'GOOGLE_AID' },
   { key: 'wlan-mac',    name: 'WiFi MAC',      desc: 'MAC wlan0 + reset WifiConfigStore',                 get: 'WIFI_MAC' },
   { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'MAC adapter BT + Address di bt_config.conf',        get: 'BLUETOOTH_ADDR' },
   { key: 'device-name', name: 'Nama perangkat', desc: 'device_name = MODEL dari identity.prop',           get: 'MODEL' },

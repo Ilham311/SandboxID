@@ -136,23 +136,6 @@ sdk_release() {
   esac
 }
 
-sdk_secpatch() {
-  case "$1" in
-    30) echo "2021-08-05" ;; 31) echo "2022-08-05" ;; 32) echo "2022-08-05" ;;
-    33) echo "2023-08-05" ;; 34) echo "2024-08-05" ;; 35) echo "2024-11-05" ;;
-    36) echo "2025-08-05" ;;
-    *)  echo "" ;;
-  esac
-}
-sdk_release_date() {
-  case "$1" in
-    30) echo "2020-09" ;; 31) echo "2021-10" ;; 32) echo "2022-07" ;;
-    33) echo "2022-08" ;; 34) echo "2023-10" ;; 35) echo "2024-10" ;;
-    36) echo "2025-06" ;;
-    *)  echo "" ;;
-  esac
-}
-
 col() { printf '%s' "$1" | cut -f"$2"; }
 
 gen_lifecycle() {
@@ -211,13 +194,6 @@ assemble_identity() {
   RELEASE=$(col "$_row" 11);     BUILD_ID=$(col "$_row" 12)
   INCREMENTAL=$(col "$_row" 13); SECPATCH=$(col "$_row" 14)
   RELEASE_DATE=$(col "$_row" 15)
-
-  if [ -n "${LOCK_SDK:-}" ]; then
-    SDK=$LOCK_SDK
-    _lock_secpatch=$(sdk_secpatch "$LOCK_SDK"); [ -n "$_lock_secpatch" ] && SECPATCH="$_lock_secpatch"
-    _lock_reldate=$(sdk_release_date "$LOCK_SDK"); [ -n "$_lock_reldate" ] && RELEASE_DATE="$_lock_reldate"
-  fi
-  [ -n "${LOCK_REL:-}" ] && RELEASE=$LOCK_REL
 
   for _v in "$BRAND" "$MANUFACTURER" "$MODEL" "$DEVICE" "$PRODUCT" "$BOARD" \
             "$SOC_MODEL" "$SDK" "$RELEASE" "$BUILD_ID" "$INCREMENTAL" \
@@ -301,17 +277,8 @@ FIRST_BOOT=$FIRST_BOOT
 LAST_BOOT=$(epoch_to_ymd "$LAST_BOOT_EP")
 USAGE_PROFILE=$PROFILE
 FRESH=$FRESH
-VBMETA_DIGEST=$(rand_hex 32)
 FLAVOR=$FLAVOR_STR
 APPLOG_EPOCH=$APPLOG_EPOCH
-SUPPORTED_ABIS=arm64-v8a,armeabi-v7a,armeabi
-SUPPORTED_64_BIT_ABIS=arm64-v8a
-SUPPORTED_32_BIT_ABIS=armeabi-v7a,armeabi
-CPU_ABI=arm64-v8a
-CPU_ABI2=
-PREVIEW_SDK_INT=0
-PREVIEW_SDK_FINGERPRINT=REL
-FIRST_API_LEVEL=$SDK
 EOF
 )
   if [ -n "$BUILD_UTC" ]; then
@@ -345,8 +312,8 @@ display_profile() {
   fi
   printf '  %-12s %s\n'        "Status"      "$( [ "$RESET" -eq 1 ] && echo 'fresh (baru direset)' || echo 'fresh (baru dipasang)' )"
   printf '  %-12s %s\n'        "Serial"      "$SERIAL"
-  printf '  %-12s %s\n'        "Android ID"  "$ANDROID_ID"
-  printf '  %-12s %s\n'        "GAID"        "$GAID"
+  printf '  %-12s %s\n'        "Entropy ID"  "$ANDROID_ID"
+  printf '  %-12s %s\n'        "GAID lokal"  "$GAID"
   echo ""
 }
 
@@ -371,31 +338,23 @@ cmd_device() {
   fi
 
   RAW="$TMP_DIR/devices.raw"
-  LOCK_SDK=""; LOCK_REL=""
   _dev_sdk="${SBX_REAL_SDK:-$(getprop ro.build.version.sdk 2>/dev/null || :)}"
   _dev_rel="${SBX_REAL_RELEASE:-$(getprop ro.build.version.release 2>/dev/null || :)}"
-  case "$_dev_sdk" in ''|*[!0-9]*) _dev_sdk="" ;; esac
-  if [ -n "$_dev_sdk" ]; then
-    awk -F'\t' -v s="$_dev_sdk" '$10==s' "$RAW_ALL" > "$RAW"
-    _nmatch=$(wc -l < "$RAW" 2>/dev/null | tr -d ' ')
-    case "$_nmatch" in ''|*[!0-9]*) _nmatch=0 ;; esac
-    if [ "$_nmatch" -ge 1 ]; then
-      log "kunci versi: Android ${_dev_rel:-?} (SDK $_dev_sdk) — $_nmatch model bawaan versi ini dipakai"
-    else
-      cp -f "$RAW_ALL" "$RAW" 2>/dev/null
-      LOCK_SDK="$_dev_sdk"
-      LOCK_REL=$(sdk_release "$_dev_sdk"); [ -z "$LOCK_REL" ] && LOCK_REL="$_dev_rel"
-      if [ -z "$LOCK_REL" ]; then
-        LOCK_SDK=""; LOCK_REL=""
-        log "kunci versi dibatalkan: RELEASE untuk SDK $_dev_sdk tidak terdeteksi (di luar 30..36 & getprop kosong) — persona dipakai apa adanya"
-      else
-        log "kunci versi: tidak ada model bawaan Android ${_dev_rel:-$_dev_sdk} di pool — model lain dipakai, SDK/RELEASE dikunci ke SDK $_dev_sdk"
-      fi
-    fi
-  else
-    cp -f "$RAW_ALL" "$RAW" 2>/dev/null
-    log "kunci versi dilewati: versi Android perangkat tidak terbaca (getprop)"
+  case "$_dev_sdk" in
+    ''|*[!0-9]*)
+      log "SDK runtime tidak terbaca — pembuatan identitas dibatalkan agar persona tidak memakai kemampuan platform yang keliru"
+      return 1
+      ;;
+  esac
+
+  awk -F'\t' -v s="$_dev_sdk" '$10==s' "$RAW_ALL" > "$RAW"
+  _nmatch=$(wc -l < "$RAW" 2>/dev/null | tr -d ' ')
+  case "$_nmatch" in ''|*[!0-9]*) _nmatch=0 ;; esac
+  if [ "$_nmatch" -lt 1 ]; then
+    log "tidak ada persona dengan SDK runtime $_dev_sdk (Android ${_dev_rel:-?}) di $DEVICES_FILE — perbarui database perangkat atau gunakan persona yang kompatibel"
+    return 1
   fi
+  log "kunci versi: Android ${_dev_rel:-?} (SDK $_dev_sdk) — $_nmatch model bawaan versi ini dipakai"
 
   total=$(wc -l < "$RAW" 2>/dev/null | tr -d ' ')
   case "$total" in ''|*[!0-9]*) total=0 ;; esac

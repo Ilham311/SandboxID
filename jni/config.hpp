@@ -44,67 +44,13 @@ inline constexpr BindEntry BIND_ENTRIES[] = {
     {"product/build.prop",    "/product/build.prop"},
     {"system_ext/build.prop", "/system_ext/etc/build.prop"},
     {"system_ext/build.prop", "/system_ext/build.prop"},
-
-    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
 };
 inline constexpr size_t BIND_ENTRIES_N = sizeof(BIND_ENTRIES) / sizeof(BIND_ENTRIES[0]);
 
 inline constexpr const char* MOUNT_PARTS[] = {"system", "vendor", "odm", "product", "system_ext"};
 inline constexpr size_t MOUNT_PARTS_N = sizeof(MOUNT_PARTS) / sizeof(MOUNT_PARTS[0]);
-
-struct KV { const char* k; const char* v; };
-
-inline constexpr KV VAL_DEFAULTS[] = {
-    {"SYS_BOOT_COMPLETED",     "1"},
-    {"GSM_OPERATOR_NUMERIC",   "51010"},
-    {"GSM_OPERATOR_ALPHA",     "Telkomsel"},
-    {"GSM_OPERATOR_ISO",       "id"},
-    {"GSM_CARRIER_ID",         "787"},
-    {"GSM_SIM_STATE",          ""},
-    {"BUILD_CHARACTERISTICS",  "default"},
-    {"PERSIST_TIMEZONE",       "Asia/Jakarta"},
-    {"CPU_ABI",                "arm64-v8a"},
-    {"CPU_ABI2",               ""},
-    {"SUPPORTED_ABIS",         "arm64-v8a,armeabi-v7a,armeabi"},
-    {"SUPPORTED_64_BIT_ABIS",  "arm64-v8a"},
-    {"SUPPORTED_32_BIT_ABIS",  "armeabi-v7a,armeabi"},
-    {"DALVIK_HEAPGROWTHLIMIT", "256m"},
-    {"MEDIACODEC_MIN_RATE",    "8000"},
-    {"MEDIACODEC_MAX_RATE",    "192000"},
-    {"DEBUG_FORCE_RTL",        "false"},
-    {"MULTISIM_CONFIG",        ""},
-};
-inline constexpr size_t VAL_DEFAULTS_N = sizeof(VAL_DEFAULTS) / sizeof(VAL_DEFAULTS[0]);
-
-inline constexpr KV STATIC_PROP_DEFAULTS[] = {
-    {"gsm.operator.isroaming",       "false"},
-    {"ro.zygote",                    "zygote64_32"},
-    {"ro.dalvik.vm.native.bridge",   "0"},
-    {"ro.allow.mock.location",       "0"},
-    {"dalvik.vm.isa.arm64.variant",  "generic"},
-    {"dalvik.vm.isa.arm64.features", "default"},
-    {"dalvik.vm.isa.arm.variant",    "generic"},
-    {"dalvik.vm.isa.arm.features",   "default"},
-    {"dalvik.vm.heapsize",           "512m"},
-    {"ro.build.version.preview_sdk", "0"},
-
-    {"ro.build.version.codename",       "REL"},
-    {"ro.build.version.all_codenames",  "REL"},
-
-    {"ro.boot.verifiedbootstate",       "green"},
-    {"ro.boot.vbmeta.device_state",     "locked"},
-    {"ro.boot.flash.locked",            "1"},
-    {"ro.boot.veritymode",              "enforcing"},
-    {"ro.boot.vbmeta.hash_alg",         "sha256"},
-    {"ro.boot.vbmeta.avb_version",      "1.0"},
-    {"ro.boot.vbmeta.invalidate_on_error", "yes"},
-    {"ro.secure",                       "1"},
-    {"ro.debuggable",                   "0"},
-    {"ro.build.selinux",                "1"},
-    {"sys.oem_unlock_allowed",          "0"},
-};
-inline constexpr size_t STATIC_PROP_DEFAULTS_N =
-    sizeof(STATIC_PROP_DEFAULTS) / sizeof(STATIC_PROP_DEFAULTS[0]);
+inline constexpr char LEGACY_SETTINGS_OVERLAY[] =
+    "/data/adb/modules/sandboxid/mount/settings_secure.xml";
 
 inline bool read_full(int fd, void* buf, size_t n) {
     uint8_t* p = static_cast<uint8_t*>(buf);

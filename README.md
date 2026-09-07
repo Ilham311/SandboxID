@@ -43,23 +43,27 @@ to any application until you configure `target.txt`.
 
 ## How it works
 
-SandboxID combines three cooperating layers:
+SandboxID combines three cooperating phases:
 
-1. **Pre-zygote property configuration** — a Zygisk module runs before
-   application processes start. It reads a per-package identity blob from the
-   companion and patches the Java `Build.*` fields and `SystemProperties`
-   reads the app would otherwise observe, so the first spawn already sees the
-   configured values.
-2. **Per-application identifier customization** — a root-side companion process
-   serves identity blobs over the Zygisk socket, hot-reloads the target list,
-   and bind-mounts a synthetic `build.prop` tree into the target's mount
-   namespace so file-based readers see consistent values.
-3. **CLI / shell layer** — a native `sandboxid` binary and `rotate_ids.sh`
-   script regenerate the persona, apply native properties, and synchronize
-   shell-layer identifiers (SSAID, GAID, wlan/Bluetooth MAC, device name).
+1. **Pre-Zygote presentation properties** — `post-fs-data.sh` validates or seeds
+   `identity.prop`, then runs `sandboxid apply-props` before Zygote caches
+   `Build.*`. These are presentation strings; SDK level, ABI lists, preview
+   state, media performance class, first API level, ISA, heap settings, and
+   other runtime capabilities remain sourced from the real platform.
+2. **Per-target process hooks** — during Zygisk specialization, the companion
+   serves one validated identity snapshot. The module updates presentation
+   `Build.*` fields, intercepts string/typed/Handle `SystemProperties` reads and
+   native Bionic property reads, and bind-mounts synthetic `build.prop` files
+   into that target's mount namespace.
+3. **Post-boot lifecycle work** — `service.sh` runs `sandboxid apply-boot` only
+   after Android reports boot completion. This refreshes mount files and
+   framework device-name Settings; `rotate_ids.sh` can separately perform
+   explicit, device-level storage rotations such as SSAID regeneration, local
+   GAID storage, and Wi-Fi/Bluetooth state changes.
 
-The architecture is deliberately split so the Java hook layer and the shell
-layer always report the same values for a given persona.
+The layers share a canonical persona where their scopes overlap. They do not
+turn denied, empty, redacted, opt-out, or service-owned API results into a
+synthetic success, and they do not claim to replace hardware-backed evidence.
 
 ---
 
@@ -141,11 +145,13 @@ Pixel builds — editing it (or dropping in your own rows) changes the pool
 directly; no rebuild needed. If the file is missing or empty, the native binary
 falls back to a small built-in list, so `freshen` always works.
 
-`autopif.sh` (run automatically by `action.sh`, best-effort) refreshes this file
-with the latest **canary** Pixel fingerprints scraped from Google, when the
-device has `curl`/`wget`. It is a **no-op offline** and skips any device whose
-SoC it can't map, so it never makes the pool inconsistent. See
-[Credits](#credits--references).
+`autopif.sh device` (run by `action.sh`) chooses uniformly by brand from
+`devices.tsv`, but only from rows whose SDK exactly matches the real runtime
+SDK. If the runtime SDK cannot be read or the database has no exact match,
+generation stops with an actionable error instead of relabelling an
+incompatible persona. The separate `autopif.sh fetch` command can refresh the
+optional Pixel canary override when network tools are available; native
+validation still rejects an override whose SDK differs from the runtime.
 
 ---
 
@@ -159,12 +165,13 @@ su -c 'sandboxid <command>'
 
 | Command | What it does |
 |---------|--------------|
-| `freshen` | Generate a new persona (identity + mount overlay) and wipe target app data |
+| `freshen` | Generate an exact-SDK persona, apply presentation properties, refresh overlays/Settings, and wipe target app data |
 | `status` | Print the current `identity.prop` |
-| `rollback` | Restore the previous identity from backup |
+| `rollback` | Restore the previous identity and apply the same phases |
 | `lock` / `unlock` | Prevent / re-enable `freshen` (safety after setup) |
-| `apply-boot` | Re-apply native props via `resetprop-rs` (used by `service.sh`) |
-| `seed` | Fast bootstrap: identity + mount overlay only (used by `post-fs-data.sh`) |
+| `apply-props` | Apply presentation properties; boot scripts run this before Zygote |
+| `apply-boot` | Apply post-boot framework Settings and refresh mount files |
+| `seed` | Validate or generate identity and mount files before `apply-props` |
 | `targets` | List the active target list from `target.txt` |
 
 ### `rotate_ids.sh`
@@ -175,80 +182,40 @@ su -c 'sh /data/adb/modules/sandboxid/rotate_ids.sh <cmd>'
 
 | Command | Applies | Needs reboot? |
 |---------|---------|---------------|
-| `all` | SSAID + GAID + wlan MAC + BT MAC + device name + applog (default) | Yes (SSAID) |
-| `safe` | GAID + BT MAC + device name + applog (skips SSAID + wlan) | No |
-| `ssaid` | Delete `settings_ssaid.xml` per user | Yes |
-| `gaid [uuid]` | Set Google Advertising ID | No |
+| `all` | SSAID storage regeneration + local GAID write + wlan/BT MAC + device name + AppLog (default) | Yes (SSAID regeneration) |
+| `safe` | Local GAID write + BT MAC + device name + AppLog (skips SSAID + wlan) | No |
+| `ssaid` | Back up and delete `settings_ssaid.xml`; Android regenerates it after reboot | Yes |
+| `gaid [uuid]` | Best-effort local Settings/XML GAID write; the all-zero sentinel keeps local opt-out flags, and the command does not hook the advertising-ID API | No |
 | `wlan-mac [xx:xx:...]` | Set `wlan0` MAC + wipe `WifiConfigStore` | No |
 | `bt-mac [xx:xx:...]` | Set Bluetooth adapter MAC + `bt_config.conf` Address | No (toggle BT) |
 | `device-name [name]` | Sync device/BT name to `identity.prop` MODEL | No |
-| `applog [pkg]` | **Rotate** ByteDance AppLog IDs (bump APPLOG_EPOCH + wipe stale cache + force-stop; the zygisk L9 hook serves the new did/iid/ssid/openudid/clientudid/cdid in-process) | No |
-| `applog-wipe [pkg]` | Wipe-only escape hatch (no rotation; forces SDK to re-register from server) | No |
+| `applog [pkg]` | Rotate local ByteDance AppLog cache values served by the native-read layer | No |
+| `applog-wipe [pkg]` | Wipe known AppLog caches without rotating the persona epoch | No |
 | `status` | Read-only snapshot of all identifiers (never dumps AppLog values — privacy) | — |
 | `help` | Print usage | — |
 
-**`applog` in detail.** Apps built on the ByteDance **AppLog / RangersAppLog**
-SDK (TikTok `com.ss.android.ugc.trill`, Douyin `com.ss.android.ugc.aweme`,
-TikTok Global `com.zhiliaoapp.musically`, CapCut, Lark, and any third-party app
-that ships `com.bytedance.applog`) cache a **server-issued** trio of identifiers
-alongside the hardware fingerprint the module already spoofs:
+**`applog` in detail.** Some apps built on ByteDance **AppLog /
+RangersAppLog** keep application-owned caches containing keys such as
+`device_id`/`did`, `install_id`/`iid`, `ssid`, `cdid`, `clientudid`, and
+`openudid`. Their source, format, and lifecycle vary by SDK and service version;
+some may be assigned or reconciled remotely rather than controlled by the local
+cache. SandboxID recognizes only the explicitly listed local files and does not
+claim that changing them changes a service's server-side identity, account
+state, registration, or relinking behavior.
 
-- `device_id` (aka `did` / `bd_did`) — Snowflake 64-bit int (19 decimal
-  digits; decodes as `(unix_ms << 22) | 22-bit random` — verified against
-  real `device_register` samples, e.g. `6990234216324986369 >> 22` =
-  2022-10-24), minted by the register endpoint
-  `/service/2/device_register/` and pinned to the app install
-- `install_id` (aka `iid`) — same Snowflake shape, rotates on reinstall,
-  links to the current install
-- `ssid` — server-side ID (same shape) that maps `device_id ↔ user_unique_id`
-  even across logout / re-login
-- `cdid` — RFC 4122 UUID v4 (locally generated via
-  `UUID.randomUUID()` in the SDK), seeds the register call
-- `clientudid` — RFC 4122 UUID v4
-- `openudid` — 16 hex chars (legacy iOS UDID shape, Android SDK reuses)
+The native-read layer can present deterministic per-package cache values from
+the persona identity, package name, and `APPLOG_EPOCH` in `identity.prop`:
 
-These live in `shared_prefs/applog.xml`, `shared_prefs/snssdk_openudid.xml`,
-`shared_prefs/bd_device_info.xml`, `files/bd_setting/{device_id, install_id,
-openudid, clientudid}`, and `files/.cdid`. Rotating hardware without touching
-them leaves the SDK's server-side identity intact — the backend still
-recognises the device.
+- recognized `shared_prefs/{applog,snssdk_openudid,snssdk_did,bd_device_info}.xml`
+  reads patch only known identifier values and preserve unrelated XML entries;
+- recognized `files/bd_setting/*` and `files/.cdid` pure reads receive bounded
+  synthetic text.
 
-SandboxID does **not** seed these files anymore. The zygisk module (L9)
-spoofs them **in-process**: every read of an AppLog cache file is redirected
-to memfd content derived deterministically from the persona identity +
-package name + `APPLOG_EPOCH` from `identity.prop`:
-
-- `shared_prefs/{applog,snssdk_openudid,snssdk_did,bd_device_info}.xml` —
-  the app's **real** XML is read from disk and only the identifier values
-  are patched in (key names vary across SDK versions — `device_id`,
-  `header_device_id`, `iid`, … — so the patcher matches by pattern and
-  preserves every other entry verbatim)
-- `files/bd_setting/{device_id,install_id,openudid,clientudid}` and
-  `files/.cdid` — served fully synthesized (raw text, read natively by
-  `libbdtracker` bypassing SharedPreferences)
-
-Each ByteDance app gets its **own** did (the seed includes the package
-name, matching the real per-app registration), and the six IDs are stable
-until `APPLOG_EPOCH` is bumped — no zero-value "new install" gap in between.
-
-`rotate_ids.sh applog` is the rotation command:
-
-1. **Bump** — `APPLOG_EPOCH` in `identity.prop` is set to now (unix ms);
-   the next cold start derives a fresh six-tuple from it
-2. **Wipe** — every known AppLog cache file is removed (tar-backup first:
-   `backups/applog_<pkg>_<epoch>.tar`, mode 0600). User login / prefs /
-   drafts / downloads stay untouched
-3. **Force-stop** — the target is killed so no warm process keeps using the
-   old IDs in memory
-
-Regen is scheduled **last** inside `all` / `safe` so the epoch bump lands on
-top of the fully rotated hardware layer, not the stale one. The wipe-only
-escape hatch (`applog-wipe`) is preserved for forensic scenarios where you
-want to watch the SDK re-register from scratch against the server.
-`rotate_ids.sh applog` with no argument walks every non-comment line in
-`target.txt`. Runs as a no-op (with a friendly hint) if `target.txt` is
-empty — same "ship idle" contract as the rest of the
-module.
+`rotate_ids.sh applog` bumps `APPLOG_EPOCH`, backs up and removes recognized
+cache files, and force-stops the selected targets so a warm process does not
+keep old in-memory values. `applog-wipe` performs only the backup/removal step.
+These are local privacy-testing controls, not a promise about remote
+registration, relinking, or service acceptance.
 
 ---
 
@@ -268,8 +235,8 @@ Written by `freshen`, read by native prop apply, Zygisk hooks, and
 | `FINGERPRINT`, `ID`, `DISPLAY` | `freshen` | Build metadata |
 | `SERIAL` | `freshen` | `Build.SERIAL`, `ro.serialno`, `ro.boot.serialno` |
 | `RADIO` | `freshen` | `Build.RADIO`, `gsm.version.baseband` |
-| `ANDROID_ID` | `freshen` | Per-app `Settings.Secure.ANDROID_ID` (hook layer) |
-| `GOOGLE_AID` | `freshen` | GAID (also written by `set_gaid_value` if missing) |
+| `ANDROID_ID` | persona generator | Profile entropy used by local derivations; not an active `Settings.Secure.ANDROID_ID` hook |
+| `GOOGLE_AID` | persona generator / `rotate_ids.sh` | Desired local GAID storage value; the service API and opt-out state remain service-owned |
 | `WIFI_MAC` | `rotate_ids.sh` | Persisted wlan0 MAC |
 | `BLUETOOTH_ADDR` | `rotate_ids.sh` | Persisted BT adapter MAC |
 | `BLUETOOTH_NAME` | `rotate_ids.sh` | Optional override for device/BT name; if unset, uses `MODEL` |
@@ -330,12 +297,10 @@ Build with `-Wall -Wextra` per ABI. The `debug` variant enables verbose
 ## Credits & References
 
 SandboxID uses documented Android platform commands (`pm clear`,
-`am force-stop`, `settings put`) and Magisk runtime APIs (`resetprop`, the
-boot-stage contract), and adopts the `killall` process-stop technique from
-PlayIntegrityFork (osm0sis, GPL-3.0). Full attribution, source links, and the
-licensing note are in **[CREDITS.md](./CREDITS.md)**. No third-party source
-code is bundled — only documented commands and techniques — so SandboxID
-remains MIT.
+`am force-stop`, `settings put`) and root/Zygisk module APIs. External Android
+and AOSP documentation used to explain identifier scope and property behavior
+is linked above. The repository is MIT licensed; inspect your checkout's
+history and dependency metadata for version-specific attribution.
 
 ---
 
@@ -343,88 +308,61 @@ remains MIT.
 
 ### Covered
 
-- Device fingerprint (`Build.*` incl. `Build.TIME`, `SystemProperties.native_get*`
-  typed variants, `ro.build.flavor` / `ro.build.date*` / codename props)
-- Per-app `ANDROID_ID` / SSAID override — **requires the experimental L3 hook**
-  (disabled by default; see [Known limitations](#known-limitations))
-- Google Advertising ID (`Settings.Global.advertising_id` + GMS `adid_settings.xml`)
-- Wi-Fi MAC + `WifiConfigStore.xml` reset (with backup)
-- Bluetooth adapter MAC (properties + `bt_config.conf` Address)
-- Device / Bluetooth name synced to the persona `MODEL`
-- Bind-mount overlay for `build.prop` files + `settings_secure.xml`
-- Companion IPC protocol with hot-reloaded target list
-- Crash watchdog and atomic configuration writes
-- **ByteDance AppLog SDK identifier spoofing** (`did` / `iid` / `ssid` /
-  `openudid` / `clientudid` / `cdid`) — **in-process, per package**: the L9
-  native-read hook patches every read of the AppLog caches (applog.xml /
-  snssdk_*.xml / bd_device_info.xml are patched in place preserving the
-  SDK's own key names; raw `bd_setting/*` + `.cdid` are served
-  synthesized). Values are deterministic from the persona identity +
-  package name + `APPLOG_EPOCH` — each app gets its own did like the real
-  per-app registration, and `rotate_ids.sh applog` rotates all six at once
-  by bumping the epoch (see the `applog` command above)
+- Validated presentation identity: selected `Build.*` strings/timestamps,
+  string and typed `SystemProperties` reads, genuine nonzero `Handle` reads,
+  native Bionic property reads, and per-target `build.prop` file views.
+- Pre-Zygote property publication plus checked per-process Build fallback for
+  warm/vendor-cached paths.
+- Exact-runtime-SDK persona selection. ABI arrays, `SDK_INT`, SDK extensions,
+  preview state, first API level, Zygote/native bridge/ISA/heap configuration,
+  and media performance class remain real runtime capabilities.
+- Relative pure-read `openat` path resolution for the small native-read
+  allowlist, with fail-open behavior on ambiguity.
+- Optional aggregate `/proc/cpuinfo` revision normalization when
+  `SBX_CPU_REVISION=1`; per-core records, topology, features, and Hardware lines
+  remain byte-for-byte intact.
+- Device-level lifecycle actions for SSAID storage regeneration, local GAID
+  Settings/XML writes, Wi-Fi/Bluetooth state, device name, and recognized
+  AppLog caches. These actions do not imply active Java identifier API hooks.
+- Companion IPC with atomic target-list hot reload, crash logging, and atomic
+  configuration writes.
 
-### Out of scope
+### Intentionally not packaged or changed
 
-- Network-layer changes (VPN, residential IP)
-- Play Integrity / SafetyNet bypass — use dedicated modules alongside if needed
-- Sensor fingerprinting (planned)
-- MediaDrm ID / GSF ID rotation (planned; need on-device tooling)
+- Java entry hooks for per-app SSAID/`ANDROID_ID`, advertising ID, App Set ID,
+  AdServices ID, Telephony APIs (including `getSimCarrierId`), or Wi-Fi APIs.
+- Forgery of Play Integrity, SafetyNet, Key/ID attestation, attested OS/vendor
+  patch levels, verified-boot hashes, package/signature/installer identity, or
+  any other hardware/server-signed evidence.
+- Conversion of permission denial, empty/null, redacted/unknown, opt-out,
+  cancellation, callback/executor error, or dynamic service state into a
+  synthetic successful identifier.
+- Network-layer identity changes, direct-syscall or `mmap` interception,
+  directory enumeration, broad `dlopen` interception, or new root/mount/maps
+  concealment.
 
 ### Known limitations
 
-Honest gaps in the current design — documented so you can reason about what a
-detector still sees:
-
-- **Per-app `ANDROID_ID` needs an L3 hook, which is not implemented.** `ANDROID_ID`
-  (SSAID) is served over Binder by `SettingsProvider` in `system_server`, which
-  caches the value at boot. A normal app calling `Settings.Secure.getString()`
-  never reads the `settings_secure.xml` we bind-mount, so the overlay does not
-  change the value it sees. Genuine per-app `ANDROID_ID` spoofing would need an
-  L3 `getString` hook in the app process, which this module does not provide.
-  Treat per-app `ANDROID_ID` spoofing as out of scope.
-
-- **Two layers, two scopes.** The module has a *device-wide* layer (boot-time
-  `resetprop` via `apply-boot`, active only when `target.txt` is non-empty) and a
-  *per-app* layer (Zygisk hooks + `build.prop` bind-mounted into the target app's
-  mount namespace). The device-wide layer affects *every* process; the per-app
-  layer affects only the listed targets. Enabling one does not imply the other,
-  and with an empty `target.txt` the module is fully idle by design.
-
-- **`SystemProperties` `Handle` / `find()` fast path is not hooked.** We hook the
-  typed `native_get*` entry points. Code that resolves a property `Handle` once
-  (via `SystemProperties.find`) and reads through it, or reads
-  `/dev/__properties__` directly, bypasses the JNI hook and sees the real value.
-  The bind-mounted `build.prop` still covers file readers, but not the
-  shared-memory fast path.
-
-- **Non-target apps see a mixed identity.** The device-wide `resetprop` layer and
-  the per-app bind-mount are independent. An app *not* in `target.txt` that reads
-  props gets whatever the device-wide layer set (or the real values when idle)
-  with no bind-mount overlay — so its `Build.*` and file-based props can disagree.
-  Only listed target apps get a fully consistent persona.
-
-- **`applog` spoofing is local-only; server-side re-linking still happens.** The
-  L9 hook serves Snowflake `did`/`iid`/`ssid` (decoding as
-  `(unix_ms << 22) | rand`, like real `device_register` values), UUID
-  cdid/clientudid, and 16-hex openudid in-process, per package. The app
-  presents them to `/service/2/device_register/` as its own persistent state
-  — but the ByteDance backend fingerprints the register call itself — same
-  account login, same residential
-  IP, reused sensor / SIM signals, or behavioral patterns (typing cadence,
-  video watch order) can still let the server link the new identifiers back
-  to the old device server-side, no matter how clean the local values are.
-  Rotating hardware persona (`sandboxid freshen`), Google Advertising ID
-  (`rotate_ids.sh gaid`), and MACs alongside the AppLog rotation is what makes
-  the values actually *cohere* with a plausible new device — the local
-  rotation alone is necessary but not sufficient. Network-layer changes (VPN /
-  residential IP rotation) are out of scope for this module and stay a
-  separate concern. Additionally, newer AppLog SDK builds can persist these
-  IDs in **MMKV** (binary mmap, opened read-write) — the L9 hook only
-  redirects pure-read `open`/`fopen`, so MMKV-backed stores are not spoofed.
-
-SandboxID changes only identity strings. It does not modify hardware, the
-framework boot path, or kernel state in ways that risk boot failure.
+- Presentation properties are device-wide once `apply-props` runs, while
+  per-process Build/property/file hooks are limited to `target.txt`. Keep the
+  list intentional; an empty list leaves the module idle.
+- `SystemProperties.native_find` and the long-handle getters are covered only
+  for genuine nonzero handles returned by the platform. The module never
+  fabricates handles or interprets private `prop_info` layouts. Direct reads of
+  `/dev/__properties__` remain outside this boundary.
+- SSAID deletion is a reboot-time regeneration action, not a per-app API
+  override. Local GAID writes do not guarantee what Google Play services
+  returns and must not override its opt-out sentinel.
+- Carrier selection presents GSM operator properties. `GSM_CARRIER_ID` is
+  retained as profile metadata, but `TelephonyManager.getSimCarrierId()` is not
+  hooked by this build.
+- Native file presentation covers recognized pure-read `open`/`openat`/`fopen`
+  paths. Read-write or memory-mapped stores such as MMKV pass through.
+- Signed/hardware-backed attestation values remain genuine. The immutable probe
+  expectation fixture classifies attested vendor patch, OS patch, and vbmeta
+  hash mismatches as `EXPECTED_IMMUTABLE`, not failures to spoof.
+- On-device reboot and full probe verification are still required for each ROM
+  and Zygisk provider; host tests cannot prove Android lifecycle timing.
 
 ---
 

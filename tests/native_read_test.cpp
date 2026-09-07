@@ -1,8 +1,11 @@
 
 #include "../jni/sbx_native_read.hpp"
 #include "../jni/sbx_mountinfo.hpp"
+#include "../jni/sbx_identity.hpp"
+#include "../jni/sbx_property.hpp"
 
 #include <cassert>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -139,65 +142,56 @@ static void test_pixel_ram() {
 }
 
 static void test_cpuinfo() {
-    std::string repl;
-
-    int a = cpu_action_for("Qualcomm", "SM8650", repl);
-    CHECK(a == CPU_QUALCOMM, "qualcomm manuf -> QUALCOMM");
-    CHECK(repl == "Qualcomm Technologies, Inc SM8650", "qualcomm repl string");
-
-    a = cpu_action_for("", "SM7325", repl);
-    CHECK(a == CPU_QUALCOMM, "SM prefix -> QUALCOMM");
-
-    a = cpu_action_for("MediaTek", "MT6893", repl);
-    CHECK(a == CPU_MTK, "mediatek -> MTK");
-    CHECK(repl == "MT6893", "mtk repl string");
-
-    a = cpu_action_for("", "MT6877", repl);
-    CHECK(a == CPU_MTK, "MT prefix -> MTK");
-
-    a = cpu_action_for("Google", "Tensor G3", repl);
-    CHECK(a == CPU_STRIP, "google/tensor -> STRIP");
-
-    std::string real_qcom =
+    const std::string real =
+        "Processor\t: AArch64 Processor rev 0 (aarch64)\n"
         "processor\t: 0\n"
         "BogoMIPS\t: 38.40\n"
-        "Hardware\t: Qualcomm Technologies, Inc SM_REAL_CHIP\n"
-        "Revision\t: 0001\n";
+        "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics\n"
+        "CPU implementer\t: 0x41\n"
+        "CPU architecture: 8\n"
+        "CPU variant\t: 0x2\n"
+        "CPU part\t: 0xd05\n"
+        "CPU revision\t: 14\n"
+        "\n"
+        "processor\t: 1\n"
+        "CPU implementer\t: 0x41\n"
+        "CPU architecture: 8\n"
+        "CPU variant\t: 0x0\n"
+        "CPU part\t: 0xd0c\n"
+        "CPU revision\t: 0\n"
+        "Hardware\t: MT6893Z/CZA\n";
     std::string out;
-    cpu_action_for("Qualcomm", "SM8650", repl);
-    bool changed = patch_cpuinfo(real_qcom, CPU_QUALCOMM, repl, out);
-    CHECK(changed, "qcom cpuinfo changed");
-    CHECK(out.find("SM8650") != std::string::npos, "qcom repl applied");
-    CHECK(out.find("SM_REAL_CHIP") == std::string::npos, "real chip removed");
-    CHECK(out.find("BogoMIPS\t: 38.40") != std::string::npos, "other cpuinfo lines intact");
-    CHECK(out.find("Revision\t: 0001") != std::string::npos, "trailing line intact");
+    CHECK(patch_cpuinfo_aggregate_revision(real, out),
+          "mixed per-core revisions normalize aggregate");
+    CHECK(out.rfind("Processor\t: AArch64 Processor rev 14 (aarch64)\n", 0) == 0,
+          "aggregate revision uses maximum valid per-core revision");
+    const size_t first_eol = real.find('\n');
+    CHECK(out.substr(out.find('\n')) == real.substr(first_eol),
+          "all bytes after aggregate line are preserved");
+    CHECK(out.find("Hardware\t: MT6893Z/CZA") != std::string::npos,
+          "Hardware line is preserved");
+    CHECK(out.find("CPU revision\t: 14") != std::string::npos &&
+              out.find("CPU revision\t: 0") != std::string::npos,
+          "per-core revisions are preserved");
 
-    std::string real_pixel =
-        "processor\t: 0\n"
-        "Hardware\t: Qualcomm Technologies, Inc SM_REAL_CHIP\n"
-        "Revision\t: 0001\n";
-    std::string outp;
-    bool ch2 = patch_cpuinfo(real_pixel, CPU_STRIP, "", outp);
-    CHECK(ch2, "strip changed");
-    CHECK(outp.find("Hardware") == std::string::npos, "Hardware line stripped");
-    CHECK(outp.find("Revision\t: 0001") != std::string::npos, "line after stripped Hardware intact");
-    CHECK(outp.find("processor\t: 0") != std::string::npos, "line before stripped Hardware intact");
-
-    std::string no_hw = "processor\t: 0\nBogoMIPS\t: 38.40\n";
-    std::string out3;
-    bool ch3 = patch_cpuinfo(no_hw, CPU_STRIP, "", out3);
-    CHECK(!ch3, "no Hardware -> no change");
-    CHECK(out3.empty(), "no-change clears out for passthrough");
-
-    std::string out4;
-    CHECK(!patch_cpuinfo(real_qcom, CPU_NONE, "", out4), "CPU_NONE -> passthrough");
-
-    std::string eof_hw = "processor\t: 0\nHardware\t: SM_REAL";
-    std::string out5;
-    bool ch5 = patch_cpuinfo(eof_hw, CPU_STRIP, "", out5);
-    CHECK(ch5, "EOF Hardware line changed");
-    CHECK(out5.find("Hardware") == std::string::npos, "EOF Hardware stripped");
-    CHECK(out5 == "processor\t: 0\n", "EOF strip leaves preceding lines");
+    std::string unchanged;
+    CHECK(!patch_cpuinfo_aggregate_revision(out, unchanged) && unchanged.empty(),
+          "already-correct aggregate passes through");
+    CHECK(!patch_cpuinfo_aggregate_revision(
+              "processor\t: 0\nCPU revision\t: 14\n", unchanged),
+          "missing AArch64 aggregate passes through");
+    CHECK(!patch_cpuinfo_aggregate_revision(
+              "Processor\t: AArch64 Processor rev x (aarch64)\n"
+              "CPU revision\t: 14\n", unchanged),
+          "malformed aggregate passes through");
+    CHECK(!patch_cpuinfo_aggregate_revision(
+              "Processor\t: AArch64 Processor rev 0 (aarch64)\n"
+              "CPU implementer\t: 0x41\n", unchanged),
+          "missing per-core revision passes through");
+    CHECK(!patch_cpuinfo_aggregate_revision(
+              "Processor\t: AArch64 Processor rev 0 (aarch64)\n"
+              "CPU revision\t: 999\n", unchanged),
+          "out-of-range per-core revision passes through");
 }
 
 static void test_classify() {
@@ -524,6 +518,180 @@ static void test_applog_xml_synth() {
     CHECK(twice == patched, "second patch is a no-op");
 }
 
+static void test_path_normalization() {
+    std::string out;
+    CHECK(normalize_absolute_path("/proc//self/../cpuinfo", out) &&
+              out == "/proc/cpuinfo",
+          "absolute path is lexically normalized");
+    CHECK(join_and_normalize_path("/proc/self/fd/../..", "proc/version", out) &&
+              out == "/proc/proc/version",
+          "relative path joins normalized base");
+    CHECK(join_and_normalize_path("/proc", "self/../cpuinfo", out) &&
+              out == "/proc/cpuinfo",
+          "relative dot segments normalize");
+    CHECK(join_and_normalize_path("/sys/class/net/wlan0", "./address", out) &&
+              out == "/sys/class/net/wlan0/address" && classify(out.c_str()) == MAC,
+          "normalized relative sysfs path classifies");
+    CHECK(!join_and_normalize_path("relative", "proc/version", out),
+          "relative base is rejected");
+    CHECK(!join_and_normalize_path("/", "../proc/version", out),
+          "path escaping root is rejected");
+    CHECK(!normalize_absolute_path("proc/version", out),
+          "non-absolute path is rejected");
+}
+
+static std::string valid_identity_blob(const std::string& gaid) {
+    return
+        "BRAND=google\nMANUFACTURER=Google\nMODEL=Pixel 8 Pro\n"
+        "MARKETNAME=Pixel 8 Pro\nDEVICE=husky\nPRODUCT=husky\n"
+        "BOARD=zuma\nHARDWARE=zuma\nBOARD_PLATFORM=zuma\n"
+        "SOC_MANUFACTURER=Google\nSOC_MODEL=GS301\n"
+        "FINGERPRINT=google/husky/husky:15/AP3A.240905.015/12244876:user/release-keys\n"
+        "ID=AP3A.240905.015\nDISPLAY=AP3A.240905.015\n"
+        "DESCRIPTION=husky-user 15 AP3A.240905.015 12244876 release-keys\n"
+        "HOST=google-build-647\nUSER=android-build\nTYPE=user\nTAGS=release-keys\n"
+        "INCREMENTAL=12244876\nRELEASE=15\nSDK_INT=35\n"
+        "SECURITY_PATCH=2024-09-05\nSERIAL=CAD0CDE1B7DCC\n"
+        "ANDROID_ID=0764bfec5da44ba7\nGOOGLE_AID=" + gaid + "\n"
+        "FLAVOR=husky-user\nAPPLOG_EPOCH=1788799392000\n"
+        "BUILD_TIME_UTC=1725075240\n"
+        "BUILD_DATE=Sat Aug 31 03:34:00 UTC 2024\n";
+}
+
+static void test_identity_validation() {
+    sbxid::ValidationContext strict;
+    strict.runtime_sdk = 35;
+    sbxid::IdentitySnapshot snapshot;
+    std::string error;
+    std::string blob = valid_identity_blob(
+        "0d723296-e9ca-4702-83e8-fd05c3a7b512");
+    CHECK(sbxid::parse_and_validate_identity(blob, strict, snapshot, error),
+          "canonical identity accepted");
+    CHECK(snapshot.values.find("MODEL") != snapshot.values.end(),
+          "canonical identity values published");
+
+    const std::string zero_gaid = "00000000-0000-0000-0000-000000000000";
+    CHECK(sbxid::parse_and_validate_identity(valid_identity_blob(zero_gaid), strict,
+                                             snapshot, error),
+          "all-zero advertising opt-out sentinel accepted");
+
+    const std::string legacy = blob + "SUPPORTED_ABIS=arm64-v8a,armeabi-v7a\n"
+                                     "VBMETA_DIGEST=deadbeef\n";
+    CHECK(!sbxid::parse_and_validate_identity(legacy, strict, snapshot, error) &&
+              error.find("runtime capability key") != std::string::npos,
+          "strict app-side parser rejects runtime capability keys");
+
+    sbxid::ValidationContext migrate = strict;
+    migrate.drop_legacy_capabilities = true;
+    CHECK(sbxid::parse_and_validate_identity(legacy, migrate, snapshot, error),
+          "CLI migration parser accepts known legacy capability keys");
+    CHECK(snapshot.values.find("SUPPORTED_ABIS") == snapshot.values.end() &&
+              snapshot.values.find("VBMETA_DIGEST") == snapshot.values.end(),
+          "legacy capability keys are dropped, not published");
+    CHECK(snapshot.dropped_legacy_capabilities.size() == 2,
+          "migration records every dropped legacy key");
+
+    const std::string duplicate_legacy = legacy + "VBMETA_DIGEST=beadfeed\n";
+    CHECK(!sbxid::parse_and_validate_identity(duplicate_legacy, migrate, snapshot,
+                                              error) &&
+              error.find("duplicate identity key") != std::string::npos,
+          "duplicate legacy capability keys remain invalid");
+
+    std::string bad_sdk = blob;
+    size_t sdk = bad_sdk.find("SDK_INT=35");
+    bad_sdk.replace(sdk, std::strlen("SDK_INT=35"), "SDK_INT=34");
+    CHECK(!sbxid::parse_and_validate_identity(bad_sdk, strict, snapshot, error) &&
+              error.find("runtime SDK") != std::string::npos,
+          "SDK metadata must match the real runtime");
+}
+
+static void test_property_helpers() {
+    sbxprop::HandleNames names;
+    std::string name;
+    CHECK(!names.remember(0, "ro.product.model"), "zero property handle rejected");
+    CHECK(!names.remember(42, ""), "empty property name rejected");
+    CHECK(names.remember(42, "ro.product.model"), "genuine nonzero handle stored");
+    CHECK(names.find(42, name) && name == "ro.product.model",
+          "stored handle resolves to its property name");
+    CHECK(!names.find(0, name), "zero property handle never resolves");
+    CHECK(!names.find(99, name), "unknown property handle delegates");
+    CHECK(names.remember(42, "ro.product.brand") &&
+              names.find(42, name) && name == "ro.product.brand",
+          "reused genuine handle updates its property name");
+
+    int64_t parsed = 0;
+    CHECK(sbxprop::parse_int64("42", INT32_MIN, INT32_MAX, parsed) && parsed == 42,
+          "decimal property integer parses");
+    CHECK(sbxprop::parse_int64("  -42", INT32_MIN, INT32_MAX, parsed) && parsed == -42,
+          "leading whitespace and sign follow AOSP parsing");
+    CHECK(sbxprop::parse_int64("0x2a", INT32_MIN, INT32_MAX, parsed) && parsed == 42,
+          "immediate hexadecimal prefix parses");
+    CHECK(!sbxprop::parse_int64(" 0x2a ", INT32_MIN, INT32_MAX, parsed),
+          "trailing whitespace is rejected");
+    CHECK(!sbxprop::parse_int64("42x", INT32_MIN, INT32_MAX, parsed),
+          "trailing content is rejected");
+    CHECK(!sbxprop::parse_int64("", INT32_MIN, INT32_MAX, parsed),
+          "empty integer is rejected");
+    CHECK(!sbxprop::parse_int64("2147483648", INT32_MIN, INT32_MAX, parsed),
+          "integer outside caller range is rejected");
+    CHECK(sbxprop::parse_int64("9223372036854775807", INT64_MIN, INT64_MAX, parsed) &&
+              parsed == INT64_MAX,
+          "int64 maximum parses");
+    CHECK(!sbxprop::parse_int64("9223372036854775808", INT64_MIN, INT64_MAX, parsed),
+          "int64 overflow is rejected");
+
+    bool boolean = false;
+    for (const char* value : {"1", "y", "yes", "on", "true"})
+        CHECK(sbxprop::parse_bool(value, boolean) && boolean, value);
+    for (const char* value : {"0", "n", "no", "off", "false"})
+        CHECK(sbxprop::parse_bool(value, boolean) && !boolean, value);
+    for (const char* value : {"TRUE", "Yes", " true", "false ", "2", ""})
+        CHECK(!sbxprop::parse_bool(value, boolean), value);
+}
+
+static void test_identity_serialization() {
+    sbxid::ValidationContext migrate;
+    migrate.runtime_sdk = 35;
+    migrate.drop_legacy_capabilities = true;
+    sbxid::IdentitySnapshot snapshot;
+    std::string error;
+    const std::string blob = valid_identity_blob(
+        "0d723296-e9ca-4702-83e8-fd05c3a7b512") +
+        "UPTIME_SECONDS=12345\n"
+        "UPTIME_HUMAN=3 hours, 25 minutes\n"
+        "RELEASE_DATE=2024-09-05\n"
+        "SAFE_METADATA=kept\n"
+        "SUPPORTED_ABIS=arm64-v8a,armeabi-v7a\n"
+        "VBMETA_DIGEST=deadbeef\n";
+    CHECK(sbxid::parse_and_validate_identity(blob, migrate, snapshot, error),
+          "migration identity with safe metadata parses");
+
+    static constexpr std::string_view order[] = {
+        "BRAND", "MODEL", "FINGERPRINT", "SUPPORTED_ABIS", "VBMETA_DIGEST",
+    };
+    std::string serialized;
+    CHECK(sbxid::serialize_identity_values(
+              snapshot.values, order, sizeof(order) / sizeof(order[0]), serialized),
+          "validated identity serializes");
+    CHECK(serialized.rfind("BRAND=google\nMODEL=Pixel 8 Pro\nFINGERPRINT=", 0) == 0,
+          "canonical requested keys are emitted first");
+    CHECK(serialized.find("UPTIME_SECONDS=12345\n") != std::string::npos &&
+              serialized.find("UPTIME_HUMAN=3 hours, 25 minutes\n") != std::string::npos &&
+              serialized.find("RELEASE_DATE=2024-09-05\n") != std::string::npos &&
+              serialized.find("SAFE_METADATA=kept\n") != std::string::npos,
+          "safe unknown and lifecycle metadata survive serialization");
+    CHECK(serialized.find("SUPPORTED_ABIS=") == std::string::npos &&
+              serialized.find("VBMETA_DIGEST=") == std::string::npos,
+          "dropped capability keys cannot be re-emitted");
+
+    std::map<std::string, std::string> unsafe = snapshot.values;
+    unsafe["SUPPORTED_ABIS"] = "arm64-v8a";
+    CHECK(!sbxid::serialize_identity_values(
+              unsafe, order, sizeof(order) / sizeof(order[0]), serialized) &&
+              serialized.empty(),
+          "serializer rejects a reintroduced capability key");
+}
+
 int main() {
     test_uuid();
     test_mac();
@@ -542,6 +710,10 @@ int main() {
     test_applog_xml_patch();
     test_applog_xml_synth();
     test_mountinfo();
+    test_path_normalization();
+    test_identity_validation();
+    test_property_helpers();
+    test_identity_serialization();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;

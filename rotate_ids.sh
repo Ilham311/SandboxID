@@ -45,10 +45,16 @@ set_gaid_value() {
         identity_persist GOOGLE_AID "$newgaid"
         log_info "GAID generated + persisted to identity.prop"
     fi
-    log_step "Set GAID: $(mask_id "$newgaid")"
+    case "$newgaid" in
+        00000000-0000-0000-0000-000000000000) gaid_opt_out=1 ;;
+        *) gaid_opt_out=0 ;;
+    esac
+    log_step "Set local GAID storage: $(mask_id "$newgaid")"
 
     settings_put global advertising_id "$newgaid" || log_warn "settings put advertising_id failed"
-    settings_put global limit_ad_tracking 0       || :
+    # Preserve the explicit all-zero opt-out sentinel instead of upgrading it to
+    # an opted-in success. Nonzero local rotations keep the legacy opt-in flag.
+    settings_put global limit_ad_tracking "$gaid_opt_out" || :
 
     force_stop com.google.android.gms
     command -v am >/dev/null 2>&1 && am kill --user 0 com.google.android.gms </dev/null >/dev/null 2>&1
@@ -74,7 +80,7 @@ set_gaid_value() {
 <?xml version='1.0' encoding='utf-8' standalone='yes' ?>
 <map>
     <string name="adid_key">$newgaid</string>
-    <boolean name="enable_limit_ad_tracking" value="false" />
+    <boolean name="enable_limit_ad_tracking" value="$([ "$gaid_opt_out" = "1" ] && printf true || printf false)" />
     <long name="last_reset_time" value="$(date +%s)000" />
 </map>
 XMLEOF
@@ -455,10 +461,10 @@ case "$cmd" in
     -h|--help|help)
         cat <<USAGE
 Usage: rotate_ids.sh <cmd> [args]
-  all                        - SSAID + GAID + wlan-MAC + BT-MAC + device-name + boot-count + applog (default)
-  safe                       - GAID + BT-MAC + device-name + boot-count + applog (no reboot, no wifi reset)
+  all                        - SSAID + local GAID storage + wlan-MAC + BT-MAC + device-name + boot-count + applog (default)
+  safe                       - local GAID storage + BT-MAC + device-name + boot-count + applog (no reboot, no wifi reset)
   ssaid                      - wipe settings_ssaid.xml (needs reboot)
-  gaid [uuid]                - set Google Advertising ID
+  gaid [uuid]                - write local Advertising ID caches (all-zero keeps opt-out; API remains service-owned)
   wlan-mac [xx:xx:..]        - set wlan0 MAC
   bt-mac [xx:xx:..]          - set Bluetooth adapter MAC
   device-name [name]         - sync device_name/BT to persona (identity.prop MODEL)
