@@ -1,0 +1,24 @@
+build/
+pkg/
+*.zip
+*.o
+*.so
+*.a
+
+.cxx/
+.gradle/
+local.properties
+
+.vscode/
+.idea/
+*.iml
+
+.DS_Store
+Thumbs.db
+__pycache__/
+*.py[cod]
+
+jni/zygisk.hpp
+
+# Claude Code worktrees (ephemeral; never commit as embedded repos)
+.claude/worktrees/

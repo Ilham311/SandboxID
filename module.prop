@@ -1,0 +1,7 @@
+id=sandboxid
+name=SandboxID — Android device identifier privacy research module
+version=v2.1.11
+versionCode=229
+author=Ilham311
+description=SandboxID is an open-source Android privacy research and education module for devices you own. Presentation properties are applied before Zygote, per-process Zygisk hooks serve configured Build.* and property values to listed targets, and framework Settings work runs after boot. Runtime capabilities and hardware-backed attestation remain real. target.txt ships empty, so the module is idle until you add an application.
+updateJson=https://github.com/Ilham311/SandboxID/releases/latest/download/update.json
