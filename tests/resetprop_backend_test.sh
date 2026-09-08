@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
 
-ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 TMP_ROOT=${SBX_VALIDATE_TMPDIR:-${TMPDIR:-$ROOT/.claude-tmp}}
 mkdir -p "$TMP_ROOT" || exit 1
 TMP=$(mktemp -d "$TMP_ROOT/sbx-resetprop-test.XXXXXX") || exit 1
