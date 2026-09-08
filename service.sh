@@ -1,21 +1,8 @@
 #!/system/bin/sh
 MODDIR="${0%/*}"
+SERVICE_RC=0
 until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 2; done
 sleep 5
-BIN="$MODDIR/bin/sandboxid"
-if [ ! -x "$BIN" ]; then
-    case "$(getprop ro.product.cpu.abi)" in
-        arm64-v8a)   BIN="$MODDIR/bin/sandboxid-arm64" ;;
-        armeabi-v7a) BIN="$MODDIR/bin/sandboxid-arm" ;;
-        x86_64)      BIN="$MODDIR/bin/sandboxid-x86_64" ;;
-        x86)         BIN="$MODDIR/bin/sandboxid-x86" ;;
-    esac
-fi
-
-if grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
-    [ -f "$MODDIR/identity.prop" ] && [ -x "$BIN" ] && \
-        "$BIN" apply-boot >> /cache/sandboxid-boot.log 2>&1
-fi
 
 if [ -f "$MODDIR/debug_variant" ]; then
     mkdir -p "$MODDIR/debug"
@@ -61,3 +48,5 @@ if [ -f "$MODDIR/debug_variant" ]; then
     ) &
     echo "$!" > "$MODDIR/debug/journal.pid"
 fi
+
+exit "$SERVICE_RC"

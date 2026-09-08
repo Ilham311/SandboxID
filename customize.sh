@@ -6,14 +6,14 @@ SBX_VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
 ui_print "- SandboxID ${SBX_VER:-(versi ?)}"
 ui_print "- Membuat aplikasi melihat perangkat ini sebagai perangkat lain:"
 ui_print "-   model, brand, pabrikan, fingerprint, serial"
-ui_print "-   plus Android ID / SSAID per-aplikasi"
+ui_print "-   plus entropy persona module-local (bukan SSAID sistem)"
 ui_print "- Identitas perangkat diacak dari banyak brand:"
 ui_print "-   Pixel, Samsung, Xiaomi, POCO, OPPO, vivo, Redmi, Infinix"
 ui_print "-   peluang tiap brand sama rata."
-ui_print "- Spoof berjalan pre-zygote, sebelum aplikasi terbuka."
-ui_print "- Aman: hanya mengganti string identitas, tidak menyentuh HW/framework."
-ui_print "- Tombol Action (sekali tekan): acak perangkat, terapkan, rotasi ID"
-ui_print "-   (SSAID, GAID, WiFi/BT MAC, nama, boot count)"
+ui_print "- Spoof berjalan saat proses aplikasi target dimulai."
+ui_print "- Action hanya mengganti persona module-local secara atomik."
+ui_print "-   Action tidak menghapus data/izin aplikasi, mereset SSAID,"
+ui_print "-   menjalankan rotasi agregat, atau menerbitkan properti global."
 ui_print "- Aplikasi target diatur sendiri di target.txt (kosong = modul nonaktif)."
 ui_print "- WebUI: buka modul ini di manajer KernelSU/APatch."
 ui_print ""
@@ -30,6 +30,20 @@ LIVE_CARRIER="/data/adb/modules/sandboxid/carrier.conf"
 if [ -s "$LIVE_CARRIER" ]; then
     ui_print "- carrier.conf (pilihan operator) dari instalasi sebelumnya dipertahankan"
     cp -f "$LIVE_CARRIER" "$MODPATH/carrier.conf"
+fi
+
+LIVE_IDENTITY="/data/adb/modules/sandboxid/identity.prop"
+if [ -r "$LIVE_IDENTITY" ]; then
+    : > "$MODPATH/.operational-flags"
+    for KEY in SBX_NATIVE_READ SBX_HIDE SBX_CPU_REVISION SBX_PROC_VERSION SBX_MEMINFO SBX_SYSFS_MAC; do
+        VALUE=$(awk -F= -v k="$KEY" '$1==k && ($2=="0" || $2=="1") {v=$2} END {if (v!="") print v}' "$LIVE_IDENTITY" 2>/dev/null)
+        [ -n "$VALUE" ] && printf '%s=%s\n' "$KEY" "$VALUE" >> "$MODPATH/.operational-flags"
+    done
+    if [ -s "$MODPATH/.operational-flags" ]; then
+        ui_print "- Flag operasional dari instalasi sebelumnya akan dipulihkan saat boot"
+    else
+        rm -f "$MODPATH/.operational-flags"
+    fi
 fi
 
 if [ -f "$MODPATH/debug_variant" ]; then
@@ -81,23 +95,23 @@ set_perm $MODPATH/bin/sandboxid-arm64       0 0 0755
 set_perm $MODPATH/bin/sandboxid-arm         0 0 0755
 set_perm $MODPATH/bin/sandboxid-x86_64      0 0 0755
 set_perm $MODPATH/bin/sandboxid-x86         0 0 0755
-if [ -f $MODPATH/bin/resetprop-rs ]; then
-    set_perm $MODPATH/bin/resetprop-rs 0 0 0755
+case "$ABI" in
+    arm64-v8a|armeabi-v7a|x86_64|x86) RP_ASSET="resetprop-$ABI" ;;
+    *) abort "! ABI tidak didukung resetprop-rs v0.6.0: $ABI" ;;
+esac
 
-    if [ -f "$MODPATH/bin/resetprop-rs.sha256" ] && command -v sha256sum >/dev/null 2>&1; then
-        if ( cd "$MODPATH/bin" && sha256sum -c resetprop-rs.sha256 >/dev/null 2>&1 ); then
-            ui_print "- Checksum resetprop-rs OK"
-        else
-            ui_print "! Checksum resetprop-rs tidak cocok — binary bawaan dihapus"
-            rm -f "$MODPATH/bin/resetprop-rs"
-        fi
-    fi
-
-    if [ -f "$MODPATH/bin/resetprop-rs" ] && [ "$ABI" != "arm64-v8a" ]; then
-        rm -f "$MODPATH/bin/resetprop-rs" "$MODPATH/bin/resetprop-rs.sha256"
-        ui_print "- Catatan: resetprop-rs hanya untuk arm64 — dihapus di $ABI (pakai resetprop Magisk)."
-    fi
-fi
+[ -f "$MODPATH/bin/$RP_ASSET" ] || abort "! Binary resetprop-rs untuk $ABI tidak ada"
+[ -f "$MODPATH/bin/resetprop-rs.sha256" ] || abort "! Manifest checksum resetprop-rs tidak ada"
+command -v sha256sum >/dev/null 2>&1 || abort "! sha256sum diperlukan untuk verifikasi resetprop-rs"
+EXPECTED=$(grep "  $RP_ASSET\$" "$MODPATH/bin/resetprop-rs.sha256" | cut -d' ' -f1)
+[ -n "$EXPECTED" ] || abort "! Checksum $RP_ASSET tidak terdaftar"
+ACTUAL=$(sha256sum "$MODPATH/bin/$RP_ASSET" | cut -d' ' -f1)
+[ "$ACTUAL" = "$EXPECTED" ] || abort "! Checksum resetprop-rs $ABI tidak cocok"
+mv -f "$MODPATH/bin/$RP_ASSET" "$MODPATH/bin/resetprop-rs"
+rm -f "$MODPATH/bin/resetprop-arm64-v8a" "$MODPATH/bin/resetprop-armeabi-v7a" \
+      "$MODPATH/bin/resetprop-x86_64" "$MODPATH/bin/resetprop-x86"
+set_perm "$MODPATH/bin/resetprop-rs" 0 0 0755
+ui_print "- resetprop-rs v0.6.0 ($ABI) terverifikasi"
 
 case "$ABI" in
     arm64-v8a)   ln -sf sandboxid-arm64  $MODPATH/bin/sandboxid ;;

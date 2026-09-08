@@ -107,16 +107,8 @@ rp_set() {
         persist.*) _rpflag="-p" ;;
         *)         _rpflag="-n" ;;
     esac
-    if command -v resetprop >/dev/null 2>&1; then
-        resetprop "$_rpflag" "$key" "$val" 2>/dev/null && return 0
-    fi
-    if [ -x "$MODDIR/bin/resetprop-rs" ]; then
-        "$MODDIR/bin/resetprop-rs" "$_rpflag" "$key" "$val" 2>/dev/null && return 0
-    fi
-    if command -v resetprop-rs >/dev/null 2>&1; then
-        resetprop-rs "$_rpflag" "$key" "$val" 2>/dev/null && return 0
-    fi
-    setprop "$key" "$val" 2>/dev/null
+    [ -x "$MODDIR/bin/resetprop-rs" ] || return 1
+    "$MODDIR/bin/resetprop-rs" "$_rpflag" "$key" "$val" 2>/dev/null
 }
 
 sbx_bin() {
@@ -172,10 +164,10 @@ identity_persist() {
     if [ ! -f "$IDENTITY_FILE" ]; then
         touch "$IDENTITY_FILE" 2>/dev/null || return 1
     fi
-    tmp="${IDENTITY_FILE}.tmp.$$"
-    awk -F= -v k="$key" '$1!=k {print}' "$IDENTITY_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
-    printf '%s=%s\n' "$key" "$val" >> "$tmp"
-    mv "$tmp" "$IDENTITY_FILE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    _identity_tmp="${IDENTITY_FILE}.tmp.$$"
+    awk -F= -v k="$key" '$1!=k {print}' "$IDENTITY_FILE" > "$_identity_tmp" 2>/dev/null || { rm -f "$_identity_tmp"; return 1; }
+    printf '%s=%s\n' "$key" "$val" >> "$_identity_tmp"
+    mv "$_identity_tmp" "$IDENTITY_FILE" 2>/dev/null || { rm -f "$_identity_tmp"; return 1; }
     chmod 0644 "$IDENTITY_FILE" 2>/dev/null
     return 0
 }
@@ -184,10 +176,33 @@ identity_del() {
     key="$1"
     [ -z "$key" ] && return 1
     [ -f "$IDENTITY_FILE" ] || return 0
-    tmp="${IDENTITY_FILE}.tmp.$$"
-    awk -F= -v k="$key" '$1!=k {print}' "$IDENTITY_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
-    mv "$tmp" "$IDENTITY_FILE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    _identity_tmp="${IDENTITY_FILE}.tmp.$$"
+    awk -F= -v k="$key" '$1!=k {print}' "$IDENTITY_FILE" > "$_identity_tmp" 2>/dev/null || { rm -f "$_identity_tmp"; return 1; }
+    mv "$_identity_tmp" "$IDENTITY_FILE" 2>/dev/null || { rm -f "$_identity_tmp"; return 1; }
     chmod 0644 "$IDENTITY_FILE" 2>/dev/null
+    return 0
+}
+
+identity_preserve_operational_flags() {
+    _src="$1"
+    _dst="$2"
+    [ -r "$_src" ] || return 0
+    [ -f "$_dst" ] || return 1
+    _saved_identity_file="$IDENTITY_FILE"
+    for _key in SBX_NATIVE_READ SBX_HIDE SBX_CPU_REVISION \
+                SBX_PROC_VERSION SBX_MEMINFO SBX_SYSFS_MAC; do
+        _val=$(awk -F= -v k="$_key" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$_src" 2>/dev/null)
+        case "$_val" in
+            0|1)
+                IDENTITY_FILE="$_dst"
+                identity_persist "$_key" "$_val" || {
+                    IDENTITY_FILE="$_saved_identity_file"
+                    return 1
+                }
+                ;;
+        esac
+    done
+    IDENTITY_FILE="$_saved_identity_file"
     return 0
 }
 

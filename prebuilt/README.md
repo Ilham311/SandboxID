@@ -2,28 +2,25 @@
 
 Vendored third-party binaries bundled into the module ZIP.
 
-## resetprop-rs
+## resetprop-rs v0.6.0
 
-- **What:** Rust reimplementation of Magisk's `resetprop`, used by the native
-  `sandboxid` CLI (`jni/config.hpp` → `RESETPROP`) to set system properties
-  when the Magisk `resetprop` applet is not on `PATH`.
-- **Architecture:** `arm64-v8a` (aarch64) **only**. ELF PIE, built with NDK
-  r26d for Android API 26, stripped. It will **not** run on `armeabi-v7a`,
-  `x86`, or `x86_64` devices — on those ABIs `customize.sh` removes it and the
-  shell layer falls back to the Magisk `resetprop` applet (`helpers.sh:rp_set`).
-- **Integrity (C1):** the SHA-256 is pinned in `resetprop-rs.sha256`. Both
-  `build.sh` (package time) and `customize.sh` (install time) verify the binary
-  against this file and refuse to ship / install a mismatched blob. This blocks
-  a silently-swapped or corrupted binary from reaching a rooted device.
+SandboxID uses only the bundled `resetprop-rs`; it never falls back to Magisk's
+`resetprop`, a PATH binary, or `setprop`. The four binaries are official assets
+from <https://github.com/Enginex0/resetprop-rs/releases/tag/v0.6.0>:
 
-### Verify manually
+- `resetprop-arm64-v8a`
+- `resetprop-armeabi-v7a`
+- `resetprop-x86_64`
+- `resetprop-x86`
 
-    sha256sum -c prebuilt/resetprop-rs.sha256
+`resetprop-rs.sha256` pins the SHA-256 digests published by GitHub for that
+release. `build.sh` requires and verifies all four assets before packaging.
+`customize.sh` verifies the selected device ABI again, renames it to
+`bin/resetprop-rs`, and aborts installation on a missing or mismatched binary.
 
-### Regenerate the checksum after an intentional update
+Verify the vendored set manually:
 
-    sha256sum prebuilt/resetprop-rs | sed 's# .*/# #' > prebuilt/resetprop-rs.sha256
-    # then confirm: sha256sum -c prebuilt/resetprop-rs.sha256
+    (cd prebuilt && sha256sum -c resetprop-rs.sha256)
 
-Update this note (and the `.sha256`) in the same commit whenever the binary is
-replaced, and record the upstream source/commit the binary was built from.
+When upgrading, replace all four assets and the manifest together, then update
+the version and upstream release link in this file.

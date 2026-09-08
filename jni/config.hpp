@@ -44,13 +44,13 @@ inline constexpr BindEntry BIND_ENTRIES[] = {
     {"product/build.prop",    "/product/build.prop"},
     {"system_ext/build.prop", "/system_ext/etc/build.prop"},
     {"system_ext/build.prop", "/system_ext/build.prop"},
-
-    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
 };
 inline constexpr size_t BIND_ENTRIES_N = sizeof(BIND_ENTRIES) / sizeof(BIND_ENTRIES[0]);
 
 inline constexpr const char* MOUNT_PARTS[] = {"system", "vendor", "odm", "product", "system_ext"};
 inline constexpr size_t MOUNT_PARTS_N = sizeof(MOUNT_PARTS) / sizeof(MOUNT_PARTS[0]);
+inline constexpr char LEGACY_SETTINGS_OVERLAY[] =
+    "/data/adb/modules/sandboxid/mount/settings_secure.xml";
 
 struct KV { const char* k; const char* v; };
 

@@ -1,8 +1,11 @@
 
 #include "../jni/sbx_native_read.hpp"
 #include "../jni/sbx_mountinfo.hpp"
+#include "../jni/sbx_identity.hpp"
+#include "../jni/sbx_property.hpp"
 
 #include <cassert>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -139,65 +142,56 @@ static void test_pixel_ram() {
 }
 
 static void test_cpuinfo() {
-    std::string repl;
-
-    int a = cpu_action_for("Qualcomm", "SM8650", repl);
-    CHECK(a == CPU_QUALCOMM, "qualcomm manuf -> QUALCOMM");
-    CHECK(repl == "Qualcomm Technologies, Inc SM8650", "qualcomm repl string");
-
-    a = cpu_action_for("", "SM7325", repl);
-    CHECK(a == CPU_QUALCOMM, "SM prefix -> QUALCOMM");
-
-    a = cpu_action_for("MediaTek", "MT6893", repl);
-    CHECK(a == CPU_MTK, "mediatek -> MTK");
-    CHECK(repl == "MT6893", "mtk repl string");
-
-    a = cpu_action_for("", "MT6877", repl);
-    CHECK(a == CPU_MTK, "MT prefix -> MTK");
-
-    a = cpu_action_for("Google", "Tensor G3", repl);
-    CHECK(a == CPU_STRIP, "google/tensor -> STRIP");
-
-    std::string real_qcom =
+    const std::string real =
+        "Processor\t: AArch64 Processor rev 0 (aarch64)\n"
         "processor\t: 0\n"
         "BogoMIPS\t: 38.40\n"
-        "Hardware\t: Qualcomm Technologies, Inc SM_REAL_CHIP\n"
-        "Revision\t: 0001\n";
+        "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics\n"
+        "CPU implementer\t: 0x41\n"
+        "CPU architecture: 8\n"
+        "CPU variant\t: 0x2\n"
+        "CPU part\t: 0xd05\n"
+        "CPU revision\t: 14\n"
+        "\n"
+        "processor\t: 1\n"
+        "CPU implementer\t: 0x41\n"
+        "CPU architecture: 8\n"
+        "CPU variant\t: 0x0\n"
+        "CPU part\t: 0xd0c\n"
+        "CPU revision\t: 0\n"
+        "Hardware\t: MT6893Z/CZA\n";
     std::string out;
-    cpu_action_for("Qualcomm", "SM8650", repl);
-    bool changed = patch_cpuinfo(real_qcom, CPU_QUALCOMM, repl, out);
-    CHECK(changed, "qcom cpuinfo changed");
-    CHECK(out.find("SM8650") != std::string::npos, "qcom repl applied");
-    CHECK(out.find("SM_REAL_CHIP") == std::string::npos, "real chip removed");
-    CHECK(out.find("BogoMIPS\t: 38.40") != std::string::npos, "other cpuinfo lines intact");
-    CHECK(out.find("Revision\t: 0001") != std::string::npos, "trailing line intact");
+    CHECK(patch_cpuinfo_aggregate_revision(real, out),
+          "mixed per-core revisions normalize aggregate");
+    CHECK(out.rfind("Processor\t: AArch64 Processor rev 14 (aarch64)\n", 0) == 0,
+          "aggregate revision uses maximum valid per-core revision");
+    const size_t first_eol = real.find('\n');
+    CHECK(out.substr(out.find('\n')) == real.substr(first_eol),
+          "all bytes after aggregate line are preserved");
+    CHECK(out.find("Hardware\t: MT6893Z/CZA") != std::string::npos,
+          "Hardware line is preserved");
+    CHECK(out.find("CPU revision\t: 14") != std::string::npos &&
+              out.find("CPU revision\t: 0") != std::string::npos,
+          "per-core revisions are preserved");
 
-    std::string real_pixel =
-        "processor\t: 0\n"
-        "Hardware\t: Qualcomm Technologies, Inc SM_REAL_CHIP\n"
-        "Revision\t: 0001\n";
-    std::string outp;
-    bool ch2 = patch_cpuinfo(real_pixel, CPU_STRIP, "", outp);
-    CHECK(ch2, "strip changed");
-    CHECK(outp.find("Hardware") == std::string::npos, "Hardware line stripped");
-    CHECK(outp.find("Revision\t: 0001") != std::string::npos, "line after stripped Hardware intact");
-    CHECK(outp.find("processor\t: 0") != std::string::npos, "line before stripped Hardware intact");
-
-    std::string no_hw = "processor\t: 0\nBogoMIPS\t: 38.40\n";
-    std::string out3;
-    bool ch3 = patch_cpuinfo(no_hw, CPU_STRIP, "", out3);
-    CHECK(!ch3, "no Hardware -> no change");
-    CHECK(out3.empty(), "no-change clears out for passthrough");
-
-    std::string out4;
-    CHECK(!patch_cpuinfo(real_qcom, CPU_NONE, "", out4), "CPU_NONE -> passthrough");
-
-    std::string eof_hw = "processor\t: 0\nHardware\t: SM_REAL";
-    std::string out5;
-    bool ch5 = patch_cpuinfo(eof_hw, CPU_STRIP, "", out5);
-    CHECK(ch5, "EOF Hardware line changed");
-    CHECK(out5.find("Hardware") == std::string::npos, "EOF Hardware stripped");
-    CHECK(out5 == "processor\t: 0\n", "EOF strip leaves preceding lines");
+    std::string unchanged;
+    CHECK(!patch_cpuinfo_aggregate_revision(out, unchanged) && unchanged.empty(),
+          "already-correct aggregate passes through");
+    CHECK(!patch_cpuinfo_aggregate_revision(
+              "processor\t: 0\nCPU revision\t: 14\n", unchanged),
+          "missing AArch64 aggregate passes through");
+    CHECK(!patch_cpuinfo_aggregate_revision(
+              "Processor\t: AArch64 Processor rev x (aarch64)\n"
+              "CPU revision\t: 14\n", unchanged),
+          "malformed aggregate passes through");
+    CHECK(!patch_cpuinfo_aggregate_revision(
+              "Processor\t: AArch64 Processor rev 0 (aarch64)\n"
+              "CPU implementer\t: 0x41\n", unchanged),
+          "missing per-core revision passes through");
+    CHECK(!patch_cpuinfo_aggregate_revision(
+              "Processor\t: AArch64 Processor rev 0 (aarch64)\n"
+              "CPU revision\t: 999\n", unchanged),
+          "out-of-range per-core revision passes through");
 }
 
 static void test_classify() {
@@ -272,9 +266,22 @@ static void test_hide_prop() {
     CHECK(!is_custom_rom_prop("ro.cmdline"), "ro.cmdline not custom rom (ro.cm. must be dotted)");
     CHECK(!is_custom_rom_prop(nullptr), "null prop not custom rom");
 
-    CHECK(should_hide_prop("qemu.hw.mainkeys"), "should_hide covers emulator");
-    CHECK(should_hide_prop("ro.lineage.version"), "should_hide covers custom rom");
-    CHECK(!should_hide_prop("ro.product.brand"), "should_hide leaves normal props");
+    CHECK(!should_hide_prop("qemu.hw.mainkeys", false),
+          "disabled hide gate preserves emulator props");
+    CHECK(!should_hide_prop("ro.lineage.version", false),
+          "disabled hide gate preserves custom-ROM props");
+    CHECK(!should_hide_prop("ro.miui.ui.version.code", false),
+          "disabled hide gate preserves OEM numeric props");
+    CHECK(should_hide_prop("qemu.hw.mainkeys", true),
+          "enabled hide gate covers emulator props");
+    CHECK(should_hide_prop("ro.lineage.version", true),
+          "enabled hide gate covers custom-ROM props");
+    CHECK(should_hide_prop("ro.miui.ui.version.code", true),
+          "enabled hide gate covers OEM props");
+    CHECK(!should_hide_prop("ro.product.brand", true),
+          "enabled hide gate leaves ordinary props genuine");
+    CHECK(!should_hide_prop(nullptr, true),
+          "enabled hide gate handles null names safely");
 }
 
 static void test_applog_classify() {
@@ -417,6 +424,39 @@ static bool vec_has(const std::vector<std::string>& v, const char* s) {
     return false;
 }
 
+using PropertyCallback = void (*)(void*, const char*, const char*, uint32_t);
+using PropertyReadCallback = void (*)(const void*, PropertyCallback, void*);
+
+struct CallbackCapture {
+    int calls = 0;
+    void* cookie = nullptr;
+    std::string name;
+    std::string value;
+    uint32_t serial = 0;
+};
+
+static int g_property_read_calls = 0;
+static const void* g_property_read_pi = nullptr;
+
+static void capture_property_callback(void* cookie, const char* name,
+                                      const char* value, uint32_t serial) {
+    CallbackCapture* capture = static_cast<CallbackCapture*>(cookie);
+    if (!capture) return;
+    ++capture->calls;
+    capture->cookie = cookie;
+    capture->name = name ? name : "";
+    capture->value = value ? value : "";
+    capture->serial = serial;
+}
+
+static void capture_property_read(const void* pi, PropertyCallback callback,
+                                  void* cookie) {
+    ++g_property_read_calls;
+    g_property_read_pi = pi;
+    if (callback)
+        callback(cookie, "ro.test.wrapper", "genuine", 0x55);
+}
+
 static void test_mountinfo() {
     using namespace sbxmnt;
 
@@ -464,7 +504,8 @@ static void test_mountinfo() {
 
 static void test_native_unsafe_prop() {
     const char* unsafe[] = {
-        "ro.hardware", "ro.product.board", "ro.board.platform", "ro.arch",
+        "ro.hardware", "ro.product.board", "ro.board.platform",
+        "ro.soc.manufacturer", "ro.soc.model", "ro.arch",
         "ro.zygote", "ro.vendor.api_level", "persist.graphics.egl",
         "ro.product.cpu.abi", "ro.product.cpu.abi2", "ro.product.cpu.abilist",
         "ro.product.cpu.abilist32", "ro.product.cpu.abilist64",
@@ -479,8 +520,7 @@ static void test_native_unsafe_prop() {
         "ro.product.model", "ro.product.brand", "ro.product.manufacturer",
         "ro.product.device", "ro.product.name", "ro.build.fingerprint",
         "ro.build.id", "ro.build.version.release", "ro.build.version.sdk",
-        "ro.soc.manufacturer", "ro.soc.model", "ro.serialno",
-        "gsm.operator.numeric", "persist.sys.timezone",
+        "ro.serialno", "gsm.operator.numeric", "persist.sys.timezone",
         "dalvik.vm.heapgrowthlimit", "ro.hardwaremodel", "ro.arch2",
     };
     for (const char* p : spoofable)
@@ -524,6 +564,442 @@ static void test_applog_xml_synth() {
     CHECK(twice == patched, "second patch is a no-op");
 }
 
+static void test_path_normalization() {
+    std::string out;
+    CHECK(normalize_absolute_path("/proc//self/../cpuinfo", out) &&
+              out == "/proc/cpuinfo",
+          "absolute path is lexically normalized");
+    CHECK(join_and_normalize_path("/proc/self/fd/../..", "proc/version", out) &&
+              out == "/proc/proc/version",
+          "relative path joins normalized base");
+    CHECK(join_and_normalize_path("/proc", "self/../cpuinfo", out) &&
+              out == "/proc/cpuinfo",
+          "relative dot segments normalize");
+    CHECK(join_and_normalize_path("/sys/class/net/wlan0", "./address", out) &&
+              out == "/sys/class/net/wlan0/address" && classify(out.c_str()) == MAC,
+          "normalized relative sysfs path classifies");
+    CHECK(!join_and_normalize_path("relative", "proc/version", out),
+          "relative base is rejected");
+    CHECK(!join_and_normalize_path("/", "../proc/version", out),
+          "path escaping root is rejected");
+    CHECK(!normalize_absolute_path("proc/version", out),
+          "non-absolute path is rejected");
+}
+
+static std::string valid_identity_blob(const std::string& gaid) {
+    return
+        "BRAND=google\nMANUFACTURER=Google\nMODEL=Pixel 8 Pro\n"
+        "MARKETNAME=Pixel 8 Pro\nDEVICE=husky\nPRODUCT=husky\n"
+        "BOARD=zuma\nHARDWARE=zuma\nBOARD_PLATFORM=zuma\n"
+        "SOC_MANUFACTURER=Google\nSOC_MODEL=GS301\n"
+        "FINGERPRINT=google/husky/husky:15/AP3A.240905.015/12244876:user/release-keys\n"
+        "ID=AP3A.240905.015\nDISPLAY=AP3A.240905.015\n"
+        "DESCRIPTION=husky-user 15 AP3A.240905.015 12244876 release-keys\n"
+        "HOST=google-build-647\nUSER=android-build\nTYPE=user\nTAGS=release-keys\n"
+        "INCREMENTAL=12244876\nRELEASE=15\nSDK_INT=35\n"
+        "SECURITY_PATCH=2024-09-05\nSERIAL=CAD0CDE1B7DCC\n"
+        "ANDROID_ID=0764bfec5da44ba7\nGOOGLE_AID=" + gaid + "\n"
+        "FLAVOR=husky-user\nAPPLOG_EPOCH=1788799392000\n"
+        "BUILD_TIME_UTC=1725075240\n"
+        "BUILD_DATE=Sat Aug 31 03:34:00 UTC 2024\n";
+}
+
+static void test_identity_validation() {
+    sbxid::ValidationContext strict;
+    strict.runtime_sdk = 35;
+    sbxid::IdentitySnapshot snapshot;
+    std::string error;
+    std::string blob = valid_identity_blob(
+        "0d723296-e9ca-4702-83e8-fd05c3a7b512");
+    CHECK(sbxid::parse_and_validate_identity(blob, strict, snapshot, error),
+          "canonical identity accepted");
+    CHECK(snapshot.values.find("MODEL") != snapshot.values.end(),
+          "canonical identity values published");
+
+    const std::string zero_gaid = "00000000-0000-0000-0000-000000000000";
+    CHECK(sbxid::parse_and_validate_identity(valid_identity_blob(zero_gaid), strict,
+                                             snapshot, error),
+          "all-zero advertising opt-out sentinel accepted");
+
+    const std::string legacy = blob + "SUPPORTED_ABIS=arm64-v8a,armeabi-v7a\n"
+                                     "VBMETA_DIGEST=deadbeef\n";
+    CHECK(!sbxid::parse_and_validate_identity(legacy, strict, snapshot, error) &&
+              error.find("runtime capability key") != std::string::npos,
+          "strict app-side parser rejects runtime capability keys");
+
+    sbxid::ValidationContext migrate = strict;
+    migrate.drop_legacy_capabilities = true;
+    CHECK(sbxid::parse_and_validate_identity(legacy, migrate, snapshot, error),
+          "CLI migration parser accepts known legacy capability keys");
+    CHECK(snapshot.values.find("SUPPORTED_ABIS") == snapshot.values.end() &&
+              snapshot.values.find("VBMETA_DIGEST") == snapshot.values.end(),
+          "legacy capability keys are dropped, not published");
+    CHECK(snapshot.dropped_legacy_capabilities.size() == 2,
+          "migration records every dropped legacy key");
+
+    const std::string duplicate_legacy = legacy + "VBMETA_DIGEST=beadfeed\n";
+    CHECK(!sbxid::parse_and_validate_identity(duplicate_legacy, migrate, snapshot,
+                                              error) &&
+              error.find("duplicate identity key") != std::string::npos,
+          "duplicate legacy capability keys remain invalid");
+
+    std::string bad_sdk = blob;
+    size_t sdk = bad_sdk.find("SDK_INT=35");
+    bad_sdk.replace(sdk, std::strlen("SDK_INT=35"), "SDK_INT=34");
+    CHECK(!sbxid::parse_and_validate_identity(bad_sdk, strict, snapshot, error) &&
+              error.find("runtime SDK") != std::string::npos,
+          "SDK metadata must match the real runtime");
+
+    const char* operational_flags[] = {
+        "SBX_NATIVE_READ", "SBX_HIDE", "SBX_CPU_REVISION",
+        "SBX_PROC_VERSION", "SBX_MEMINFO", "SBX_SYSFS_MAC",
+    };
+    CHECK(sizeof(operational_flags) / sizeof(operational_flags[0]) ==
+              sizeof(sbxid::kOperationalFlags) /
+                  sizeof(sbxid::kOperationalFlags[0]),
+          "all six operational flags share one canonical native list");
+    for (const char* key : operational_flags) {
+        const std::string valid_flags = blob + key + "=1\n";
+        CHECK(sbxid::parse_and_validate_identity(valid_flags, strict, snapshot,
+                                                 error),
+              key);
+        const std::string invalid_flags = blob + key + "=true\n";
+        CHECK(!sbxid::parse_and_validate_identity(invalid_flags, strict, snapshot,
+                                                  error) &&
+                  error.find("operational boolean") != std::string::npos,
+              key);
+    }
+}
+
+static void test_property_helpers() {
+    CHECK(sbxprop::stable_release_runtime("0", "REL"),
+          "stable runtime permits release aliases");
+    CHECK(!sbxprop::stable_release_runtime("1", "VanillaIceCream"),
+          "preview SDK blocks release aliases");
+    CHECK(!sbxprop::stable_release_runtime("0", "VanillaIceCream"),
+          "non-REL codename blocks release aliases");
+    CHECK(!sbxprop::stable_release_runtime("", "REL") &&
+              !sbxprop::stable_release_runtime("0", ""),
+          "unknown preview state blocks release aliases");
+
+    const char* aliases[] = {
+        "ro.build.version.release_or_codename",
+        "ro.product.build.version.release_or_codename",
+        "ro.system.build.version.release_or_codename",
+        "ro.system_ext.build.version.release_or_codename",
+        "ro.vendor.build.version.release_or_codename",
+        "ro.odm.build.version.release_or_codename",
+    };
+    for (const char* key : aliases)
+        CHECK(sbxprop::release_alias_property(key), key);
+    CHECK(!sbxprop::release_alias_property("ro.build.version.release"),
+          "plain release is not a hybrid alias");
+    CHECK(!sbxprop::release_alias_property("ro.build.version.codename"),
+          "codename is never treated as a release alias");
+    CHECK(sbxprop::legacy_copy_length(std::string(90, 'a')) == 90,
+          "legacy property length reports full short value");
+    CHECK(sbxprop::legacy_copy_length(std::string(91, 'a')) == 91 &&
+              sbxprop::legacy_copy_length(std::string(92, 'a')) == 91 &&
+              sbxprop::legacy_copy_length(std::string(309, 'a')) == 91,
+          "legacy property length reports copied truncated bytes");
+
+    sbxprop::HandleNames names;
+    std::string name;
+    CHECK(!names.remember(0, "ro.product.model"), "zero property handle rejected");
+    CHECK(!names.remember(42, ""), "empty property name rejected");
+    CHECK(names.remember(42, "ro.product.model"), "genuine nonzero handle stored");
+    CHECK(names.find(42, name) && name == "ro.product.model",
+          "stored handle resolves to its property name");
+    CHECK(!names.find(0, name), "zero property handle never resolves");
+    CHECK(!names.find(99, name), "unknown property handle delegates");
+    CHECK(names.remember(42, "ro.product.brand") &&
+              names.find(42, name) && name == "ro.product.brand",
+          "reused genuine handle updates its property name");
+
+    int64_t parsed = 0;
+    CHECK(sbxprop::parse_int64("42", INT32_MIN, INT32_MAX, parsed) && parsed == 42,
+          "decimal property integer parses");
+    CHECK(sbxprop::parse_int64("  -42", INT32_MIN, INT32_MAX, parsed) && parsed == -42,
+          "leading whitespace and sign follow AOSP parsing");
+    CHECK(sbxprop::parse_int64("0x2a", INT32_MIN, INT32_MAX, parsed) && parsed == 42,
+          "immediate hexadecimal prefix parses");
+    CHECK(!sbxprop::parse_int64(" 0x2a ", INT32_MIN, INT32_MAX, parsed),
+          "trailing whitespace is rejected");
+    CHECK(!sbxprop::parse_int64("42x", INT32_MIN, INT32_MAX, parsed),
+          "trailing content is rejected");
+    CHECK(!sbxprop::parse_int64("", INT32_MIN, INT32_MAX, parsed),
+          "empty integer is rejected");
+    CHECK(!sbxprop::parse_int64("2147483648", INT32_MIN, INT32_MAX, parsed),
+          "integer outside caller range is rejected");
+    CHECK(sbxprop::parse_int64("9223372036854775807", INT64_MIN, INT64_MAX, parsed) &&
+              parsed == INT64_MAX,
+          "int64 maximum parses");
+    CHECK(!sbxprop::parse_int64("9223372036854775808", INT64_MIN, INT64_MAX, parsed),
+          "int64 overflow is rejected");
+
+    bool boolean = false;
+    for (const char* value : {"1", "y", "yes", "on", "true"})
+        CHECK(sbxprop::parse_bool(value, boolean) && boolean, value);
+    for (const char* value : {"0", "n", "no", "off", "false"})
+        CHECK(sbxprop::parse_bool(value, boolean) && !boolean, value);
+    for (const char* value : {"TRUE", "Yes", " true", "false ", "2", ""})
+        CHECK(!sbxprop::parse_bool(value, boolean), value);
+}
+
+static void test_property_callbacks() {
+    CallbackCapture capture;
+    std::string mapped93(93, 'm');
+    sbxprop::ValueDecision mapped =
+        sbxprop::decide_value(true, false, &mapped93);
+    sbxprop::CallbackRelay<decltype(&capture_property_callback)> relay{
+        capture_property_callback, &capture, false};
+    CHECK(relay.complete("ro.test.long", "genuine", 0x1234, mapped),
+          "mapped callback completes");
+    CHECK(capture.calls == 1 && capture.cookie == &capture,
+          "mapped callback preserves cookie and completes once");
+    CHECK(capture.name == "ro.test.long" && capture.serial == 0x1234,
+          "mapped callback preserves name and serial");
+    CHECK(capture.value == mapped93 && capture.value.size() == 93,
+          "mapped callback is not limited to PROP_VALUE_MAX");
+    CHECK(!relay.complete("ro.test.long", "again", 0x9999, mapped) &&
+              capture.calls == 1,
+          "relay suppresses duplicate completion");
+
+    CallbackCapture long_capture;
+    std::string mapped309(309, 'v');
+    sbxprop::ValueDecision mapped_long =
+        sbxprop::decide_value(true, false, &mapped309);
+    CHECK(sbxprop::complete_callback(capture_property_callback, &long_capture,
+                                     "ro.test.very_long", "genuine", 77,
+                                     mapped_long),
+          "309-byte mapped callback completes");
+    CHECK(long_capture.value == mapped309 && long_capture.value.size() == 309,
+          "309-byte mapped callback remains byte-complete");
+
+    CallbackCapture pass_capture;
+    std::string genuine(309, 'g');
+    sbxprop::ValueDecision pass = sbxprop::decide_value(true, false, nullptr);
+    CHECK(sbxprop::complete_callback(capture_property_callback, &pass_capture,
+                                     "ro.test.pass", genuine.c_str(), 91, pass),
+          "unmapped callback completes");
+    CHECK(pass_capture.calls == 1 && pass_capture.value == genuine,
+          "unmapped callback passes long genuine value byte-for-byte");
+
+    CallbackCapture hidden_capture;
+    sbxprop::ValueDecision hidden =
+        sbxprop::decide_value(true, true, nullptr);
+    CHECK(sbxprop::complete_callback(capture_property_callback, &hidden_capture,
+                                     "ro.test.hidden", "secret", 52, hidden),
+          "hidden existing property still completes callback");
+    CHECK(hidden_capture.calls == 1 && hidden_capture.value.empty() &&
+              hidden_capture.name == "ro.test.hidden" &&
+              hidden_capture.serial == 52,
+          "hidden callback preserves metadata and returns empty value once");
+
+    PropertyCallback null_callback = nullptr;
+    CHECK(!sbxprop::complete_callback(null_callback, nullptr, "ro.test.null",
+                                      "value", 1, pass),
+          "null callback remains a no-op");
+    sbxprop::CallbackRelay<PropertyCallback> null_relay;
+    CHECK(!null_relay.complete("ro.test.missing", nullptr, 0, pass) &&
+              !null_relay.completed,
+          "missing/null property path fabricates no callback completion");
+
+    CallbackCapture wrapper_capture;
+    sbxprop::CallbackRelay<PropertyCallback> wrapper_relay{
+        capture_property_callback, &wrapper_capture, false};
+    auto wrapper_trampoline = [](void* relay_cookie, const char* name,
+                                 const char* value, uint32_t serial) {
+        auto* callback_relay = static_cast<
+            sbxprop::CallbackRelay<PropertyCallback>*>(relay_cookie);
+        if (callback_relay)
+            callback_relay->complete(name, value, serial, {});
+    };
+    const int property_info = 1;
+    g_property_read_calls = 0;
+    g_property_read_pi = nullptr;
+    CHECK(sbxprop::dispatch_callback_read(
+              capture_property_read, &property_info, capture_property_callback,
+              wrapper_trampoline, &wrapper_relay),
+          "callback wrapper dispatches a genuine handle and callback");
+    CHECK(g_property_read_calls == 1 && g_property_read_pi == &property_info &&
+              wrapper_capture.calls == 1 &&
+              wrapper_capture.name == "ro.test.wrapper" &&
+              wrapper_capture.value == "genuine" &&
+              wrapper_capture.serial == 0x55,
+          "callback wrapper delegates once and preserves genuine payload");
+
+    g_property_read_calls = 0;
+    wrapper_capture = {};
+    wrapper_relay = {capture_property_callback, &wrapper_capture, false};
+    CHECK(!sbxprop::dispatch_callback_read(
+              capture_property_read, &property_info, null_callback,
+              wrapper_trampoline, &wrapper_relay) &&
+              g_property_read_calls == 0 && wrapper_capture.calls == 0,
+          "callback wrapper does not delegate a null caller callback");
+    CHECK(!sbxprop::dispatch_callback_read(
+              capture_property_read, static_cast<const int*>(nullptr),
+              capture_property_callback, wrapper_trampoline, &wrapper_relay) &&
+              g_property_read_calls == 0 && wrapper_capture.calls == 0,
+          "callback wrapper does not delegate a null property handle");
+    PropertyReadCallback null_reader = nullptr;
+    CHECK(!sbxprop::dispatch_callback_read(
+              null_reader, &property_info, capture_property_callback,
+              wrapper_trampoline, &wrapper_relay) &&
+              g_property_read_calls == 0 && wrapper_capture.calls == 0,
+          "callback wrapper remains a no-op without Bionic reader");
+}
+
+static void test_environment_gates() {
+    EnvironmentGates gates;
+    for (Kind kind : {BOOTID, VERSION, MEMINFO, MAC, CPUINFO,
+                      SELINUX_ENFORCE, APPLOG_XML})
+        CHECK(!environment_surface_enabled(kind, gates),
+              "master gate defaults closed");
+
+    gates.native_read = true;
+    CHECK(environment_surface_enabled(BOOTID, gates),
+          "boot id follows native-read master");
+    CHECK(environment_surface_enabled(SELINUX_ENFORCE, gates),
+          "existing enforce presentation follows native-read master");
+    CHECK(environment_surface_enabled(APPLOG_XML, gates),
+          "existing AppLog presentation follows native-read master");
+    CHECK(!environment_surface_enabled(VERSION, gates) &&
+              !environment_surface_enabled(MEMINFO, gates) &&
+              !environment_surface_enabled(MAC, gates) &&
+              !environment_surface_enabled(CPUINFO, gates),
+          "experimental environment surfaces default off");
+
+    gates.proc_version = true;
+    CHECK(environment_surface_enabled(VERSION, gates) &&
+              !environment_surface_enabled(MEMINFO, gates) &&
+              !environment_surface_enabled(MAC, gates) &&
+              !environment_surface_enabled(CPUINFO, gates),
+          "proc/version opt-in is independent");
+    gates.proc_version = false;
+    gates.meminfo = true;
+    CHECK(environment_surface_enabled(MEMINFO, gates) &&
+              !environment_surface_enabled(VERSION, gates) &&
+              !environment_surface_enabled(MAC, gates),
+          "meminfo opt-in is independent");
+    gates.meminfo = false;
+    gates.sysfs_mac = true;
+    CHECK(environment_surface_enabled(MAC, gates) &&
+              !environment_surface_enabled(VERSION, gates) &&
+              !environment_surface_enabled(CPUINFO, gates),
+          "sysfs MAC opt-in is independent");
+    gates.sysfs_mac = false;
+    gates.cpu_revision = true;
+    CHECK(environment_surface_enabled(CPUINFO, gates) &&
+              !environment_surface_enabled(VERSION, gates) &&
+              !environment_surface_enabled(MEMINFO, gates),
+          "CPU revision opt-in is independent");
+
+    gates.native_read = false;
+    CHECK(!environment_surface_enabled(CPUINFO, gates),
+          "master gate overrides enabled experimental surface");
+}
+
+static void test_operational_flag_lifecycle() {
+    const std::map<std::string, std::string> selected = {
+        {"SBX_NATIVE_READ", "0"}, {"SBX_HIDE", "1"},
+        {"SBX_CPU_REVISION", "1"}, {"SBX_PROC_VERSION", "1"},
+        {"SBX_MEMINFO", "0"}, {"SBX_SYSFS_MAC", "1"},
+    };
+    std::map<std::string, std::string> next = {
+        {"MODEL", "Pixel 9"}, {"SBX_NATIVE_READ", "1"},
+        {"SBX_HIDE", "0"}, {"SBX_CPU_REVISION", "0"},
+        {"SBX_PROC_VERSION", "0"}, {"SBX_MEMINFO", "1"},
+        {"SBX_SYSFS_MAC", "0"},
+    };
+    sbxid::preserve_operational_flags(selected, next);
+    for (std::string_view key : sbxid::kOperationalFlags) {
+        const std::string owned(key);
+        CHECK(next.find(owned) != next.end() && next[owned] == selected.at(owned),
+              owned.c_str());
+    }
+    CHECK(next["MODEL"] == "Pixel 9",
+          "lifecycle merge preserves replacement persona fields");
+
+    static constexpr std::string_view order[] = {
+        "MODEL", "SBX_NATIVE_READ", "SBX_HIDE", "SBX_CPU_REVISION",
+        "SBX_PROC_VERSION", "SBX_MEMINFO", "SBX_SYSFS_MAC",
+    };
+    std::string serialized;
+    CHECK(sbxid::serialize_identity_values(
+              next, order, sizeof(order) / sizeof(order[0]), serialized),
+          "lifecycle merge serializes atomically");
+    for (std::string_view key : sbxid::kOperationalFlags) {
+        const std::string prefix = std::string(key) + "=";
+        size_t count = 0;
+        for (size_t pos = serialized.find(prefix); pos != std::string::npos;
+             pos = serialized.find(prefix, pos + prefix.size())) {
+            if (pos == 0 || serialized[pos - 1] == '\n') ++count;
+        }
+        CHECK(count == 1, (std::string(key) + " remains unique").c_str());
+    }
+
+    std::map<std::string, std::string> legacy_current = {
+        {"SBX_NATIVE_READ", "0"}, {"SBX_HIDE", "1"},
+    };
+    std::map<std::string, std::string> generated = {
+        {"SBX_NATIVE_READ", "1"}, {"SBX_HIDE", "0"},
+        {"SBX_CPU_REVISION", "0"}, {"SBX_PROC_VERSION", "0"},
+        {"SBX_MEMINFO", "0"}, {"SBX_SYSFS_MAC", "0"},
+    };
+    sbxid::preserve_operational_flags(legacy_current, generated);
+    CHECK(generated["SBX_NATIVE_READ"] == "0" && generated["SBX_HIDE"] == "1",
+          "legacy present selections survive replacement");
+    CHECK(generated["SBX_CPU_REVISION"] == "0" &&
+              generated["SBX_PROC_VERSION"] == "0" &&
+              generated["SBX_MEMINFO"] == "0" &&
+              generated["SBX_SYSFS_MAC"] == "0",
+          "legacy missing children retain safe generated defaults");
+}
+
+static void test_identity_serialization() {
+    sbxid::ValidationContext migrate;
+    migrate.runtime_sdk = 35;
+    migrate.drop_legacy_capabilities = true;
+    sbxid::IdentitySnapshot snapshot;
+    std::string error;
+    const std::string blob = valid_identity_blob(
+        "0d723296-e9ca-4702-83e8-fd05c3a7b512") +
+        "UPTIME_SECONDS=12345\n"
+        "UPTIME_HUMAN=3 hours, 25 minutes\n"
+        "RELEASE_DATE=2024-09-05\n"
+        "SAFE_METADATA=kept\n"
+        "SUPPORTED_ABIS=arm64-v8a,armeabi-v7a\n"
+        "VBMETA_DIGEST=deadbeef\n";
+    CHECK(sbxid::parse_and_validate_identity(blob, migrate, snapshot, error),
+          "migration identity with safe metadata parses");
+
+    static constexpr std::string_view order[] = {
+        "BRAND", "MODEL", "FINGERPRINT", "SUPPORTED_ABIS", "VBMETA_DIGEST",
+    };
+    std::string serialized;
+    CHECK(sbxid::serialize_identity_values(
+              snapshot.values, order, sizeof(order) / sizeof(order[0]), serialized),
+          "validated identity serializes");
+    CHECK(serialized.rfind("BRAND=google\nMODEL=Pixel 8 Pro\nFINGERPRINT=", 0) == 0,
+          "canonical requested keys are emitted first");
+    CHECK(serialized.find("UPTIME_SECONDS=12345\n") != std::string::npos &&
+              serialized.find("UPTIME_HUMAN=3 hours, 25 minutes\n") != std::string::npos &&
+              serialized.find("RELEASE_DATE=2024-09-05\n") != std::string::npos &&
+              serialized.find("SAFE_METADATA=kept\n") != std::string::npos,
+          "safe unknown and lifecycle metadata survive serialization");
+    CHECK(serialized.find("SUPPORTED_ABIS=") == std::string::npos &&
+              serialized.find("VBMETA_DIGEST=") == std::string::npos,
+          "dropped capability keys cannot be re-emitted");
+
+    std::map<std::string, std::string> unsafe = snapshot.values;
+    unsafe["SUPPORTED_ABIS"] = "arm64-v8a";
+    CHECK(!sbxid::serialize_identity_values(
+              unsafe, order, sizeof(order) / sizeof(order[0]), serialized) &&
+              serialized.empty(),
+          "serializer rejects a reintroduced capability key");
+}
+
 int main() {
     test_uuid();
     test_mac();
@@ -542,6 +1018,13 @@ int main() {
     test_applog_xml_patch();
     test_applog_xml_synth();
     test_mountinfo();
+    test_path_normalization();
+    test_identity_validation();
+    test_property_helpers();
+    test_property_callbacks();
+    test_environment_gates();
+    test_operational_flag_lifecycle();
+    test_identity_serialization();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;

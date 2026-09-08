@@ -131,7 +131,7 @@ _vbs="$(gp ro.boot.verifiedbootstate)"
 case "$_vbs" in
     green)             emit vbmeta PASS "verifiedbootstate=green" ;;
     orange|yellow|red) emit vbmeta FAIL "verifiedbootstate=$_vbs (bootloader tidak terkunci/termodifikasi)" ;;
-    "")                emit vbmeta WARN "verifiedbootstate kosong — apply-boot belum jalan?" ;;
+    "")                emit vbmeta WARN "verifiedbootstate kosong — properti genuine tidak tersedia" ;;
     *)                 emit vbmeta WARN "verifiedbootstate=$_vbs (tak dikenal)" ;;
 esac
 

@@ -11,30 +11,39 @@ else
     exit 2
 fi
 
-REBOOT_NEEDED=0
 FAILURES=0
 
-wipe_ssaid() {
-    log_step "Wipe SSAID (backup + surgical)"
-    se_permissive
-    changed=0
-    for u in $(get_users); do
-        f="/data/system/users/$u/settings_ssaid.xml"
-        [ -f "$f" ] || continue
-        cp -f "$f" "$BACKUP_DIR_ROOT/settings_ssaid.$u.$(date +%s).bak" 2>/dev/null
-        rm -f "$f" "$f.bak" "$f.tmp" 2>/dev/null
-        changed=1
-    done
-    se_restore
-    backup_rotate "settings_ssaid." 10
-    if [ "$changed" = "1" ]; then
-        REBOOT_NEEDED=1
-        log_ok "SSAID cleared (backup in $BACKUP_DIR_ROOT)"
-        log_warn "REBOOT REQUIRED: system_server regenerates SSAID at boot."
-    else
-        log_info "No settings_ssaid.xml present"
-    fi
-    return 0
+print_help() {
+    cat <<USAGE
+Usage: rotate_ids.sh <cmd> [args]
+  gaid [uuid]                - tulis penyimpanan Advertising ID lokal (nilai nol mempertahankan opt-out; API tetap milik layanan)
+  wlan-mac [xx:xx:..]        - set MAC wlan0
+  bt-mac [xx:xx:..]          - set MAC adapter Bluetooth
+  device-name [name]         - sinkronkan device_name/BT ke persona (MODEL identity.prop)
+  boot-count                 - tulis Settings.Global.boot_count dari BOOT_COUNT identity.prop
+  carrier <spec>|off|status  - pilih SIM/operator; spec = "MCC|MNC|NAME|ISO|PHANTOM|CARRIER_ID"
+  applog [pkg]               - rotasi ID AppLog ByteDance untuk target atau paket tertentu
+  applog-wipe [pkg]          - hapus cache AppLog saja (tanpa rotasi)
+  status                     - tampilkan nilai non-SSAID saat ini (hanya-baca)
+  ssaid                      - info lifecycle SSAID Android 8+ (tidak mengubah apa pun; keluar nonzero)
+
+Perintah agregat 'all' dan 'safe' telah dihentikan. Jalankan operasi individual
+secara eksplisit. SSAID Android 8+ dikelola sistem per aplikasi, pengguna, dan
+kunci penandatanganan; SandboxID tidak membaca atau mengubah penyimpanan SSAID.
+USAGE
+}
+
+reject_aggregate() {
+    log_err "Perintah agregat '$1' telah dihentikan dan tidak mengubah apa pun."
+    log_info "Jalankan operasi individual secara eksplisit: gaid, wlan-mac, bt-mac, device-name, boot-count, carrier, atau applog."
+    return 2
+}
+
+explain_ssaid() {
+    log_err "Perintah 'ssaid' telah dihentikan dan tidak mengubah apa pun."
+    log_info "Android 8+ mengelola SSAID per aplikasi, pengguna, dan kunci penandatanganan sebagai bagian dari lifecycle sistem."
+    log_info "SandboxID tidak membaca, menghapus, mencadangkan, atau menulis penyimpanan SSAID."
+    return 2
 }
 
 set_gaid_value() {
@@ -45,10 +54,16 @@ set_gaid_value() {
         identity_persist GOOGLE_AID "$newgaid"
         log_info "GAID generated + persisted to identity.prop"
     fi
-    log_step "Set GAID: $(mask_id "$newgaid")"
+    case "$newgaid" in
+        00000000-0000-0000-0000-000000000000) gaid_opt_out=1 ;;
+        *) gaid_opt_out=0 ;;
+    esac
+    log_step "Set local GAID storage: $(mask_id "$newgaid")"
 
     settings_put global advertising_id "$newgaid" || log_warn "settings put advertising_id failed"
-    settings_put global limit_ad_tracking 0       || :
+    # Preserve the explicit all-zero opt-out sentinel instead of upgrading it to
+    # an opted-in success. Nonzero local rotations keep the legacy opt-in flag.
+    settings_put global limit_ad_tracking "$gaid_opt_out" || :
 
     force_stop com.google.android.gms
     command -v am >/dev/null 2>&1 && am kill --user 0 com.google.android.gms </dev/null >/dev/null 2>&1
@@ -74,7 +89,7 @@ set_gaid_value() {
 <?xml version='1.0' encoding='utf-8' standalone='yes' ?>
 <map>
     <string name="adid_key">$newgaid</string>
-    <boolean name="enable_limit_ad_tracking" value="false" />
+    <boolean name="enable_limit_ad_tracking" value="$([ "$gaid_opt_out" = "1" ] && printf true || printf false)" />
     <long name="last_reset_time" value="$(date +%s)000" />
 </map>
 XMLEOF
@@ -393,15 +408,6 @@ cmd_status() {
     log_info "getprop persist.bluetooth.adaptername = $(getprop persist.bluetooth.adaptername 2>/dev/null)"
     log_info "getprop persist.service.bdroid.bdaddr = $(mask_id "$(getprop persist.service.bdroid.bdaddr 2>/dev/null)")"
     log_info "getprop ro.serialno                   = $(mask_id "$(getprop ro.serialno 2>/dev/null)")"
-    for u in $(get_users); do
-        f="/data/system/users/$u/settings_ssaid.xml"
-        if [ -f "$f" ]; then
-            log_info "  user $u SSAID xml = present ($(stat -c '%s' "$f") bytes)"
-        else
-            log_info "  user $u SSAID xml = absent"
-        fi
-    done
-
     if grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
         log_info "AppLog cache (per target):"
         while IFS= read -r _t || [ -n "$_t" ]; do
@@ -420,29 +426,19 @@ cmd_status() {
     fi
 }
 
-cmd="${1:-all}"
-shift 2>/dev/null || true
+if [ "$#" -eq 0 ]; then
+    print_help
+    exit 0
+fi
+
+cmd="$1"
+shift
 MODVER=$(awk -F= '$1=="version"{print $2}' "$MODDIR/module.prop" 2>/dev/null)
 log_step "rotate_ids.sh cmd=$cmd (module $MODVER)"
 
 case "$cmd" in
-    all)
-        wipe_ssaid                    || FAILURES=$((FAILURES + 1))
-        set_gaid_value "$@"           || FAILURES=$((FAILURES + 1))
-        randomize_wlan_mac            || FAILURES=$((FAILURES + 1))
-        rotate_bluetooth_mac          || FAILURES=$((FAILURES + 1))
-        sync_device_name              || FAILURES=$((FAILURES + 1))
-        sync_boot_count               || :
-        regen_applog                  || :
-        ;;
-    safe)
-        set_gaid_value "$@"           || FAILURES=$((FAILURES + 1))
-        rotate_bluetooth_mac          || FAILURES=$((FAILURES + 1))
-        sync_device_name              || :
-        sync_boot_count               || :
-        regen_applog                  || :
-        ;;
-    ssaid)                wipe_ssaid              || FAILURES=$((FAILURES + 1)) ;;
+    all|safe)             reject_aggregate "$cmd" || exit $? ;;
+    ssaid)                explain_ssaid || exit $? ;;
     gaid)                 set_gaid_value "$@"     || FAILURES=$((FAILURES + 1)) ;;
     wlan-mac|mac)         randomize_wlan_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
     bt-mac|bluetooth-mac) rotate_bluetooth_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
@@ -452,29 +448,10 @@ case "$cmd" in
     applog|bytedance|regen-applog) regen_applog "$@"       || FAILURES=$((FAILURES + 1)) ;;
     applog-wipe|wipe-applog)       wipe_applog_only "$@"   || FAILURES=$((FAILURES + 1)) ;;
     status)               cmd_status ;;
-    -h|--help|help)
-        cat <<USAGE
-Usage: rotate_ids.sh <cmd> [args]
-  all                        - SSAID + GAID + wlan-MAC + BT-MAC + device-name + boot-count + applog (default)
-  safe                       - GAID + BT-MAC + device-name + boot-count + applog (no reboot, no wifi reset)
-  ssaid                      - wipe settings_ssaid.xml (needs reboot)
-  gaid [uuid]                - set Google Advertising ID
-  wlan-mac [xx:xx:..]        - set wlan0 MAC
-  bt-mac [xx:xx:..]          - set Bluetooth adapter MAC
-  device-name [name]         - sync device_name/BT to persona (identity.prop MODEL)
-  boot-count                 - write Settings.Global.boot_count from identity.prop BOOT_COUNT
-  carrier <spec>|off|status  - pick SIM/operator; spec = "MCC|MNC|NAME|ISO|PHANTOM|CARRIER_ID"
-  applog [pkg]               - rotate ByteDance AppLog IDs (did/iid/ssid/openudid/clientudid/cdid):
-                               bump APPLOG_EPOCH + wipe stale cache + force-stop; the zygisk hook
-                               serves the new values in-process on next cold start
-  applog-wipe [pkg]          - wipe cache only (no rotation) — forces SDK to re-register from server
-  status                     - show current values (read-only)
-USAGE
-        exit 0 ;;
+    -h|--help|help)       print_help; exit 0 ;;
     *) log_err "Unknown cmd: $cmd (try: rotate_ids.sh help)"; exit 2 ;;
 esac
 
-[ "$REBOOT_NEEDED" = "1" ] && log_warn "REBOOT REQUIRED for SSAID regeneration."
 if [ "$FAILURES" -gt 0 ]; then
     log_warn "rotate_ids.sh: $FAILURES step(s) reported failure"
     exit 1

@@ -43,6 +43,26 @@
 
 static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 
+static void upsert_identity_value(std::string& identity,
+                                  const std::string& key,
+                                  const std::string& value) {
+    const std::string prefix = key + "=";
+    size_t cursor = 0;
+    while (cursor <= identity.size()) {
+        size_t end = identity.find('\n', cursor);
+        if (end == std::string::npos) end = identity.size();
+        if (end - cursor >= prefix.size() &&
+            identity.compare(cursor, prefix.size(), prefix) == 0) {
+            identity.replace(cursor, end - cursor, prefix + value);
+            return;
+        }
+        if (end == identity.size()) break;
+        cursor = end + 1;
+    }
+    if (!identity.empty() && identity.back() != '\n') identity.push_back('\n');
+    identity.append(prefix).append(value).push_back('\n');
+}
+
 static void watch_target_death(uint32_t pid, int client_fd);
 
 static std::vector<std::string> g_targets;
@@ -402,7 +422,7 @@ extern "C" void sandboxid_companion(int client) {
     bool have_peer = (::getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) == 0
                       && peer_len == sizeof(peer));
     if (!have_peer)
-        LOGW("SO_PEERCRED gagal errno=%d — otorisasi DO_MOUNTS fail-open", errno);
+        LOGW("SO_PEERCRED gagal errno=%d — otorisasi DO_MOUNTS/DO_HIDE fail-closed", errno);
     else
         LOGD("peer creds pid=%d uid=%d gid=%d", peer.pid, peer.uid, peer.gid);
 
@@ -469,16 +489,12 @@ extern "C" void sandboxid_companion(int client) {
                 std::string nrkill = std::string(sandboxid::MODDIR) + "/no_native_read";
                 struct stat nrst;
                 if (::stat(nrkill.c_str(), &nrst) == 0) {
-
-                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
-                    d += "SBX_NATIVE_READ=0\n";
+                    upsert_identity_value(d, "SBX_NATIVE_READ", "0");
                     LOGD("no_native_read aktif -> SBX_NATIVE_READ=0 utk '%s'", pkg.c_str());
                 }
 
                 if (::stat(sandboxid::ENABLE_HIDE, &nrst) == 0) {
-
-                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
-                    d += "SBX_HIDE=1\n";
+                    upsert_identity_value(d, "SBX_HIDE", "1");
                     LOGD("enable_hide aktif -> SBX_HIDE=1 utk '%s'", pkg.c_str());
                 }
             }

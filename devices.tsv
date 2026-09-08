@@ -7,9 +7,9 @@
 # `autopif.sh device` picks ONE row and layers a coherent synthetic lifecycle on
 # top (boot count / uptime / "fresh" state derived from the device's release
 # date), then writes a verbatim identity.prop-style artifact to
-# $MODDIR/device.identity. It is applied automatically by the Action button, or
-# opt-in by hand with:
-#     cp device.identity identity.prop && sandboxid apply-boot
+# $MODDIR/device.identity. Action validates and imports it atomically, or use the
+# same validated module-local path by hand with:
+#     sandboxid import device.identity
 #
 # FAIR PER-BRAND PICK: the picker chooses a BRAND first (uniformly across the
 # distinct brands below), THEN a model within that brand. So every brand has the

@@ -139,23 +139,26 @@ build_variant() {
   cp "build/$V/x86_64/sandboxid"       "$PKG/bin/sandboxid-x86_64"
   cp "build/$V/x86/sandboxid"          "$PKG/bin/sandboxid-x86"
 
-  if [ -f prebuilt/resetprop-rs ]; then
-
-    if [ -f prebuilt/resetprop-rs.sha256 ] && command -v sha256sum >/dev/null 2>&1; then
-      ( cd prebuilt && sha256sum -c resetprop-rs.sha256 >/dev/null ) || {
-        echo "  ERROR: prebuilt/resetprop-rs checksum mismatch — refusing to package" >&2
-        exit 1
-      }
-      echo "  ==> resetprop-rs verified"
-    else
-      echo "  WARN: cannot verify resetprop-rs checksum (missing .sha256 or sha256sum)" >&2
-    fi
-    cp prebuilt/resetprop-rs "$PKG/bin/resetprop-rs"
-
-    [ -f prebuilt/resetprop-rs.sha256 ] && cp prebuilt/resetprop-rs.sha256 "$PKG/bin/resetprop-rs.sha256"
-  else
-    echo "  WARN: prebuilt/resetprop-rs missing; native prop apply will rely on Magisk resetprop"
+  echo "  ==> verifying resetprop-rs v0.6.0 assets"
+  for RP_ABI in arm64-v8a armeabi-v7a x86_64 x86; do
+    [ -f "prebuilt/resetprop-$RP_ABI" ] || {
+      echo "  ERROR: prebuilt/resetprop-$RP_ABI missing" >&2
+      exit 1
+    }
+  done
+  if [ ! -f prebuilt/resetprop-rs.sha256 ] || ! command -v sha256sum >/dev/null 2>&1; then
+    echo "  ERROR: resetprop-rs checksum manifest or sha256sum missing" >&2
+    exit 1
   fi
+  ( cd prebuilt && sha256sum -c resetprop-rs.sha256 >/dev/null ) || {
+    echo "  ERROR: resetprop-rs v0.6.0 checksum mismatch" >&2
+    exit 1
+  }
+  for RP_ABI in arm64-v8a armeabi-v7a x86_64 x86; do
+    cp "prebuilt/resetprop-$RP_ABI" "$PKG/bin/resetprop-$RP_ABI"
+  done
+  cp prebuilt/resetprop-rs.sha256 "$PKG/bin/resetprop-rs.sha256"
+  echo "  ==> resetprop-rs v0.6.0 verified (4 ABI)"
 
   local ZIP="$OUT/sandboxid-$VERSION-$V.zip"
   (cd "$PKG" && zip -r9 "$ZIP" . -x "*.DS_Store" >/dev/null)

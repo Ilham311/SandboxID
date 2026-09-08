@@ -305,6 +305,16 @@ button:disabled { opacity: .5; pointer-events: none; }
   word-break: break-all;
 }
 .empty { grid-column: 1 / -1; padding: 8px 0; color: var(--muted); font-size: 13px; }
+.persona-note {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--s1);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
 
 /* ---- Rotate ------------------------------------------------------------- */
 .chip {
