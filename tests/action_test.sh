@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Assertions evaluate variable names from test expressions.
+# shellcheck disable=SC2034
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

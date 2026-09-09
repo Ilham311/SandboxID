@@ -18,7 +18,6 @@ FROM_IDENTITY=0
 REPORT_FILE=""
 COMPONENT_REPORT=""
 MUTATION_LOCK_OWNED=0
-ROTATION_TERMINAL=0
 
 rotation_cleanup() {
     command -v se_restore_all >/dev/null 2>&1 && se_restore_all
@@ -31,7 +30,6 @@ rotation_cleanup() {
 rotation_signal() {
     _signal_rc="$1"
     rotation_cleanup
-    ROTATION_TERMINAL=1
     trap - EXIT INT TERM HUP
     exit "$_signal_rc"
 }
