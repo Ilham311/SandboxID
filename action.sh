@@ -515,11 +515,23 @@ fi
 PACKAGE_LIST_FILE="$DEBUG_DIR/.action-package-list.$RUN_ID"
 INSTALLED_TARGETS_FILE="$DEBUG_DIR/.action-installed.$RUN_ID"
 ABSENT_TARGETS_FILE="$DEBUG_DIR/.action-absent.$RUN_ID"
-if ! pm list packages --user 0 </dev/null > "$PACKAGE_LIST_FILE" 2>> "$ACTION_LOG"; then
-    rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" 2>/dev/null
-    failure "Package Manager tidak dapat membaca daftar package."
-    stage_done FAIL package-query-failed
-    finish 30 failed package-query-failed
+if pm list packages --user 0 </dev/null > "$PACKAGE_LIST_FILE" 2>> "$ACTION_LOG"; then
+    :
+else
+    : > "$PACKAGE_LIST_FILE" || {
+        rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" 2>/dev/null
+        failure "Daftar package sementara tidak dapat dibuat."
+        stage_done FAIL target-state-unwritable
+        finish 30 failed target-state-unwritable
+    }
+    if pm list packages </dev/null > "$PACKAGE_LIST_FILE" 2>> "$ACTION_LOG"; then
+        warning "Query package untuk user 0 gagal; menggunakan daftar package default."
+    else
+        rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" 2>/dev/null
+        failure "Package Manager tidak dapat membaca daftar package."
+        stage_done FAIL package-query-failed
+        finish 30 failed package-query-failed
+    fi
 fi
 : > "$INSTALLED_TARGETS_FILE" || {
     rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" 2>/dev/null

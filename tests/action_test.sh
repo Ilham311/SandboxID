@@ -32,7 +32,7 @@ reset_env() {
     export SBX_RESTORE_RC=0 SBX_VERIFY_RUN_RC=0 SBX_VERIFY_RESTORE_RC=0
     export SBX_COMMIT_DIGEST=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     export SBX_ROTATE_RC=0 SBX_ROTATE_FAILURES=0 SBX_ROTATE_UNSUPPORTED=0
-    export SBX_ROTATE_REBOOT=0 SBX_PM_CLEAR_FAIL='' SBX_AM_FAIL=''
+    export SBX_ROTATE_REBOOT=0 SBX_PM_CLEAR_FAIL='' SBX_PM_USER_QUERY_RC=0 SBX_PM_QUERY_RC=0 SBX_AM_FAIL=''
     export SBX_APPLOG_WIPE_FAIL='' SBX_APPLOG_SEED_FAIL=''
 }
 
@@ -173,7 +173,13 @@ SH
 #!/bin/sh
 printf 'pm %s\n' "$*" >> "$SBX_CALLS"
 case "$1 $2" in
-  'list packages') printf '%b' "${SBX_PACKAGES:-}" ;;
+  'list packages')
+    if [ "${3:-}" = --user ]; then
+      [ "${SBX_PM_USER_QUERY_RC:-0}" -eq 0 ] || exit "$SBX_PM_USER_QUERY_RC"
+    else
+      [ "${SBX_PM_QUERY_RC:-0}" -eq 0 ] || exit "$SBX_PM_QUERY_RC"
+    fi
+    printf '%b' "${SBX_PACKAGES:-}" ;;
   'clear --user')
     pkg=$4
     [ "$pkg" != "${SBX_PM_CLEAR_FAIL:-}" ] ;;
@@ -224,6 +230,23 @@ run_case
 check '[ "$CASE_RC" -eq 64 ]' 'invalid target parser status exits 64'
 check 'result_has "code=target-invalid"' 'invalid targets persist target-invalid result'
 check '! call_has "native prepare" && ! call_has "pm clear"' 'invalid targets perform no destructive work'
+
+setup_case package-user-query-fallback
+SBX_PM_USER_QUERY_RC=1
+export SBX_PM_USER_QUERY_RC
+run_case
+check '[ "$CASE_RC" -eq 0 ]' 'unsupported user-scoped package query falls back to default package list'
+check 'call_has "pm list packages --user 0" && call_has "pm list packages$"' 'package fallback retries without unsupported user option'
+check 'result_has "status=success" && result_has "warnings=1"' 'package fallback is visible as a warning'
+
+setup_case package-query-fail
+SBX_PM_USER_QUERY_RC=1
+SBX_PM_QUERY_RC=1
+export SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC
+run_case
+check '[ "$CASE_RC" -eq 30 ]' 'all package queries failing exits before commit with 30'
+check 'result_has "code=package-query-failed"' 'package query failure remains explicit and durable'
+check '! call_has "native prepare" && ! call_has "pm clear"' 'package query failure performs no mutation'
 
 setup_case prepare-fail
 SBX_PREPARE_RC=1
