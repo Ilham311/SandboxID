@@ -24,6 +24,17 @@ if [ ! -f module.prop ]; then
   echo "ERROR: module.prop not found in $ROOT — refusing to build" >&2
   exit 1
 fi
+MANDATORY_RUNTIME=(
+  action.sh service.sh customize.sh post-fs-data.sh helpers.sh rotate_ids.sh
+  selftest.sh autopif.sh target.txt webroot/index.html webroot/app.js
+  webroot/style.css webroot/theme-init.js tests/package_manifest_test.sh
+)
+for _required in "${MANDATORY_RUNTIME[@]}"; do
+  if [ ! -f "$_required" ]; then
+    echo "ERROR: mandatory runtime input missing or not a regular file: $_required" >&2
+    exit 1
+  fi
+done
 VERSION="$(grep '^version=' module.prop | cut -d= -f2 || true)"
 if [ -z "${VERSION:-}" ]; then
   echo "ERROR: version= line missing in module.prop" >&2
@@ -100,25 +111,16 @@ build_variant() {
 
   rm -rf "$PKG"
   mkdir -p "$PKG/zygisk" "$PKG/bin"
-  cp module.prop action.sh service.sh customize.sh "$PKG/"
+  cp module.prop action.sh service.sh customize.sh post-fs-data.sh helpers.sh \
+    rotate_ids.sh selftest.sh autopif.sh target.txt "$PKG/"
+  cp -R webroot "$PKG/"
   [ -f LICENSE ]   && cp LICENSE "$PKG/"
   [ -f CREDITS.md ] && cp CREDITS.md "$PKG/"
   [ -f summarize.sh ] && cp summarize.sh "$PKG/"
-  [ -f post-fs-data.sh ] && cp post-fs-data.sh "$PKG/"
-  [ -f target.txt ] && cp target.txt "$PKG/"
-  [ -f helpers.sh ] && cp helpers.sh "$PKG/"
-  [ -f rotate_ids.sh ] && cp rotate_ids.sh "$PKG/"
-  [ -f selftest.sh ] && cp selftest.sh "$PKG/"
+  # Optional reviewed convenience catalogs. The native offline catalog remains
+  # authoritative when these files are absent.
   [ -f personas.tsv ] && cp personas.tsv "$PKG/"
-  [ -f devices.tsv ] && cp devices.tsv "$PKG/"
   [ -f carriers.tsv ] && cp carriers.tsv "$PKG/"
-  [ -f autopif.sh ] && cp autopif.sh "$PKG/"
-  [ -d webroot ] && cp -R webroot "$PKG/"
-
-  if [ "${AUTOPIF_REFRESH:-0}" = "1" ] && [ -f "$PKG/autopif.sh" ]; then
-    echo "  ==> refreshing persona pool (autopif, build-time)"
-    PERSONAS_FILE="$PKG/personas.tsv" MODDIR="$PKG" sh "$PKG/autopif.sh" || true
-  fi
 
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"
@@ -139,23 +141,29 @@ build_variant() {
   cp "build/$V/x86_64/sandboxid"       "$PKG/bin/sandboxid-x86_64"
   cp "build/$V/x86/sandboxid"          "$PKG/bin/sandboxid-x86"
 
-  if [ -f prebuilt/resetprop-rs ]; then
-
-    if [ -f prebuilt/resetprop-rs.sha256 ] && command -v sha256sum >/dev/null 2>&1; then
-      ( cd prebuilt && sha256sum -c resetprop-rs.sha256 >/dev/null ) || {
-        echo "  ERROR: prebuilt/resetprop-rs checksum mismatch — refusing to package" >&2
-        exit 1
-      }
-      echo "  ==> resetprop-rs verified"
-    else
-      echo "  WARN: cannot verify resetprop-rs checksum (missing .sha256 or sha256sum)" >&2
+  if [ -e prebuilt/resetprop-rs ] || [ -e prebuilt/resetprop-rs.sha256 ] ||
+     [ -e prebuilt/resetprop-rs.LICENSE ]; then
+    if [ ! -f prebuilt/resetprop-rs ] || [ ! -f prebuilt/resetprop-rs.sha256 ] ||
+       [ ! -f prebuilt/resetprop-rs.LICENSE ]; then
+      echo "  ERROR: resetprop-rs binary/checksum/license set is incomplete" >&2
+      exit 1
     fi
-    cp prebuilt/resetprop-rs "$PKG/bin/resetprop-rs"
-
-    [ -f prebuilt/resetprop-rs.sha256 ] && cp prebuilt/resetprop-rs.sha256 "$PKG/bin/resetprop-rs.sha256"
+    if ! command -v sha256sum >/dev/null 2>&1; then
+      echo "  ERROR: sha256sum is required to verify bundled resetprop-rs" >&2
+      exit 1
+    fi
+    ( cd prebuilt && sha256sum -c resetprop-rs.sha256 >/dev/null ) || {
+      echo "  ERROR: prebuilt/resetprop-rs checksum mismatch — refusing to package" >&2
+      exit 1
+    }
+    echo "  ==> resetprop-rs verified"
+    cp prebuilt/resetprop-rs prebuilt/resetprop-rs.sha256 \
+      prebuilt/resetprop-rs.LICENSE "$PKG/bin/"
   else
-    echo "  WARN: prebuilt/resetprop-rs missing; native prop apply will rely on Magisk resetprop"
+    echo "  ==> resetprop-rs not bundled; runtime requires resetprop/resetprop-rs in PATH"
   fi
+
+  bash tests/package_manifest_test.sh "$PKG"
 
   local ZIP="$OUT/sandboxid-$VERSION-$V.zip"
   (cd "$PKG" && zip -r9 "$ZIP" . -x "*.DS_Store" >/dev/null)

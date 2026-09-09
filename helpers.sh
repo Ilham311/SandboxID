@@ -13,6 +13,260 @@ chmod 0700 "$BACKUP_DIR_ROOT" 2>/dev/null
 [ -w "$(dirname "$LOGFILE")" ] || LOGFILE="$MODDIR/sandboxid-boot.log"
 touch "$LOGFILE" 2>/dev/null
 
+ACTION_LOCK="${ACTION_LOCK:-$MODDIR/.action.lock}"
+MUTATION_LOCK="${MUTATION_LOCK:-$MODDIR/.mutation.lock}"
+MUTATION_LOCK_HELD=0
+MUTATION_OWNER_PID=""
+MUTATION_OWNER_START=""
+MUTATION_OWNER_KIND=""
+MUTATION_OWNER_RUN=""
+MUTATION_OWNER_TOKEN=""
+
+_lock_fields() {
+    _lf_file="$1"
+    shift
+    awk -F= -v requested="$(printf '%s\n' "$@")" '
+        BEGIN {
+            count = split(requested, order, "\n")
+            for (i = 1; i <= count; ++i) wanted[order[i]] = 1
+        }
+        ($1 in wanted) && !seen[$1]++ {
+            key = $1
+            sub(/^[^=]*=/, "")
+            values[key] = $0
+        }
+        END {
+            for (i = 1; i <= count; ++i) print values[order[i]]
+        }
+    ' "$_lf_file" 2>/dev/null
+}
+
+_proc_stat_field() {
+    _ps_pid="$1"; _ps_field="$2"
+    [ -r "/proc/$_ps_pid/stat" ] || return 1
+    awk -v n="$_ps_field" '{ line=$0; sub(/^.*\) /, "", line); split(line, f, " "); print f[n]; exit }' \
+        "/proc/$_ps_pid/stat" 2>/dev/null
+}
+
+proc_start_ticks() { _proc_stat_field "$1" 20; }
+proc_parent_pid() { _proc_stat_field "$1" 2; }
+
+_process_descends_from() {
+    _pd_child="$1"; _pd_owner="$2"; _pd_depth=0
+    case "$_pd_child:$_pd_owner" in *[!0-9:]*) return 1 ;; esac
+    while [ "$_pd_depth" -lt 64 ] && [ "$_pd_child" -gt 0 ]; do
+        [ "$_pd_child" = "$_pd_owner" ] && return 0
+        _pd_next="$(proc_parent_pid "$_pd_child" 2>/dev/null)"
+        case "$_pd_next" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$_pd_next" != "$_pd_child" ] || return 1
+        _pd_child="$_pd_next"
+        _pd_depth=$((_pd_depth + 1))
+    done
+    return 1
+}
+
+_owner_binding_live() {
+    _ob_pid="$1"
+    _ob_start="$2"
+    case "$_ob_pid:$_ob_start" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    kill -0 "$_ob_pid" 2>/dev/null || return 1
+    [ "$(proc_start_ticks "$_ob_pid" 2>/dev/null)" = "$_ob_start" ]
+}
+
+_owner_file_live() {
+    _of_file="$1"
+    [ -r "$_of_file" ] || return 1
+    _of_fields="$(_lock_fields "$_of_file" pid proc_start)" || return 1
+    if ! {
+        IFS= read -r _of_pid
+        IFS= read -r _of_start
+    } <<EOF
+$_of_fields
+EOF
+    then
+        return 1
+    fi
+    _owner_binding_live "$_of_pid" "$_of_start"
+}
+
+_action_lock_owned() {
+    [ -n "${SBX_ACTION_RUN_ID:-}" ] || return 1
+    [ -n "${SBX_MUTATION_OWNER_PID:-}" ] || return 1
+    [ -n "${SBX_MUTATION_OWNER_START:-}" ] || return 1
+    [ -n "${SBX_MUTATION_OWNER_TOKEN:-}" ] || return 1
+    [ -r "$ACTION_LOCK/owner" ] || return 1
+    _al_fields="$(_lock_fields "$ACTION_LOCK/owner" version kind run pid proc_start token)" || return 1
+    if ! {
+        IFS= read -r _al_version
+        IFS= read -r _al_kind
+        IFS= read -r _al_run
+        IFS= read -r _al_pid
+        IFS= read -r _al_start
+        IFS= read -r _al_token
+    } <<EOF
+$_al_fields
+EOF
+    then
+        return 1
+    fi
+    [ "$_al_version" = 1 ] && [ "$_al_kind" = action ] || return 1
+    [ "$_al_run" = "$SBX_ACTION_RUN_ID" ] || return 1
+    [ "$_al_pid" = "$SBX_MUTATION_OWNER_PID" ] || return 1
+    [ "$_al_start" = "$SBX_MUTATION_OWNER_START" ] || return 1
+    [ "$_al_token" = "$SBX_MUTATION_OWNER_TOKEN" ] || return 1
+    _owner_file_live "$ACTION_LOCK/owner" || return 1
+    _process_descends_from "$$" "$_al_pid"
+}
+
+_action_owner_live() { _owner_file_live "$ACTION_LOCK/owner"; }
+
+_mutation_inherited_owned() {
+    [ -n "${SBX_MUTATION_OWNER_PID:-}" ] || return 1
+    [ -n "${SBX_MUTATION_OWNER_START:-}" ] || return 1
+    [ -n "${SBX_MUTATION_OWNER_TOKEN:-}" ] || return 1
+    [ -r "$MUTATION_LOCK/owner" ] || return 1
+    _mi_fields="$(_lock_fields "$MUTATION_LOCK/owner" version pid proc_start kind run token)" || return 1
+    if ! {
+        IFS= read -r _mi_version
+        IFS= read -r _mi_pid
+        IFS= read -r _mi_start
+        IFS= read -r _mi_kind
+        IFS= read -r _mi_run
+        IFS= read -r _mi_token
+    } <<EOF
+$_mi_fields
+EOF
+    then
+        return 1
+    fi
+    [ "$_mi_version" = 1 ] || return 1
+    [ "$_mi_pid" = "$SBX_MUTATION_OWNER_PID" ] || return 1
+    [ "$_mi_start" = "$SBX_MUTATION_OWNER_START" ] || return 1
+    [ "$_mi_token" = "$SBX_MUTATION_OWNER_TOKEN" ] || return 1
+    _owner_file_live "$MUTATION_LOCK/owner" || return 1
+    _process_descends_from "$$" "$_mi_pid" || return 1
+    case "$_mi_kind" in
+        action)
+            [ "$_mi_run" = "${SBX_ACTION_RUN_ID:-}" ] || return 1
+            _action_lock_owned ;;
+        standalone)
+            [ -z "$_mi_run" ] || return 1
+            [ "$MUTATION_LOCK_HELD" -eq 1 ] || return 1
+            [ "$MUTATION_OWNER_KIND" = standalone ] || return 1
+            [ "$MUTATION_OWNER_PID" = "$_mi_pid" ] || return 1
+            [ "$MUTATION_OWNER_START" = "$_mi_start" ] || return 1
+            [ "$MUTATION_OWNER_TOKEN" = "$_mi_token" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+action_mutation_allowed() {
+    if [ -d "$MUTATION_LOCK" ]; then
+        _mutation_inherited_owned
+        return $?
+    fi
+    [ ! -d "$ACTION_LOCK" ] && return 0
+    _action_lock_owned && return 0
+    [ -r "$ACTION_LOCK/owner" ] || return 1
+    _action_owner_live && return 1
+    return 0
+}
+
+require_action_mutation() {
+    action_mutation_allowed && return 0
+    log_warn "mutasi ditolak: domain mutasi dimiliki operasi lain atau token owner tidak valid"
+    return 1
+}
+
+_make_owner_token() {
+    _mo_token="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \r\n')"
+    case "$_mo_token" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) printf '%s\n' "$_mo_token" ;;
+        *) return 1 ;;
+    esac
+}
+
+mutation_lock_acquire() {
+    _ml_kind="${1:-standalone}"
+    _ml_run="${2:-}"
+    [ "$MUTATION_LOCK_HELD" -eq 0 ] || return 0
+    if _mutation_inherited_owned; then
+        return 0
+    fi
+    if mkdir "$MUTATION_LOCK" 2>/dev/null; then
+        :
+    else
+        [ -r "$MUTATION_LOCK/owner" ] || return 75
+        _owner_file_live "$MUTATION_LOCK/owner" && return 75
+        _ml_stale="${MUTATION_LOCK}.stale.$$"
+        mv "$MUTATION_LOCK" "$_ml_stale" 2>/dev/null || return 75
+        rm -rf "$_ml_stale" 2>/dev/null || return 1
+        mkdir "$MUTATION_LOCK" 2>/dev/null || return 75
+    fi
+    chmod 0700 "$MUTATION_LOCK" 2>/dev/null || {
+        rmdir "$MUTATION_LOCK" 2>/dev/null
+        return 1
+    }
+    _ml_start="$(proc_start_ticks "$$" 2>/dev/null)"
+    _ml_token="$(_make_owner_token 2>/dev/null)"
+    case "$_ml_start:$_ml_token" in *[!0-9a-f:]*) rm -rf "$MUTATION_LOCK" 2>/dev/null; return 1 ;; esac
+    case "$_ml_kind" in action) [ -n "$_ml_run" ] || { rm -rf "$MUTATION_LOCK" 2>/dev/null; return 1; } ;; standalone) _ml_run="" ;; *) rm -rf "$MUTATION_LOCK" 2>/dev/null; return 1 ;; esac
+    _ml_tmp="$MUTATION_LOCK/owner.tmp.$$"
+    umask 077
+    if ! {
+        printf 'version=1\n'
+        printf 'kind=%s\n' "$_ml_kind"
+        printf 'pid=%s\n' "$$"
+        printf 'proc_start=%s\n' "$_ml_start"
+        [ -n "$_ml_run" ] && printf 'run=%s\n' "$_ml_run"
+        printf 'token=%s\n' "$_ml_token"
+    } > "$_ml_tmp" 2>/dev/null ||
+       ! chmod 0600 "$_ml_tmp" 2>/dev/null ||
+       ! mv -f "$_ml_tmp" "$MUTATION_LOCK/owner" 2>/dev/null; then
+        rm -f "$_ml_tmp" 2>/dev/null
+        rm -rf "$MUTATION_LOCK" 2>/dev/null
+        umask 022
+        return 1
+    fi
+    umask 022
+    MUTATION_OWNER_PID=$$
+    MUTATION_OWNER_START=$_ml_start
+    MUTATION_OWNER_KIND=$_ml_kind
+    MUTATION_OWNER_RUN=$_ml_run
+    MUTATION_OWNER_TOKEN=$_ml_token
+    MUTATION_LOCK_HELD=1
+    SBX_MUTATION_OWNER_PID=$MUTATION_OWNER_PID
+    SBX_MUTATION_OWNER_START=$MUTATION_OWNER_START
+    SBX_MUTATION_OWNER_TOKEN=$MUTATION_OWNER_TOKEN
+    export SBX_MUTATION_OWNER_PID SBX_MUTATION_OWNER_START SBX_MUTATION_OWNER_TOKEN
+    return 0
+}
+
+mutation_lock_release() {
+    [ "$MUTATION_LOCK_HELD" -eq 1 ] || return 0
+    _mr_fields="$(_lock_fields "$MUTATION_LOCK/owner" pid proc_start token)" || _mr_fields=""
+    {
+        IFS= read -r _mr_pid
+        IFS= read -r _mr_start
+        IFS= read -r _mr_token
+    } <<EOF
+$_mr_fields
+EOF
+    if [ "$_mr_pid" = "$MUTATION_OWNER_PID" ] &&
+       [ "$_mr_start" = "$MUTATION_OWNER_START" ] &&
+       [ "$_mr_token" = "$MUTATION_OWNER_TOKEN" ]; then
+        rm -f "$MUTATION_LOCK/owner" 2>/dev/null
+        rmdir "$MUTATION_LOCK" 2>/dev/null
+    fi
+    MUTATION_LOCK_HELD=0
+    MUTATION_OWNER_PID=""
+    MUTATION_OWNER_START=""
+    MUTATION_OWNER_KIND=""
+    MUTATION_OWNER_RUN=""
+    MUTATION_OWNER_TOKEN=""
+    unset SBX_MUTATION_OWNER_PID SBX_MUTATION_OWNER_START SBX_MUTATION_OWNER_TOKEN
+}
+
 _now() { date '+%Y-%m-%d %H:%M:%S'; }
 _log() { printf '[%s] %s\n' "$(_now)" "$*" | tee -a "$LOGFILE"; }
 log_step() { _log "==> $*"; }
@@ -34,20 +288,32 @@ mask_id() {
 
 _SE_REF=0
 _SE_PRIOR=""
+se_restore_all() {
+    while [ "$_SE_REF" -gt 0 ]; do
+        se_restore
+    done
+}
 se_permissive() {
     if [ "$_SE_REF" -eq 0 ]; then
         _SE_PRIOR="$(getenforce 2>/dev/null || echo Unknown)"
         setenforce 0 2>/dev/null || true
-
-        trap 'se_restore' EXIT INT TERM HUP
     fi
     _SE_REF=$((_SE_REF + 1))
 }
 se_restore() {
     [ "$_SE_REF" -gt 0 ] && _SE_REF=$((_SE_REF - 1))
-    if [ "$_SE_REF" -eq 0 ] && [ "$_SE_PRIOR" = "Enforcing" ]; then
-        setenforce 1 2>/dev/null || true
+    if [ "$_SE_REF" -eq 0 ]; then
+        _se_restore_rc=0
+        if [ "$_SE_PRIOR" = "Enforcing" ]; then
+            setenforce 1 2>/dev/null || _se_restore_rc=1
+        fi
+        _SE_PRIOR=""
+        if [ "$_se_restore_rc" -ne 0 ]; then
+            log_warn "SELinux enforcing tidak dapat dipulihkan"
+            return 1
+        fi
     fi
+    return 0
 }
 
 get_users() {
@@ -169,49 +435,31 @@ identity_get() {
 identity_persist() {
     key="$1"; val="$2"
     [ -z "$key" ] && return 1
-    if [ ! -f "$IDENTITY_FILE" ]; then
-        touch "$IDENTITY_FILE" 2>/dev/null || return 1
-    fi
-    _identity_tmp="${IDENTITY_FILE}.tmp.$$"
-    awk -F= -v k="$key" '$1!=k {print}' "$IDENTITY_FILE" > "$_identity_tmp" 2>/dev/null || { rm -f "$_identity_tmp"; return 1; }
-    printf '%s=%s\n' "$key" "$val" >> "$_identity_tmp"
-    mv "$_identity_tmp" "$IDENTITY_FILE" 2>/dev/null || { rm -f "$_identity_tmp"; return 1; }
-    chmod 0644 "$IDENTITY_FILE" 2>/dev/null
-    return 0
+    require_action_mutation || return 75
+    _cli="$(sbx_bin 2>/dev/null)"
+    [ -x "$_cli" ] || {
+        log_warn "identity update ditolak: binary native tidak tersedia"
+        return 1
+    }
+    case "$key" in
+        GOOGLE_AID|WIFI_MAC|BLUETOOTH_ADDR|BLUETOOTH_NAME|BOOT_COUNT)
+            "$_cli" set-local "$key" "$val" </dev/null >/dev/null 2>&1 ;;
+        SBX_NATIVE_READ|SBX_HIDE|SBX_CPU_REVISION|SBX_PROC_VERSION|SBX_MEMINFO|SBX_SYSFS_MAC)
+            "$_cli" set-flag "$key" "$val" </dev/null >/dev/null 2>&1 ;;
+        *)
+            log_warn "identity update '$key' tidak memiliki transaksi native"
+            return 64 ;;
+    esac
 }
 
 identity_del() {
-    key="$1"
-    [ -z "$key" ] && return 1
-    [ -f "$IDENTITY_FILE" ] || return 0
-    _identity_tmp="${IDENTITY_FILE}.tmp.$$"
-    awk -F= -v k="$key" '$1!=k {print}' "$IDENTITY_FILE" > "$_identity_tmp" 2>/dev/null || { rm -f "$_identity_tmp"; return 1; }
-    mv "$_identity_tmp" "$IDENTITY_FILE" 2>/dev/null || { rm -f "$_identity_tmp"; return 1; }
-    chmod 0644 "$IDENTITY_FILE" 2>/dev/null
-    return 0
+    log_warn "identity_del dinonaktifkan; gunakan perintah native yang memiliki transaksi"
+    return 64
 }
 
 identity_preserve_operational_flags() {
-    _src="$1"
-    _dst="$2"
-    [ -r "$_src" ] || return 0
-    [ -f "$_dst" ] || return 1
-    _saved_identity_file="$IDENTITY_FILE"
-    for _key in SBX_NATIVE_READ SBX_HIDE SBX_CPU_REVISION \
-                SBX_PROC_VERSION SBX_MEMINFO SBX_SYSFS_MAC; do
-        _val=$(awk -F= -v k="$_key" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$_src" 2>/dev/null)
-        case "$_val" in
-            0|1)
-                IDENTITY_FILE="$_dst"
-                identity_persist "$_key" "$_val" || {
-                    IDENTITY_FILE="$_saved_identity_file"
-                    return 1
-                }
-                ;;
-        esac
-    done
-    IDENTITY_FILE="$_saved_identity_file"
-    return 0
+    log_warn "flag preservation shell dinonaktifkan; native prepare mempertahankan flag"
+    return 64
 }
 
 backup_rotate() {
@@ -222,22 +470,74 @@ backup_rotate() {
     done
 }
 
+_valid_package_name() {
+    _vp_name="$1"
+    case "$_vp_name" in
+        ''|.*|*.|*..*|*:*|*/*|*[!A-Za-z0-9._]*) return 1 ;;
+    esac
+    case "$_vp_name" in
+        *.*) : ;;
+        *) return 1 ;;
+    esac
+    _vp_oldifs=$IFS
+    IFS=.
+    set -- $_vp_name
+    IFS=$_vp_oldifs
+    [ "$#" -ge 2 ] || return 1
+    for _vp_part do
+        case "$_vp_part" in
+            ''|[0-9]*|*[!A-Za-z0-9_]*) return 1 ;;
+        esac
+    done
+}
+
+_applog_path_manifest() {
+    printf '%s\n' \
+        shared_prefs/applog.xml shared_prefs/applog.xml.bak \
+        shared_prefs/applog_stats.xml shared_prefs/applog_stats.xml.bak \
+        shared_prefs/applog_last_sp_session.xml shared_prefs/applog_last_sp_session.xml.bak \
+        shared_prefs/applog_last_data.xml shared_prefs/applog_last_data.xml.bak \
+        shared_prefs/applog_pack.xml shared_prefs/applog_pack.xml.bak \
+        shared_prefs/applog_easter_egg.xml shared_prefs/applog_easter_egg.xml.bak \
+        shared_prefs/snssdk_openudid.xml shared_prefs/snssdk_openudid.xml.bak \
+        shared_prefs/snssdk_did.xml shared_prefs/snssdk_did.xml.bak \
+        shared_prefs/bd_device_info.xml shared_prefs/bd_device_info.xml.bak \
+        shared_prefs/header_custom.xml shared_prefs/header_custom.xml.bak \
+        shared_prefs/ug_install_settings_pref.xml shared_prefs/ug_install_settings_pref.xml.bak \
+        files/bd_setting/device_id files/bd_setting/openudid \
+        files/bd_setting/clientudid files/bd_setting/install_id \
+        files/.cdid files/applog files/applog_v2 files/applog_v3 \
+        files/bd_tracker_n no_backup/applog_device_id.dat \
+        no_backup/bd_device_id no_backup/.cdid
+}
+
 applog_wipe() {
+    require_action_mutation || return 75
     _pkg="${1:-}"
     if [ -z "$_pkg" ]; then
-        _target="${TARGET_FILE:-$MODDIR/target.txt}"
-        if [ ! -r "$_target" ]; then
-            log_warn "applog_wipe: target.txt not readable ($_target)"
+        _cli="$(sbx_bin 2>/dev/null)"
+        [ -x "$_cli" ] || {
+            log_warn "applog_wipe: binary native tidak tersedia"
+            return 1
+        }
+        _targets="${TMPDIR:-/data/local/tmp}/sbx-targets.$$"
+        if ! "$_cli" targets --packages > "$_targets" 2>/dev/null; then
+            rm -f "$_targets" 2>/dev/null
+            log_warn "applog_wipe: daftar target tidak valid"
             return 1
         fi
-        _rc=1
+        _rc=0
         while IFS= read -r _line || [ -n "$_line" ]; do
-            _line=${_line%%#*}
-            _line=$(printf '%s' "$_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
             [ -n "$_line" ] || continue
-            applog_wipe "$_line" && _rc=0
-        done < "$_target"
+            applog_wipe "$_line" || _rc=1
+        done < "$_targets"
+        rm -f "$_targets" 2>/dev/null
         return "$_rc"
+    fi
+
+    if ! _valid_package_name "$_pkg"; then
+        log_warn "applog_wipe: nama package tidak valid"
+        return 64
     fi
 
     _data_dir=""
@@ -251,79 +551,69 @@ applog_wipe() {
 
     log_step "AppLog wipe: $_pkg ($_data_dir)"
 
-    force_stop "$_pkg" >/dev/null 2>&1
+    if ! force_stop "$_pkg" >/dev/null 2>&1; then
+        log_warn "applog_wipe: force-stop gagal untuk $_pkg; cache tidak disentuh"
+        return 1
+    fi
 
     se_permissive
+    _wipe_failed=0
     _sp_dir="$_data_dir/shared_prefs"
-    if [ -d "$_sp_dir" ]; then
-        _ts=$(date +%s)
-        _safe_pkg=$(printf '%s' "$_pkg" | tr '/. ' '___')
-        _bkp="$BACKUP_DIR_ROOT/applog_${_safe_pkg}_${_ts}.tar"
-        if ls "$_sp_dir"/applog*.xml "$_sp_dir"/snssdk*.xml \
-              "$_sp_dir"/bd_device_info.xml "$_sp_dir"/header_custom.xml \
-              "$_sp_dir"/ug_install_settings_pref.xml 2>/dev/null | \
-              head -1 | grep -q . ; then
-            ( cd "$_sp_dir" && tar -cf "$_bkp" \
-                applog*.xml snssdk*.xml bd_device_info.xml \
-                header_custom.xml ug_install_settings_pref.xml 2>/dev/null ) || :
-            [ -s "$_bkp" ] && chmod 0600 "$_bkp" 2>/dev/null
+    _ts=$(date +%s)
+    _safe_pkg=$(printf '%s' "$_pkg" | tr '/. ' '___')
+    _bkp="$BACKUP_DIR_ROOT/applog_${_safe_pkg}_${_ts}.tar"
+    _backup_list="${TMPDIR:-/data/local/tmp}/sbx-applog-backup.$$"
+    : > "$_backup_list" 2>/dev/null || {
+        se_restore
+        log_warn "applog_wipe: daftar backup gagal dibuat untuk $_pkg; cache tidak disentuh"
+        return 1
+    }
+    _manifest="${TMPDIR:-/data/local/tmp}/sbx-applog-manifest.$$"
+    _applog_path_manifest > "$_manifest" 2>/dev/null || {
+        rm -f "$_backup_list" "$_manifest" 2>/dev/null
+        se_restore
+        log_warn "applog_wipe: manifest cache gagal dibuat untuk $_pkg"
+        return 1
+    }
+    while IFS= read -r _candidate || [ -n "$_candidate" ]; do
+        [ -e "$_data_dir/$_candidate" ] && printf '%s\n' "$_candidate" >> "$_backup_list"
+    done < "$_manifest"
+    if [ -s "$_backup_list" ]; then
+        if ! ( cd "$_data_dir" && tar -cf "$_bkp" -T "$_backup_list" 2>/dev/null ) ||
+           [ ! -s "$_bkp" ] || ! chmod 0600 "$_bkp" 2>/dev/null; then
+            rm -f "$_bkp" "$_backup_list" "$_manifest" 2>/dev/null
+            se_restore
+            log_warn "applog_wipe: backup gagal untuk $_pkg; cache tidak disentuh"
+            return 1
         fi
     fi
+    rm -f "$_backup_list" 2>/dev/null
 
     _removed=0
-    for _f in \
-        applog.xml applog.xml.bak \
-        applog_stats.xml applog_stats.xml.bak \
-        applog_last_sp_session.xml applog_last_sp_session.xml.bak \
-        applog_last_data.xml applog_last_data.xml.bak \
-        applog_pack.xml applog_pack.xml.bak \
-        applog_easter_egg.xml applog_easter_egg.xml.bak \
-        snssdk_openudid.xml snssdk_openudid.xml.bak \
-        snssdk_did.xml snssdk_did.xml.bak \
-        bd_device_info.xml bd_device_info.xml.bak \
-        header_custom.xml header_custom.xml.bak \
-        ug_install_settings_pref.xml ug_install_settings_pref.xml.bak
-    do
-        if [ -e "$_sp_dir/$_f" ]; then
-            rm -f "$_sp_dir/$_f" 2>/dev/null && _removed=$((_removed + 1))
+    while IFS= read -r _candidate || [ -n "$_candidate" ]; do
+        _abs="$_data_dir/$_candidate"
+        case "$_abs" in
+            "$_data_dir"/shared_prefs/*|"$_data_dir"/files/*|"$_data_dir"/no_backup/*) : ;;
+            *) _wipe_failed=$((_wipe_failed + 1)); continue ;;
+        esac
+        [ -e "$_abs" ] || continue
+        if rm -rf "${_abs:?}" 2>/dev/null && [ ! -e "$_abs" ]; then
+            _removed=$((_removed + 1))
+        else
+            _wipe_failed=$((_wipe_failed + 1))
         fi
-    done
+    done < "$_manifest"
+    rm -f "$_manifest" 2>/dev/null
 
-    _files_dir="$_data_dir/files"
-    if [ -n "$_data_dir" ] && [ -d "$_files_dir" ]; then
-        for _p in \
-            bd_setting/device_id \
-            bd_setting/openudid \
-            bd_setting/clientudid \
-            bd_setting/install_id \
-            .cdid \
-            applog \
-            applog_v2 \
-            applog_v3 \
-            bd_tracker_n
-        do
-            [ -n "$_p" ] || continue
-            _abs="$_files_dir/$_p"
-            case "$_abs" in
-                "$_data_dir"/files/*) : ;;
-                *) continue ;;
-            esac
-            if [ -e "$_abs" ]; then
-                rm -rf "${_abs:?}" 2>/dev/null && _removed=$((_removed + 1))
-            fi
-        done
+    if ! se_restore; then
+        _wipe_failed=$((_wipe_failed + 1))
     fi
-
-    _nb_dir="$_data_dir/no_backup"
-    if [ -d "$_nb_dir" ]; then
-        for _p in applog_device_id.dat bd_device_id .cdid; do
-            [ -e "$_nb_dir/$_p" ] && rm -f "$_nb_dir/$_p" 2>/dev/null && _removed=$((_removed + 1))
-        done
-    fi
-
-    se_restore
     backup_rotate "applog_" 20
 
+    if [ "$_wipe_failed" -gt 0 ]; then
+        log_warn "$_pkg — AppLog wipe parsial: $_removed terhapus, $_wipe_failed gagal"
+        return 1
+    fi
     if [ "$_removed" -gt 0 ]; then
         log_ok "$_pkg — cleared $_removed AppLog cache entr(y|ies)"
     else
@@ -337,8 +627,11 @@ _applog_own() {
     [ -e "$_t" ] || return 1
     [ -n "$_uid" ] || return 1
     chown "${_uid}:${_uid}" "$_t" 2>/dev/null || return 1
-    chmod "$_mode" "$_t" 2>/dev/null
-    [ -n "$_refctx" ] && command -v chcon >/dev/null 2>&1 && chcon "$_refctx" "$_t" 2>/dev/null
+    chmod "$_mode" "$_t" 2>/dev/null || return 1
+    if [ -n "$_refctx" ]; then
+        command -v chcon >/dev/null 2>&1 || return 1
+        chcon "$_refctx" "$_t" 2>/dev/null || return 1
+    fi
     return 0
 }
 
@@ -368,8 +661,10 @@ _applog_put() {
 }
 
 applog_seed() {
+    require_action_mutation || return 75
     _pkg="${1:-}"
     [ -n "$_pkg" ] || return 1
+    _valid_package_name "$_pkg" || return 64
 
     _data_dir=""
     for _base in /data/data /data/user/0; do
@@ -379,7 +674,7 @@ applog_seed() {
 
     _cli="$(sbx_bin 2>/dev/null)"
     if [ -z "$_cli" ] || [ ! -x "$_cli" ]; then
-        log_warn "applog_seed: binary native tidak ada — seed dilewati, hook tetap spoof saat file dibaca"
+        log_warn "applog_seed: binary native tidak ada; seed tidak dilakukan"
         return 1
     fi
     _ids="$("$_cli" applog-ids "$_pkg" 2>/dev/null)"
@@ -409,9 +704,25 @@ applog_seed() {
     _bd="$_data_dir/files/bd_setting"
 
     se_permissive
-    mkdir -p "$_sp" "$_bd" 2>/dev/null
+    if ! mkdir -p "$_sp" "$_bd" 2>/dev/null ||
+       [ ! -d "$_sp" ] || [ ! -d "$_data_dir/files" ] || [ ! -d "$_bd" ]; then
+        se_restore
+        log_warn "applog_seed: direktori seed gagal dibuat untuk $_pkg"
+        return 1
+    fi
     _spctx=$(ls -Zd "$_data_dir" 2>/dev/null | awk '{print $1}')
-    case "$_spctx" in u:object_r:*) : ;; *) _spctx="" ;; esac
+    case "$_spctx" in
+        u:object_r:*) : ;;
+        *)
+            se_restore
+            log_warn "applog_seed: konteks SELinux $_pkg tidak dapat diverifikasi; seed dibatalkan"
+            return 1 ;;
+    esac
+    command -v chcon >/dev/null 2>&1 || {
+        se_restore
+        log_warn "applog_seed: chcon tidak tersedia; seed dibatalkan"
+        return 1
+    }
     for _d in "$_sp" "$_data_dir/files" "$_bd"; do
         [ -d "$_d" ] || continue
         if ! _applog_own "$_d" "$_uid" 0771 "$_spctx"; then
@@ -447,7 +758,7 @@ applog_seed() {
     se_restore
 
     if [ "$_failed" -gt 0 ]; then
-        log_warn "$_pkg — seed parsial: $_seeded ok, $_failed gagal (izin/SELinux) — hook tetap spoof lewat sintesis in-process"
+        log_warn "$_pkg — seed parsial: $_seeded ok, $_failed gagal (izin/SELinux)"
         return 1
     fi
     if [ "$_seeded" -gt 0 ]; then
@@ -459,21 +770,28 @@ applog_seed() {
 }
 
 applog_regen() {
+    require_action_mutation || return 75
     _pkg="${1:-}"
     if [ -z "$_pkg" ]; then
-        _target="${TARGET_FILE:-$MODDIR/target.txt}"
-        if [ ! -r "$_target" ]; then
-            log_warn "applog_regen: target.txt not readable ($_target)"
+        _cli="$(sbx_bin 2>/dev/null)"
+        [ -x "$_cli" ] || return 1
+        _targets="${TMPDIR:-/data/local/tmp}/sbx-targets.$$"
+        if ! "$_cli" targets --packages > "$_targets" 2>/dev/null; then
+            rm -f "$_targets" 2>/dev/null
             return 1
         fi
-        _rc=1
+        _rc=0
         while IFS= read -r _line || [ -n "$_line" ]; do
-            _line=${_line%%#*}
-            _line=$(printf '%s' "$_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
             [ -n "$_line" ] || continue
-            applog_regen "$_line" && _rc=0
-        done < "$_target"
+            applog_regen "$_line" || _rc=1
+        done < "$_targets"
+        rm -f "$_targets" 2>/dev/null
         return "$_rc"
+    fi
+
+    if ! _valid_package_name "$_pkg"; then
+        log_warn "applog_regen: nama package tidak valid"
+        return 64
     fi
 
     _found=0
@@ -487,20 +805,19 @@ applog_regen() {
 
     log_step "AppLog regen: $_pkg"
 
-    _now_ms="$(date +%s 2>/dev/null || echo 1700000000)000"
-    identity_persist APPLOG_EPOCH "$_now_ms" || {
-        log_warn "applog_regen: gagal bump APPLOG_EPOCH — ID lama dipakai lagi"
-        return 1
-    }
-
+    # APPLOG_EPOCH belongs to the committed snapshot.  Never bump it per
+    # package: every target in one Action must derive IDs from the same epoch.
     force_stop "$_pkg" >/dev/null 2>&1
-    applog_wipe "$_pkg" || :
-    if applog_seed "$_pkg"; then
-        log_ok "$_pkg — epoch bumped + cache wiped + seed baru (ID aktif saat app dibuka)"
-    else
-        log_warn "$_pkg — epoch bumped + cache wiped, tapi seed disk gagal; ID tetap dispoof in-process oleh hook L9 saat app membaca cache"
+    if ! applog_wipe "$_pkg"; then
+        log_warn "$_pkg — cache AppLog tidak dapat dibersihkan"
+        return 1
     fi
-    return 0
+    if applog_seed "$_pkg"; then
+        log_ok "$_pkg — cache wiped + seed dari epoch canonical"
+        return 0
+    fi
+    log_warn "$_pkg — cache wiped, tetapi seed disk gagal"
+    return 1
 }
 
 applog_probe() {

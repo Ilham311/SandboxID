@@ -15,9 +15,30 @@ inline constexpr char TARGET_FILE[]   = "/data/adb/modules/sandboxid/target.txt"
 inline constexpr char PERSONAS_FILE[] = "/data/adb/modules/sandboxid/personas.tsv";
 
 inline constexpr char PERSONA_OVERRIDE[] = "/data/adb/modules/sandboxid/persona.override";
+inline constexpr char PERSONA_CACHE[] = "/data/adb/modules/sandboxid/persona.cache";
+inline constexpr char PERSONA_CACHE_META[] =
+    "/data/adb/modules/sandboxid/persona.cache.meta";
 
 inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/sandboxid/identity.prop.bak";
+inline constexpr char IDENTITY_META[] = "/data/adb/modules/sandboxid/identity.meta";
+inline constexpr char IDENTITY_META_BAK[] =
+    "/data/adb/modules/sandboxid/identity.meta.bak";
+inline constexpr char IDENTITY_PENDING[] =
+    "/data/adb/modules/sandboxid/identity.pending";
+inline constexpr char PENDING_META[]  =
+    "/data/adb/modules/sandboxid/identity.pending.meta";
 inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mode";
+inline constexpr char STATE_LOCK[]    = "/data/adb/modules/sandboxid/.state.lock";
+inline constexpr char MUTATION_LOCK[] = "/data/adb/modules/sandboxid/.mutation.lock";
+inline constexpr char MUTATION_OWNER[] =
+    "/data/adb/modules/sandboxid/.mutation.lock/owner";
+inline constexpr char ACTION_LOCK[]   = "/data/adb/modules/sandboxid/.action.lock";
+inline constexpr char ACTION_OWNER[]  =
+    "/data/adb/modules/sandboxid/.action.lock/owner";
+inline constexpr char ACTION_STATE[]  =
+    "/data/adb/modules/sandboxid/debug/action.state";
+inline constexpr char ACTION_RESULT[] =
+    "/data/adb/modules/sandboxid/debug/action.result";
 
 inline constexpr char CARRIER_CONF[]  = "/data/adb/modules/sandboxid/carrier.conf";
 inline constexpr char CARRIERS_FILE[] = "/data/adb/modules/sandboxid/carriers.tsv";

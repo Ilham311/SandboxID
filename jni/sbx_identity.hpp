@@ -97,12 +97,14 @@ inline bool valid_key(std::string_view key) {
 
 inline bool decimal_u64(const std::string& value, uint64_t& out) {
     if (value.empty()) return false;
-    for (char c : value) if (c < '0' || c > '9') return false;
-    errno = 0;
-    char* end = nullptr;
-    unsigned long long parsed = std::strtoull(value.c_str(), &end, 10);
-    if (errno == ERANGE || !end || *end != '\0') return false;
-    out = static_cast<uint64_t>(parsed);
+    uint64_t parsed = 0;
+    for (char c : value) {
+        if (c < '0' || c > '9') return false;
+        const uint64_t digit = static_cast<uint64_t>(c - '0');
+        if (parsed > (UINT64_MAX - digit) / 10u) return false;
+        parsed = parsed * 10u + digit;
+    }
+    out = parsed;
     return true;
 }
 
@@ -143,6 +145,39 @@ inline bool valid_uuid(const std::string& value) {
            (value[19] == '8' || value[19] == '9' ||
             value[19] == 'a' || value[19] == 'b' ||
             value[19] == 'A' || value[19] == 'B');
+}
+
+inline bool valid_local_mac(const std::string& value) {
+    if (value.size() != 17) return false;
+    unsigned first_octet = 0;
+    bool any_nonzero = false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (i % 3 == 2) {
+            if (value[i] != ':') return false;
+            continue;
+        }
+        char c = value[i];
+        unsigned nibble = 0;
+        if (c >= '0' && c <= '9') nibble = static_cast<unsigned>(c - '0');
+        else if (c >= 'a' && c <= 'f') nibble = static_cast<unsigned>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') nibble = static_cast<unsigned>(c - 'A' + 10);
+        else return false;
+        if (nibble != 0) any_nonzero = true;
+        if (i == 0) first_octet = nibble << 4;
+        else if (i == 1) first_octet |= nibble;
+    }
+    return any_nonzero && (first_octet & 0x01u) == 0 && (first_octet & 0x02u) != 0;
+}
+
+inline bool valid_device_name(const std::string& value) {
+    if (value.empty() || value.size() > 64 || value.front() == ' ' ||
+        value.back() == ' ')
+        return false;
+    for (unsigned char c : value)
+        if (c < 0x20 || c > 0x7e || c == '<' || c == '>' || c == '&' ||
+            c == '\'' || c == '"')
+            return false;
+    return true;
 }
 
 inline std::string utc_date_string(uint64_t seconds) {
@@ -208,6 +243,22 @@ inline bool validate_snapshot(const ValidationContext& ctx,
     auto gaid = snapshot.values.find("GOOGLE_AID");
     if (gaid != snapshot.values.end() && !gaid->second.empty() && !valid_uuid(gaid->second))
         return reject(error, "invalid GOOGLE_AID");
+    for (const char* key : {"WIFI_MAC", "BLUETOOTH_ADDR"}) {
+        auto mac = snapshot.values.find(key);
+        if (mac != snapshot.values.end() && !mac->second.empty() &&
+            !valid_local_mac(mac->second))
+            return reject(error, std::string("invalid locally administered ") + key);
+    }
+    auto bluetooth_name = snapshot.values.find("BLUETOOTH_NAME");
+    if (bluetooth_name != snapshot.values.end() &&
+        !valid_device_name(bluetooth_name->second))
+        return reject(error, "invalid BLUETOOTH_NAME");
+    auto boot_count = snapshot.values.find("BOOT_COUNT");
+    if (boot_count != snapshot.values.end()) {
+        uint64_t parsed = 0;
+        if (!decimal_u64(boot_count->second, parsed) || parsed > 1000000ULL)
+            return reject(error, "invalid BOOT_COUNT");
+    }
 
     auto sdk = snapshot.values.find("SDK_INT");
     if (sdk != snapshot.values.end() && !sdk->second.empty()) {
