@@ -1,6 +1,6 @@
 id=sandboxid
 name=SandboxID — Android device identifier
-version=v1.0
+version=v1.0.0
 versionCode=1.0
 author=Ilham311
 description=SandboxID is an open-source Android privacy research and education module for devices you own
