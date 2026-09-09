@@ -77,10 +77,19 @@ make_run_id() {
     _run="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
     case "$_run" in
         [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
-            printf '%s\n' "$_run" ;;
-        *)
-            printf '%08x%08x%08x%08x\n' "$$" "$(now_utc)" "$(( $$ * 1103515245 ))" "$(( $(now_utc) + $$ ))" ;;
+            printf '%s\n' "$_run"
+            return ;;
     esac
+    _p1=$(( $$ & 0xffffffff ))
+    _p2=$(( $(now_utc) & 0xffffffff ))
+    _p3=$(( ( $$ * 1103515245 ) & 0xffffffff ))
+    _p4=$(( ( $(now_utc) + $$ ) & 0xffffffff ))
+    _run="$(printf '%08x%08x%08x%08x\n' "$_p1" "$_p2" "$_p3" "$_p4")"
+    if valid_run_id "$_run"; then
+        printf '%s\n' "$_run"
+    else
+        printf '%s\n' 00000000000000000000000000000000
+    fi
 }
 
 valid_run_id() {
