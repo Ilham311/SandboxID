@@ -131,12 +131,27 @@ static void test_comments_blanks_crlf_ws() {
 }
 
 static void test_phantom_strictly_one() {
-    CHECK(!parse_carrier_conf("NAME=A\nMCC=1\nMNC=2\nPHANTOM=true\n").phantom,
-          "PHANTOM=true is not phantom (only \"1\")");
-    CHECK(!parse_carrier_conf("NAME=A\nMCC=1\nMNC=2\nPHANTOM=2\n").phantom,
-          "PHANTOM=2 is not phantom");
-    CHECK(parse_carrier_conf("NAME=A\nMCC=1\nMNC=2\nPHANTOM=1\n").phantom,
+    CHECK(!parse_carrier_conf("NAME=A\nMCC=310\nMNC=20\nPHANTOM=true\n").valid,
+          "PHANTOM=true rejects the candidate");
+    CHECK(!parse_carrier_conf("NAME=A\nMCC=310\nMNC=20\nPHANTOM=2\n").valid,
+          "PHANTOM=2 rejects the candidate");
+    CHECK(parse_carrier_conf("NAME=A\nMCC=310\nMNC=20\nPHANTOM=1\n").phantom,
           "PHANTOM=1 is phantom");
+}
+
+static void test_invalid_field_shapes() {
+    CHECK(!parse_carrier_conf("NAME=A\nMCC=31x\nMNC=20\n").valid,
+          "nondigit MCC rejected");
+    CHECK(!parse_carrier_conf("NAME=A\nMCC=310\nMNC=2\n").valid,
+          "one-digit MNC rejected");
+    CHECK(!parse_carrier_conf("NAME=A\nMCC=310\nMNC=20\nISO=ID\n").valid,
+          "uppercase ISO rejected");
+    CHECK(!parse_carrier_conf("NAME=A\nMCC=310\nMNC=20\nCARRIER_ID=x\n").valid,
+          "nondigit carrier ID rejected");
+    CHECK(!parse_carrier_conf("NAME=A\nNAME=B\nMCC=310\nMNC=20\n").valid,
+          "duplicate carrier field rejected");
+    CHECK(!parse_carrier_conf("NAME=A\nMCC=310\nMNC=20\nUNKNOWN=x\n").valid,
+          "unknown carrier field rejected");
 }
 
 static void test_reapply_switches_cleanly() {
@@ -162,6 +177,7 @@ int main() {
     test_invalid_empty_and_incomplete();
     test_comments_blanks_crlf_ws();
     test_phantom_strictly_one();
+    test_invalid_field_shapes();
     test_reapply_switches_cleanly();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

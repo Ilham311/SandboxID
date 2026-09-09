@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <sched.h>
 #include <sys/mount.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
@@ -28,6 +29,8 @@
 #include <android/log.h>
 #include "config.hpp"
 #include "sbx_mountinfo.hpp"
+#include "sbx_sha256.hpp"
+#include "sbx_transaction.hpp"
 
 #define LOG_TAG "SandboxIDCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -181,6 +184,49 @@ static std::string read_file(const char* p) {
     std::stringstream ss;
     ss << f.rdbuf();
     return ss.str();
+}
+
+enum class BoundIdentityStatus {
+    Ready,
+    Missing,
+    Busy,
+    Invalid,
+};
+
+static BoundIdentityStatus read_bound_identity(std::string& identity) {
+    identity.clear();
+    int lock_fd = ::open(sandboxid::STATE_LOCK, O_RDONLY | O_CLOEXEC);
+    if (lock_fd < 0 && errno == ENOENT)
+        lock_fd = ::open(sandboxid::STATE_LOCK,
+                         O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (lock_fd < 0) {
+        LOGE("canonical state lock open failed errno=%d", errno);
+        return BoundIdentityStatus::Invalid;
+    }
+    if (::flock(lock_fd, LOCK_SH | LOCK_NB) != 0) {
+        const int lock_errno = errno;
+        ::close(lock_fd);
+        if (lock_errno == EWOULDBLOCK || lock_errno == EAGAIN)
+            return BoundIdentityStatus::Busy;
+        LOGE("canonical state lock failed errno=%d", lock_errno);
+        return BoundIdentityStatus::Invalid;
+    }
+    identity = read_file(sandboxid::IDENTITY_FILE);
+    std::string metadata = read_file(sandboxid::IDENTITY_META);
+    ::flock(lock_fd, LOCK_UN);
+    ::close(lock_fd);
+    if (identity.empty() && metadata.empty()) return BoundIdentityStatus::Missing;
+    sbxtxn::CanonicalMeta parsed;
+    std::string error;
+    if (identity.empty() || metadata.empty() ||
+        !sbxtxn::parse_identity_meta(metadata, parsed, error) ||
+        !sbxtxn::identity_matches(parsed, identity)) {
+        LOGE("canonical identity/meta rejected: %s", error.empty()
+             ? "identity/meta pair is incomplete or hash-mismatched" : error.c_str());
+        identity.clear();
+        return BoundIdentityStatus::Invalid;
+    }
+    return BoundIdentityStatus::Ready;
 }
 
 static void upsert_identity_value(std::string& data, const std::string& key,
@@ -533,19 +579,21 @@ extern "C" void sandboxid_companion(int client) {
                 continue;
             }
 
-            std::string d = read_file(sandboxid::IDENTITY_FILE);
-            if (d.empty()) {
-
-                for (int attempt = 0; attempt < 3 && d.empty(); ++attempt) {
-                    if (attempt > 0)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    if (try_seed_ondemand())
-                        d = read_file(sandboxid::IDENTITY_FILE);
-                }
-                if (d.empty())
-                    LOGE("target '%s' tapi identity.prop kosong SETELAH seed on-demand — "
-                         "fail-open: app jalan TANPA spoofing", pkg.c_str());
+            std::string d;
+            BoundIdentityStatus identity_status = read_bound_identity(d);
+            for (int attempt = 0;
+                 identity_status == BoundIdentityStatus::Busy && attempt < 3;
+                 ++attempt) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                identity_status = read_bound_identity(d);
             }
+            if (identity_status == BoundIdentityStatus::Missing &&
+                try_seed_ondemand())
+                identity_status = read_bound_identity(d);
+            if (identity_status != BoundIdentityStatus::Ready)
+                LOGE("target '%s' but canonical identity is unavailable (status=%d) — "
+                     "fail-open: app runs without spoofing", pkg.c_str(),
+                     static_cast<int>(identity_status));
 
             if (!d.empty()) {
                 std::string kill = std::string(sandboxid::MODDIR) + "/no_uptime";

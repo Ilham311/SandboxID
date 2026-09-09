@@ -192,9 +192,21 @@ nav::-webkit-scrollbar { display: none; }
 /* ---- Layout ------------------------------------------------------------- */
 main { padding: var(--gutter); padding-bottom: 96px; }
 .page { display: none; }
+.page[hidden] { display: none !important; }
 .page.active { display: block; animation: fade var(--dur) var(--ease) both; }
 .row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .row.spread { justify-content: space-between; }
+.action-effects {
+  margin: -2px 0 12px; padding: 10px 12px;
+  color: var(--text-2); background: var(--accent-weak);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  border-radius: var(--r-md); font-size: 12px; line-height: 1.5;
+}
+.action-progress {
+  margin-bottom: 12px; padding: 8px 11px;
+  color: var(--accent); background: var(--s1); border: 1px solid var(--border);
+  border-radius: var(--r-sm); font-family: var(--mono); font-size: 11px;
+}
 
 /* ---- Buttons ------------------------------------------------------------ */
 .primary, .ghost {
@@ -374,6 +386,17 @@ select {
   font-size: 13px; cursor: pointer;
 }
 select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input:not([type="checkbox"]) {
+  width: 100%; min-height: 40px; padding: 8px 11px;
+  background: var(--s2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  font: inherit;
+}
+.manual-carrier { margin-bottom: 12px; }
+.manual-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 8px; }
+.manual-grid label { color: var(--muted); font-size: 11px; }
+.manual-grid input { display: block; margin-top: 4px; }
+.manual-grid label:first-child, .manual-grid label:last-child { grid-column: 1 / -1; }
 .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
 
 /* ---- Experimental settings ---------------------------------------------- */
@@ -432,6 +455,7 @@ select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   animation: shimmer 1.2s infinite;
 }
 .kv .sk { display: block; }
+.kv .sk-group { display: contents; }
 
 /* ---- Toast -------------------------------------------------------------- */
 .toast {
