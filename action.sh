@@ -34,6 +34,7 @@ PACKAGE_LIST_FILE=""
 PACKAGE_QUERY_ERROR_FILE=""
 PACKAGE_QUERY_IO_FAILED=0
 PACKAGE_QUERY_NEEDED_RECOVERY=0
+PACKAGE_DUMP_STATUS=unknown
 
 if [ "$(id -u 2>/dev/null)" != 0 ]; then
     _bootstrap_run="${SBX_ACTION_RUN_ID:-00000000000000000000000000000000}"
@@ -285,6 +286,124 @@ package_query() {
     : > "$PACKAGE_LIST_FILE" 2>/dev/null || PACKAGE_QUERY_IO_FAILED=1
     rm -f "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
     return 1
+}
+
+package_dump_log_failure() {
+    _dump_package="$1"
+    _dump_rc="$2"
+    _dump_reason="$3"
+    {
+        printf '[package-dump] package=%s rc=%s reason=%s\n' \
+            "$_dump_package" "$_dump_rc" "$_dump_reason"
+        if [ -s "$PACKAGE_LIST_FILE" ]; then
+            printf '[package-dump] stdout-bytes=%s relevant:\n' \
+                "$(wc -c < "$PACKAGE_LIST_FILE" 2>/dev/null)"
+            awk '
+                BEGIN { emitted = 0 }
+                {
+                    line = $0
+                    sub(/^[ \t]+/, "", line)
+                    if (index(line, "Package [") == 1 ||
+                        index(line, "User 0:") == 1 ||
+                        index(line, "Unable to find package:") == 1 ||
+                        index(line, "Permission Denial:") == 1 ||
+                        index(line, "Failure calling service") > 0) {
+                        print substr(line, 1, 1024)
+                        emitted++
+                    }
+                    if (emitted >= 8) exit
+                }
+            ' "$PACKAGE_LIST_FILE"
+        fi
+        if [ -s "$PACKAGE_QUERY_ERROR_FILE" ]; then
+            printf '%s\n' '[package-dump] stderr:'
+            dd if="$PACKAGE_QUERY_ERROR_FILE" bs=4096 count=1 2>/dev/null
+            printf '\n'
+        fi
+    } >> "$ACTION_LOG" 2>/dev/null || PACKAGE_QUERY_IO_FAILED=1
+}
+
+package_dump_query() {
+    _dump_package="$1"
+    PACKAGE_DUMP_STATUS=unknown
+    : > "$PACKAGE_LIST_FILE" 2>/dev/null || {
+        PACKAGE_QUERY_IO_FAILED=1
+        return 1
+    }
+    : > "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null || {
+        PACKAGE_QUERY_IO_FAILED=1
+        return 1
+    }
+    dumpsys package "$_dump_package" </dev/null \
+        > "$PACKAGE_LIST_FILE" 2> "$PACKAGE_QUERY_ERROR_FILE"
+    _dump_rc=$?
+    if [ "$_dump_rc" -ne 0 ]; then
+        package_dump_log_failure "$_dump_package" "$_dump_rc" command-failed
+        return 1
+    fi
+    if [ -s "$PACKAGE_QUERY_ERROR_FILE" ]; then
+        package_dump_log_failure "$_dump_package" "$_dump_rc" stderr-output
+        return 1
+    fi
+    PACKAGE_DUMP_STATUS="$(awk -v expected="$_dump_package" '
+        function trim(line) {
+            sub(/^[ \t]+/, "", line)
+            sub(/[ \t]+$/, "", line)
+            return line
+        }
+        {
+            line = trim($0)
+            if (line != "") nonempty++
+            if (index(line, "Package [") == 1) {
+                rest = substr(line, 10)
+                end = index(rest, "]")
+                if (end == 0) bad = 1
+                else {
+                    name = substr(rest, 1, end - 1)
+                    suffix = substr(rest, end + 1)
+                    headers++
+                    if (name != expected || suffix !~ /^ \([^()]+\):?$/) bad = 1
+                }
+            }
+            if (index(line, "Unable to find package:") == 1) {
+                missing++
+                name = trim(substr(line, 24))
+                if (name != expected) bad = 1
+            }
+            if (index(line, "User 0:") == 1) {
+                rest = substr(line, 8)
+                count = 0
+                value = ""
+                fields = split(rest, parts, /[ \t]+/)
+                for (i = 1; i <= fields; i++) {
+                    if (parts[i] == "installed=true") { count++; value = "installed" }
+                    else if (parts[i] == "installed=false") { count++; value = "absent" }
+                }
+                if (count > 0) {
+                    states++
+                    if (count != 1) bad = 1
+                    if (status != "" && status != value) bad = 1
+                    status = value
+                }
+            }
+        }
+        END {
+            if (!bad && missing == 1 && headers == 0 && states == 0 && nonempty == 1) print "absent"
+            else if (!bad && missing == 0 && headers == 1 && states == 1 && status != "") print status
+            else print "unknown"
+        }
+    ' "$PACKAGE_LIST_FILE")"
+    case "$PACKAGE_DUMP_STATUS" in
+        installed|absent)
+            rm -f "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
+            PACKAGE_QUERY_NEEDED_RECOVERY=1
+            return 0 ;;
+        *)
+            PACKAGE_DUMP_STATUS=unknown
+            package_dump_log_failure "$_dump_package" "$_dump_rc" unrecognized-output
+            rm -f "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
+            return 1 ;;
+    esac
 }
 
 lock_owner_alive() {
@@ -623,11 +742,26 @@ else
     while IFS= read -r _package || [ -n "$_package" ]; do
         [ -n "$_package" ] || continue
         _package_query_ok=0
-        if package_query "target-user-0:$_package" --user 0 "$_package"; then
+        _package_status=unknown
+        if command -v dumpsys >/dev/null 2>&1 && package_dump_query "$_package"; then
             _package_query_ok=1
+            _package_status="$PACKAGE_DUMP_STATUS"
+        elif [ "$PACKAGE_QUERY_IO_FAILED" -eq 0 ] &&
+             package_query "target-user-0:$_package" --user 0 "$_package"; then
+            _package_query_ok=1
+            if grep -Fqx "package:$_package" "$PACKAGE_LIST_FILE"; then
+                _package_status=installed
+            else
+                _package_status=absent
+            fi
         elif [ "$PACKAGE_QUERY_IO_FAILED" -eq 0 ] &&
              package_query "target-default:$_package" "$_package"; then
             _package_query_ok=1
+            if grep -Fqx "package:$_package" "$PACKAGE_LIST_FILE"; then
+                _package_status=installed
+            else
+                _package_status=absent
+            fi
         fi
         if [ "$PACKAGE_QUERY_IO_FAILED" -ne 0 ]; then
             rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" \
@@ -640,17 +774,21 @@ else
             _package_query_unknown=1
             break
         fi
-        if grep -Fqx "package:$_package" "$PACKAGE_LIST_FILE"; then
-            printf '%s\n' "$_package" >> "$INSTALLED_TARGETS_FILE" || {
-                PACKAGE_QUERY_IO_FAILED=1
-                break
-            }
-        else
-            printf '%s\n' "$_package" >> "$ABSENT_TARGETS_FILE" || {
-                PACKAGE_QUERY_IO_FAILED=1
-                break
-            }
-        fi
+        case "$_package_status" in
+            installed)
+                printf '%s\n' "$_package" >> "$INSTALLED_TARGETS_FILE" || {
+                    PACKAGE_QUERY_IO_FAILED=1
+                    break
+                } ;;
+            absent)
+                printf '%s\n' "$_package" >> "$ABSENT_TARGETS_FILE" || {
+                    PACKAGE_QUERY_IO_FAILED=1
+                    break
+                } ;;
+            *)
+                _package_query_unknown=1
+                break ;;
+        esac
     done < "$TARGETS_FILE"
     if [ "$PACKAGE_QUERY_IO_FAILED" -ne 0 ]; then
         rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" \
@@ -669,7 +807,7 @@ else
 fi
 rm -f "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
 if [ "$PACKAGE_QUERY_NEEDED_RECOVERY" -ne 0 ]; then
-    warning "Query Package Manager memerlukan retry atau fallback terfilter."
+    warning "Query package memerlukan retry atau fallback status per-target."
 fi
 stage_done OK ready
 

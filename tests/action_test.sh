@@ -37,6 +37,9 @@ reset_env() {
     export SBX_PM_USER_QUERY_SEQUENCE='' SBX_PM_QUERY_SEQUENCE=''
     export SBX_PM_FILTER_USER_SEQUENCE='' SBX_PM_FILTER_SEQUENCE=''
     export SBX_PM_FAIL_STDOUT='' SBX_PM_FAIL_STDERR=''
+    export SBX_DUMPSYS_INSTALLED='' SBX_DUMPSYS_NOT_INSTALLED='' SBX_DUMPSYS_MISSING=''
+    export SBX_DUMPSYS_MISSING_EXTRA='' SBX_DUMPSYS_MISMATCH='' SBX_DUMPSYS_NO_USER=''
+    export SBX_DUMPSYS_CONFLICT='' SBX_DUMPSYS_MALFORMED='' SBX_DUMPSYS_DENIED='' SBX_DUMPSYS_STDERR='' SBX_DUMPSYS_FAIL=''
     export SBX_APPLOG_WIPE_FAIL='' SBX_APPLOG_SEED_FAIL=''
 }
 
@@ -243,6 +246,67 @@ case "$1 $2" in
   *) exit 64 ;;
 esac
 SH
+    cat > "$CASE/tools/dumpsys" <<'SH'
+#!/bin/sh
+printf 'dumpsys %s\n' "$*" >> "$SBX_CALLS"
+[ "$1" = package ] || exit 64
+pkg=$2
+if [ "$pkg" = "${SBX_DUMPSYS_FAIL:-}" ]; then
+  printf 'package dump failed\n' >&2
+  exit 2
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_DENIED:-}" ]; then
+  printf 'Permission Denial: cannot dump PackageManager\n'
+  exit 0
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_STDERR:-}" ]; then
+  printf '  Package [%s] (abcdef):\n' "$pkg"
+  printf '    User 0: installed=true hidden=false\n'
+  printf 'package dump warning\n' >&2
+  exit 0
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_MISSING_EXTRA:-}" ]; then
+  printf 'Unable to find package: %s\n' "$pkg"
+  printf 'unexpected trailing output\n'
+  exit 0
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_MISSING:-}" ]; then
+  printf 'Unable to find package: %s\n' "$pkg"
+  exit 0
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_MISMATCH:-}" ]; then
+  printf '  Package [%s.extra] (abcdef):\n' "$pkg"
+  printf '    User 0: installed=true hidden=false\n'
+  exit 0
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_NO_USER:-}" ]; then
+  printf '  Package [%s] (abcdef):\n' "$pkg"
+  printf '    User 10: installed=true hidden=false\n'
+  exit 0
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_CONFLICT:-}" ]; then
+  printf '  Package [%s] (abcdef):\n' "$pkg"
+  printf '    User 0: installed=true installed=false\n'
+  exit 0
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_MALFORMED:-}" ]; then
+  printf '  Package [%s] (abcdef):\n' "$pkg"
+  printf '    User 0: installed=maybe hidden=false\n'
+  exit 0
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_INSTALLED:-}" ]; then
+  printf '  Package [%s] (abcdef):\n' "$pkg"
+  printf '    User 0: installed=true hidden=false\n'
+  printf 'queryable via interaction:\n    User 0:\n'
+  exit 0
+fi
+if [ "$pkg" = "${SBX_DUMPSYS_NOT_INSTALLED:-}" ]; then
+  printf '  Package [%s] (abcdef):\n' "$pkg"
+  printf '    User 0: installed=false hidden=false\n'
+  exit 0
+fi
+exit 0
+SH
     cat > "$CASE/tools/am" <<'SH'
 #!/bin/sh
 printf 'am %s\n' "$*" >> "$SBX_CALLS"
@@ -308,6 +372,37 @@ check '[ "$CASE_RC" -eq 0 ]' 'unsupported user-scoped package query falls back t
 check '[ "$(grep -c "pm list packages --user 0" "$CASE/calls")" -eq 3 ] && call_has "pm list packages$"' 'package fallback bounds scoped retries before retrying without the unsupported user option'
 check 'result_has "status=success" && result_has "warnings=1"' 'package fallback is visible as a warning'
 
+setup_case package-dump-installed
+SBX_PM_USER_QUERY_RC=2
+SBX_PM_QUERY_RC=2
+SBX_DUMPSYS_INSTALLED=com.example.present
+SBX_DUMPSYS_MISSING=com.example.absent
+export SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC SBX_DUMPSYS_INSTALLED SBX_DUMPSYS_MISSING
+run_case
+check '[ "$CASE_RC" -eq 0 ]' 'exact package dump states recover unavailable global inventory'
+check 'call_has "dumpsys package com.example.present" && call_has "dumpsys package com.example.absent"' 'dump fallback queries every normalized target exactly'
+check '! call_has "pm list packages --user 0 com.example.present" && stdout_has "TARGET.*status=cleared" && stdout_has "TARGET.*status=absent"' 'installed and exact not-found dump proofs need no filtered Package Manager query'
+
+setup_case package-dump-not-installed
+SBX_TARGETS='com.example.absent\n'
+SBX_PM_USER_QUERY_RC=2
+SBX_PM_QUERY_RC=2
+SBX_DUMPSYS_NOT_INSTALLED=com.example.absent
+export SBX_TARGETS SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC SBX_DUMPSYS_NOT_INSTALLED
+run_case
+check '[ "$CASE_RC" -eq 0 ] && stdout_has "TARGET.*status=absent"' 'explicit user-zero installed=false proves an absent target'
+check '! call_has "pm clear --user 0 com.example.absent" && ! call_has "pm list packages --user 0 com.example.absent"' 'not-installed dump state skips target mutation and filtered queries'
+
+setup_case package-dump-unavailable
+rm -f "$CASE/tools/dumpsys"
+SBX_PM_USER_QUERY_RC=2
+SBX_PM_QUERY_RC=2
+SBX_PACKAGES='package:com.example.present\n'
+export SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC SBX_PACKAGES
+run_case
+check '[ "$CASE_RC" -eq 0 ]' 'missing optional dumpsys retains filtered Package Manager compatibility'
+check 'call_has "pm list packages --user 0 com.example.present" && ! call_has "dumpsys package"' 'unavailable dump route is skipped before exact filtered queries'
+
 setup_case package-filtered-fallback
 SBX_PM_USER_QUERY_RC=2
 SBX_PM_QUERY_RC=2
@@ -320,6 +415,41 @@ check 'call_has "pm list packages --user 0 com.example.present" && call_has "pm 
 check 'stdout_has "TARGET.*status=cleared" && stdout_has "TARGET.*status=absent"' 'filtered fallback classifies installed and absent targets'
 check '! call_has "am force-stop --user 0 com.example.present.extra" && ! call_has "pm clear --user 0 com.example.present.extra"' 'substring package output never creates an installed target'
 check 'grep -q "package service busy" "$CASE/mod/debug/action.log"' 'failed-query stderr is retained before filtered recovery'
+check 'grep -q "reason=unrecognized-output" "$CASE/mod/debug/action.log"' 'inconclusive package dumps retain bounded parse diagnostics'
+
+for dump_case in missing-extra mismatch no-user conflict malformed denied stderr fail; do
+    setup_case "package-dump-$dump_case"
+    SBX_TARGETS='com.example.present\n'
+    SBX_PM_USER_QUERY_RC=2
+    SBX_PM_QUERY_RC=2
+    SBX_PM_FILTER_USER_RC=1
+    SBX_PM_FILTER_RC=1
+    SBX_DUMPSYS_MISSING_EXTRA=''
+    SBX_DUMPSYS_MISMATCH=''
+    SBX_DUMPSYS_NO_USER=''
+    SBX_DUMPSYS_CONFLICT=''
+    SBX_DUMPSYS_MALFORMED=''
+    SBX_DUMPSYS_DENIED=''
+    SBX_DUMPSYS_STDERR=''
+    SBX_DUMPSYS_FAIL=''
+    case "$dump_case" in
+      missing-extra) SBX_DUMPSYS_MISSING_EXTRA=com.example.present ;;
+      mismatch) SBX_DUMPSYS_MISMATCH=com.example.present ;;
+      no-user) SBX_DUMPSYS_NO_USER=com.example.present ;;
+      conflict) SBX_DUMPSYS_CONFLICT=com.example.present ;;
+      malformed) SBX_DUMPSYS_MALFORMED=com.example.present ;;
+      denied) SBX_DUMPSYS_DENIED=com.example.present ;;
+      stderr) SBX_DUMPSYS_STDERR=com.example.present ;;
+      fail) SBX_DUMPSYS_FAIL=com.example.present ;;
+    esac
+    export SBX_TARGETS SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC
+    export SBX_PM_FILTER_USER_RC SBX_PM_FILTER_RC
+    export SBX_DUMPSYS_MISSING_EXTRA SBX_DUMPSYS_MISMATCH SBX_DUMPSYS_NO_USER SBX_DUMPSYS_CONFLICT
+    export SBX_DUMPSYS_MALFORMED SBX_DUMPSYS_DENIED SBX_DUMPSYS_STDERR SBX_DUMPSYS_FAIL
+    run_case
+    check '[ "$CASE_RC" -eq 30 ]' "$dump_case dump evidence remains unknown when filtered queries fail"
+    check 'result_has "code=package-query-failed" && ! call_has "native prepare" && ! call_has "pm clear"' "$dump_case dump evidence cannot cross the mutation boundary"
+done
 
 setup_case package-filtered-unknown
 SBX_PM_USER_QUERY_RC=2
@@ -342,6 +472,8 @@ run_case
 check '[ "$CASE_RC" -eq 30 ]' 'all package queries failing exits before commit with 30'
 check 'result_has "code=package-query-failed"' 'package query failure remains explicit and durable'
 check '! call_has "native prepare" && ! call_has "pm clear"' 'package query failure performs no mutation'
+check '[ "$(grep -c "dumpsys package com.example.present" "$CASE/calls")" -eq 1 ] && [ "$(grep -c "pm list packages --user 0 com.example.present" "$CASE/calls")" -eq 3 ]' 'independent dump and final filtered compatibility paths stay bounded'
+check 'grep -q "package-dump.*unrecognized-output" "$CASE/mod/debug/action.log"' 'empty successful dump output is diagnosed and never treated as absent'
 
 setup_case prepare-fail
 SBX_PREPARE_RC=1
