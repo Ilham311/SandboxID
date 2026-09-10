@@ -29,7 +29,6 @@
 #include <android/log.h>
 #include "config.hpp"
 #include "sbx_mountinfo.hpp"
-#include "sbx_sha256.hpp"
 #include "sbx_transaction.hpp"
 
 #define LOG_TAG "SandboxIDCompanion"
@@ -620,10 +619,13 @@ extern "C" void sandboxid_companion(int client) {
                     LOGD("no_uptime aktif -> UPTIME_SECONDS/UPTIME_HUMAN dipaksa 0 utk '%s'", pkg.c_str());
                 }
 
+                // Broad native PLT registration is forced off after an observed
+                // manager-specific commit failure. Keep no_native_read as a visible
+                // compatibility marker for existing installations.
+                upsert_identity_value(d, "SBX_NATIVE_READ", "0");
                 std::string nrkill = std::string(sandboxid::MODDIR) + "/no_native_read";
                 struct stat nrst;
                 if (::stat(nrkill.c_str(), &nrst) == 0) {
-                    upsert_identity_value(d, "SBX_NATIVE_READ", "0");
                     LOGD("no_native_read aktif -> SBX_NATIVE_READ=0 utk '%s'", pkg.c_str());
                 }
 

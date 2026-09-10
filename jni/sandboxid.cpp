@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 #include <map>
-#include <optional>
 #include <fstream>
 #include <sstream>
 #include <random>
@@ -779,7 +778,7 @@ static Identity derive_identity(const PixelEntry& p) {
 
     id.kv["SKU"]     = "";
     id.kv["ODM_SKU"] = "";
-    id.kv["SBX_NATIVE_READ"] = "1";
+    id.kv["SBX_NATIVE_READ"] = "0";
     id.kv["SBX_HIDE"] = "0";
     id.kv["SBX_CPU_REVISION"] = "0";
     id.kv["SBX_PROC_VERSION"] = "0";
@@ -821,7 +820,6 @@ static int apply_properties(const Identity& id) {
     struct Rp {
         const char* key;
         std::string val;
-        bool del_if_empty = false;
         sbxprop::ApplyMode mode = sbxprop::ApplyMode::kRequired;
     };
 
@@ -969,8 +967,8 @@ static int apply_properties(const Identity& id) {
         {"ro.vendor.build.tags",                     TAGS},
         {"ro.odm.build.tags",                        TAGS},
 
-        {"gsm.version.baseband",               RADIO, true},
-        {"ro.build.expect.baseband",           RADIO, true,
+        {"gsm.version.baseband",               RADIO},
+        {"ro.build.expect.baseband",           RADIO,
          sbxprop::apply_mode_for_property("ro.build.expect.baseband")},
 
         {"ro.bootloader",                      std::string("unknown")},
@@ -997,7 +995,7 @@ static int apply_properties(const Identity& id) {
     {
         int applied = 0, skipped = 0, failed = 0;
         for (const auto& r : rp) {
-            if (r.val.empty() && !r.del_if_empty) continue;
+            if (r.val.empty()) continue;
             const bool property_exists =
                 r.mode == sbxprop::ApplyMode::kRequired ||
                 __system_property_find(r.key) != nullptr;
@@ -1006,16 +1004,7 @@ static int apply_properties(const Identity& id) {
                 continue;
             }
             int rc;
-            if (r.val.empty()) {
-
-                if (have_bundled) {
-                    rc = run_bin(RESETPROP, {"resetprop-rs", "--delete", r.key});
-                } else {
-                    rc = run_bin_path("resetprop", {"resetprop", "--delete", r.key});
-                    if (rc != 0)
-                        rc = run_bin_path("resetprop-rs", {"resetprop-rs", "--delete", r.key});
-                }
-            } else if (have_bundled) {
+            if (have_bundled) {
                 rc = run_bin(RESETPROP, {"resetprop-rs", "-n", r.key, r.val.c_str()});
             } else {
                 rc = run_bin_path("resetprop", {"resetprop", "-n", r.key, r.val.c_str()});
@@ -1038,94 +1027,11 @@ static int apply_properties(const Identity& id) {
                     have_bundled ? "" : " (bundled absent + PATH fallback gagal)");
     }
 
-    {
-        static const char* const emu_props[] = {
-            "ro.kernel.qemu",
-            "ro.kernel.qemu.gles",
-            "ro.boot.qemu",
-            "ro.boot.qemu.gltransport",
-            "ro.hardware.virtual_device",
-            "qemu.hw.mainkeys",
-            "init.svc.qemud",
-            "init.svc.qemu-props",
-            "init.svc.goldfish-logcat",
-            "init.svc.goldfish-setup",
-            "init.svc.ranchu-net",
-        };
-        static const char* const identity_props[] = {
-            "ro.ril.factory_id",
-            "persist.odm.ril.factory_id",
-            "ro.ril.oem.imei",  "ro.ril.oem.imei0", "ro.ril.oem.imei1", "ro.ril.oem.imei2",
-            "ro.ril.miui.imei", "ro.ril.miui.imei0", "ro.ril.miui.imei1", "ro.ril.miui.imei2",
-            "ro.ril.oem.meid",  "ro.ril.oem.psno",  "ro.ril.oem.btmac",
-            "persist.odm.ril.oem.imei0", "persist.odm.ril.oem.imei1", "persist.odm.ril.oem.imei2",
-            "persist.odm.ril.oem.sno", "persist.odm.ril.oem.psno",
-            "persist.odm.ril.oem.wifimac", "persist.odm.ril.oem.btmac",
-            "persist.radio.imei", "persist.radio.imei0", "persist.radio.imei1", "persist.radio.imei2",
-            "ro.product.serial", "ro.build.serial",
-            "ro.kernel.androidboot.serialno", "ril.serialnumber",
-            "gsm.sim.preiccid_0", "gsm.sim.preiccid_1",
-            "persist.vendor.radio.cfu.iccid.1",
-            "persist.netd.stable_secret",
-        };
-        static const char* const custom_rom_props[] = {
-            "ro.modversion",
-            "ro.cm.version",
-            "ro.cm.build.date",
-        };
-        static const char* const oem_props[] = {
-            "ro.product.cert",
-            "ro.product.mod_device",
-            "ro.fota.oem",
-            "ro.netflix.bsp_rev",
-            "ro.baseband",
-            "persist.sys.hardcoder.name",
-            "persist.vendor.sys.fp.module",
-            "persist.vendor.sys.fp.vendor",
-            "ro.com.google.clientidbase",
-            "ro.com.google.clientidbase.ms",
-            "ro.com.google.clientidbase.tx",
-            "ro.com.google.clientidbase.vs",
-            "ro.com.google.clientidbase.am",
-            "ro.com.google.clientidbase.yt",
-            "ro.miui.build.region",
-            "ro.miui.ui.version.code",
-            "ro.miui.ui.version.name",
-            "ro.miui.cust_variant",
-            "ro.miui.region",
-            "ro.miui.mcc",
-            "ro.miui.mnc",
-            "ro.vendor.miui.region",
-            "ro.vendor.miui.mcc",
-            "ro.vendor.miui.mnc",
-            "ro.vendor.miui.cust_variant",
-        };
-        int del_ok = 0, del_skip = 0;
-        auto try_delete = [&](const char* prop) {
-            char buf[PROP_VALUE_MAX] = {0};
-            if (__system_property_get(prop, buf) <= 0) { del_skip++; return; }
-            int rc;
-            if (have_bundled) {
-                rc = run_bin(RESETPROP, {"resetprop-rs", "--delete", prop});
-            } else {
-                rc = run_bin_path("resetprop", {"resetprop", "--delete", prop});
-                if (rc != 0)
-                    rc = run_bin_path("resetprop-rs", {"resetprop-rs", "--delete", prop});
-            }
-            if (rc == 0) {
-                del_ok++;
-            } else {
-                failures++;
-                fprintf(stderr, "! resetprop delete gagal (exit!=0): %s\n", prop);
-            }
-        };
-        for (const char* p : emu_props) try_delete(p);
-        for (const char* p : identity_props) try_delete(p);
-        for (const char* p : custom_rom_props) try_delete(p);
-        for (const char* p : oem_props) try_delete(p);
-        if (del_ok > 0)
-            printf("  Sanitized: %d prop(s) deleted, %d absent\n", del_ok, del_skip);
-    }
+    // Never delete genuine global properties. OEM framework components may parse
+    // compatibility, region, radio, Wi-Fi, or Bluetooth properties during static
+    // initialization; deleting them can turn required values into empty strings and
+    // crash non-target system processes. Sensitive direct identifiers are hidden only
+    // inside validated target processes by the Java/Bionic property hooks.
     return failures == 0 ? 0 : 1;
 }
 

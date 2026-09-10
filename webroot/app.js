@@ -705,18 +705,15 @@ const EXPERIMENT_FLAGS = [
 ];
 
 function renderSettingsState(kv, available = true) {
-  const master = kv.SBX_NATIVE_READ !== '0';
   for (const key of EXPERIMENT_FLAGS) {
     const input = document.querySelector(`input[data-flag="${key}"]`);
     if (!input) continue;
-    input.checked = key === 'SBX_NATIVE_READ' ? master : kv[key] === '1';
-    input.disabled = !available || (key !== 'SBX_NATIVE_READ' && !master);
+    input.checked = key === 'SBX_NATIVE_READ' ? false : kv[key] === '1';
+    input.disabled = true;
   }
   document.getElementById('settingsStatus').textContent = !available
     ? 'identity.prop belum ada. Buat persona terlebih dahulu.'
-    : master
-      ? 'Master aktif. Opsi anak tetap independen dan default-nonaktif.'
-      : 'Master nonaktif: seluruh presentasi native dilewatkan genuine.';
+    : 'Native-read dipaksa nonaktif untuk keselamatan; seluruh presentasi native dilewatkan genuine.';
 }
 
 async function loadSettings() {

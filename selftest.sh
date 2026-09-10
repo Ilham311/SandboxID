@@ -272,17 +272,12 @@ else
     emit hosts INFO "/system/etc/hosts tidak terbaca"
 fi
 
-_native="$(id_get SBX_NATIVE_READ)"; [ -n "$_native" ] || _native=1
+_native=0
 _proc="$(id_get SBX_PROC_VERSION)"; [ -n "$_proc" ] || _proc=0
 _mem="$(id_get SBX_MEMINFO)"; [ -n "$_mem" ] || _mem=0
 _cpu="$(id_get SBX_CPU_REVISION)"; [ -n "$_cpu" ] || _cpu=0
-[ -f "$MODDIR/no_native_read" ] && _native=0
 
-if [ "$_native" = 1 ]; then
-    emit hooks INFO "native-read master: AKTIF (boot_id, SELinux enforce, AppLog sesuai allowlist)"
-else
-    emit hooks INFO "native-read master: nonaktif — seluruh surface native pass-through"
-fi
+emit hooks INFO "native-read master: dipaksa nonaktif untuk keselamatan — seluruh surface native pass-through"
 for _entry in "proc/version:$_proc" "proc/meminfo:$_mem" "CPU revision:$_cpu"; do
     _name=${_entry%:*}; _flag=${_entry##*:}
     if [ "$_native" = 1 ] && [ "$_flag" = 1 ]; then
@@ -291,6 +286,6 @@ for _entry in "proc/version:$_proc" "proc/meminfo:$_mem" "CPU revision:$_cpu"; d
         emit hooks INFO "eksperimental $_name: nonaktif"
     fi
 done
-emit hooks INFO "hook properti L2/L9 + bind build.prop: hanya di app target — verifikasi dengan app detektor"
+emit hooks INFO "hook properti Java + bind build.prop: hanya di app target — verifikasi dengan app detektor"
 
 printf 'SELFTEST SUMMARY pass=%d warn=%d fail=%d info=%d\n' "$PASS" "$WARN" "$FAIL" "$INFO"

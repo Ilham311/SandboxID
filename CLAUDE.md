@@ -116,7 +116,7 @@ Boot ordering is deliberate:
 - `post-fs-data.sh`: restore operational flags through native `set-flag`; if targets are effectively empty, stop; otherwise `seed` then pre-Zygote `apply-props`.
 - `service.sh`: wait for framework boot, then `apply-boot` for effective targets; debug workers are separate. Its hard-coded `/cache/sandboxid-boot.log` behavior remains an integration caveat.
 - Companion: exact-process target lookup, shared-locked identity/metadata read, seed only when state is genuinely missing, then send the bound snapshot.
-- Zygisk module: strict app-side validation, Java Build/property hooks, Bionic/property and native-read hooks, uptime, AppLog presentation, mount overlays, and optional hide.
+- Zygisk module: strict app-side validation, Java Build/property hooks, uptime, AppLog presentation, mount overlays, and optional hide. Broad Bionic property/native-read PLT registration is retained but forced off pending a separately reviewed manager-compatible path.
 
 Keep IPC IDs/framing in `jni/config.hpp` synchronized across module and companion. Missing/invalid identity fails open to genuine app behavior. Host checks do not establish live JNI availability, complete PLT coverage, socket/credential behavior, namespace operations, or Android ABI behavior.
 
@@ -124,7 +124,7 @@ Keep IPC IDs/framing in `jni/config.hpp` synchronized across module and companio
 
 `rotate_ids.sh all --from-identity` consumes `GOOGLE_AID`, `BOOT_COUNT`, and `APPLOG_EPOCH` from the committed snapshot. It validates the UUID/decimal inputs, XML-escapes written GAID values, and reports only SSAID, GAID, and boot-count components. Standalone local changes acquire mutation ownership and persist through native `set-local`.
 
-Action AppLog work wipes/seeds each installed unique package with the one committed `APPLOG_EPOCH`; aggregate success may not hide a failed package. Synthetic Wi-Fi/Bluetooth identities and SIM/carrier presentation are not runtime features. Framework application still synchronizes general user-0 device-name settings from persona `MODEL`; defensive property removal still prevents genuine IMEI, ICCID, Wi-Fi, and Bluetooth identifiers from leaking where covered.
+Action AppLog work wipes/seeds each installed unique package with the one committed `APPLOG_EPOCH`; aggregate success may not hide a failed package. Synthetic Wi-Fi/Bluetooth identities and SIM/carrier presentation are not runtime features. Framework application still synchronizes general user-0 device-name settings from persona `MODEL`; genuine global properties are preserved for framework compatibility, while validated target-process Java property hooks hide covered direct identifiers.
 
 The WebUI is static and privileged through `ksu.exec`. Preserve external-only CSP, `shq` quoting, and base64 treatment of target text. It provides a bounded callback timeout with global cleanup, one mutation coordinator, Action progress/run polling, durable timeout reconciliation, exit-preserving script logging, atomic target publication with validation/rollback, accessible ARIA tabs and keyboard navigation, and distinct success/reboot/partial/rollback/degraded/busy/unknown states.
 

@@ -49,7 +49,7 @@ Overlays are generated as one checked five-part set (`system`, `vendor`, `odm`, 
 | `targets --processes|--packages` | Return exact deduplicated processes or normalized unique base packages from one parser. |
 | `set-local`, `set-flag` | Validate owner, remaining supported key/value, whole identity, metadata, and overlays before coherent publication. |
 | `action-write state|result <source>` | Validate the bounded Action document/protocol and durably publish it under `debug/`. |
-| `apply-props` | Strict-load canonical identity and apply global property aliases/removals through the selected backend. |
+| `apply-props` | Strict-load canonical identity and apply global presentation aliases through the selected backend; never delete genuine global properties. |
 | `apply-boot` | Apply framework-ready settings and regenerate checked overlays. |
 | `seed` | Keep a valid bound canonical pair, migrate the narrow legacy form, or create state only when genuinely missing. |
 | `applog-ids <package>` | Derive deterministic IDs from canonical persona, package, and committed AppLog epoch. |
@@ -60,7 +60,7 @@ Exit values distinguish ordinary failure, usage/configuration (`64`), busy owner
 
 ## Property and framework behavior
 
-Native property application prefers the verified bundled `resetprop-rs`, then supported PATH backends according to implementation policy. Required aliases are attempted and any backend failure is reported. The explicitly classified OEM alias `ro.build.expect.baseband` is existing-only: genuine absence is a successful skip, while a failed write when present remains fatal. `gsm.version.baseband` remains required, and both radio aliases remain represented in build-property overlays. Presentation aliases cover build/product/serial/radio metadata while selected direct-ID, emulator, custom-ROM, and OEM leak properties—including genuine telephony, Wi-Fi, and Bluetooth identifiers—are removed rather than invented. Stable-release aliases are changed only when the genuine runtime is stable. Framework application writes user-0 device-name settings from persona `MODEL`; this general setting is distinct from retired synthetic Bluetooth-name state and does not pretend `ANDROID_ID` is one global secure value.
+Native property application prefers the verified bundled `resetprop-rs`, then supported PATH backends according to implementation policy. Required aliases are attempted and any backend failure is reported. The explicitly classified OEM alias `ro.build.expect.baseband` is existing-only: genuine absence is a successful skip, while a failed write when present remains fatal. `gsm.version.baseband` remains required, and both radio aliases remain represented in build-property overlays. Global application changes presentation aliases only; it never deletes genuine OEM, compatibility, telephony, Wi-Fi, Bluetooth, emulator, or custom-ROM properties because non-target framework components may require and parse those values. Covered direct identifiers and leak markers are hidden by property hooks only inside validated target processes. Stable-release aliases are changed only when the genuine runtime is stable. Framework application writes user-0 device-name settings from persona `MODEL`; this general setting is distinct from retired synthetic Bluetooth-name state and does not pretend `ANDROID_ID` is one global secure value.
 
 ## Companion target and identity service
 
@@ -68,7 +68,7 @@ The target cache reads one FD with before/after `fstat` and publishes only a sta
 
 For a targeted GET, the companion takes a nonblocking shared state lock, reads identity and metadata together, checks canonical metadata and SHA binding, and returns `Ready`, `Missing`, `Busy`, or `Invalid`. Busy is retried briefly. Seed is attempted only for genuinely missing state; invalid state is never replaced as a side effect of a GET. Any non-ready outcome returns no identity so the app remains genuine.
 
-Memory-only marker adjustments occur after bound validation: `no_uptime` zeros existing uptime fields, `no_native_read` forces the delivered native-read master off, and `enable_hide` forces delivered hide on. The companion independently requires `enable_hide` again before executing hide.
+Memory-only marker adjustments occur after bound validation: `no_uptime` zeros existing uptime fields, `SBX_NATIVE_READ` is forced off pending a separately reviewed manager-compatible opt-in (`no_native_read` remains an explicit kill-switch marker), and `enable_hide` forces delivered hide on. The companion independently requires `enable_hide` again before executing hide.
 
 ## IPC and Zygisk lifecycle
 
@@ -76,11 +76,11 @@ IPC IDs remain `GET_IDENTITY=2`, `DO_MOUNTS=3`, and `DO_HIDE=4`, with local inte
 
 `preAppSpecialize` converts the exact process name, opens the companion FD, requests identity, enforces the 64 KiB cap, obtains the genuine runtime SDK, and strict-validates before marking the module active. Non-target and rejected responses close the socket without requesting an exemption. Only a validated target attempts to exempt the FD for post-specialization IPC; exemption failure closes it before specialization, keeps in-process presentation active, and disables build-property mounts and optional hide for that process. Zero/invalid/unavailable data unloads the module and leaves the process genuine. `preServerSpecialize` always unloads.
 
-`postAppSpecialize` publishes the validated snapshot, determines genuine stable-release state, mutates selected Java `Build`/`VERSION` fields, installs Java string/handle/typed property hooks, installs uptime, sets the AppLog package seed, installs Bionic property/native-read PLT hooks, and arms the crash watchdog. When pre-specialization FD exemption succeeded, it requests build-property mounts, optionally requests hide, and closes the companion socket. Individual hook/mount failures do not abort app startup.
+`postAppSpecialize` publishes the validated snapshot, determines genuine stable-release state, mutates selected Java `Build`/`VERSION` fields, installs Java string/handle/typed property hooks, installs uptime, and sets the AppLog package seed. Broad Bionic property/native-read PLT registration remains implemented but default-off and is forced off by the companion after an observed 373-library commit failure on a supported target; target processes keep Java presentation rather than entering that unsafe path. No signal handlers or diagnostic threads are installed in app processes. When pre-specialization FD exemption succeeded, the module requests build-property mounts, optionally requests hide, and closes the companion socket. Individual Java hook/mount failures do not abort app startup.
 
 ## Hook lenses and limits
 
-Java string getters can map or hide by key. Handle APIs first need a genuine handle and therefore cannot invent an absent property. Bionic name-based `__system_property_get` can synthesize mapped absent keys; read/callback forms require a genuine property/read and preserve callback cookie/name/serial. Native capability-property groups pass through. Java hooks remain active when the native-read master is off; the Bionic PLT property hooks share that master.
+Java string getters can map or hide by key. Handle APIs first need a genuine handle and therefore cannot invent an absent property. Native capability-property groups pass through. The Bionic PLT implementation can synthesize mapped absent name-based properties while read/callback forms require a genuine property and preserve callback cookie/name/serial, but this broad layer is currently forced off for safety. Java hooks remain active.
 
 Selected Java `Build` fields and stable-release `Build.VERSION` fields are changed; SDK, ABI arrays, capabilities, board/hardware/SoC, preview state, and attestation remain genuine unless another explicitly documented lens covers them.
 
@@ -94,8 +94,8 @@ PLT scanning covers currently mapped libraries and active status does not prove 
 
 Mount/hide requests require `SO_PEERCRED`, root UID, and requested PID equal to the peer PID. Children fork before `setns`. Mounts require successful recursive `MS_SLAVE`; missing source/destination is a skip, bind failures are logged, and the module receives only the success count. Hide selects unprotected root traces from mountinfo and detaches with `MNT_DETACH`; it currently warns but continues if propagation isolation fails, so that condition remains a device-integration risk. Required overlay sources/destinations and system roots are protected.
 
-The target-death watcher is informational and bounded. The crash watchdog handles selected fatal signals through a nonblocking pipe and chains prior/default behavior; it is diagnostics, not recovery.
+The target-death watcher is informational and bounded. App processes do not install SandboxID fatal-signal handlers; crash diagnostics must remain out-of-process so Android/runtime signal ownership is unchanged.
 
 ## Verification boundary
 
-Header/mocked tests establish parser, derivation, ownership, transaction-return, target, property, native-read, AppLog, and mount-selection contracts. They do not establish real Android property/settings behavior, SELinux labels, namespace isolation, mount propagation, GMS/OEM stores, signal chaining, companion socket deadlines, Zygisk/JNI/PLT coverage, or ABI package execution. Missing `jni/zygisk.hpp` remains an explicit `main.cpp` syntax blocker.
+Header/mocked tests establish parser, derivation, ownership, transaction-return, target, property, native-read, AppLog, and mount-selection contracts. They do not establish real Android property/settings behavior, SELinux labels, namespace isolation, mount propagation, GMS/OEM stores, companion socket deadlines, Zygisk/JNI/PLT coverage, or ABI package execution. Missing `jni/zygisk.hpp` remains an explicit `main.cpp` syntax blocker.

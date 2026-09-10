@@ -21,9 +21,7 @@
 #include <mutex>
 #include <vector>
 #include <utility>
-#include <signal.h>
 #include <ctime>
-#include <thread>
 #include "zygisk.hpp"
 #include "config.hpp"
 #include "sbx_identity.hpp"
@@ -1089,125 +1087,6 @@ static void install_native_read_hooks(Api* api) {
          reinterpret_cast<void*>(orig_spr),    reinterpret_cast<void*>(orig_sprcb));
 }
 
-struct SbxCrashRec {
-    uint32_t magic;
-    int32_t  sig;
-    int32_t  code;
-    int32_t  sender;
-    int32_t  pid;
-    int32_t  hit;
-    int64_t  alive_ms;
-    void*    addr;
-};
-static const uint32_t SBX_CRASH_MAGIC = 0x54544352u;
-
-static int         g_crash_pipe[2] = {-1, -1};
-static char        g_watchdog_pkg_buf[128] = {0};
-static int64_t     g_load_time_ms = 0;
-static struct sigaction g_prev_sig[NSIG];
-static volatile sig_atomic_t g_crash_count[NSIG] = {0};
-static const int   CRASH_LIMIT = 3;
-
-static int64_t sbx_now_ms() {
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
-static const char* sbx_sig_name(int sig) {
-    switch (sig) {
-        case SIGSEGV: return "SIGSEGV";
-        case SIGABRT: return "SIGABRT";
-        case SIGBUS:  return "SIGBUS";
-        case SIGILL:  return "SIGILL";
-        case SIGFPE:  return "SIGFPE";
-        case SIGSYS:  return "SIGSYS";
-        default:      return "?";
-    }
-}
-
-static void sbx_crash_drain_loop() {
-    SbxCrashRec rec;
-    while (sandboxid::read_full(g_crash_pipe[0], &rec, sizeof(rec))) {
-        if (rec.magic != SBX_CRASH_MAGIC) continue;
-        LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%lldms hit=%d/%d",
-             SBX_VARIANT_TAG, g_watchdog_pkg_buf, rec.pid, rec.sig, sbx_sig_name(rec.sig),
-             rec.code, rec.addr, rec.sender, (long long)rec.alive_ms, rec.hit, CRASH_LIMIT);
-    }
-}
-
-static void sbx_signal_handler(int sig, siginfo_t* info, void* ctx) {
-    int n = 0;
-    if (sig >= 0 && sig < NSIG) {
-
-        n = g_crash_count[sig] + 1;
-        g_crash_count[sig] = n;
-    }
-
-    if (n <= CRASH_LIMIT && g_crash_pipe[1] >= 0) {
-
-        int saved_errno = errno;
-        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-        SbxCrashRec rec;
-        rec.magic    = SBX_CRASH_MAGIC;
-        rec.sig      = sig;
-        rec.code     = info ? info->si_code : 0;
-        rec.sender   = info ? info->si_pid  : 0;
-        rec.pid      = (int)getpid();
-        rec.hit      = n;
-        rec.alive_ms = ((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000) - g_load_time_ms;
-        rec.addr     = info ? info->si_addr : nullptr;
-        ssize_t wr = ::write(g_crash_pipe[1], &rec, sizeof(rec));
-        (void)wr;
-        errno = saved_errno;
-    }
-
-    if (sig >= 0 && sig < NSIG) {
-        struct sigaction* p = &g_prev_sig[sig];
-        if ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction) {
-            p->sa_sigaction(sig, info, ctx);
-        } else if (!(p->sa_flags & SA_SIGINFO) && p->sa_handler &&
-                   p->sa_handler != SIG_DFL && p->sa_handler != SIG_IGN) {
-            p->sa_handler(sig);
-        } else {
-
-            signal(sig, SIG_DFL);
-            raise(sig);
-        }
-    }
-}
-
-static void install_crash_watchdog(const std::string& pkg) {
-    static bool armed = false;
-    if (armed) return;
-
-    strncpy(g_watchdog_pkg_buf, pkg.c_str(), sizeof(g_watchdog_pkg_buf) - 1);
-    g_load_time_ms = sbx_now_ms();
-
-    if (pipe2(g_crash_pipe, O_CLOEXEC) == 0) {
-        int fl = fcntl(g_crash_pipe[1], F_GETFL, 0);
-        if (fl >= 0) fcntl(g_crash_pipe[1], F_SETFL, fl | O_NONBLOCK);
-        std::thread(sbx_crash_drain_loop).detach();
-    } else {
-        g_crash_pipe[0] = g_crash_pipe[1] = -1;
-        LOGE("crash watchdog: pipe2 failed errno=%d (logging disabled, chaining still armed)", errno);
-    }
-
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-
-    sa.sa_flags     = SA_SIGINFO;
-    sa.sa_sigaction = sbx_signal_handler;
-    sigemptyset(&sa.sa_mask);
-
-    static const int sigs[] = { SIGABRT, SIGFPE, SIGILL };
-    for (int s : sigs) {
-        g_crash_count[s] = 0;
-        sigaction(s, &sa, &g_prev_sig[s]);
-    }
-    armed = true;
-    LOGD("crash watchdog armed for %s (ABRT/FPE/ILL, limit=%d)", pkg.c_str(), CRASH_LIMIT);
-}
-
 static int runtime_sdk(JNIEnv* env) {
     jclass version = env->FindClass("android/os/Build$VERSION");
     if (!version || env->ExceptionCheck()) {
@@ -1435,7 +1314,6 @@ public:
 #ifdef SBX_DEBUG
         for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
-        install_crash_watchdog(pkg_);
 
         if (comp_fd_ >= 0) {
             request_companion_mounts(comp_fd_);

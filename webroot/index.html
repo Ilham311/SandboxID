@@ -65,13 +65,13 @@
       <div class="hint">Presentasi eksperimental untuk aplikasi target. Perubahan berlaku setelah proses target dimulai ulang.</div>
       <button id="settingsReload" class="ghost sm">Muat ulang</button>
     </div>
-    <div class="settings-warn">Opsi anak di bawah default-nonaktif dan parsial; native-read master tetap aktif secara default. Ini bukan virtualisasi lingkungan penuh: /proc/version tidak mengubah uname dan /proc/meminfo tidak mengubah ActivityManager.</div>
+    <div class="settings-warn">Broad native-read/PLT hooking dipaksa nonaktif untuk keselamatan setelah kegagalan commit pada manager yang didukung. Kontrol native-read di bawah disimpan untuk kompatibilitas tetapi belum diaktifkan saat runtime.</div>
     <div class="settings-list">
       <div class="setting-row">
         <span><strong>Refresh persona otomatis</strong><small>Setiap Action mencoba kandidat Pixel OTA exact-SDK secara terbatas. Kegagalan tetap memakai cache atau katalog offline.</small></span>
       </div>
       <label class="setting-row" for="setNativeRead">
-        <span><strong>Native-read master</strong><small>Mengizinkan presentasi native terkontrol; mematikan ini menonaktifkan semua opsi di bawah.</small></span>
+        <span><strong>Native-read master</strong><small>Disimpan untuk kompatibilitas; companion tetap memaksa nonaktif sampai jalur manager-compatible ditinjau.</small></span>
         <input type="checkbox" id="setNativeRead" data-flag="SBX_NATIVE_READ" data-mutation>
       </label>
       <label class="setting-row" for="setProcVersion">
