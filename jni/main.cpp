@@ -1359,10 +1359,6 @@ public:
         ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
 
-        if (!api_->exemptFd(fd))
-            LOGW("exemptFd(fd=%d) returned false — companion socket may be closed by "
-                 "zygote; bind-mount step will be skipped for this process", fd);
-
         uint8_t cmd   = sandboxid::CMD_GET_IDENTITY;
         uint16_t plen = (uint16_t)pkg.size();
         if (!sandboxid::write_full(fd, &cmd, 1) ||
@@ -1404,9 +1400,15 @@ public:
 
         validated_identity_ = std::move(snapshot.values);
         blob_.clear();
-        active_  = true;
-        pkg_     = pkg;
-        comp_fd_ = fd;
+        active_ = true;
+        pkg_    = pkg;
+        if (api_->exemptFd(fd)) {
+            comp_fd_ = fd;
+        } else {
+            LOGW("exemptFd(fd=%d) returned false; closing companion socket before "
+                 "specialization and disabling mount/hide for pkg='%s'", fd, pkg.c_str());
+            ::close(fd);
+        }
 
         LOGD("target active (%u B) [%s]", len, SBX_VARIANT_TAG);
         LOGD("target pkg='%s'", pkg.c_str());
