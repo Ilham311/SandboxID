@@ -31,6 +31,9 @@ TARGETS_FILE=""
 INSTALLED_TARGETS_FILE=""
 ABSENT_TARGETS_FILE=""
 PACKAGE_LIST_FILE=""
+PACKAGE_QUERY_ERROR_FILE=""
+PACKAGE_QUERY_IO_FAILED=0
+PACKAGE_QUERY_NEEDED_RECOVERY=0
 
 if [ "$(id -u 2>/dev/null)" != 0 ]; then
     _bootstrap_run="${SBX_ACTION_RUN_ID:-00000000000000000000000000000000}"
@@ -231,6 +234,59 @@ run_capture() {
     return "$CMD_RC"
 }
 
+package_query_log_failure() {
+    _query_label="$1"
+    _query_attempt="$2"
+    _query_rc="$3"
+    {
+        printf '[package-query] label=%s attempt=%s rc=%s\n' \
+            "$_query_label" "$_query_attempt" "$_query_rc"
+        if [ -s "$PACKAGE_LIST_FILE" ]; then
+            printf '%s\n' '[package-query] stdout:'
+            dd if="$PACKAGE_LIST_FILE" bs=4096 count=1 2>/dev/null
+            printf '\n'
+        fi
+        if [ -s "$PACKAGE_QUERY_ERROR_FILE" ]; then
+            printf '%s\n' '[package-query] stderr:'
+            dd if="$PACKAGE_QUERY_ERROR_FILE" bs=4096 count=1 2>/dev/null
+            printf '\n'
+        fi
+    } >> "$ACTION_LOG" 2>/dev/null || PACKAGE_QUERY_IO_FAILED=1
+}
+
+package_query() {
+    _query_label="$1"
+    shift
+    _query_attempt=1
+    while [ "$_query_attempt" -le 3 ]; do
+        : > "$PACKAGE_LIST_FILE" 2>/dev/null || {
+            PACKAGE_QUERY_IO_FAILED=1
+            return 1
+        }
+        : > "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null || {
+            PACKAGE_QUERY_IO_FAILED=1
+            return 1
+        }
+        pm list packages "$@" </dev/null > "$PACKAGE_LIST_FILE" 2> "$PACKAGE_QUERY_ERROR_FILE"
+        _query_rc=$?
+        if [ "$_query_rc" -eq 0 ]; then
+            rm -f "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
+            [ "$_query_attempt" -eq 1 ] || PACKAGE_QUERY_NEEDED_RECOVERY=1
+            return 0
+        fi
+        package_query_log_failure "$_query_label" "$_query_attempt" "$_query_rc"
+        [ "$PACKAGE_QUERY_IO_FAILED" -eq 0 ] || return 1
+        if [ "$_query_attempt" -lt 3 ]; then
+            PACKAGE_QUERY_NEEDED_RECOVERY=1
+            sleep 1
+        fi
+        _query_attempt=$((_query_attempt + 1))
+    done
+    : > "$PACKAGE_LIST_FILE" 2>/dev/null || PACKAGE_QUERY_IO_FAILED=1
+    rm -f "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
+    return 1
+}
+
 lock_owner_alive() {
     _owner_file_live "$ACTION_LOCK/owner"
 }
@@ -361,7 +417,7 @@ finished_utc=$(now_utc)" >/dev/null 2>&1 || :
     fi
     printf '%s\n' "$_record" | tee -a "$ACTION_LOG" "$LOGFILE"
     rm -f "$TARGETS_FILE" "$INSTALLED_TARGETS_FILE" "$ABSENT_TARGETS_FILE" \
-        "$PACKAGE_LIST_FILE" 2>/dev/null
+        "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
     release_action_lock
     release_global_lock
     trap - EXIT INT TERM HUP
@@ -382,7 +438,7 @@ cleanup() {
     [ "$TERMINAL" -eq 1 ] && return
     command -v se_restore_all >/dev/null 2>&1 && se_restore_all
     rm -f "$TARGETS_FILE" "$INSTALLED_TARGETS_FILE" "$ABSENT_TARGETS_FILE" \
-        "$PACKAGE_LIST_FILE" 2>/dev/null
+        "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
     release_action_lock
     release_global_lock
 }
@@ -513,55 +569,108 @@ if ! command -v pm >/dev/null 2>&1 || ! command -v am >/dev/null 2>&1; then
     finish 127 failed framework-tools-missing
 fi
 PACKAGE_LIST_FILE="$DEBUG_DIR/.action-package-list.$RUN_ID"
+PACKAGE_QUERY_ERROR_FILE="$DEBUG_DIR/.action-package-query-error.$RUN_ID"
 INSTALLED_TARGETS_FILE="$DEBUG_DIR/.action-installed.$RUN_ID"
 ABSENT_TARGETS_FILE="$DEBUG_DIR/.action-absent.$RUN_ID"
-if pm list packages --user 0 </dev/null > "$PACKAGE_LIST_FILE" 2>> "$ACTION_LOG"; then
-    :
-else
-    : > "$PACKAGE_LIST_FILE" || {
-        rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" 2>/dev/null
-        failure "Daftar package sementara tidak dapat dibuat."
-        stage_done FAIL target-state-unwritable
-        finish 30 failed target-state-unwritable
-    }
-    if pm list packages </dev/null > "$PACKAGE_LIST_FILE" 2>> "$ACTION_LOG"; then
-        warning "Query package untuk user 0 gagal; menggunakan daftar package default."
-    else
-        rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" 2>/dev/null
-        failure "Package Manager tidak dapat membaca daftar package."
-        stage_done FAIL package-query-failed
-        finish 30 failed package-query-failed
-    fi
-fi
 : > "$INSTALLED_TARGETS_FILE" || {
-    rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" 2>/dev/null
+    rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
     failure "Daftar target terpasang tidak dapat dibuat."
     stage_done FAIL target-state-unwritable
     finish 30 failed target-state-unwritable
 }
 : > "$ABSENT_TARGETS_FILE" || {
-    rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$INSTALLED_TARGETS_FILE" 2>/dev/null
+    rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" \
+        "$INSTALLED_TARGETS_FILE" 2>/dev/null
     failure "Daftar target absent tidak dapat dibuat."
     stage_done FAIL target-state-unwritable
     finish 30 failed target-state-unwritable
 }
-if ! awk -v installed="$INSTALLED_TARGETS_FILE" -v absent="$ABSENT_TARGETS_FILE" '
-    NR == FNR {
-        if (index($0, "package:") == 1) packages[substr($0, 9)] = 1
-        next
-    }
-    $0 != "" {
-        destination = (($0 in packages) ? installed : absent)
-        print $0 >> destination
-        if (close(destination) != 0) exit 1
-    }
-' "$PACKAGE_LIST_FILE" "$TARGETS_FILE"; then
-    rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$INSTALLED_TARGETS_FILE" "$ABSENT_TARGETS_FILE" 2>/dev/null
-    failure "Klasifikasi target gagal dipersistenkan."
+_package_inventory=none
+if package_query global-user-0 --user 0; then
+    _package_inventory=global
+elif [ "$PACKAGE_QUERY_IO_FAILED" -eq 0 ] && package_query global-default; then
+    _package_inventory=global
+    PACKAGE_QUERY_NEEDED_RECOVERY=1
+fi
+if [ "$PACKAGE_QUERY_IO_FAILED" -ne 0 ]; then
+    rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" \
+        "$INSTALLED_TARGETS_FILE" "$ABSENT_TARGETS_FILE" 2>/dev/null
+    failure "File sementara query package tidak dapat digunakan."
     stage_done FAIL target-state-unwritable
     finish 30 failed target-state-unwritable
 fi
-rm -f "$PACKAGE_LIST_FILE" 2>/dev/null
+if [ "$_package_inventory" = global ]; then
+    if ! awk -v installed="$INSTALLED_TARGETS_FILE" -v absent="$ABSENT_TARGETS_FILE" '
+        NR == FNR {
+            if (index($0, "package:") == 1) packages[substr($0, 9)] = 1
+            next
+        }
+        $0 != "" {
+            destination = (($0 in packages) ? installed : absent)
+            print $0 >> destination
+            if (close(destination) != 0) exit 1
+        }
+    ' "$PACKAGE_LIST_FILE" "$TARGETS_FILE"; then
+        rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" \
+            "$INSTALLED_TARGETS_FILE" "$ABSENT_TARGETS_FILE" 2>/dev/null
+        failure "Klasifikasi target gagal dipersistenkan."
+        stage_done FAIL target-state-unwritable
+        finish 30 failed target-state-unwritable
+    fi
+else
+    PACKAGE_QUERY_NEEDED_RECOVERY=1
+    _package_query_unknown=0
+    while IFS= read -r _package || [ -n "$_package" ]; do
+        [ -n "$_package" ] || continue
+        _package_query_ok=0
+        if package_query "target-user-0:$_package" --user 0 "$_package"; then
+            _package_query_ok=1
+        elif [ "$PACKAGE_QUERY_IO_FAILED" -eq 0 ] &&
+             package_query "target-default:$_package" "$_package"; then
+            _package_query_ok=1
+        fi
+        if [ "$PACKAGE_QUERY_IO_FAILED" -ne 0 ]; then
+            rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" \
+                "$INSTALLED_TARGETS_FILE" "$ABSENT_TARGETS_FILE" 2>/dev/null
+            failure "File sementara query package tidak dapat digunakan."
+            stage_done FAIL target-state-unwritable
+            finish 30 failed target-state-unwritable
+        fi
+        if [ "$_package_query_ok" -ne 1 ]; then
+            _package_query_unknown=1
+            break
+        fi
+        if grep -Fqx "package:$_package" "$PACKAGE_LIST_FILE"; then
+            printf '%s\n' "$_package" >> "$INSTALLED_TARGETS_FILE" || {
+                PACKAGE_QUERY_IO_FAILED=1
+                break
+            }
+        else
+            printf '%s\n' "$_package" >> "$ABSENT_TARGETS_FILE" || {
+                PACKAGE_QUERY_IO_FAILED=1
+                break
+            }
+        fi
+    done < "$TARGETS_FILE"
+    if [ "$PACKAGE_QUERY_IO_FAILED" -ne 0 ]; then
+        rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" \
+            "$INSTALLED_TARGETS_FILE" "$ABSENT_TARGETS_FILE" 2>/dev/null
+        failure "Klasifikasi target gagal dipersistenkan."
+        stage_done FAIL target-state-unwritable
+        finish 30 failed target-state-unwritable
+    fi
+    if [ "$_package_query_unknown" -ne 0 ]; then
+        rm -f "$TARGETS_FILE" "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" \
+            "$INSTALLED_TARGETS_FILE" "$ABSENT_TARGETS_FILE" 2>/dev/null
+        failure "Package Manager tidak dapat mengklasifikasikan semua target."
+        stage_done FAIL package-query-failed
+        finish 30 failed package-query-failed
+    fi
+fi
+rm -f "$PACKAGE_LIST_FILE" "$PACKAGE_QUERY_ERROR_FILE" 2>/dev/null
+if [ "$PACKAGE_QUERY_NEEDED_RECOVERY" -ne 0 ]; then
+    warning "Query Package Manager memerlukan retry atau fallback terfilter."
+fi
 stage_done OK ready
 
 stage refresh "Memeriksa pembaruan persona opsional"

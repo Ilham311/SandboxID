@@ -33,6 +33,10 @@ reset_env() {
     export SBX_COMMIT_DIGEST=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     export SBX_ROTATE_RC=0 SBX_ROTATE_FAILURES=0 SBX_ROTATE_UNSUPPORTED=0
     export SBX_ROTATE_REBOOT=0 SBX_PM_CLEAR_FAIL='' SBX_PM_USER_QUERY_RC=0 SBX_PM_QUERY_RC=0 SBX_AM_FAIL=''
+    export SBX_PM_FILTER_USER_RC=0 SBX_PM_FILTER_RC=0 SBX_PM_FILTER_FAIL=''
+    export SBX_PM_USER_QUERY_SEQUENCE='' SBX_PM_QUERY_SEQUENCE=''
+    export SBX_PM_FILTER_USER_SEQUENCE='' SBX_PM_FILTER_SEQUENCE=''
+    export SBX_PM_FAIL_STDOUT='' SBX_PM_FAIL_STDERR=''
     export SBX_APPLOG_WIPE_FAIL='' SBX_APPLOG_SEED_FAIL=''
 }
 
@@ -172,14 +176,67 @@ SH
     cat > "$CASE/tools/pm" <<'SH'
 #!/bin/sh
 printf 'pm %s\n' "$*" >> "$SBX_CALLS"
+next_rc() {
+  key=$1
+  fallback=$2
+  count_file="$MODDIR/debug/.mock-pm-$key"
+  count=0
+  [ ! -r "$count_file" ] || count="$(cat "$count_file")"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$count_file"
+  eval "sequence=\${SBX_PM_${key}_SEQUENCE:-}"
+  if [ -n "$sequence" ]; then
+    old_ifs=$IFS
+    IFS=,
+    set -- $sequence
+    IFS=$old_ifs
+    rc=
+    index=1
+    for value do
+      rc=$value
+      [ "$index" -lt "$count" ] || break
+      index=$((index + 1))
+    done
+    printf '%s\n' "${rc:-$fallback}"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+query_fail() {
+  rc=$1
+  [ "$rc" -ne 0 ] || return 1
+  [ -z "${SBX_PM_FAIL_STDOUT:-}" ] || printf '%b' "$SBX_PM_FAIL_STDOUT"
+  [ -z "${SBX_PM_FAIL_STDERR:-}" ] || printf '%b' "$SBX_PM_FAIL_STDERR" >&2
+  exit "$rc"
+}
 case "$1 $2" in
   'list packages')
-    if [ "${3:-}" = --user ]; then
-      [ "${SBX_PM_USER_QUERY_RC:-0}" -eq 0 ] || exit "$SBX_PM_USER_QUERY_RC"
-    else
-      [ "${SBX_PM_QUERY_RC:-0}" -eq 0 ] || exit "$SBX_PM_QUERY_RC"
+    shift 2
+    user=0
+    if [ "${1:-}" = --user ]; then
+      user=1
+      shift 2
     fi
-    printf '%b' "${SBX_PACKAGES:-}" ;;
+    filter=${1:-}
+    if [ -n "$filter" ]; then
+      if [ "$filter" = "${SBX_PM_FILTER_FAIL:-}" ]; then
+        rc=1
+      elif [ "$user" -eq 1 ]; then
+        rc="$(next_rc FILTER_USER "${SBX_PM_FILTER_USER_RC:-0}")"
+      else
+        rc="$(next_rc FILTER "${SBX_PM_FILTER_RC:-0}")"
+      fi
+      query_fail "$rc"
+      printf '%b' "${SBX_PACKAGES:-}" | grep -F "package:$filter" || :
+    else
+      if [ "$user" -eq 1 ]; then
+        rc="$(next_rc USER_QUERY "${SBX_PM_USER_QUERY_RC:-0}")"
+      else
+        rc="$(next_rc QUERY "${SBX_PM_QUERY_RC:-0}")"
+      fi
+      query_fail "$rc"
+      printf '%b' "${SBX_PACKAGES:-}"
+    fi ;;
   'clear --user')
     pkg=$4
     [ "$pkg" != "${SBX_PM_CLEAR_FAIL:-}" ] ;;
@@ -193,6 +250,7 @@ pkg=$4
 [ "$pkg" != "${SBX_AM_FAIL:-}" ]
 SH
     printf '#!/bin/sh\nexit 0\n' > "$CASE/tools/resetprop"
+    printf '#!/bin/sh\nexit 0\n' > "$CASE/tools/sleep"
 }
 
 run_case() {
@@ -231,18 +289,55 @@ check '[ "$CASE_RC" -eq 64 ]' 'invalid target parser status exits 64'
 check 'result_has "code=target-invalid"' 'invalid targets persist target-invalid result'
 check '! call_has "native prepare" && ! call_has "pm clear"' 'invalid targets perform no destructive work'
 
+setup_case package-query-retry
+SBX_PM_USER_QUERY_SEQUENCE='2,0'
+SBX_PM_FAIL_STDOUT='cmd: Failure calling service package: Failed transaction (2147483646)\n'
+export SBX_PM_USER_QUERY_SEQUENCE SBX_PM_FAIL_STDOUT
+run_case
+check '[ "$CASE_RC" -eq 0 ]' 'transient Binder failure recovers within the bounded query retry'
+check '[ "$(grep -c "pm list packages --user 0" "$CASE/calls")" -eq 2 ]' 'transient query retries the same scoped read once before success'
+check 'grep -q "label=global-user-0 attempt=1 rc=2" "$CASE/mod/debug/action.log" && grep -q "Failed transaction (2147483646)" "$CASE/mod/debug/action.log"' 'stdout-only Binder failure is retained in the Action log'
+check 'result_has "status=success" && result_has "warnings=1"' 'recovered transient inventory is visible as one warning'
+check 'stdout_has "TARGET.*status=cleared" && stdout_has "TARGET.*status=absent"' 'failed-attempt stdout is truncated before successful classification'
+
 setup_case package-user-query-fallback
 SBX_PM_USER_QUERY_RC=1
 export SBX_PM_USER_QUERY_RC
 run_case
 check '[ "$CASE_RC" -eq 0 ]' 'unsupported user-scoped package query falls back to default package list'
-check 'call_has "pm list packages --user 0" && call_has "pm list packages$"' 'package fallback retries without unsupported user option'
+check '[ "$(grep -c "pm list packages --user 0" "$CASE/calls")" -eq 3 ] && call_has "pm list packages$"' 'package fallback bounds scoped retries before retrying without the unsupported user option'
 check 'result_has "status=success" && result_has "warnings=1"' 'package fallback is visible as a warning'
+
+setup_case package-filtered-fallback
+SBX_PM_USER_QUERY_RC=2
+SBX_PM_QUERY_RC=2
+SBX_PACKAGES='package:com.example.present\npackage:com.example.present.extra\npackage:com.example.absent.extra\n'
+SBX_PM_FAIL_STDERR='package service busy\n'
+export SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC SBX_PACKAGES SBX_PM_FAIL_STDERR
+run_case
+check '[ "$CASE_RC" -eq 0 ]' 'filtered target queries recover when both global inventory forms remain unavailable'
+check 'call_has "pm list packages --user 0 com.example.present" && call_has "pm list packages --user 0 com.example.absent"' 'filtered fallback queries every normalized target exactly'
+check 'stdout_has "TARGET.*status=cleared" && stdout_has "TARGET.*status=absent"' 'filtered fallback classifies installed and absent targets'
+check '! call_has "am force-stop --user 0 com.example.present.extra" && ! call_has "pm clear --user 0 com.example.present.extra"' 'substring package output never creates an installed target'
+check 'grep -q "package service busy" "$CASE/mod/debug/action.log"' 'failed-query stderr is retained before filtered recovery'
+
+setup_case package-filtered-unknown
+SBX_PM_USER_QUERY_RC=2
+SBX_PM_QUERY_RC=2
+SBX_PM_FILTER_FAIL=com.example.absent
+SBX_PM_FAIL_STDOUT='cmd: Failure calling service package: Failed transaction (2147483646)\n'
+export SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC SBX_PM_FILTER_FAIL SBX_PM_FAIL_STDOUT
+run_case
+check '[ "$CASE_RC" -eq 30 ]' 'one unresolved filtered target preserves fail-safe exit 30'
+check 'result_has "code=package-query-failed" && ! result_has "committed=1"' 'unresolved package state is explicit and remains pre-commit'
+check '! call_has "native prepare" && ! call_has "pm clear" && ! call_has "rotate " && ! call_has "wipe " && ! call_has "seed "' 'unresolved package state performs no prepare or irreversible work'
 
 setup_case package-query-fail
 SBX_PM_USER_QUERY_RC=1
 SBX_PM_QUERY_RC=1
-export SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC
+SBX_PM_FILTER_USER_RC=1
+SBX_PM_FILTER_RC=1
+export SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC SBX_PM_FILTER_USER_RC SBX_PM_FILTER_RC
 run_case
 check '[ "$CASE_RC" -eq 30 ]' 'all package queries failing exits before commit with 30'
 check 'result_has "code=package-query-failed"' 'package query failure remains explicit and durable'

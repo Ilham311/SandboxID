@@ -44,7 +44,7 @@ Action writes bounded state/result documents through native `action-write`. Mach
 
 Stages and mutation policy:
 
-1. **preflight** validates root/tools, ownership, unlocked mode, effective exact targets, normalized packages, property backend, runtime persona support, package inventory, and writable state/debug locations.
+1. **preflight** validates root/tools, ownership, unlocked mode, effective exact targets, normalized packages, property backend, runtime persona support, package inventory, and writable state/debug locations. Package inventory uses bounded retries for user-scoped and compatibility global queries, then bounded exact package-name-filtered queries when both inventories remain unavailable. Failed-attempt stdout and stderr are retained in `debug/action.log`. Only a successful query can establish installed or absent state; any unqueryable target stops preflight before mutation.
 2. **refresh** optionally invokes bounded `autopif.sh refresh`; failure warns when an offline source remains.
 3. **prepare** asks native code to create and validate pending identity bound to current canonical state; it performs no device/app mutation.
 4. **commit** publishes checked overlays and canonical identity/metadata for the exact run.
