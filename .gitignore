@@ -15,10 +15,16 @@ local.properties
 
 .DS_Store
 Thumbs.db
-__pycache__/
-*.py[cod]
 
 jni/zygisk.hpp
 
+# L3 LSPlant (opt-in): vendored libs + generated callback DEX header
+jni/external/
+jni/hook_dex.h
+
 # Claude Code worktrees (ephemeral; never commit as embedded repos)
 .claude/worktrees/
+
+# Runtime-generated operator selection (ditulis rotate_ids.sh saat runtime;
+# jangan pernah di-commit — sumber datanya adalah data/carriers.tsv)
+carrier.conf

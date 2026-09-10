@@ -11,7 +11,7 @@
 namespace sbxnr {
 
 inline uint64_t fnv1a(const std::string& s) {
-    uint64_t h = 14695981039346656037ULL;
+    uint64_t h = 1469598103934665603ULL;
     for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
     return h;
 }
@@ -49,6 +49,30 @@ inline std::string uuid_from_seed(uint64_t seed) {
         s.push_back(hex_lc(b[i] & 0xF));
     }
     return s;
+}
+
+inline std::string mac_from_seed(uint64_t seed) {
+    uint8_t b[6];
+    fill_bytes(seed, b, sizeof(b));
+    b[0] = 0x02;
+    char buf[18];
+    std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
+                  b[0], b[1], b[2], b[3], b[4], b[5]);
+    return std::string(buf);
+}
+
+inline bool is_valid_mac(const std::string& m) {
+    if (m.size() != 17) return false;
+    for (int i = 0; i < 17; ++i) {
+        char c = m[i];
+        if ((i % 3) == 2) { if (c != ':') return false; }
+        else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return false;
+    }
+
+    bool all_zero = true;
+    for (char c : m) if (c != '0' && c != ':') { all_zero = false; break; }
+    return !all_zero;
 }
 
 inline std::string hex_from_seed(uint64_t seed, size_t nbytes) {
@@ -295,77 +319,79 @@ inline std::string patch_meminfo(const std::string& real, int target_gb) {
     return out;
 }
 
-inline bool patch_cpuinfo_aggregate_revision(const std::string& real,
-                                             std::string& out) {
-    static constexpr char prefix[] = "Processor\t: AArch64 Processor rev ";
-    size_t line_end = real.find('\n');
-    if (line_end == std::string::npos) line_end = real.size();
-    if (line_end < sizeof(prefix) - 1 ||
-        real.compare(0, sizeof(prefix) - 1, prefix) != 0)
-        return false;
+enum CpuAction { CPU_NONE = 0, CPU_QUALCOMM = 1, CPU_MTK = 2, CPU_STRIP = 3 };
 
-    size_t revision_begin = sizeof(prefix) - 1;
-    size_t revision_end = revision_begin;
-    while (revision_end < line_end && real[revision_end] >= '0' &&
-           real[revision_end] <= '9')
-        ++revision_end;
-    static constexpr char suffix[] = " (aarch64)";
-    if (revision_end == revision_begin ||
-        line_end - revision_end != sizeof(suffix) - 1 ||
-        real.compare(revision_end, sizeof(suffix) - 1, suffix) != 0)
-        return false;
+inline bool ci_contains(const std::string& hay, const char* needle) {
+    std::string h = hay, n = needle;
+    for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return h.find(n) != std::string::npos;
+}
 
-    size_t cursor = line_end == real.size() ? line_end : line_end + 1;
-    bool have_revision = false;
-    unsigned int aggregate = 0;
-    while (cursor < real.size()) {
-        size_t end = real.find('\n', cursor);
-        if (end == std::string::npos) end = real.size();
-        static constexpr char field[] = "CPU revision";
-        if (end - cursor >= sizeof(field) - 1 &&
-            real.compare(cursor, sizeof(field) - 1, field) == 0) {
-            size_t value = cursor + sizeof(field) - 1;
-            while (value < end && (real[value] == ' ' || real[value] == '\t'))
-                ++value;
-            if (value < end && real[value] == ':') {
-                ++value;
-                while (value < end && (real[value] == ' ' || real[value] == '\t'))
-                    ++value;
-                size_t digits = value;
-                while (digits < end && real[digits] >= '0' && real[digits] <= '9')
-                    ++digits;
-                if (digits > value) {
-                    errno = 0;
-                    const std::string revision(
-                        real, value, digits - value);
-                    char* parsed_end = nullptr;
-                    unsigned long parsed =
-                        std::strtoul(revision.c_str(), &parsed_end, 10);
-                    if (errno == 0 && parsed_end && *parsed_end == '\0' &&
-                        parsed <= 255) {
-                        if (!have_revision || parsed > aggregate)
-                            aggregate = static_cast<unsigned int>(parsed);
-                        have_revision = true;
-                    }
-                }
-            }
-        }
-        if (end == real.size()) break;
-        cursor = end + 1;
+inline bool starts_with(const std::string& s, const char* p) {
+    size_t n = std::strlen(p);
+    return s.size() >= n && std::memcmp(s.data(), p, n) == 0;
+}
+
+inline int cpu_action_for(const std::string& soc_manuf, const std::string& soc_model,
+                          std::string& repl_out) {
+    repl_out.clear();
+    bool qcom = ci_contains(soc_manuf, "qualcomm") ||
+                starts_with(soc_model, "SM") || starts_with(soc_model, "MSM") ||
+                starts_with(soc_model, "SDM") || starts_with(soc_model, "QCM") ||
+                starts_with(soc_model, "APQ");
+    bool mtk  = ci_contains(soc_manuf, "mediatek") || starts_with(soc_model, "MT");
+    if (qcom) {
+        repl_out = soc_model.empty() ? std::string("Qualcomm Technologies, Inc")
+                                     : ("Qualcomm Technologies, Inc " + soc_model);
+        return CPU_QUALCOMM;
     }
-    if (!have_revision) return false;
+    if (mtk) {
+        repl_out = soc_model.empty() ? std::string("MT6893") : soc_model;
+        return CPU_MTK;
+    }
 
-    std::string replacement = std::to_string(aggregate);
-    if (real.compare(revision_begin, revision_end - revision_begin,
-                     replacement) == 0)
-        return false;
-    out = real;
-    out.replace(revision_begin, revision_end - revision_begin, replacement);
+    return CPU_STRIP;
+}
+
+inline bool patch_cpuinfo(const std::string& real, int action,
+                          const std::string& repl, std::string& out) {
+    if (action == CPU_NONE) return false;
+    out.clear();
+    out.reserve(real.size() + 16);
+    bool changed = false;
+    size_t i = 0, n = real.size();
+    while (i < n) {
+        size_t eol = real.find('\n', i);
+        size_t line_end = (eol == std::string::npos) ? n : eol;
+
+        bool is_hw = false;
+        if (line_end - i >= 8 && std::memcmp(real.data() + i, "Hardware", 8) == 0) {
+            size_t j = i + 8;
+            while (j < line_end && (real[j] == ' ' || real[j] == '\t')) ++j;
+            if (j < line_end && real[j] == ':') is_hw = true;
+        }
+        if (is_hw) {
+            changed = true;
+            if (action != CPU_STRIP) {
+                out.append("Hardware\t: ");
+                out.append(repl);
+                if (eol != std::string::npos) out.push_back('\n');
+            }
+
+        } else {
+            out.append(real, i, line_end - i);
+            if (eol != std::string::npos) out.push_back('\n');
+        }
+        if (eol == std::string::npos) break;
+        i = eol + 1;
+    }
+    if (!changed) { out.clear(); return false; }
     return true;
 }
 
 enum Kind {
-    NONE = 0, BOOTID, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE,
+    NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE,
 
     APPLOG_XML,
     BD_RAW_DID,
@@ -374,24 +400,6 @@ enum Kind {
     BD_RAW_CLIENTUDID,
     BD_RAW_CDID,
 };
-
-struct EnvironmentGates {
-    bool native_read = false;
-    bool proc_version = false;
-    bool meminfo = false;
-    bool cpu_revision = false;
-};
-
-inline bool environment_surface_enabled(Kind kind,
-                                        const EnvironmentGates& gates) {
-    if (!gates.native_read) return false;
-    switch (kind) {
-        case VERSION: return gates.proc_version;
-        case MEMINFO: return gates.meminfo;
-        case CPUINFO: return gates.cpu_revision;
-        default: return true;
-    }
-}
 
 inline bool ends_with(const char* s, size_t sl, const char* suffix) {
     size_t xl = std::strlen(suffix);
@@ -402,53 +410,6 @@ inline bool ends_with(const std::string& s, const char* suffix) {
     return ends_with(s.c_str(), s.size(), suffix);
 }
 
-inline bool is_absolute_path(const std::string& path) {
-    return !path.empty() && path[0] == '/';
-}
-
-inline bool normalize_absolute_path(const std::string& path,
-                                    std::string& out) {
-    if (!is_absolute_path(path) || path.size() > 4096 ||
-        path.find('\0') != std::string::npos)
-        return false;
-
-    out.clear();
-    out.push_back('/');
-    size_t i = 1;
-    while (i <= path.size()) {
-        size_t slash = path.find('/', i);
-        if (slash == std::string::npos) slash = path.size();
-        std::string part = path.substr(i, slash - i);
-        if (!part.empty() && part != ".") {
-            if (part == "..") {
-                if (out.size() == 1) return false;
-                size_t prev = out.find_last_of('/', out.size() - 2);
-                out.erase(prev == std::string::npos ? 1 : prev + 1);
-            } else {
-                if (out.size() > 1 && out.back() != '/') out.push_back('/');
-                out.append(part);
-            }
-        }
-        if (slash == path.size()) break;
-        i = slash + 1;
-    }
-    return true;
-}
-
-inline bool join_and_normalize_path(const std::string& base,
-                                    const std::string& relative,
-                                    std::string& out) {
-    if (!is_absolute_path(base) || relative.empty() ||
-        is_absolute_path(relative) || relative.size() > 4096 ||
-        relative.find('\0') != std::string::npos)
-        return false;
-    std::string joined = base;
-    if (joined.empty() || joined.back() != '/') joined.push_back('/');
-    joined.append(relative);
-    if (joined.size() > 4096) return false;
-    return normalize_absolute_path(joined, out);
-}
-
 inline Kind classify(const char* path) {
     if (!path) return NONE;
     if (std::strcmp(path, "/proc/sys/kernel/random/boot_id") == 0) return BOOTID;
@@ -457,6 +418,19 @@ inline Kind classify(const char* path) {
     if (std::strcmp(path, "/proc/cpuinfo") == 0) return CPUINFO;
 
     if (std::strcmp(path, "/sys/fs/selinux/enforce") == 0) return SELINUX_ENFORCE;
+
+    static const char pfx[] = "/sys/class/net/";
+    const size_t pl = sizeof(pfx) - 1;
+    if (std::strncmp(path, pfx, pl) == 0) {
+        const char* rest = path + pl;
+        const char* slash = std::strchr(rest, '/');
+        if (slash && std::strcmp(slash, "/address") == 0) {
+            size_t iflen = static_cast<size_t>(slash - rest);
+            if ((iflen >= 4 && std::strncmp(rest, "wlan", 4) == 0) ||
+                (iflen >= 3 && std::strncmp(rest, "p2p", 3) == 0))
+                return MAC;
+        }
+    }
 
     const size_t pl2 = std::strlen(path);
     if (ends_with(path, pl2, "/shared_prefs/applog.xml") ||
@@ -514,51 +488,8 @@ inline bool is_custom_rom_prop(const char* name) {
     return false;
 }
 
-inline bool is_identity_leak_prop(const char* name) {
-    if (!name) return false;
-    static const char* const exact[] = {
-        "ro.ril.factory_id",
-        "persist.odm.ril.factory_id",
-        "ro.ril.oem.imei",  "ro.ril.oem.imei0", "ro.ril.oem.imei1", "ro.ril.oem.imei2",
-        "ro.ril.miui.imei", "ro.ril.miui.imei0", "ro.ril.miui.imei1", "ro.ril.miui.imei2",
-        "ro.ril.oem.meid",  "ro.ril.oem.psno",  "ro.ril.oem.btmac",
-        "persist.odm.ril.oem.imei0", "persist.odm.ril.oem.imei1", "persist.odm.ril.oem.imei2",
-        "persist.odm.ril.oem.sno", "persist.odm.ril.oem.psno",
-        "persist.odm.ril.oem.wifimac", "persist.odm.ril.oem.btmac",
-        "persist.radio.imei", "persist.radio.imei0", "persist.radio.imei1", "persist.radio.imei2",
-        "ro.product.serial", "ro.build.serial",
-        "ro.kernel.androidboot.serialno", "ril.serialnumber",
-        "gsm.sim.preiccid_0", "gsm.sim.preiccid_1",
-        "persist.vendor.radio.cfu.iccid.1",
-        "persist.netd.stable_secret",
-    };
-    for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
-    return false;
-}
-
-inline bool is_oem_leak_prop(const char* name) {
-    if (!name) return false;
-    static const char* const exact[] = {
-        "ro.product.cert",
-        "ro.product.mod_device",
-        "ro.fota.oem",
-        "ro.netflix.bsp_rev",
-        "ro.baseband",
-        "persist.sys.hardcoder.name",
-        "persist.vendor.sys.fp.module",
-        "persist.vendor.sys.fp.vendor",
-    };
-    for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
-    if (std::strncmp(name, "ro.miui.", 8) == 0)              return true;
-    if (std::strncmp(name, "persist.sys.miui.", 17) == 0)    return true;
-    if (std::strncmp(name, "ro.com.google.clientidbase", 26) == 0) return true;
-    if (std::strncmp(name, "ro.vendor.miui.", 15) == 0)      return true;
-    return false;
-}
-
 inline bool should_hide_prop(const char* name) {
-    return is_emulator_prop(name) || is_custom_rom_prop(name) ||
-           is_identity_leak_prop(name) || is_oem_leak_prop(name);
+    return is_emulator_prop(name) || is_custom_rom_prop(name);
 }
 
 inline bool is_native_unsafe_prop(const char* name) {
@@ -568,8 +499,6 @@ inline bool is_native_unsafe_prop(const char* name) {
         "ro.hardware",
         "ro.product.board",
         "ro.board.platform",
-        "ro.soc.manufacturer",
-        "ro.soc.model",
         "ro.arch",
         "ro.zygote",
         "ro.vendor.api_level",

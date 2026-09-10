@@ -18,14 +18,16 @@
 #include <android/log.h>
 #include <string>
 #include <map>
-#include <mutex>
 #include <vector>
 #include <utility>
+#include <sstream>
+#include <signal.h>
 #include <ctime>
+#include <thread>
+#include <atomic>
 #include "zygisk.hpp"
 #include "config.hpp"
-#include "sbx_identity.hpp"
-#include "sbx_property.hpp"
+#include "sbx_lsplant.hpp"
 #include "sbx_native_read.hpp"
 
 #ifndef MFD_CLOEXEC
@@ -62,43 +64,25 @@ using zygisk::ServerSpecializeArgs;
 
 static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 
-static std::map<std::string, std::string> g_id;
+static std::map<std::string, std::string> g_identity;
 
 static const std::string& val(const std::string& k) {
     static const std::string empty;
-    auto it = g_id.find(k);
-    return it != g_id.end() ? it->second : empty;
+    auto it = g_identity.find(k);
+    if (it != g_identity.end() && !it->second.empty()) return it->second;
+
+    static const std::map<std::string, std::string> defaults = [] {
+        std::map<std::string, std::string> m;
+        for (size_t i = 0; i < sandboxid::VAL_DEFAULTS_N; ++i)
+            m.emplace(sandboxid::VAL_DEFAULTS[i].k, sandboxid::VAL_DEFAULTS[i].v);
+        return m;
+    }();
+    auto d = defaults.find(k);
+    if (d != defaults.end()) return d->second;
+    return empty;
 }
 
 static jstring (*orig_native_get)(JNIEnv*, jclass, jstring, jstring) = nullptr;
-static jlong (*orig_native_find)(JNIEnv*, jclass, jstring) = nullptr;
-static jstring (*orig_handle_get)(JNIEnv*, jclass, jlong) = nullptr;
-static jint (*orig_handle_get_int)(JNIEnv*, jclass, jlong, jint) = nullptr;
-static jlong (*orig_handle_get_long)(JNIEnv*, jclass, jlong, jlong) = nullptr;
-static jboolean (*orig_handle_get_bool)(JNIEnv*, jclass, jlong, jboolean) = nullptr;
-static sbxprop::HandleNames g_prop_handles;
-
-static bool string_from_jni(JNIEnv* env, jstring value, std::string& out) {
-    if (!value) return false;
-    const char* raw = env->GetStringUTFChars(value, nullptr);
-    if (!raw || env->ExceptionCheck()) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        return false;
-    }
-    out.assign(raw);
-    env->ReleaseStringUTFChars(value, raw);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        out.clear();
-        return false;
-    }
-    return true;
-}
-
-static bool property_name_for_handle(jlong handle, std::string& name) {
-    return g_prop_handles.find(static_cast<int64_t>(handle), name);
-}
-
 static const std::map<std::string, std::string>& prop_to_identity_map() {
     static const std::map<std::string, std::string> m = {
         {"ro.serialno",                     "SERIAL"},
@@ -116,13 +100,41 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.product.system.marketname",    "MARKETNAME"},
         {"ro.product.odm.marketname",       "MARKETNAME"},
         {"ro.product.product.marketname",   "MARKETNAME"},
+        {"ro.product.board",                "BOARD"},
+        {"ro.hardware",                     "HARDWARE"},
+        {"ro.board.platform",               "BOARD_PLATFORM"},
+        {"ro.soc.manufacturer",             "SOC_MANUFACTURER"},
+        {"ro.soc.model",                    "SOC_MODEL"},
         {"ro.build.id",                     "ID"},
         {"ro.build.display.id",             "DISPLAY"},
         {"ro.build.description",            "DESCRIPTION"},
         {"ro.build.version.release",        "RELEASE"},
+        {"ro.build.version.sdk",            "SDK_INT"},
         {"ro.build.version.security_patch", "SECURITY_PATCH"},
         {"ro.build.version.incremental",    "INCREMENTAL"},
         {"gsm.version.baseband",            "RADIO"},
+        {"sys.boot_completed",              "SYS_BOOT_COMPLETED"},
+        {"debug.force_rtl",                 "DEBUG_FORCE_RTL"},
+        {"persist.radio.multisim.config",   "MULTISIM_CONFIG"},
+        {"gsm.operator.numeric",            "GSM_OPERATOR_NUMERIC"},
+        {"gsm.sim.operator.numeric",        "GSM_OPERATOR_NUMERIC"},
+        {"gsm.operator.alpha",              "GSM_OPERATOR_ALPHA"},
+        {"gsm.sim.operator.alpha",          "GSM_OPERATOR_ALPHA"},
+        {"gsm.operator.iso-country",        "GSM_OPERATOR_ISO"},
+        {"gsm.sim.operator.iso-country",    "GSM_OPERATOR_ISO"},
+        {"gsm.sim.state",                   "GSM_SIM_STATE"},
+        {"gsm.sim.state.ril",               "GSM_SIM_STATE"},
+        {"ro.build.characteristics",        "BUILD_CHARACTERISTICS"},
+        {"persist.sys.timezone",            "PERSIST_TIMEZONE"},
+
+        {"ro.product.cpu.abi",              "CPU_ABI"},
+        {"ro.product.cpu.abi2",             "CPU_ABI2"},
+        {"ro.product.cpu.abilist",          "SUPPORTED_ABIS"},
+        {"ro.product.cpu.abilist64",        "SUPPORTED_64_BIT_ABIS"},
+        {"ro.product.cpu.abilist32",        "SUPPORTED_32_BIT_ABIS"},
+        {"dalvik.vm.heapgrowthlimit",       "DALVIK_HEAPGROWTHLIMIT"},
+        {"ro.mediacodec.min_sample_rate",   "MEDIACODEC_MIN_RATE"},
+        {"ro.mediacodec.max_sample_rate",   "MEDIACODEC_MAX_RATE"},
         {"ro.build.user",                   "USER"},
         {"ro.build.host",                   "HOST"},
         {"ro.build.tags",                   "TAGS"},
@@ -132,6 +144,8 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.build.date",                   "BUILD_DATE"},
 
         {"ro.build.flavor",                 "FLAVOR"},
+
+        {"ro.boot.vbmeta.digest",           "VBMETA_DIGEST"},
         {"ro.build.product",                     "DEVICE"},
         {"ro.build.version.release_or_codename", "RELEASE"},
         {"ro.vendor.build.security_patch",       "SECURITY_PATCH"},
@@ -176,70 +190,26 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
 
         {"ro.boot.hardware.sku",                     "SKU"},
         {"ro.boot.product.hardware.sku",             "ODM_SKU"},
-
-        {"ro.product.build.id",                  "ID"},
-        {"ro.system.build.id",                   "ID"},
-        {"ro.system_ext.build.id",               "ID"},
-        {"ro.vendor.build.id",                   "ID"},
-        {"ro.odm.build.id",                      "ID"},
-
-        {"ro.product.build.version.incremental",          "INCREMENTAL"},
-        {"ro.system.build.version.incremental",           "INCREMENTAL"},
-        {"ro.system_ext.build.version.incremental",       "INCREMENTAL"},
-        {"ro.vendor.build.version.incremental",           "INCREMENTAL"},
-        {"ro.odm.build.version.incremental",              "INCREMENTAL"},
-
-        {"ro.product.build.version.release",              "RELEASE"},
-        {"ro.system.build.version.release",               "RELEASE"},
-        {"ro.system_ext.build.version.release",           "RELEASE"},
-        {"ro.vendor.build.version.release",               "RELEASE"},
-        {"ro.odm.build.version.release",                  "RELEASE"},
-
-        {"ro.product.build.version.release_or_codename",  "RELEASE"},
-        {"ro.system.build.version.release_or_codename",   "RELEASE"},
-        {"ro.system_ext.build.version.release_or_codename", "RELEASE"},
-        {"ro.vendor.build.version.release_or_codename",   "RELEASE"},
-        {"ro.odm.build.version.release_or_codename",      "RELEASE"},
-
-        {"ro.product.build.date.utc",                     "BUILD_TIME_UTC"},
-        {"ro.system.build.date.utc",                      "BUILD_TIME_UTC"},
-        {"ro.system_ext.build.date.utc",                  "BUILD_TIME_UTC"},
-        {"ro.vendor.build.date.utc",                      "BUILD_TIME_UTC"},
-        {"ro.odm.build.date.utc",                         "BUILD_TIME_UTC"},
-        {"ro.bootimage.build.date.utc",                   "BUILD_TIME_UTC"},
-
-        {"ro.product.build.date",                         "BUILD_DATE"},
-        {"ro.system.build.date",                          "BUILD_DATE"},
-        {"ro.system_ext.build.date",                      "BUILD_DATE"},
-        {"ro.vendor.build.date",                          "BUILD_DATE"},
-        {"ro.odm.build.date",                             "BUILD_DATE"},
-        {"ro.bootimage.build.date",                       "BUILD_DATE"},
-
-        {"ro.product.build.type",                         "TYPE"},
-        {"ro.system.build.type",                          "TYPE"},
-        {"ro.system_ext.build.type",                      "TYPE"},
-        {"ro.vendor.build.type",                          "TYPE"},
-        {"ro.odm.build.type",                             "TYPE"},
-
-        {"ro.product.build.tags",                         "TAGS"},
-        {"ro.system.build.tags",                          "TAGS"},
-        {"ro.system_ext.build.tags",                      "TAGS"},
-        {"ro.vendor.build.tags",                          "TAGS"},
-        {"ro.odm.build.tags",                             "TAGS"},
+        {"ro.build.version.base_os",                 "BASE_OS"},
+        {"ro.build.version.preview_sdk",             "PREVIEW_SDK_INT"},
+        {"ro.build.version.preview_sdk_fingerprint", "PREVIEW_SDK_FINGERPRINT"},
+        {"ro.odm.build.media_performance_class",     "MEDIA_PERFORMANCE_CLASS"},
     };
     return m;
 }
 
-static bool g_stable_release_runtime = false;
-
 static bool spoof_prop_value(const std::string& k, std::string& out) {
-    if (sbxprop::release_alias_property(k) && !g_stable_release_runtime)
-        return false;
     const auto& map = prop_to_identity_map();
     auto it = map.find(k);
     if (it != map.end()) {
         const std::string& v = val(it->second);
         if (!v.empty()) { out = v; return true; }
+    }
+    for (size_t i = 0; i < sandboxid::STATIC_PROP_DEFAULTS_N; ++i) {
+        if (k == sandboxid::STATIC_PROP_DEFAULTS[i].k) {
+            out = sandboxid::STATIC_PROP_DEFAULTS[i].v;
+            return true;
+        }
     }
     return false;
 }
@@ -248,26 +218,19 @@ static inline bool sbx_prop_hidden(const char* name) {
     return name && sbxnr::should_hide_prop(name);
 }
 
-static jstring checked_new_string(JNIEnv* env, const std::string& value, jstring fallback) {
-    jstring result = env->NewStringUTF(value.c_str());
-    if (!result || env->ExceptionCheck()) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        return fallback;
-    }
-    return result;
-}
-
 static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
 
-    std::string k;
-    if (!string_from_jni(env, j_key, k)) return j_def;
+    const char* raw = env->GetStringUTFChars(j_key, nullptr);
+    if (!raw) { if (env->ExceptionCheck()) env->ExceptionClear(); return j_def; }
+    std::string k(raw);
+    env->ReleaseStringUTFChars(j_key, raw);
     LOGD("L2 native_get('%s')", k.c_str());
 
     std::string v;
     if (spoof_prop_value(k, v)) {
         LOGD("L2 SPOOF '%s' -> '%s'", k.c_str(), v.c_str());
-        return checked_new_string(env, v, j_def);
+        return env->NewStringUTF(v.c_str());
     }
 
     if (sbx_prop_hidden(k.c_str())) {
@@ -278,142 +241,8 @@ static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j
     if (orig_native_get) return orig_native_get(env, clazz, j_key, j_def);
 
     char buf[PROP_VALUE_MAX] = {0};
-    if (__system_property_get(k.c_str(), buf) > 0)
-        return checked_new_string(env, buf, j_def);
+    if (__system_property_get(k.c_str(), buf) > 0) return env->NewStringUTF(buf);
     return j_def;
-}
-
-static jlong hook_prop_find(JNIEnv* env, jclass clazz, jstring j_name) {
-    if (!orig_native_find) return 0;
-    jlong handle = orig_native_find(env, clazz, j_name);
-    if (env->ExceptionCheck()) return handle;
-    if (handle == 0 || !j_name) return handle;
-
-    std::string name;
-    if (!string_from_jni(env, j_name, name)) return handle;
-    g_prop_handles.remember(static_cast<int64_t>(handle), name);
-    return handle;
-}
-
-static jstring hook_prop_handle_get(JNIEnv* env, jclass clazz, jlong handle) {
-    std::string name;
-    if (property_name_for_handle(handle, name)) {
-        std::string value;
-        if (spoof_prop_value(name, value))
-            return checked_new_string(env, value, nullptr);
-        if (sbx_prop_hidden(name.c_str())) {
-            LOGD("L2 Handle HIDE '%s'", name.c_str());
-            return checked_new_string(env, "", nullptr);
-        }
-    }
-    return orig_handle_get ? orig_handle_get(env, clazz, handle) : nullptr;
-}
-
-static bool parse_prop_int64(const std::string& value, long long min_value,
-                             long long max_value, long long& out) {
-    int64_t parsed = 0;
-    if (!sbxprop::parse_int64(value, min_value, max_value, parsed)) return false;
-    out = static_cast<long long>(parsed);
-    return true;
-}
-
-static bool parse_prop_bool(const std::string& value, jboolean& out) {
-    bool parsed = false;
-    if (!sbxprop::parse_bool(value, parsed)) return false;
-    out = parsed ? JNI_TRUE : JNI_FALSE;
-    return true;
-}
-
-static jint hook_prop_handle_get_int(JNIEnv* env, jclass clazz, jlong handle,
-                                     jint def) {
-    std::string name;
-    if (property_name_for_handle(handle, name)) {
-        std::string value;
-        if (spoof_prop_value(name, value)) {
-            long long parsed = 0;
-            return parse_prop_int64(value, INT32_MIN, INT32_MAX, parsed)
-                ? static_cast<jint>(parsed) : def;
-        }
-        if (sbx_prop_hidden(name.c_str())) return def;
-    }
-    return orig_handle_get_int ? orig_handle_get_int(env, clazz, handle, def) : def;
-}
-
-static jlong hook_prop_handle_get_long(JNIEnv* env, jclass clazz, jlong handle,
-                                       jlong def) {
-    std::string name;
-    if (property_name_for_handle(handle, name)) {
-        std::string value;
-        if (spoof_prop_value(name, value)) {
-            long long parsed = 0;
-            return parse_prop_int64(value, INT64_MIN, INT64_MAX, parsed)
-                ? static_cast<jlong>(parsed) : def;
-        }
-        if (sbx_prop_hidden(name.c_str())) return def;
-    }
-    return orig_handle_get_long ? orig_handle_get_long(env, clazz, handle, def) : def;
-}
-
-static jboolean hook_prop_handle_get_bool(JNIEnv* env, jclass clazz, jlong handle,
-                                          jboolean def) {
-    std::string name;
-    if (property_name_for_handle(handle, name)) {
-        std::string value;
-        if (spoof_prop_value(name, value)) {
-            jboolean parsed = def;
-            return parse_prop_bool(value, parsed) ? parsed : def;
-        }
-        if (sbx_prop_hidden(name.c_str())) return def;
-    }
-    return orig_handle_get_bool ? orig_handle_get_bool(env, clazz, handle, def) : def;
-}
-
-static void install_prop_handle_hooks(Api* api, JNIEnv* env) {
-    JNINativeMethod methods[] = {
-        {const_cast<char*>("native_find"),
-         const_cast<char*>("(Ljava/lang/String;)J"),
-         reinterpret_cast<void*>(hook_prop_find)},
-        {const_cast<char*>("native_get"),
-         const_cast<char*>("(J)Ljava/lang/String;"),
-         reinterpret_cast<void*>(hook_prop_handle_get)},
-        {const_cast<char*>("native_get_int"),
-         const_cast<char*>("(JI)I"),
-         reinterpret_cast<void*>(hook_prop_handle_get_int)},
-        {const_cast<char*>("native_get_long"),
-         const_cast<char*>("(JJ)J"),
-         reinterpret_cast<void*>(hook_prop_handle_get_long)},
-        {const_cast<char*>("native_get_boolean"),
-         const_cast<char*>("(JZ)Z"),
-         reinterpret_cast<void*>(hook_prop_handle_get_bool)},
-    };
-    api->hookJniNativeMethods(env, "android/os/SystemProperties", methods,
-                              sizeof(methods) / sizeof(methods[0]));
-    if (env->ExceptionCheck()) env->ExceptionClear();
-
-    if (methods[0].fnPtr)
-        orig_native_find = reinterpret_cast<jlong (*)(JNIEnv*, jclass, jstring)>(
-            methods[0].fnPtr);
-    if (methods[1].fnPtr)
-        orig_handle_get = reinterpret_cast<jstring (*)(JNIEnv*, jclass, jlong)>(
-            methods[1].fnPtr);
-    if (methods[2].fnPtr)
-        orig_handle_get_int = reinterpret_cast<jint (*)(JNIEnv*, jclass, jlong, jint)>(
-            methods[2].fnPtr);
-    if (methods[3].fnPtr)
-        orig_handle_get_long = reinterpret_cast<jlong (*)(JNIEnv*, jclass, jlong, jlong)>(
-            methods[3].fnPtr);
-    if (methods[4].fnPtr)
-        orig_handle_get_bool = reinterpret_cast<jboolean (*)(JNIEnv*, jclass, jlong, jboolean)>(
-            methods[4].fnPtr);
-    if (!orig_native_find || !orig_handle_get || !orig_handle_get_int ||
-        !orig_handle_get_long || !orig_handle_get_bool) {
-        LOGW("L2: SystemProperties Handle API unavailable/partial (%d/%d/%d/%d/%d)",
-             orig_native_find ? 1 : 0, orig_handle_get ? 1 : 0,
-             orig_handle_get_int ? 1 : 0, orig_handle_get_long ? 1 : 0,
-             orig_handle_get_bool ? 1 : 0);
-    } else {
-        LOGD("L2 SystemProperties Handle hooks installed");
-    }
 }
 
 static void install_prop_hook(Api* api, JNIEnv* env) {
@@ -438,15 +267,48 @@ static jlong    (*orig_get_long)(JNIEnv*, jclass, jstring, jlong)   = nullptr;
 static jboolean (*orig_get_bool)(JNIEnv*, jclass, jstring, jboolean)= nullptr;
 
 static const std::map<std::string, jboolean>& sbx_bool_spoof() {
-    static const std::map<std::string, jboolean> m;
+    static const std::map<std::string, jboolean> m = {
+        {"sys.boot_completed",                       JNI_TRUE},
+        {"debug.force_rtl",                          JNI_FALSE},
+        {"framework.pause_bg_animations.enabled",    JNI_FALSE},
+        {"dalvik.vm.dexopt.secondary",               JNI_TRUE},
+        {"viewroot.profile_rendering",               JNI_FALSE},
+        {"debug.sqlite.no_double_quoted_strs",       JNI_TRUE},
+        {"persist.sys.activity_anim_perf_override",  JNI_FALSE},
+        {"persist.sys.lmk.reportkills",              JNI_FALSE},
+        {"debug.layout",                             JNI_FALSE},
+    };
     return m;
 }
 static const std::map<std::string, jint>& sbx_int_spoof() {
-    static const std::map<std::string, jint> m;
+    static const std::map<std::string, jint> m = {
+        {"ro.mediacodec.min_sample_rate",         8000},
+        {"ro.mediacodec.max_sample_rate",         192000},
+        {"debug.sqlite.wal.autocheckpoint",       100},
+        {"debug.sqlite.pagesize",                 4096},
+        {"debug.sqlite.journalsizelimit",         524288},
+        {"debug.sqlite.wal.truncatesize",         1048576},
+        {"debug.sqlite.wal.poolsize",             0},
+        {"debug.hwui.fps_divisor",                1},
+        {"persist.wm.debug.ext_version_override", 0},
+        {"build.version.extensions.r",            3},
+        {"build.version.extensions.s",            4},
+        {"build.version.extensions.t",            4},
+        {"build.version.extensions.u",            13},
+        {"build.version.extensions.v",            13},
+        {"build.version.extensions.ad_services",  15},
+        {"debug.am.run_gc_trim_level",            2147483647},
+        {"debug.am.run_mallopt_trim_level",       2147483647},
+        {"debug.adservices.binder_timeout",       10000},
+
+        {"ro.build.version.preview_sdk",          0},
+    };
     return m;
 }
 static const std::map<std::string, jlong>& sbx_long_spoof() {
-    static const std::map<std::string, jlong> m;
+    static const std::map<std::string, jlong> m = {
+        {"ro.gfx.driver_build_time",              1704067200LL},
+    };
     return m;
 }
 
@@ -460,118 +322,68 @@ static bool sbx_should_suppress_key(const std::string& k) {
     return false;
 }
 
-static bool sbx_parse_ll(const std::string& v, long long& out) {
-    return parse_prop_int64(v, INT64_MIN, INT64_MAX, out);
-}
+static bool sbx_parse_longlong(const std::string& v, long long& out) {
+    if (v.empty()) return false;
+    errno = 0;
+    const char* s = v.c_str();
 
-static int g_build_replacements = 0;
-static int g_build_failures = 0;
-
-static void clear_jni_exception(JNIEnv* env) {
-    if (env->ExceptionCheck()) env->ExceptionClear();
-}
-
-static void set_str(JNIEnv* env, jclass c, const char* f,
-                    const std::string& v) {
-    if (v.empty()) return;
-    jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
-    if (!id || env->ExceptionCheck()) {
-        clear_jni_exception(env);
-        ++g_build_failures;
-        return;
-    }
-    jstring j = env->NewStringUTF(v.c_str());
-    if (!j || env->ExceptionCheck()) {
-        clear_jni_exception(env);
-        ++g_build_failures;
-        return;
-    }
-    env->SetStaticObjectField(c, id, j);
-    if (env->ExceptionCheck()) {
-        clear_jni_exception(env);
-        ++g_build_failures;
-    } else {
-        ++g_build_replacements;
-    }
-    env->DeleteLocalRef(j);
-}
-
-static void set_long(JNIEnv* env, jclass c, const char* f, jlong v) {
-    jfieldID id = env->GetStaticFieldID(c, f, "J");
-    if (!id || env->ExceptionCheck()) {
-        clear_jni_exception(env);
-        ++g_build_failures;
-        return;
-    }
-    env->SetStaticLongField(c, id, v);
-    if (env->ExceptionCheck()) {
-        clear_jni_exception(env);
-        ++g_build_failures;
-    } else {
-        ++g_build_replacements;
-    }
+    if (*s == '+' || *s == '-') ++s;
+    if (!*s) return false;
+    char* end = nullptr;
+    long long n = std::strtoll(v.c_str(), &end, 10);
+    if (end == v.c_str() || *end != '\0' || errno == ERANGE) return false;
+    out = n;
+    return true;
 }
 
 static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def) {
     if (!j_key) return def;
-    std::string k;
-    if (!string_from_jni(env, j_key, k)) return def;
+    const char* r = env->GetStringUTFChars(j_key, nullptr);
+    if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
+    std::string k(r);
+    env->ReleaseStringUTFChars(j_key, r);
 
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
-        if (!parse_prop_int64(v, INT32_MIN, INT32_MAX, n)) return def;
-        LOGD("L7 SPI(id) '%s' -> %d", k.c_str(), (int)n);
-        return static_cast<jint>(n);
+        if (sbx_parse_longlong(v, n)) { LOGD("L7 SPI(id) '%s' -> %d", k.c_str(), (int)n); return (jint)n; }
     }
 
     const auto& m = sbx_int_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPI '%s' -> %d", k.c_str(), it->second); return it->second; }
-    if (sbx_prop_hidden(k.c_str()) || sbx_should_suppress_key(k)) {
-        LOGD("L7 SPI SUPPRESS '%s'", k.c_str());
-        return def;
-    }
+    if (sbx_should_suppress_key(k)) { LOGD("L7 SPI SUPPRESS '%s'", k.c_str()); return def; }
     return orig_get_int ? orig_get_int(env, clazz, j_key, def) : def;
 }
 static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong def) {
     if (!j_key) return def;
-    std::string k;
-    if (!string_from_jni(env, j_key, k)) return def;
+    const char* r = env->GetStringUTFChars(j_key, nullptr);
+    if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
+    std::string k(r);
+    env->ReleaseStringUTFChars(j_key, r);
 
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
-        if (!parse_prop_int64(v, INT64_MIN, INT64_MAX, n)) return def;
-        LOGD("L7 SPL(id) '%s' -> %lld", k.c_str(), (long long)n);
-        return static_cast<jlong>(n);
+        if (sbx_parse_longlong(v, n)) { LOGD("L7 SPL(id) '%s' -> %lld", k.c_str(), (long long)n); return (jlong)n; }
     }
 
     const auto& m = sbx_long_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPL '%s' -> %lld", k.c_str(), (long long)it->second); return it->second; }
-    if (sbx_prop_hidden(k.c_str()) || sbx_should_suppress_key(k)) {
-        LOGD("L7 SPL SUPPRESS '%s'", k.c_str());
-        return def;
-    }
+    if (sbx_should_suppress_key(k)) { LOGD("L7 SPL SUPPRESS '%s'", k.c_str()); return def; }
     return orig_get_long ? orig_get_long(env, clazz, j_key, def) : def;
 }
 static jboolean hook_prop_get_bool(JNIEnv* env, jclass clazz, jstring j_key, jboolean def) {
     if (!j_key) return def;
-    std::string k;
-    if (!string_from_jni(env, j_key, k)) return def;
-    std::string v;
-    if (spoof_prop_value(k, v)) {
-        jboolean parsed = def;
-        return parse_prop_bool(v, parsed) ? parsed : def;
-    }
+    const char* r = env->GetStringUTFChars(j_key, nullptr);
+    if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
+    std::string k(r);
+    env->ReleaseStringUTFChars(j_key, r);
     const auto& m = sbx_bool_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("L7 SPB '%s' -> %d", k.c_str(), (int)it->second); return it->second; }
-    if (sbx_prop_hidden(k.c_str()) || sbx_should_suppress_key(k)) {
-        LOGD("L7 SPB SUPPRESS '%s'", k.c_str());
-        return def;
-    }
+    if (sbx_should_suppress_key(k)) { LOGD("L7 SPB SUPPRESS '%s'", k.c_str()); return def; }
     return orig_get_bool ? orig_get_bool(env, clazz, j_key, def) : def;
 }
 
@@ -591,15 +403,12 @@ static void install_leak_sensors(Api* api, JNIEnv* env) {
     api->hookJniNativeMethods(env, "android/os/SystemProperties", m, 3);
     if (env->ExceptionCheck())
         env->ExceptionClear();
-    if (m[0].fnPtr)
-        orig_get_int = reinterpret_cast<jint (*)(JNIEnv*, jclass, jstring, jint)>(m[0].fnPtr);
-    if (m[1].fnPtr)
-        orig_get_long = reinterpret_cast<jlong (*)(JNIEnv*, jclass, jstring, jlong)>(m[1].fnPtr);
-    if (m[2].fnPtr)
-        orig_get_bool = reinterpret_cast<jboolean (*)(JNIEnv*, jclass, jstring, jboolean)>(m[2].fnPtr);
     if (!m[0].fnPtr || !m[1].fnPtr || !m[2].fnPtr)
         LOGE("L7: leak-sensor hooks FAILED (fnPtr null: %d/%d/%d) — typed getters unspoofed",
              m[0].fnPtr ? 1 : 0, m[1].fnPtr ? 1 : 0, m[2].fnPtr ? 1 : 0);
+    orig_get_int  = reinterpret_cast<jint (*)(JNIEnv*, jclass, jstring, jint)>(m[0].fnPtr);
+    orig_get_long = reinterpret_cast<jlong (*)(JNIEnv*, jclass, jstring, jlong)>(m[1].fnPtr);
+    orig_get_bool = reinterpret_cast<jboolean (*)(JNIEnv*, jclass, jstring, jboolean)>(m[2].fnPtr);
     LOGD("L7 leak sensors installed (int/long/bool)");
 }
 
@@ -620,13 +429,18 @@ static int sbx_hooked_clock_gettime(clockid_t clk, struct timespec* ts) {
     return r;
 }
 
-static bool sbx_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino) {
+static bool sbx_find_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return false;
-    char line[512];
+    // getline() grows its buffer to fit the whole line: a fixed char[512] would
+    // truncate long /proc/self/maps paths and split one map across two iterations,
+    // making a library's dev/inode impossible to match (Bug #4).
+    char*  line = nullptr;
+    size_t cap  = 0;
+    ssize_t n;
     size_t sl = strlen(suffix);
     bool found = false;
-    while (fgets(line, sizeof(line), f)) {
+    while ((n = getline(&line, &cap, f)) != -1) {
         char* path = strchr(line, '/');
         if (!path) continue;
         size_t pl = strlen(path);
@@ -637,6 +451,7 @@ static bool sbx_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* out_ino
             break;
         }
     }
+    free(line);
     fclose(f);
     return found;
 }
@@ -659,7 +474,7 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
             dlsym(RTLD_DEFAULT, "clock_gettime"));
     for (size_t i = 0; i < sizeof(kLibs) / sizeof(kLibs[0]); ++i) {
         dev_t dev = 0; ino_t ino = 0;
-        if (!sbx_lib_dev_inode(kLibs[i], &dev, &ino)) continue;
+        if (!sbx_find_lib_dev_inode(kLibs[i], &dev, &ino)) continue;
         api->pltHookRegister(dev, ino, "clock_gettime",
                              reinterpret_cast<void*>(sbx_hooked_clock_gettime),
                              reinterpret_cast<void**>(&orig_clock_gettime));
@@ -696,95 +511,79 @@ static void install_uptime_hook(Api* api, JNIEnv*  ) {
 typedef int   (*sbx_open_fn)(const char*, int, ...);
 typedef int   (*sbx_openat_fn)(int, const char*, int, ...);
 typedef FILE* (*sbx_fopen_fn)(const char*, const char*);
-typedef int   (*sbx_spg_fn)(const char*, char*);
-typedef int   (*sbx_spr_fn)(const void*, char*, char*);
-typedef void  (*sbx_prop_cb)(void*, const char*, const char*, uint32_t);
-typedef void  (*sbx_sprcb_fn)(const void*, sbx_prop_cb, void*);
+typedef int   (*sbx_sysprop_get_fn)(const char*, char*);
+typedef int   (*sbx_sysprop_read_fn)(const void*, char*, char*);
+typedef void  (*sbx_sysprop_cb)(void*, const char*, const char*, uint32_t);
+typedef void  (*sbx_sysprop_read_cb_fn)(const void*, sbx_sysprop_cb, void*);
 
 static sbx_open_fn   orig_open   = nullptr;
 static sbx_openat_fn orig_openat = nullptr;
 static sbx_fopen_fn  orig_fopen  = nullptr;
-static sbx_spg_fn    orig_spg    = nullptr;
-static sbx_spr_fn    orig_spr    = nullptr;
-static sbx_sprcb_fn  orig_sprcb  = nullptr;
+static sbx_sysprop_get_fn    orig_sysprop_get    = nullptr;
+static sbx_sysprop_read_fn    orig_sysprop_read    = nullptr;
+static sbx_sysprop_read_cb_fn  orig_sysprop_read_cb  = nullptr;
 
-static bool        g_nr_active    = false;
+static std::atomic<bool> g_native_read_active{false};
 static std::string g_boot_id;
+static std::string g_wifi_mac;
 static std::string g_proc_version;
-static int         g_ram_gb = 0;
-static sbxnr::EnvironmentGates g_environment_gates;
+static std::string g_cpu_repl;
+static int         g_ram_gb    = 0;
+static int         g_cpu_action = sbxnr::CPU_NONE;
 
 static std::string    g_pkg;
 static sbxnr::ApplogIds g_applog;
 static bool           g_applog_ok = false;
 
-static void sbx_fill_prop(char* value, const std::string& v) {
+static int sbx_fill_prop(char* value, const std::string& v) {
     size_t n = v.size();
     if (n > PROP_VALUE_MAX - 1) n = PROP_VALUE_MAX - 1;
     memcpy(value, v.data(), n);
     value[n] = '\0';
+    return (int)n;   // bytes actually written (excl NUL) — matches __system_property_get contract
 }
 
 static inline bool sbx_nr_spoofable(const char* name) {
-    return g_nr_active && name && !sbxnr::is_native_unsafe_prop(name);
+    return g_native_read_active && name && !sbxnr::is_native_unsafe_prop(name);
 }
 
-static sbxprop::ValueDecision sbx_prop_decision(const char* name) {
-    if (!sbx_nr_spoofable(name)) return {};
-    if (sbx_prop_hidden(name))
-        return sbxprop::decide_value(true, true, nullptr);
-    std::string mapped;
-    if (spoof_prop_value(name, mapped))
-        return sbxprop::decide_value(true, false, &mapped);
-    return {};
-}
-
-static int sbx_spg(const char* name, char* value) {
-    if (value) {
-        const sbxprop::ValueDecision decision = sbx_prop_decision(name);
-        if (decision.action == sbxprop::ValueAction::kHidden) {
-            value[0] = '\0';
-            return 0;
-        }
-        if (decision.action == sbxprop::ValueAction::kMapped) {
-            sbx_fill_prop(value, decision.mapped);
-            return static_cast<int>(sbxprop::legacy_copy_length(decision.mapped));
-        }
+static int sbx_sysprop_get(const char* name, char* value) {
+    if (sbx_nr_spoofable(name) && value) {
+        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
+        std::string v;
+        if (spoof_prop_value(name, v)) { return sbx_fill_prop(value, v); }
     }
-    if (orig_spg) return orig_spg(name, value);
+    if (orig_sysprop_get) return orig_sysprop_get(name, value);
     if (value) value[0] = '\0';
     return 0;
 }
 
-static int sbx_spr(const void* pi, char* name, char* value) {
-    int r = orig_spr ? orig_spr(pi, name, value) : -1;
-    if (r >= 0 && value) {
-        const sbxprop::ValueDecision decision = sbx_prop_decision(name);
-        if (decision.action == sbxprop::ValueAction::kHidden) {
-            value[0] = '\0';
-            return 0;
-        }
-        if (decision.action == sbxprop::ValueAction::kMapped) {
-            sbx_fill_prop(value, decision.mapped);
-            return static_cast<int>(sbxprop::legacy_copy_length(decision.mapped));
-        }
+static int sbx_sysprop_read(const void* pi, char* name, char* value) {
+    int r = orig_sysprop_read ? orig_sysprop_read(pi, name, value) : -1;
+    if (r >= 0 && sbx_nr_spoofable(name) && value) {
+        if (sbx_prop_hidden(name)) { value[0] = '\0'; return 0; }
+        std::string v;
+        if (spoof_prop_value(name, v)) { return sbx_fill_prop(value, v); }
     }
     return r;
 }
 
-struct SbxCbCtx {
-    sbxprop::CallbackRelay<sbx_prop_cb> relay;
-};
-static void sbx_cb_tramp(void* cookie, const char* name, const char* value,
-                         uint32_t serial) {
-    SbxCbCtx* c = static_cast<SbxCbCtx*>(cookie);
-    if (!c) return;
-    c->relay.complete(name, value, serial, sbx_prop_decision(name));
+struct SbxSyspropCbCtx { sbx_sysprop_cb cb; void* cookie; };
+static void sbx_sysprop_cb_trampoline(void* cookie, const char* name, const char* value, uint32_t serial) {
+    SbxSyspropCbCtx* c = static_cast<SbxSyspropCbCtx*>(cookie);
+    std::string v;
+    if (sbx_nr_spoofable(name) && sbx_prop_hidden(name))
+        return;
+    else if (sbx_nr_spoofable(name) && spoof_prop_value(name, v))
+        c->cb(c->cookie, name, v.c_str(), serial);
+    else
+        c->cb(c->cookie, name, value, serial);
 }
-static void sbx_sprcb(const void* pi, sbx_prop_cb cb, void* cookie) {
-    SbxCbCtx ctx{{cb, cookie, false}};
-    (void)sbxprop::dispatch_callback_read(
-        orig_sprcb, pi, cb, sbx_cb_tramp, &ctx);
+static void sbx_sysprop_read_cb(const void* pi, sbx_sysprop_cb cb, void* cookie) {
+    if (!orig_sysprop_read_cb) return;
+    if (!cb) { orig_sysprop_read_cb(pi, cb, cookie); return; }
+    SbxSyspropCbCtx ctx{cb, cookie};
+    orig_sysprop_read_cb(pi, sbx_sysprop_cb_trampoline, &ctx);
 }
 
 static int sbx_make_memfd(const std::string& content) {
@@ -818,12 +617,10 @@ static std::string sbx_read_real(const char* path) {
 }
 
 static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& out) {
-    if (!sbxnr::environment_surface_enabled(kind, g_environment_gates))
-        return false;
     switch (kind) {
-        case sbxnr::BOOTID:  out = g_boot_id; out.push_back('\n'); return true;
-        case sbxnr::VERSION:
-            out = g_proc_version; out.push_back('\n'); return true;
+        case sbxnr::BOOTID:  out = g_boot_id;      out.push_back('\n'); return true;
+        case sbxnr::MAC:     out = g_wifi_mac;     out.push_back('\n'); return true;
+        case sbxnr::VERSION: out = g_proc_version; out.push_back('\n'); return true;
         case sbxnr::SELINUX_ENFORCE:
 
             out = sbxnr::selinux_enforce_content();
@@ -835,9 +632,10 @@ static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& o
             return true;
         }
         case sbxnr::CPUINFO: {
+            if (g_cpu_action == sbxnr::CPU_NONE) return false;
             std::string real = sbx_read_real("/proc/cpuinfo");
             if (real.empty()) return false;
-            return sbxnr::patch_cpuinfo_aggregate_revision(real, out);
+            return sbxnr::patch_cpuinfo(real, g_cpu_action, g_cpu_repl, out);
         }
         case sbxnr::APPLOG_XML: {
             if (!g_applog_ok) return false;
@@ -868,44 +666,14 @@ static inline bool sbx_is_pure_read(int flags) {
     return (flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_TMPFILE));
 }
 
-static bool sbx_resolve_openat_path(int dirfd, const char* pathname,
-                                    std::string& resolved) {
-    if (!pathname || !*pathname) return false;
-    std::string path(pathname);
-    if (path[0] == '/')
-        return sbxnr::normalize_absolute_path(path, resolved);
-
-    char base[4096];
-    if (dirfd == AT_FDCWD) {
-        if (!::getcwd(base, sizeof(base))) return false;
-    } else {
-        char proc_path[64];
-        int n = ::snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", dirfd);
-        if (n <= 0 || static_cast<size_t>(n) >= sizeof(proc_path)) return false;
-        ssize_t got = ::readlink(proc_path, base, sizeof(base) - 1);
-        if (got <= 0 || static_cast<size_t>(got) >= sizeof(base) - 1) return false;
-        base[got] = '\0';
-        static const char deleted[] = " (deleted)";
-        size_t len = static_cast<size_t>(got);
-        if (len >= sizeof(deleted) - 1 &&
-            std::memcmp(base + len - (sizeof(deleted) - 1), deleted,
-                        sizeof(deleted) - 1) == 0)
-            return false;
-    }
-    return sbxnr::join_and_normalize_path(base, path, resolved);
-}
-
 static int sbx_openat(int dirfd, const char* pathname, int flags, ...) {
     mode_t mode = 0;
     bool has_mode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (has_mode) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
 
-    if (g_nr_active && pathname && sbx_is_pure_read(flags)) {
-        std::string resolved;
-        if (sbx_resolve_openat_path(dirfd, pathname, resolved)) {
-            int fd = sbx_spoof_fd(resolved.c_str());
-            if (fd >= 0) return fd;
-        }
+    if (g_native_read_active && pathname && sbx_is_pure_read(flags)) {
+        int fd = sbx_spoof_fd(pathname);
+        if (fd >= 0) return fd;
     }
     if (orig_openat)
         return has_mode ? orig_openat(dirfd, pathname, flags, mode)
@@ -918,7 +686,7 @@ static int sbx_open(const char* pathname, int flags, ...) {
     bool has_mode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (has_mode) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
 
-    if (g_nr_active && pathname && sbx_is_pure_read(flags)) {
+    if (g_native_read_active && pathname && sbx_is_pure_read(flags)) {
         int fd = sbx_spoof_fd(pathname);
         if (fd >= 0) return fd;
     }
@@ -941,7 +709,7 @@ static int sbx_fopen_flags(const char* mode) {
 
 static FILE* sbx_fopen(const char* path, const char* mode) {
 
-    if (g_nr_active && path && mode && mode[0] == 'r' && !strchr(mode, '+')) {
+    if (g_native_read_active && path && mode && mode[0] == 'r' && !strchr(mode, '+')) {
         int fd = sbx_spoof_fd(path);
         if (fd >= 0) {
             FILE* fp = fdopen(fd, "r");
@@ -962,13 +730,13 @@ static FILE* sbx_fopen(const char* path, const char* mode) {
     return fp;
 }
 
-static void sbx_reg_lib(Api* api, dev_t dev, ino_t ino) {
+static void sbx_register_lib_hooks(Api* api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "__system_property_get",
-                         reinterpret_cast<void*>(sbx_spg),  reinterpret_cast<void**>(&orig_spg));
+                         reinterpret_cast<void*>(sbx_sysprop_get),  reinterpret_cast<void**>(&orig_sysprop_get));
     api->pltHookRegister(dev, ino, "__system_property_read",
-                         reinterpret_cast<void*>(sbx_spr),  reinterpret_cast<void**>(&orig_spr));
+                         reinterpret_cast<void*>(sbx_sysprop_read),  reinterpret_cast<void**>(&orig_sysprop_read));
     api->pltHookRegister(dev, ino, "__system_property_read_callback",
-                         reinterpret_cast<void*>(sbx_sprcb), reinterpret_cast<void**>(&orig_sprcb));
+                         reinterpret_cast<void*>(sbx_sysprop_read_cb), reinterpret_cast<void**>(&orig_sysprop_read_cb));
     api->pltHookRegister(dev, ino, "open",
                          reinterpret_cast<void*>(sbx_open),   reinterpret_cast<void**>(&orig_open));
     api->pltHookRegister(dev, ino, "openat",
@@ -987,8 +755,10 @@ static int sbx_register_across_libs(Api* api) {
     FILE* f = fopen("/proc/self/maps", "re");
     if (!f) return 0;
     std::vector<std::pair<dev_t, ino_t>> seen;
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
+    char*  line = nullptr;   // getline: grow to fit; char[512] would split long maps lines (Bug #4)
+    size_t cap  = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, f)) != -1) {
         char* path = strchr(line, '/');
         if (!path) continue;
         size_t pl = strlen(path);
@@ -1002,40 +772,28 @@ static int sbx_register_across_libs(Api* api) {
             if (p.first == st.st_dev && p.second == st.st_ino) { dup = true; break; }
         if (dup) continue;
         seen.push_back(std::make_pair(st.st_dev, st.st_ino));
-        const char* basename = strrchr(path, '/');
-        basename = basename ? basename + 1 : path;
-        LOGD("L9 PLT register %s dev=%llu ino=%llu", basename,
-             static_cast<unsigned long long>(st.st_dev),
-             static_cast<unsigned long long>(st.st_ino));
-        sbx_reg_lib(api, st.st_dev, st.st_ino);
+        sbx_register_lib_hooks(api, st.st_dev, st.st_ino);
     }
+    free(line);
     fclose(f);
-    LOGD("L9 PLT scan registered=%zu; libraries loaded after this scan are "
-         "outside confirmed coverage", seen.size());
-    return static_cast<int>(seen.size());
+    return (int)seen.size();
 }
 
 static void install_native_read_hooks(Api* api) {
 
-    g_environment_gates = {};
     if (val("SBX_NATIVE_READ") == "0") { LOGD("L9 disabled via kill switch"); return; }
 
     uint64_t seed = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" + val("ANDROID_ID"));
     g_boot_id = sbxnr::uuid_from_seed(seed);
 
-    g_environment_gates.native_read = true;
-    g_environment_gates.proc_version = val("SBX_PROC_VERSION") == "1";
-    g_environment_gates.meminfo = val("SBX_MEMINFO") == "1";
-    g_environment_gates.cpu_revision = val("SBX_CPU_REVISION") == "1";
+    const std::string& pmac = val("WIFI_MAC");
+    g_wifi_mac = sbxnr::is_valid_mac(pmac) ? pmac
+                                           : sbxnr::mac_from_seed(seed ^ 0x9E3779B97F4A7C15ULL);
 
-    if (g_environment_gates.proc_version) {
-        g_proc_version = sbxnr::synth_proc_version(
-            val("RELEASE"), val("INCREMENTAL"), val("BOARD_PLATFORM"),
-            val("HOST"), seed);
-    } else {
-        g_proc_version.clear();
-    }
-    g_ram_gb = g_environment_gates.meminfo ? sbxnr::pixel_ram_gb(val("MODEL")) : 0;
+    g_proc_version = sbxnr::synth_proc_version(val("RELEASE"), val("INCREMENTAL"),
+                                               val("BOARD_PLATFORM"), val("HOST"), seed);
+    g_ram_gb     = sbxnr::pixel_ram_gb(val("MODEL"));
+    g_cpu_action = sbxnr::cpu_action_for(val("SOC_MANUFACTURER"), val("SOC_MODEL"), g_cpu_repl);
 
     if (!g_pkg.empty()) {
         uint64_t epoch_ms = strtoull(val("APPLOG_EPOCH").c_str(), nullptr, 10);
@@ -1049,9 +807,9 @@ static void install_native_read_hooks(Api* api) {
              (unsigned long long)epoch_ms);
     }
 
-    if (!orig_spg)    orig_spg    = reinterpret_cast<sbx_spg_fn>(dlsym(RTLD_DEFAULT, "__system_property_get"));
-    if (!orig_spr)    orig_spr    = reinterpret_cast<sbx_spr_fn>(dlsym(RTLD_DEFAULT, "__system_property_read"));
-    if (!orig_sprcb)  orig_sprcb  = reinterpret_cast<sbx_sprcb_fn>(dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
+    if (!orig_sysprop_get)    orig_sysprop_get    = reinterpret_cast<sbx_sysprop_get_fn>(dlsym(RTLD_DEFAULT, "__system_property_get"));
+    if (!orig_sysprop_read)    orig_sysprop_read    = reinterpret_cast<sbx_sysprop_read_fn>(dlsym(RTLD_DEFAULT, "__system_property_read"));
+    if (!orig_sysprop_read_cb)  orig_sysprop_read_cb  = reinterpret_cast<sbx_sysprop_read_cb_fn>(dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
     if (!orig_open)   orig_open   = reinterpret_cast<sbx_open_fn>(dlsym(RTLD_DEFAULT, "open"));
     if (!orig_openat) orig_openat = reinterpret_cast<sbx_openat_fn>(dlsym(RTLD_DEFAULT, "openat"));
     if (!orig_fopen)  orig_fopen  = reinterpret_cast<sbx_fopen_fn>(dlsym(RTLD_DEFAULT, "fopen"));
@@ -1061,87 +819,213 @@ static void install_native_read_hooks(Api* api) {
         LOGW("L9: no mapped .so to hook — native reads not spoofed (kill-switch keeps flag off)");
         return;
     }
-    bool committed = api->pltHookCommit();
-    if (!committed) {
-        LOGW("L9: pltHookCommit gagal (%d libs registered) — native-read "
-             "presentation dinonaktifkan agar semua surface fail-open", libs);
-        g_nr_active = false;
-        return;
+    if (!api->pltHookCommit()) {
+        LOGW("L9: pltHookCommit gagal sebagian (%d libs registered) — coverage "
+             "mungkin parsial, wrapper tetap aman (orig_* via dlsym)", libs);
     }
-    LOGD("L9 PLT commit selesai: %d mapped libraries; late-loaded libraries "
-         "remain outside confirmed coverage", libs);
-    g_nr_active = orig_spg || orig_spr || orig_sprcb ||
+    g_native_read_active = orig_sysprop_get || orig_sysprop_read || orig_sysprop_read_cb ||
                   orig_open || orig_openat || orig_fopen;
-    if (!g_nr_active) {
+    if (!g_native_read_active) {
         LOGW("L9: no real implementation resolvable — native reads not spoofed");
         return;
     }
-    LOGD("L9 aktif (%d lib): boot_id=%s proc_version=%d meminfo=%d "
-         "cpu_revision=%d "
-         "[open=%p openat=%p fopen=%p spg=%p spr=%p sprcb=%p]",
-         libs, g_boot_id.c_str(), g_environment_gates.proc_version ? 1 : 0,
-         g_environment_gates.meminfo ? 1 : 0,
-         g_environment_gates.cpu_revision ? 1 : 0,
+    LOGD("L9 aktif (%d lib): boot_id=%s mac=%s ram=%dGB cpu=%d "
+         "[open=%p openat=%p fopen=%p sysprop_get=%p sysprop_read=%p sysprop_read_cb=%p]",
+         libs, g_boot_id.c_str(), g_wifi_mac.c_str(), g_ram_gb, g_cpu_action,
          reinterpret_cast<void*>(orig_open),   reinterpret_cast<void*>(orig_openat),
-         reinterpret_cast<void*>(orig_fopen),  reinterpret_cast<void*>(orig_spg),
-         reinterpret_cast<void*>(orig_spr),    reinterpret_cast<void*>(orig_sprcb));
+         reinterpret_cast<void*>(orig_fopen),  reinterpret_cast<void*>(orig_sysprop_get),
+         reinterpret_cast<void*>(orig_sysprop_read),    reinterpret_cast<void*>(orig_sysprop_read_cb));
 }
 
-static int runtime_sdk(JNIEnv* env) {
-    jclass version = env->FindClass("android/os/Build$VERSION");
-    if (!version || env->ExceptionCheck()) {
-        clear_jni_exception(env);
-        if (version) env->DeleteLocalRef(version);
-        return 0;
+struct SbxCrashRec {
+    uint32_t magic;
+    int32_t  sig;
+    int32_t  code;
+    int32_t  sender;
+    int32_t  pid;
+    int32_t  hit;
+    int64_t  alive_ms;
+    void*    addr;
+};
+static const uint32_t SBX_CRASH_MAGIC = 0x54544352u;
+
+static int         g_crash_pipe[2] = {-1, -1};
+static char        g_watchdog_pkg_buf[128] = {0};
+static int64_t     g_load_time_ms = 0;
+static struct sigaction g_prev_sig[NSIG];
+static std::atomic<int>      g_crash_count[NSIG];
+static const int   CRASH_LIMIT = 3;
+
+static int64_t sbx_now_ms() {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static const char* sbx_sig_name(int sig) {
+    switch (sig) {
+        case SIGSEGV: return "SIGSEGV";
+        case SIGABRT: return "SIGABRT";
+        case SIGBUS:  return "SIGBUS";
+        case SIGILL:  return "SIGILL";
+        case SIGFPE:  return "SIGFPE";
+        case SIGSYS:  return "SIGSYS";
+        default:      return "?";
     }
-    jfieldID field = env->GetStaticFieldID(version, "SDK_INT", "I");
-    if (!field || env->ExceptionCheck()) {
-        clear_jni_exception(env);
-        env->DeleteLocalRef(version);
-        return 0;
+}
+
+static void sbx_crash_drain_loop() {
+    SbxCrashRec rec;
+    while (sandboxid::read_full(g_crash_pipe[0], &rec, sizeof(rec))) {
+        if (rec.magic != SBX_CRASH_MAGIC) continue;
+        LOGE("CRASH [%s] pkg=%s pid=%d signal=%d(%s) code=%d addr=%p sender=%d alive=%lldms hit=%d/%d",
+             SBX_VARIANT_TAG, g_watchdog_pkg_buf, rec.pid, rec.sig, sbx_sig_name(rec.sig),
+             rec.code, rec.addr, rec.sender, (long long)rec.alive_ms, rec.hit, CRASH_LIMIT);
     }
-    jint sdk = env->GetStaticIntField(version, field);
-    if (env->ExceptionCheck()) {
-        clear_jni_exception(env);
-        sdk = 0;
+}
+
+static void sbx_signal_handler(int sig, siginfo_t* info, void* ctx) {
+    int n = 0;
+    if (sig >= 0 && sig < NSIG) {
+
+        n = g_crash_count[sig].fetch_add(1, std::memory_order_relaxed) + 1;
     }
-    env->DeleteLocalRef(version);
-    return sdk > 0 ? static_cast<int>(sdk) : 0;
+
+    if (n <= CRASH_LIMIT && g_crash_pipe[1] >= 0) {
+
+        int saved_errno = errno;
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        SbxCrashRec rec;
+        rec.magic    = SBX_CRASH_MAGIC;
+        rec.sig      = sig;
+        rec.code     = info ? info->si_code : 0;
+        rec.sender   = info ? info->si_pid  : 0;
+        rec.pid      = (int)getpid();
+        rec.hit      = n;
+        rec.alive_ms = ((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000) - g_load_time_ms;
+        rec.addr     = info ? info->si_addr : nullptr;
+        ssize_t wr = ::write(g_crash_pipe[1], &rec, sizeof(rec));
+        (void)wr;
+        errno = saved_errno;
+    }
+
+    if (sig >= 0 && sig < NSIG) {
+        struct sigaction* p = &g_prev_sig[sig];
+        if ((p->sa_flags & SA_SIGINFO) && p->sa_sigaction) {
+            p->sa_sigaction(sig, info, ctx);
+        } else if (!(p->sa_flags & SA_SIGINFO) && p->sa_handler &&
+                   p->sa_handler != SIG_DFL && p->sa_handler != SIG_IGN) {
+            p->sa_handler(sig);
+        } else {
+
+            signal(sig, SIG_DFL);
+            raise(sig);
+        }
+    }
 }
 
-static void publish_identity(std::map<std::string, std::string>&& next) {
-    g_id = std::move(next);
+static void install_crash_watchdog(const std::string& pkg) {
+    static bool armed = false;
+    if (armed) return;
+
+    strncpy(g_watchdog_pkg_buf, pkg.c_str(), sizeof(g_watchdog_pkg_buf) - 1);
+    g_load_time_ms = sbx_now_ms();
+
+    if (pipe2(g_crash_pipe, O_CLOEXEC) == 0) {
+        int fl = fcntl(g_crash_pipe[1], F_GETFL, 0);
+        if (fl >= 0) fcntl(g_crash_pipe[1], F_SETFL, fl | O_NONBLOCK);
+        std::thread(sbx_crash_drain_loop).detach();
+    } else {
+        g_crash_pipe[0] = g_crash_pipe[1] = -1;
+        LOGE("crash watchdog: pipe2 failed errno=%d (logging disabled, chaining still armed)", errno);
+    }
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+
+    sa.sa_flags     = SA_SIGINFO;
+    sa.sa_sigaction = sbx_signal_handler;
+    sigemptyset(&sa.sa_mask);
+
+    static const int sigs[] = { SIGABRT, SIGFPE, SIGILL };
+    for (int s : sigs) {
+        g_crash_count[s] = 0;
+        sigaction(s, &sa, &g_prev_sig[s]);
+    }
+    armed = true;
+    LOGD("crash watchdog armed for %s (ABRT/FPE/ILL, limit=%d)", pkg.c_str(), CRASH_LIMIT);
 }
 
-static bool read_runtime_property(const char* name, std::string& out) {
-    out.clear();
-    const prop_info* pi = __system_property_find(name);
-    if (!pi) return false;
-    sbx_sprcb_fn read_callback = reinterpret_cast<sbx_sprcb_fn>(
-        dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
-    if (!read_callback) return false;
-    struct Context {
-        std::string* out;
-        bool called;
-    } context{&out, false};
-    read_callback(
-        pi,
-        [](void* cookie, const char*, const char* value, uint32_t) {
-            Context* context = static_cast<Context*>(cookie);
-            if (!context || context->called) return;
-            context->called = true;
-            context->out->assign(value ? value : "");
-        },
-        &context);
-    return context.called;
+static void set_str(JNIEnv* env, jclass c, const char* f, const std::string& v) {
+    if (v.empty()) return;
+    jfieldID id = env->GetStaticFieldID(c, f, "Ljava/lang/String;");
+    if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    jstring j = env->NewStringUTF(v.c_str());
+    if (!j || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    env->SetStaticObjectField(c, id, j);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(j);
 }
 
-static bool runtime_is_stable_release() {
-    std::string preview_sdk;
-    std::string codename;
-    return read_runtime_property("ro.build.version.preview_sdk", preview_sdk) &&
-           read_runtime_property("ro.build.version.codename", codename) &&
-           sbxprop::stable_release_runtime(preview_sdk, codename);
+static void set_int(JNIEnv* env, jclass c, const char* f, int v) {
+    jfieldID id = env->GetStaticFieldID(c, f, "I");
+    if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    env->SetStaticIntField(c, id, v);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static void set_long(JNIEnv* env, jclass c, const char* f, jlong v) {
+    jfieldID id = env->GetStaticFieldID(c, f, "J");
+    if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    env->SetStaticLongField(c, id, v);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static std::vector<std::string> split_csv(const std::string& s) {
+    std::vector<std::string> out;
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        size_t j = s.find(',', i);
+        if (j == std::string::npos) j = n;
+
+        size_t a = i;
+        while (a < j && (s[a] == ' ' || s[a] == '\t')) ++a;
+        size_t b = j;
+        while (b > a && (s[b-1] == ' ' || s[b-1] == '\t')) --b;
+        if (b > a) out.emplace_back(s.data() + a, b - a);
+        i = j + 1;
+    }
+    return out;
+}
+
+static void set_str_array(JNIEnv* env, jclass c, const char* f, const std::string& v) {
+    if (v.empty()) return;
+    std::vector<std::string> parts = split_csv(v);
+    if (parts.empty()) return;
+
+    jfieldID id = env->GetStaticFieldID(c, f, "[Ljava/lang/String;");
+    if (!id || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    jclass str_cls = env->FindClass("java/lang/String");
+    if (!str_cls || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    jobjectArray arr = env->NewObjectArray(static_cast<jsize>(parts.size()), str_cls, nullptr);
+    if (!arr || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(str_cls);
+        return;
+    }
+    for (size_t i = 0; i < parts.size(); ++i) {
+        jstring j = env->NewStringUTF(parts[i].c_str());
+        if (!j || env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+        env->SetObjectArrayElement(arr, static_cast<jsize>(i), j);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(j);
+    }
+    env->SetStaticObjectField(c, id, arr);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    env->DeleteLocalRef(arr);
+    env->DeleteLocalRef(str_cls);
 }
 
 static void install_build_hook(JNIEnv* env) {
@@ -1151,6 +1035,8 @@ static void install_build_hook(JNIEnv* env) {
         static const std::pair<const char*, const char*> f[] = {
             {"BRAND","BRAND"}, {"MANUFACTURER","MANUFACTURER"},
             {"MODEL","MODEL"}, {"DEVICE","DEVICE"}, {"PRODUCT","PRODUCT"},
+            {"BOARD","BOARD"}, {"HARDWARE","HARDWARE"},
+            {"SOC_MANUFACTURER","SOC_MANUFACTURER"}, {"SOC_MODEL","SOC_MODEL"},
             {"FINGERPRINT","FINGERPRINT"}, {"ID","ID"},
             {"DISPLAY","DISPLAY"}, {"BOOTLOADER","BOOTLOADER"},
             {"HOST","HOST"}, {"USER","USER"}, {"TYPE","TYPE"},
@@ -1159,15 +1045,21 @@ static void install_build_hook(JNIEnv* env) {
             {"SERIAL","SERIAL"},
             {"SKU","SKU"},
             {"ODM_SKU","ODM_SKU"},
+            {"CPU_ABI","CPU_ABI"},
+            {"CPU_ABI2","CPU_ABI2"},
         };
         for (const auto& [fn, k] : f) set_str(env, build, fn, val(k));
 
         const std::string& butc = val("BUILD_TIME_UTC");
         if (!butc.empty()) {
             long long t = 0;
-            if (sbx_parse_ll(butc, t) && t > 0)
+            if (sbx_parse_longlong(butc, t) && t > 0)
                 set_long(env, build, "TIME", (jlong)t * 1000);
         }
+
+        set_str_array(env, build, "SUPPORTED_ABIS",        val("SUPPORTED_ABIS"));
+        set_str_array(env, build, "SUPPORTED_32_BIT_ABIS", val("SUPPORTED_32_BIT_ABIS"));
+        set_str_array(env, build, "SUPPORTED_64_BIT_ABIS", val("SUPPORTED_64_BIT_ABIS"));
 
         env->DeleteLocalRef(build);
     } else env->ExceptionClear();
@@ -1175,13 +1067,33 @@ static void install_build_hook(JNIEnv* env) {
     jclass ver = env->FindClass("android/os/Build$VERSION");
     if (ver && !env->ExceptionCheck()) {
         set_str(env, ver, "RELEASE",        val("RELEASE"));
+
+        set_str(env, ver, "CODENAME",       std::string("REL"));
         set_str(env, ver, "INCREMENTAL",    val("INCREMENTAL"));
         set_str(env, ver, "SECURITY_PATCH", val("SECURITY_PATCH"));
 
+        set_str(env, ver, "BASE_OS",        val("BASE_OS"));
+
         const std::string& rel = val("RELEASE");
-        if (!rel.empty() && g_stable_release_runtime) {
+        if (!rel.empty()) {
             set_str(env, ver, "RELEASE_OR_CODENAME",        rel);
             set_str(env, ver, "RELEASE_OR_PREVIEW_DISPLAY", rel);
+        }
+
+        set_str(env, ver, "PREVIEW_SDK_FINGERPRINT", std::string("REL"));
+
+        const std::string& s = val("SDK_INT");
+        if (!s.empty()) {
+            int sdk = std::atoi(s.c_str());
+            if (sdk > 0) set_int(env, ver, "SDK_INT", sdk);
+        }
+
+        set_int(env, ver, "PREVIEW_SDK_INT", 0);
+
+        const std::string& mpc = val("MEDIA_PERFORMANCE_CLASS");
+        if (!mpc.empty()) {
+            int v = std::atoi(mpc.c_str());
+            if (v >= 0) set_int(env, ver, "MEDIA_PERFORMANCE_CLASS", v);
         }
 
         env->DeleteLocalRef(ver);
@@ -1238,6 +1150,10 @@ public:
         ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
 
+        if (!api_->exemptFd(fd))
+            LOGW("exemptFd(fd=%d) returned false — companion socket may be closed by "
+                 "zygote; bind-mount step will be skipped for this process", fd);
+
         uint8_t cmd   = sandboxid::CMD_GET_IDENTITY;
         uint16_t plen = (uint16_t)pkg.size();
         if (!sandboxid::write_full(fd, &cmd, 1) ||
@@ -1258,61 +1174,49 @@ public:
         blob_.resize(len);
         if (!sandboxid::read_full(fd, blob_.data(), len)) { ::close(fd); unload(); return; }
 
-        sbxid::IdentitySnapshot snapshot;
-        sbxid::ValidationContext validation;
-        validation.runtime_sdk = runtime_sdk(env_);
-        validation.max_blob = sandboxid::MAX_IDENTITY_BLOB;
-        std::string validation_error;
-        const std::string_view blob_view(
-            reinterpret_cast<const char*>(blob_.data()), blob_.size());
-        if (validation.runtime_sdk <= 0 ||
-            !sbxid::parse_and_validate_identity(blob_view, validation, snapshot,
-                                                validation_error)) {
-            LOGW("identity rejected for pkg='%s': %s", pkg.c_str(),
-                 validation.runtime_sdk <= 0 ? "runtime SDK unavailable"
-                                             : validation_error.c_str());
-            blob_.clear();
-            ::close(fd);
-            unload();
-            return;
-        }
+        active_  = true;
+        pkg_     = pkg;
+        comp_fd_ = fd;
 
-        validated_identity_ = std::move(snapshot.values);
-        blob_.clear();
-        active_ = true;
-        pkg_    = pkg;
-        if (api_->exemptFd(fd)) {
-            comp_fd_ = fd;
-        } else {
-            LOGW("exemptFd(fd=%d) returned false; closing companion socket before "
-                 "specialization and disabling mount/hide for pkg='%s'", fd, pkg.c_str());
-            ::close(fd);
-        }
-
-        LOGD("target active (%u B) [%s]", len, SBX_VARIANT_TAG);
+        LOGI("target active (%u B) [%s]", len, SBX_VARIANT_TAG);
         LOGD("target pkg='%s'", pkg.c_str());
     }
 
     void postAppSpecialize(const AppSpecializeArgs*) override {
         if (!active_) return;
 
-        publish_identity(std::move(validated_identity_));
-        g_stable_release_runtime = runtime_is_stable_release();
-        g_build_replacements = 0;
-        g_build_failures = 0;
-        LOGD("validated identity: %zu keys", g_id.size());
+        parse_blob();
+        LOGD("parse_blob: %zu identity keys", g_identity.size());
 
         install_build_hook(env_);
-        LOGD("Build mutation complete: replacements=%d failures=%d", g_build_replacements,
-             g_build_failures);
         install_prop_hook(api_, env_);
-        install_prop_handle_hooks(api_, env_);
         install_leak_sensors(api_, env_);
         install_uptime_hook(api_, env_);
         g_pkg = pkg_;
         install_native_read_hooks(api_);
 #ifdef SBX_DEBUG
-        for (auto& kv : g_id) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
+        for (auto& kv : g_identity) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
+#endif
+        install_crash_watchdog(pkg_);
+
+#ifdef SBX_ENABLE_LSPLANT
+        {
+            // L3 spoofs identifiers that arrive over Binder (telephony/DRM) and so are
+            // out of reach of the property layers. Values come from the identity blob;
+            // IMEI/IMSI/ICCID/MEID/Widevine are synthesized from the same persona seed
+            // used by L9, so they rotate together on every action.sh run.
+            sbxlsp::HookValues hv;
+            hv.android_id = val("ANDROID_ID");
+            hv.serial     = val("SERIAL");
+            hv.wifi_mac   = val("WIFI_MAC");
+            hv.op_num     = val("GSM_OPERATOR_NUMERIC");
+            hv.op_alpha   = val("GSM_OPERATOR_ALPHA");
+            hv.op_iso     = val("GSM_OPERATOR_ISO");
+            hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
+                                         val("ANDROID_ID"));
+            if (!sbxlsp::install_all(env_, hv))
+                LOGE("L3 hooks not installed (continuing with L1/L2/L9)");
+        }
 #endif
 
         if (comp_fd_ >= 0) {
@@ -1333,13 +1237,26 @@ private:
     bool active_ = false;
     int comp_fd_ = -1;
     std::vector<uint8_t> blob_;
-    std::map<std::string, std::string> validated_identity_;
 
     void unload() {
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
 
-    void parse_blob() = delete;
+    void parse_blob() {
+        std::string s(blob_.begin(), blob_.end());
+        std::istringstream iss(s);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = line.substr(0, eq);
+            std::string v = line.substr(eq + 1);
+            while (!v.empty() && (v.back()=='\r' || v.back()=='\n' || v.back()==' '))
+                v.pop_back();
+            if (!k.empty()) g_identity[k] = v;
+        }
+    }
 };
 
 REGISTER_ZYGISK_MODULE(SandboxID)

@@ -4,47 +4,16 @@ const MODDIR = '/data/adb/modules/sandboxid';
 const ROTATE_SH = `${MODDIR}/rotate_ids.sh`;
 const IDENTITY = `${MODDIR}/identity.prop`;
 const TARGETS = `${MODDIR}/target.txt`;
+const CARRIERS = `${MODDIR}/carriers.tsv`;
+const CARRIER_CONF = `${MODDIR}/carrier.conf`;
 const SELFTEST_SH = `${MODDIR}/selftest.sh`;
 
 const ROTATE_LOG = `${MODDIR}/debug/rotate.log`;
 const ACTION_LOG = `${MODDIR}/debug/action.log`;
-const ACTION_STATE = `${MODDIR}/debug/action.state`;
-const ACTION_RESULT = `${MODDIR}/debug/action.result`;
-const ACTION_LOCK = `${MODDIR}/.action.lock`;
-const BRIDGE_TIMEOUT_MS = 120000;
-const ACTION_POLL_MS = 2000;
-const RUN_ID_RE = /^[0-9a-f]{32}$/;
 
 function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
-function moduleEnv(moddir) {
-  return `cd ${shq(moddir)} && export MODDIR=${shq(moddir)} && ` +
-    `export PATH=${shq(moddir + '/bin')}:\"$PATH\"`;
-}
-
-const ENV = moduleEnv(MODDIR);
-
-function ownerProcessProbeShell(ownerPath) {
-  const owner = shq(ownerPath);
-  return `_sbx_owner_pid=$(sed -n 's/^pid=//p' ${owner} 2>/dev/null | sed -n '1p'); ` +
-    `_sbx_owner_start=$(sed -n 's/^proc_start=//p' ${owner} 2>/dev/null | sed -n '1p'); ` +
-    `_sbx_actual_start=''; case \"$_sbx_owner_pid\" in ''|*[!0-9]*) : ;; *) ` +
-    `if [ -r \"/proc/$_sbx_owner_pid/stat\" ]; then ` +
-    `_sbx_stat=$(cat \"/proc/$_sbx_owner_pid/stat\" 2>/dev/null || :); ` +
-    `_sbx_rest=\${_sbx_stat##*) }; set -- $_sbx_rest; ` +
-    `if [ \"$#\" -ge 20 ]; then shift 19; _sbx_actual_start=$1; fi; fi ;; esac`;
-}
-
-function actionMutationGuardShell(moddir) {
-  return `${ownerProcessProbeShell(moddir + '/.action.lock/owner')}; ` +
-    `if [ -n \"$_sbx_actual_start\" ] && ` +
-    `[ \"$_sbx_actual_start\" = \"$_sbx_owner_start\" ]; then ` +
-    `printf '%s\\n' 'Action lain masih berjalan' >&2; exit 75; fi`;
-}
-
-function guardedMutationCmd(command, moddir = MODDIR) {
-  return `${moduleEnv(moddir)} && ${actionMutationGuardShell(moddir)}; ${command}`;
-}
+const ENV = `cd ${shq(MODDIR)} && export MODDIR=${shq(MODDIR)} && export PATH=${shq(MODDIR + '/bin')}:\"$PATH\"`;
 
 const BRAND_DOT = {
   google: '#4285f4', samsung: '#2e6be6', xiaomi: '#ff6900', redmi: '#ff453a',
@@ -57,36 +26,21 @@ function setBrand(brand) {
   else root.removeProperty('--brand');
 }
 
-function cleanupBridgeCallback(name) {
-  try { delete window[name]; } catch (_) { window[name] = undefined; }
-}
-
-function exec(cmd, timeoutMs) {
+function exec(cmd) {
   return new Promise((resolve, reject) => {
     if (typeof ksu === 'undefined' || !ksu.exec) {
-      reject(Object.assign(new Error('root bridge tidak tersedia'), { code: 'bridge-unavailable' }));
+      reject(new Error('root bridge tidak tersedia'));
       return;
     }
     const cbName = `__ksucb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      cleanupBridgeCallback(cbName);
-      reject(Object.assign(new Error('hasil belum diketahui: root bridge melewati batas waktu'), {
-        code: 'bridge-timeout', unknown: true,
-      }));
-    }, timeoutMs || BRIDGE_TIMEOUT_MS);
     window[cbName] = function (errno, stdout, stderr) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      cleanupBridgeCallback(cbName);
+      try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
       const code = Number(errno);
       const out = String(stdout || '');
       const err = String(stderr || '');
-      if (code === 0) resolve(out);
-      else {
+      if (code === 0) {
+        resolve(out);
+      } else {
         const msg = (err.trim() || out.trim() || `exit ${code}`);
         reject(Object.assign(new Error(msg), { code, stdout: out, stderr: err }));
       }
@@ -94,10 +48,7 @@ function exec(cmd, timeoutMs) {
     try {
       ksu.exec(cmd, '{}', cbName);
     } catch (e) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      cleanupBridgeCallback(cbName);
+      try { delete window[cbName]; } catch (_) {}
       reject(e);
     }
   });
@@ -108,123 +59,6 @@ async function shell(cmd) { return exec(cmd); }
 async function run(cmd) {
   try { return { ok: true, out: await shell(cmd) }; }
   catch (e) { return { ok: false, err: e }; }
-}
-
-let mutationTail = Promise.resolve();
-let mutationActive = 0;
-
-function setMutationBusy(busy) {
-  if (typeof document === 'undefined') return;
-  document.querySelectorAll('[data-mutation]').forEach(el => {
-    if (busy) {
-      el.dataset.mutationWasDisabled = el.disabled ? '1' : '0';
-      el.disabled = true;
-      el.setAttribute('aria-disabled', 'true');
-    } else {
-      el.disabled = el.dataset.mutationWasDisabled === '1';
-      if (!el.disabled) el.removeAttribute('aria-disabled');
-      delete el.dataset.mutationWasDisabled;
-    }
-  });
-}
-
-function mutate(fn) {
-  const task = mutationTail.catch(() => {}).then(async () => {
-    mutationActive += 1;
-    setMutationBusy(true);
-    try { return await fn(); }
-    finally {
-      mutationActive -= 1;
-      if (!mutationActive) setMutationBusy(false);
-    }
-  });
-  mutationTail = task;
-  return task;
-}
-
-function parseKeyValues(text) {
-  const out = {};
-  for (const line of String(text || '').replace(/\r/g, '').split('\n')) {
-    const at = line.indexOf('=');
-    if (at > 0) out[line.slice(0, at)] = line.slice(at + 1);
-  }
-  return out;
-}
-
-function parseActionProtocol(text) {
-  const records = [];
-  for (const line of String(text || '').replace(/\r/g, '').split('\n')) {
-    const fields = line.split('\t');
-    if (fields[0] !== 'SBX_ACTION_V1' || fields.length < 2) continue;
-    const record = { type: fields[1], fields: {}, raw: line };
-    let begin = 2;
-    if (record.type === 'STAGE' && fields.length >= 4) {
-      record.stage = fields[2];
-      record.outcome = fields[3];
-      begin = 4;
-    }
-    for (let i = begin; i < fields.length; i += 1) {
-      const at = fields[i].indexOf('=');
-      if (at > 0) record.fields[fields[i].slice(0, at)] = fields[i].slice(at + 1);
-    }
-    records.push(record);
-  }
-  return records;
-}
-
-function splitActionSnapshot(text) {
-  const raw = String(text || '');
-  const stateAt = raw.indexOf('__STATE__\n');
-  const resultAt = raw.indexOf('__RESULT__\n');
-  const lockAt = raw.indexOf('__LOCK__\n');
-  const aliveAt = raw.indexOf('__ALIVE__\n');
-  if (stateAt < 0 || resultAt < 0 || lockAt < 0 || aliveAt < 0 ||
-      !(stateAt < resultAt && resultAt < lockAt && lockAt < aliveAt)) {
-    return { state: {}, records: [], owner: {} };
-  }
-  const state = parseKeyValues(raw.slice(stateAt + 10, resultAt));
-  const records = parseActionProtocol(raw.slice(resultAt + 11, lockAt));
-  const owner = parseKeyValues(raw.slice(lockAt + 9, aliveAt));
-  owner.alive = raw.slice(aliveAt + 10).trim() === '1' ? '1' : '0';
-  return { state, records, owner };
-}
-
-function actionRunFromRecords(records) {
-  for (const record of records) {
-    const runId = record.fields.run;
-    if (RUN_ID_RE.test(runId || '')) return runId;
-  }
-  return '';
-}
-
-function actionResult(records, expectedRun) {
-  return records.find(record => record.type === 'RESULT' &&
-    RUN_ID_RE.test(record.fields.run || '') &&
-    (!expectedRun || record.fields.run === expectedRun)) || null;
-}
-
-function isActionLive(state, owner, expectedRun) {
-  return RUN_ID_RE.test(expectedRun || '') && state.run === expectedRun &&
-    owner.run === expectedRun && owner.alive === '1' && state.status !== 'terminal';
-}
-
-function actionPresentation(result) {
-  if (!result) return { kind: 'warn', title: 'Hasil belum diketahui', terminal: false };
-  const f = result.fields;
-  const status = f.status || 'degraded';
-  if (status === 'success' && f.reboot === '1')
-    return { kind: 'warn', title: 'Identitas baru aktif · perlu reboot', terminal: true };
-  if (status === 'success')
-    return { kind: f.warnings === '0' ? 'ok' : 'warn', title: 'Identitas dan privasi baru selesai', terminal: true };
-  if (status === 'partial')
-    return { kind: 'warn', title: 'Identitas baru aktif · pekerjaan lanjutan parsial', terminal: true };
-  if (status === 'rolled-back')
-    return { kind: 'warn', title: 'Gagal diterapkan · identitas lama dipulihkan', terminal: true };
-  if (status === 'busy')
-    return { kind: 'warn', title: 'Action lain masih berjalan', terminal: true };
-  if (status === 'degraded')
-    return { kind: 'error', title: 'Konsistensi hasil tidak dapat dibuktikan', terminal: true };
-  return { kind: 'error', title: 'Action gagal sebelum identitas aktif', terminal: true };
 }
 
 const ICON = { ok: '\u2713', error: '\u2715', warn: '\u26a0', info: '\u2139' };
@@ -330,6 +164,22 @@ function renderLogHtml(text) {
   }).join('');
 }
 
+function summarizeAction(out) {
+  const text = String(out || '');
+  if (/^OK - persona baru aktif/m.test(text)) {
+    const b = (text.match(/^\s*BRAND\s*:\s*(.+)$/m) || [])[1];
+    const md = (text.match(/^\s*MODEL\s*:\s*(.+)$/m) || [])[1];
+    const label = [b && b.trim(), md && md.trim()].filter(Boolean).join(' \u00b7 ');
+    return { kind: 'ok', title: label ? `Perangkat baru \u00b7 ${label}` : 'Perangkat baru aktif', detail: text };
+  }
+  if (/^OK - fresh/m.test(text)) {
+    const md = (text.match(/^\s*MODEL\s*:\s*(.+)$/m) || [])[1];
+    return { kind: 'ok', title: md ? `Perangkat baru \u00b7 ${md.trim()}` : 'Perangkat baru siap', detail: text };
+  }
+  const bang = (text.match(/^(?:Gagal\b|[\u2717!]).*$/m) || [])[0];
+  return { kind: 'error', title: trimTitle(bang || text || 'Gagal mengacak perangkat'), detail: text };
+}
+
 function summarizeRotate(out, label) {
   const text = String(out || '');
   const errs = (text.match(/\[ERR\]/g) || []).length;
@@ -348,38 +198,14 @@ function summarizeRotate(out, label) {
   return { kind, title: `${name} selesai${note}`, detail: text };
 }
 
-function activateTab(btn, focus) {
-  const id = btn.dataset.tab;
-  document.querySelectorAll('.tab').forEach(tab => {
-    const active = tab === btn;
-    tab.classList.toggle('active', active);
-    tab.setAttribute('aria-selected', active ? 'true' : 'false');
-    tab.tabIndex = active ? 0 : -1;
-  });
-  document.querySelectorAll('.page').forEach(page => {
-    const active = page.id === id;
-    page.classList.toggle('active', active);
-    page.hidden = !active;
-  });
-  if (focus) btn.focus();
-  moveIndicator();
-  onTab(id);
-}
-
 function wireTabs() {
-  const tabs = Array.from(document.querySelectorAll('.tab'));
-  tabs.forEach(btn => {
-    btn.addEventListener('click', () => activateTab(btn, false));
-    btn.addEventListener('keydown', event => {
-      const current = tabs.indexOf(btn);
-      let next = current;
-      if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
-      else if (event.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
-      else if (event.key === 'Home') next = 0;
-      else if (event.key === 'End') next = tabs.length - 1;
-      else return;
-      event.preventDefault();
-      activateTab(tabs[next], true);
+  document.querySelectorAll('.tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+      const id = btn.dataset.tab;
+      document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === id));
+      moveIndicator();
+      onTab(id);
     });
   });
 }
@@ -396,7 +222,7 @@ function moveIndicator() {
 function onTab(id) {
   if (id === 'persona') loadPersona();
   else if (id === 'rotate') loadRotate();
-  else if (id === 'settings') loadSettings();
+  else if (id === 'sim') loadSim();
   else if (id === 'targets') loadTargets();
   else if (id === 'selftest') loadSelftest();
   else if (id === 'log') loadLog();
@@ -415,21 +241,23 @@ function parseProp(text) {
 }
 
 function skLines(n) {
-  let s = '<div aria-hidden="true">';
+  let s = '';
   for (let i = 0; i < n; i++) s += `<div class="ln sk sk-line${i % 3 === 2 ? ' short' : ''}"></div>`;
-  return s + '</div>';
+  return s;
 }
 
 function skKv(n) {
-  let s = '<div class="sk-group" aria-hidden="true">';
+  let s = '';
   for (let i = 0; i < n; i++) s += '<div class="k sk sk-line short"></div><div class="v sk sk-line"></div>';
-  return s + '</div>';
+  return s;
 }
 
 const DETAIL_KEYS = [
-  ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'],
+  ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'], ['BOARD', 'Board'],
+  ['SOC_MANUFACTURER', 'SoC vendor'], ['SOC_MODEL', 'SoC'],
   ['SECURITY_PATCH', 'Security patch'],
-  ['SERIAL', 'Serial'], ['ANDROID_ID', 'Entropy profil'], ['GOOGLE_AID', 'GAID lokal'],
+  ['SERIAL', 'Serial'], ['ANDROID_ID', 'Android ID'], ['GOOGLE_AID', 'Google AID'],
+  ['WIFI_MAC', 'WiFi MAC'], ['BLUETOOTH_ADDR', 'BT MAC'], ['BLUETOOTH_NAME', 'Nama BT'],
   ['RADIO', 'Radio'], ['FIRST_BOOT', 'Boot awal'], ['LAST_BOOT', 'Boot terakhir'],
 ];
 
@@ -494,110 +322,22 @@ async function loadPersona() {
   el.innerHTML = html || '<div class="empty">identity.prop kosong.</div>';
 }
 
-function setActionProgress(state) {
-  const el = document.getElementById('actionProgress');
-  if (!el) return;
-  const run = RUN_ID_RE.test(state.run || '') ? state.run.slice(0, 8) : '—';
-  if (!state.stage) {
-    el.hidden = true;
-    el.textContent = '';
-    return;
-  }
-  el.hidden = false;
-  el.textContent = `Run ${run} · ${state.stage} · ${state.status || 'running'}`;
-}
-
-async function readActionSnapshot(expectedRun) {
-  const probe = ownerProcessProbeShell(ACTION_LOCK + '/owner');
-  const cmd = `printf '%s\\n' '__STATE__'; cat ${shq(ACTION_STATE)} 2>/dev/null || true; ` +
-    `printf '%s\\n' '__RESULT__'; cat ${shq(ACTION_RESULT)} 2>/dev/null || true; ` +
-    `printf '%s\\n' '__LOCK__'; cat ${shq(ACTION_LOCK + '/owner')} 2>/dev/null || true; ` +
-    `printf '%s\\n' '__ALIVE__'; ${probe}; ` +
-    `if [ -n "$_sbx_actual_start" ] && ` +
-    `[ "$_sbx_actual_start" = "$_sbx_owner_start" ]; then printf 1; else printf 0; fi`;
-  const r = await run(cmd);
-  if (!r.ok) return { state: {}, records: [], owner: {}, live: false };
-  const snapshot = splitActionSnapshot(r.out);
-  snapshot.live = isActionLive(snapshot.state, snapshot.owner, expectedRun);
-  return snapshot;
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function monitorAction(runId, stop) {
-  while (!stop.done) {
-    const snapshot = await readActionSnapshot(runId);
-    if (snapshot.state.run === runId) setActionProgress(snapshot.state);
-    if (actionResult(snapshot.records, runId)) return;
-    await sleep(ACTION_POLL_MS);
-  }
-}
-
-async function reconcileAction(runId, detail) {
-  if (!RUN_ID_RE.test(runId || '')) {
-    toast('Hasil belum diketahui · run ID tidak diterima', { kind: 'warn', sticky: true, detail });
-    return null;
-  }
-  for (;;) {
-    const snapshot = await readActionSnapshot(runId);
-    if (snapshot.state.run === runId) setActionProgress(snapshot.state);
-    const result = actionResult(snapshot.records, runId);
-    if (result) {
-      const view = actionPresentation(result);
-      toast(view.title, { kind: view.kind, sticky: view.kind === 'error', detail: result.raw });
-      return result;
-    }
-    if (!snapshot.live) {
-      toast('Hasil belum diketahui · jangan jalankan ulang otomatis', { kind: 'warn', sticky: true, detail });
-      return null;
-    }
-    toast('Action masih berjalan · menunggu hasil tahan lama', { kind: 'info', sticky: true, detail: `run=${runId}` });
-    await sleep(ACTION_POLL_MS);
-  }
-}
-
-async function runAction() {
-  const runId = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
-  setActionProgress({ run: runId, stage: 'starting', status: 'running' });
-  const cmd = `${ENV} && SBX_ACTION_RUN_ID=${shq(runId)} sh ${shq(MODDIR)}/action.sh 2>&1`;
-  const stop = { done: false };
-  const monitor = monitorAction(runId, stop).catch(() => {});
-  try {
-    const out = await shell(cmd);
-    const records = parseActionProtocol(out);
-    const result = actionResult(records, runId);
-    if (!result) return reconcileAction(runId, out);
-    const view = actionPresentation(result);
-    toast(view.title, { kind: view.kind, sticky: view.kind === 'error', detail: out });
-    return result;
-  } catch (error) {
-    const detail = [error.stdout, error.stderr, error.message].filter(Boolean).join('\n');
-    const records = parseActionProtocol(`${error.stdout || ''}\n${error.stderr || ''}`);
-    const result = actionResult(records, runId);
-    if (result) {
-      const view = actionPresentation(result);
-      toast(view.title, { kind: view.kind, sticky: view.kind === 'error', detail });
-      return result;
-    }
-    return reconcileAction(runId, detail);
-  } finally {
-    stop.done = true;
-    await monitor;
-    await Promise.all([loadPersona(), loadRotate()]);
-  }
-}
-
-if (typeof document !== 'undefined') {
 document.getElementById('refreshBtn').addEventListener('click', loadPersona);
-document.getElementById('freshenBtn').addEventListener('click', ev =>
-  withLoading(ev.currentTarget, () => mutate(runAction)));
-}
+document.getElementById('freshenBtn').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
+  const cmd = `${ENV} && sh ${shq(MODDIR)}/action.sh 2>&1`;
+  const r = await run(cmd);
+  if (!r.ok) toast(trimTitle(r.err.message || 'Gagal mengacak perangkat'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
+  else { const s = summarizeAction(r.out); toast(s.title, { kind: s.kind, detail: s.detail }); }
+  loadPersona();
+  if (document.getElementById('rotate').classList.contains('active')) loadRotate();
+}));
 
 const ROT_CARDS = [
-  { key: 'ssaid',       name: 'Regenerasi SSAID', desc: 'Hapus penyimpanan SSAID sistem; Android membuat ulang saat reboot (bukan hook API per-aplikasi)', get: null },
-  { key: 'gaid',        name: 'GAID lokal',      desc: 'Tulis Settings.Global + XML GMS best-effort; nilai nol mempertahankan opt-out lokal, API tetap milik layanan', get: 'GOOGLE_AID' },
+  { key: 'ssaid',       name: 'SSAID',         desc: 'Android ID per-aplikasi (Settings.Secure) — dihapus, dibuat ulang setelah reboot', get: 'ANDROID_ID' },
+  { key: 'gaid',        name: 'Google AID',    desc: 'Advertising ID (Settings.Global + XML GMS)',        get: 'GOOGLE_AID' },
+  { key: 'wlan-mac',    name: 'WiFi MAC',      desc: 'MAC wlan0 + reset WifiConfigStore',                 get: 'WIFI_MAC' },
+  { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'MAC adapter BT + Address di bt_config.conf',        get: 'BLUETOOTH_ADDR' },
+  { key: 'device-name', name: 'Nama perangkat', desc: 'device_name = MODEL dari identity.prop',           get: 'MODEL' },
   { key: 'boot-count',  name: 'Boot count',    desc: 'Settings.Global.boot_count = BOOT_COUNT identity.prop', get: 'BOOT_COUNT' },
   { key: 'applog',      name: 'AppLog ByteDance', desc: 'did/iid/ssid/openudid/clientudid/cdid untuk TikTok/Douyin — di-spoof in-process oleh hook JNI (L9)', get: null, applog: true },
 ];
@@ -608,8 +348,8 @@ async function loadRotate() {
     <div class="card" data-key="${c.key}">
       <div class="name">${c.name}</div>
       <div class="desc">${c.desc}</div>
-      <div class="val sk sk-line" data-slot="val" aria-hidden="true"></div>
-      <div class="actions"><button class="sm" data-rot="${c.key}" data-mutation>Rotasi</button></div>
+      <div class="val sk sk-line" data-slot="val"></div>
+      <div class="actions"><button class="sm" data-rot="${c.key}">Rotasi</button></div>
     </div>`).join('');
   wrap.querySelectorAll('.card').forEach((el, i) => el.style.setProperty('--i', i));
   wrap.querySelectorAll('button[data-rot]').forEach(b => {
@@ -621,7 +361,6 @@ async function loadRotate() {
     const slot = wrap.querySelector(`.card[data-key="${c.key}"] [data-slot="val"]`);
     if (!slot) continue;
     slot.classList.remove('sk', 'sk-line');
-    slot.removeAttribute('aria-hidden');
     if (c.applog) {
       slot.textContent = '\u2026';
     } else {
@@ -659,123 +398,147 @@ async function renderApplogStatus(wrap) {
   slot.title = lines.join('\n');
 }
 
-function loggedScriptCmd(label, script, moddir = MODDIR) {
-  const env = moduleEnv(moddir);
-  const guard = actionMutationGuardShell(moddir);
-  const log = moddir + '/debug/rotate.log';
-  const out = moddir + '/debug/.webui-output.$$';
-  const header = `printf '[%s] ==> ${label} (webui)\\n' "$(date '+%F %T')"`;
-  return `${env} && ${guard}; mkdir -p ${shq(moddir)}/debug && ` +
-    `_sbx_out=${shq(out)}; rm -f "$_sbx_out"; ` +
-    `${script} >"$_sbx_out" 2>&1; _sbx_rc=$?; ` +
-    `{ ${header}; cat "$_sbx_out"; } >> ${shq(log)} 2>&1; _sbx_log_rc=$?; ` +
-    `cat "$_sbx_out"; rm -f "$_sbx_out"; ` +
-    `[ "$_sbx_rc" -ne 0 ] && exit "$_sbx_rc"; exit "$_sbx_log_rc"`;
-}
-
 function rotateCmd(key) {
-  return loggedScriptCmd(`rotate ${key}`, `sh ${shq(ROTATE_SH)} ${shq(key)}`);
+  return `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
+    `{ printf '[%s] ==> rotate ${key} (webui)\\n' "$(date '+%F %T')"; ` +
+    `sh ${shq(ROTATE_SH)} ${shq(key)} 2>&1; } | tee -a ${shq(ROTATE_LOG)}`;
 }
 
-async function finishRotate(r, label) {
+function finishRotate(r, label) {
   if (!r.ok) toast(trimTitle(r.err.message || 'Rotasi gagal'), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
   else { const s = summarizeRotate(r.out, label); toast(s.title, { kind: s.kind, detail: s.detail }); }
-  await loadRotate();
+  loadRotate();
 }
 
 async function rotateOne(key, btn) {
-  await withLoading(btn, () => mutate(async () => {
+  await withLoading(btn, async () => {
     const r = await run(rotateCmd(key));
     const label = (ROT_CARDS.find(c => c.key === key) || {}).name || key;
-    await finishRotate(r, label);
-  }));
+    finishRotate(r, label);
+  });
 }
 
-if (typeof document !== 'undefined') {
-document.getElementById('rotAll').addEventListener('click', ev => withLoading(ev.currentTarget, () =>
-  mutate(async () => {
-    const r = await run(rotateCmd('all'));
-    await finishRotate(r, 'Rotasi semua');
-  })));
-}
+document.getElementById('rotAll').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
+  const r = await run(rotateCmd('all'));
+  finishRotate(r, 'Rotasi semua');
+}));
 
-const EXPERIMENT_FLAGS = [
-  'SBX_NATIVE_READ', 'SBX_PROC_VERSION', 'SBX_MEMINFO',
-  'SBX_CPU_REVISION',
-];
+let SIM_DB = null;
 
-function renderSettingsState(kv, available = true) {
-  for (const key of EXPERIMENT_FLAGS) {
-    const input = document.querySelector(`input[data-flag="${key}"]`);
-    if (!input) continue;
-    input.checked = key === 'SBX_NATIVE_READ' ? false : kv[key] === '1';
-    input.disabled = true;
+function parseCarriersTsv(text) {
+  const rows = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t[0] === '#') continue;
+    const f = line.split('\t');
+    if (f.length < 4) continue;
+    const name = f[0].trim(), mcc = f[1].trim(), mnc = f[2].trim(), iso = f[3].trim();
+    if (!name || !mcc || !mnc) continue;
+    const carrierId = (f[4] || '').trim();
+    rows.push({ name, mcc, mnc, iso, carrierId });
   }
-  document.getElementById('settingsStatus').textContent = !available
-    ? 'identity.prop belum ada. Buat persona terlebih dahulu.'
-    : 'Native-read dipaksa nonaktif untuk keselamatan; seluruh presentasi native dilewatkan genuine.';
+  return rows;
 }
 
-async function loadSettings() {
-  const status = document.getElementById('settingsStatus');
-  status.textContent = 'Memuat pengaturan…';
-  const r = await run(`cat ${shq(IDENTITY)} 2>/dev/null || true`);
-  if (!r.ok || !r.out.trim()) {
-    renderSettingsState({}, false);
+function simFillCarriers(current) {
+  const iso = document.getElementById('simCountry').value;
+  const carSel = document.getElementById('simCarrier');
+  const list = SIM_DB.filter(r => !iso || r.iso === iso)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  carSel.innerHTML = '<option value="">Operator…</option>' +
+    list.map(r => {
+      const val = `${r.mcc}|${r.mnc}|${r.name}|${r.iso}`;
+      return `<option value="${escapeHtml(val)}" data-cid="${escapeHtml(r.carrierId || '')}">${escapeHtml(r.name)} · ${escapeHtml(r.mcc + r.mnc)}</option>`;
+    }).join('');
+  if (current && current.MCC && current.MNC) {
+    const want = `${current.MCC}|${current.MNC}|`;
+    for (const opt of carSel.options) {
+      if (opt.value.startsWith(want)) { carSel.value = opt.value; break; }
+    }
+  }
+}
+
+function simFill(current) {
+  const cSel = document.getElementById('simCountry');
+  const isos = Array.from(new Set(SIM_DB.map(r => r.iso).filter(Boolean))).sort();
+  cSel.innerHTML = '<option value="">Negara…</option>' +
+    isos.map(i => `<option value="${escapeHtml(i)}">${escapeHtml(i.toUpperCase())}</option>`).join('');
+  const curIso = (current && current.ISO) ? current.ISO.toLowerCase() : '';
+  if (curIso && isos.includes(curIso)) cSel.value = curIso;
+  simFillCarriers(current);
+}
+
+function renderSimCurrent(cc) {
+  const el = document.getElementById('simCurrent');
+  const st = document.getElementById('simState');
+  if (!cc || !cc.MCC) {
+    st.textContent = 'Bawaan';
+    st.className = 'chip';
+    el.className = 'kv';
+    el.innerHTML = '<div class="empty">Belum ada operator dipilih — pakai bawaan.</div>';
     return;
   }
-  renderSettingsState(parseProp(r.out));
+  st.textContent = (cc.PHANTOM === '1') ? 'Aktif · phantom' : 'Aktif';
+  st.className = 'chip chip-on';
+  const rows = [
+    ['Operator', cc.NAME || ''],
+    ['Kode (MCC+MNC)', (cc.MCC || '') + (cc.MNC || '')],
+    ['Negara', (cc.ISO || '').toUpperCase()],
+    ['Carrier ID', cc.CARRIER_ID ? cc.CARRIER_ID : 'UNKNOWN (-1)'],
+    ['Mode Tambah SIM', cc.PHANTOM === '1' ? 'Ya' : 'Tidak'],
+  ];
+  el.className = 'kv in';
+  el.innerHTML = rows.map(([k, v]) => v !== ''
+    ? `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>` : '').join('');
 }
 
-if (typeof document !== 'undefined') {
-document.getElementById('settingsReload').addEventListener('click', loadSettings);
-document.querySelectorAll('#settings input[data-flag]').forEach(input => {
-  input.addEventListener('change', () => mutate(async () => {
-    const key = input.dataset.flag;
-    const value = input.checked ? '1' : '0';
-    input.disabled = true;
-    const cmd = guardedMutationCmd(`sandboxid set-flag ${shq(key)} ${value}`);
-    const r = await run(cmd);
-    if (!r.ok) {
-      toast(trimTitle(r.err.message || 'Gagal menyimpan pengaturan'), {
-        kind: 'error', detail: r.err.stdout || r.err.stderr || '',
-      });
-    } else {
-      toast(`${key}=${value} tersimpan`, { kind: 'ok', detail: r.out });
-    }
-    await loadSettings();
-  }));
-});
+async function loadSim() {
+  const el = document.getElementById('simCurrent');
+  el.className = 'kv';
+  el.innerHTML = skKv(3);
+  if (!SIM_DB || !SIM_DB.length) {
+    const r = await run(`cat ${shq(CARRIERS)} 2>/dev/null || true`);
+    SIM_DB = (r.ok && r.out.trim()) ? parseCarriersTsv(r.out) : [];
+  }
+  if (!SIM_DB.length) {
+    document.getElementById('simState').textContent = '—';
+    el.className = 'kv';
+    el.innerHTML = '<div class="empty">carriers.tsv tidak terbaca.</div>';
+    return;
+  }
+  const rc = await run(`cat ${shq(CARRIER_CONF)} 2>/dev/null || true`);
+  const cc = (rc.ok && rc.out.trim()) ? parseProp(rc.out) : {};
+  simFill(cc);
+  document.getElementById('simPhantom').checked = (cc.PHANTOM === '1');
+  renderSimCurrent(cc);
 }
 
-function targetSaveCmd(content, moddir = MODDIR) {
-  const env = moduleEnv(moddir);
-  const targets = moddir + '/target.txt';
-  const tmp = moddir + '/.target.webui.$$';
-  const backup = moddir + '/.target.webui-backup.$$';
-  const b64 = (typeof Buffer !== 'undefined')
-    ? Buffer.from(content, 'utf8').toString('base64')
-    : btoa(unescape(encodeURIComponent(content)));
-  return `${env} && umask 077 && ${actionMutationGuardShell(moddir)}; ` +
-    `_sbx_tmp=${shq(tmp)}; _sbx_backup=${shq(backup)}; _sbx_had_old=0; ` +
-    `rm -f "$_sbx_tmp" "$_sbx_backup" || exit $?; ` +
-    `printf '%s' ${shq(b64)} | base64 -d > "$_sbx_tmp" || ` +
-    `{ _sbx_rc=$?; rm -f "$_sbx_tmp" "$_sbx_backup"; exit "$_sbx_rc"; }; ` +
-    `chmod 0644 "$_sbx_tmp" || ` +
-    `{ _sbx_rc=$?; rm -f "$_sbx_tmp" "$_sbx_backup"; exit "$_sbx_rc"; }; ` +
-    `if [ -e ${shq(targets)} ]; then ` +
-    `cp -p ${shq(targets)} "$_sbx_backup" || ` +
-    `{ _sbx_rc=$?; rm -f "$_sbx_tmp" "$_sbx_backup"; exit "$_sbx_rc"; }; ` +
-    `_sbx_had_old=1; fi; ` +
-    `mv -f "$_sbx_tmp" ${shq(targets)} || ` +
-    `{ _sbx_rc=$?; rm -f "$_sbx_tmp" "$_sbx_backup"; exit "$_sbx_rc"; }; ` +
-    `sandboxid targets --processes >/dev/null 2>&1; _sbx_rc=$?; ` +
-    `if [ "$_sbx_rc" -ne 0 ]; then ` +
-    `if [ "$_sbx_had_old" -eq 1 ]; then ` +
-    `mv -f "$_sbx_backup" ${shq(targets)} || exit 32; ` +
-    `else rm -f ${shq(targets)} || exit 32; fi; exit "$_sbx_rc"; fi; ` +
-    `rm -f "$_sbx_backup" || exit $?`;
+function carrierCmd(arg) {
+  return `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
+    `{ printf '[%s] ==> carrier ${arg.split('|')[0] === 'off' ? 'off' : 'set'} (webui)\\n' "$(date '+%F %T')"; ` +
+    `sh ${shq(ROTATE_SH)} carrier ${shq(arg)} 2>&1; } | tee -a ${shq(ROTATE_LOG)}`;
 }
+
+document.getElementById('simCountry').addEventListener('change', () => simFillCarriers(null));
+
+document.getElementById('simApply').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
+  const carSel = document.getElementById('simCarrier');
+  const sel = carSel.value;
+  if (!sel) { toast('Pilih operator dulu', { kind: 'warn' }); return; }
+  const phantom = document.getElementById('simPhantom').checked ? '1' : '0';
+  const opt = carSel.options[carSel.selectedIndex];
+  const cid = (opt && opt.dataset ? opt.dataset.cid : '') || '';
+  const r = await run(carrierCmd(`${sel}|${phantom}|${cid}`));
+  finishRotate(r, 'SIM / operator');
+  loadSim();
+}));
+
+document.getElementById('simOff').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
+  const r = await run(carrierCmd('off'));
+  finishRotate(r, 'SIM / operator');
+  document.getElementById('simPhantom').checked = false;
+  loadSim();
+}));
 
 async function loadTargets() {
   const ta = document.getElementById('tgtArea');
@@ -783,22 +546,18 @@ async function loadTargets() {
   ta.value = r.ok ? r.out : '';
   document.getElementById('tgtStatus').textContent = '';
 }
-if (typeof document !== 'undefined') {
 document.getElementById('tgtReload').addEventListener('click', loadTargets);
-document.getElementById('tgtSave').addEventListener('click', ev => withLoading(ev.currentTarget, () =>
-  mutate(async () => {
-    const ta = document.getElementById('tgtArea');
-    const content = ta.value.replace(/\r\n/g, '\n');
-    const r = await run(targetSaveCmd(content));
-    if (!r.ok) {
-      toast('target.txt ditolak; file lama dipertahankan', { kind: 'error', detail: r.err.stdout || r.err.stderr || r.err.message });
-      return;
-    }
-    toast('target.txt tersimpan', { kind: 'ok' });
-    const lines = content.split('\n').filter(line => line.trim() && !line.trim().startsWith('#')).length;
-    document.getElementById('tgtStatus').textContent = `${lines} proses \u00b7 dimuat ulang saat spawn berikutnya`;
-  })));
-}
+document.getElementById('tgtSave').addEventListener('click', (ev) => withLoading(ev.currentTarget, async () => {
+  const ta = document.getElementById('tgtArea');
+  const content = ta.value.replace(/\r\n/g, '\n');
+  const b64 = btoa(unescape(encodeURIComponent(content)));
+  const cmd = `echo ${shq(b64)} | base64 -d > ${shq(TARGETS)} && chmod 0644 ${shq(TARGETS)}`;
+  const r = await safeExec(cmd, 'target.txt tersimpan');
+  if (r.ok) {
+    const lines = content.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length;
+    document.getElementById('tgtStatus').textContent = `${lines} paket \u00b7 dimuat ulang saat spawn berikutnya`;
+  }
+}));
 
 const ST_CAT = {
   identitas: 'Identitas', koherensi: 'Koherensi', vbmeta: 'Verified boot', build: 'Build',
@@ -874,10 +633,8 @@ async function runSelftest(showToast) {
 
 async function loadSelftest() { return runSelftest(false); }
 
-if (typeof document !== 'undefined') {
 document.getElementById('stRun').addEventListener('click', (ev) =>
   withLoading(ev.currentTarget, () => runSelftest(true)));
-}
 
 async function loadLog() {
   const src = document.getElementById('logSrc').value;
@@ -894,10 +651,8 @@ async function loadLog() {
   body.innerHTML = renderLogHtml(text);
   body.scrollTop = body.scrollHeight;
 }
-if (typeof document !== 'undefined') {
 document.getElementById('logRefresh').addEventListener('click', loadLog);
 document.getElementById('logSrc').addEventListener('change', loadLog);
-}
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
@@ -925,7 +680,6 @@ function initTheme() {
   });
 }
 
-if (typeof document !== 'undefined') {
 (function boot() {
   initTheme();
   toastInit();
@@ -945,22 +699,6 @@ if (typeof document !== 'undefined') {
     const v = await run(`sed -n 's/^version=//p' ${shq(MODDIR)}/module.prop 2>/dev/null | head -n 1`);
     if (v.ok && v.out.trim()) document.getElementById('version').textContent = v.out.trim();
     await run(`mkdir -p ${shq(MODDIR)}/debug && touch ${shq(ROTATE_LOG)} ${shq(ACTION_LOG)}`);
-    await loadPersona();
-    const snapshot = await readActionSnapshot('');
-    if (snapshot.state.status === 'running' && RUN_ID_RE.test(snapshot.state.run || '')) {
-      setActionProgress(snapshot.state);
-      await mutate(() => reconcileAction(snapshot.state.run, 'Action ditemukan masih berjalan saat WebUI dibuka.'));
-    }
+    loadPersona();
   })();
 })();
-}
-
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    actionMutationGuardShell, actionPresentation, actionResult,
-    actionRunFromRecords, cleanupBridgeCallback, exec, guardedMutationCmd,
-    isActionLive, loggedScriptCmd, moduleEnv, mutate, ownerProcessProbeShell,
-    parseActionProtocol, parseKeyValues, shq,
-    splitActionSnapshot, targetSaveCmd,
-  };
-}

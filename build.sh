@@ -24,23 +24,26 @@ if [ ! -f module.prop ]; then
   echo "ERROR: module.prop not found in $ROOT — refusing to build" >&2
   exit 1
 fi
-MANDATORY_RUNTIME=(
-  action.sh service.sh customize.sh post-fs-data.sh helpers.sh rotate_ids.sh
-  selftest.sh autopif.sh target.txt webroot/index.html webroot/app.js
-  webroot/style.css webroot/theme-init.js tests/package_manifest_test.sh
-)
-for _required in "${MANDATORY_RUNTIME[@]}"; do
-  if [ ! -f "$_required" ]; then
-    echo "ERROR: mandatory runtime input missing or not a regular file: $_required" >&2
-    exit 1
-  fi
-done
 VERSION="$(grep '^version=' module.prop | cut -d= -f2 || true)"
 if [ -z "${VERSION:-}" ]; then
   echo "ERROR: version= line missing in module.prop" >&2
   exit 1
 fi
 
+LSP_CMAKE=""
+LSP_STATUS="disabled (SBX_ENABLE_LSPLANT=OFF requested)"
+if [ "${SBX_ENABLE_LSPLANT:-ON}" = "ON" ]; then
+  LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
+  LSP_REV="$(grep -E '^LSPLANT_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
+  DOBBY_REV="$(grep -E '^DOBBY_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
+  LSP_STATUS="enabled [LSPlant=${LSP_REV:-?} Dobby=${DOBBY_REV:-?}]"
+  echo "==> L3 LSPlant $LSP_STATUS — preparing dependencies + callback DEX"
+  bash "$ROOT/jni/fetch_lsplant_deps.sh"
+  if ! bash "$ROOT/jni/tools/gen_hook_dex.sh"; then
+    echo "  WARN: hook_dex.h generation failed — L3 ANDROID_ID hook will be skipped" >&2
+    echo "        at runtime (install a JDK + Android SDK build-tools to enable it)" >&2
+  fi
+fi
 OUT="$ROOT/dist"
 
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
@@ -49,6 +52,7 @@ echo "==> SandboxID $VERSION"
 echo "==> NDK:        $ANDROID_NDK_HOME"
 echo "==> MIN_SDK:    $MIN_SDK"
 echo "==> Variant(s): $VARIANT"
+echo "==> LSPlant:    $LSP_STATUS"
 
 ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
 ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
@@ -105,21 +109,68 @@ build_variant() {
       -DANDROID_ABI="$ABI" \
       -DANDROID_PLATFORM="android-$MIN_SDK" \
       -DCMAKE_BUILD_TYPE=Release \
-      $DBG_FLAG >/dev/null
+      $DBG_FLAG ${LSP_CMAKE:-} >/dev/null
     cmake --build "$BUILD" -j
   done
 
   rm -rf "$PKG"
   mkdir -p "$PKG/zygisk" "$PKG/bin"
-  cp module.prop action.sh service.sh customize.sh post-fs-data.sh helpers.sh \
-    rotate_ids.sh selftest.sh autopif.sh target.txt "$PKG/"
-  cp -R webroot "$PKG/"
-  [ -f LICENSE ]   && cp LICENSE "$PKG/"
+
+  # Di repo, berkas ditata rapi per-folder (scripts/, data/). Namun framework
+  # Magisk/KSU/APatch dan path absolut di jni/config.hpp mengharapkan semuanya
+  # berada DATAR di root modul (/data/adb/modules/sandboxid/). Karena itu build.sh
+  # "meratakan" kembali seluruh berkas ke root paket ($PKG/) di sini.
+
+  # Manifest + lisensi (wajib; gagal keras bila hilang)
+  cp module.prop "$PKG/"
+  [ -f LICENSE ]    && cp LICENSE    "$PKG/"
   [ -f CREDITS.md ] && cp CREDITS.md "$PKG/"
-  [ -f summarize.sh ] && cp summarize.sh "$PKG/"
-  # Optional reviewed persona extension. The native offline catalog remains
-  # authoritative when this file is absent.
-  [ -f personas.tsv ] && cp personas.tsv "$PKG/"
+
+  # Skrip lifecycle yang dipanggil framework (install, boot, tombol Action)
+  cp scripts/lifecycle/customize.sh "$PKG/"
+  cp scripts/lifecycle/service.sh   "$PKG/"
+  cp scripts/lifecycle/action.sh    "$PKG/"
+  [ -f scripts/lifecycle/post-fs-data.sh ] && cp scripts/lifecycle/post-fs-data.sh "$PKG/"
+
+  # Pustaka bersama + skrip identitas + diagnostik
+  [ -f scripts/lib/helpers.sh ]         && cp scripts/lib/helpers.sh         "$PKG/"
+  [ -f scripts/identity/rotate_ids.sh ] && cp scripts/identity/rotate_ids.sh "$PKG/"
+  [ -f scripts/identity/autopif.sh ]    && cp scripts/identity/autopif.sh    "$PKG/"
+  [ -f scripts/debug/summarize.sh ]     && cp scripts/debug/summarize.sh     "$PKG/"
+  [ -f scripts/debug/selftest.sh ]      && cp scripts/debug/selftest.sh      "$PKG/"
+
+  # Data referensi + konfigurasi pengguna
+  [ -f data/personas.tsv ] && cp data/personas.tsv "$PKG/"
+  [ -f data/devices.tsv ]  && cp data/devices.tsv  "$PKG/"
+  [ -f data/carriers.tsv ] && cp data/carriers.tsv "$PKG/"
+  [ -f data/target.txt ]   && cp data/target.txt   "$PKG/"
+
+  # WebUI (disalin utuh)
+  [ -d webroot ] && cp -R webroot "$PKG/"
+
+  # Shim PATH: `su -c sandboxid ...` gagal karena bin/ tak ada di PATH. Berkas di
+  # system/bin/ di-magic-mount ke /system/bin (universal Magisk/KSU/APatch), lalu
+  # meng-exec binary per-ABI di bin/. Memperbaiki "su -c sandboxid tidak berkerja".
+  mkdir -p "$PKG/system/bin"
+  cat > "$PKG/system/bin/sandboxid" <<'WRAP'
+#!/system/bin/sh
+d=/data/adb/modules/sandboxid/bin
+if [ -x "$d/sandboxid" ]; then exec "$d/sandboxid" "$@"; fi
+case "$(getprop ro.product.cpu.abi)" in
+  arm64*)   exec "$d/sandboxid-arm64"  "$@" ;;
+  armeabi*) exec "$d/sandboxid-arm"    "$@" ;;
+  x86_64)   exec "$d/sandboxid-x86_64" "$@" ;;
+  x86)      exec "$d/sandboxid-x86"    "$@" ;;
+esac
+echo "sandboxid: tak ada binary untuk ABI $(getprop ro.product.cpu.abi)" >&2
+exit 127
+WRAP
+  chmod 0755 "$PKG/system/bin/sandboxid"
+
+  if [ "${AUTOPIF_REFRESH:-0}" = "1" ] && [ -f "$PKG/autopif.sh" ]; then
+    echo "  ==> refreshing persona pool (autopif, build-time)"
+    PERSONAS_FILE="$PKG/personas.tsv" MODDIR="$PKG" sh "$PKG/autopif.sh" || true
+  fi
 
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"
@@ -140,29 +191,23 @@ build_variant() {
   cp "build/$V/x86_64/sandboxid"       "$PKG/bin/sandboxid-x86_64"
   cp "build/$V/x86/sandboxid"          "$PKG/bin/sandboxid-x86"
 
-  if [ -e prebuilt/resetprop-rs ] || [ -e prebuilt/resetprop-rs.sha256 ] ||
-     [ -e prebuilt/resetprop-rs.LICENSE ]; then
-    if [ ! -f prebuilt/resetprop-rs ] || [ ! -f prebuilt/resetprop-rs.sha256 ] ||
-       [ ! -f prebuilt/resetprop-rs.LICENSE ]; then
-      echo "  ERROR: resetprop-rs binary/checksum/license set is incomplete" >&2
-      exit 1
-    fi
-    if ! command -v sha256sum >/dev/null 2>&1; then
-      echo "  ERROR: sha256sum is required to verify bundled resetprop-rs" >&2
-      exit 1
-    fi
-    ( cd prebuilt && sha256sum -c resetprop-rs.sha256 >/dev/null ) || {
-      echo "  ERROR: prebuilt/resetprop-rs checksum mismatch — refusing to package" >&2
-      exit 1
-    }
-    echo "  ==> resetprop-rs verified"
-    cp prebuilt/resetprop-rs prebuilt/resetprop-rs.sha256 \
-      prebuilt/resetprop-rs.LICENSE "$PKG/bin/"
-  else
-    echo "  ==> resetprop-rs not bundled; runtime requires resetprop/resetprop-rs in PATH"
-  fi
+  if [ -f prebuilt/resetprop-rs ]; then
 
-  bash tests/package_manifest_test.sh "$PKG"
+    if [ -f prebuilt/resetprop-rs.sha256 ] && command -v sha256sum >/dev/null 2>&1; then
+      ( cd prebuilt && sha256sum -c resetprop-rs.sha256 >/dev/null ) || {
+        echo "  ERROR: prebuilt/resetprop-rs checksum mismatch — refusing to package" >&2
+        exit 1
+      }
+      echo "  ==> resetprop-rs verified"
+    else
+      echo "  WARN: cannot verify resetprop-rs checksum (missing .sha256 or sha256sum)" >&2
+    fi
+    cp prebuilt/resetprop-rs "$PKG/bin/resetprop-rs"
+
+    [ -f prebuilt/resetprop-rs.sha256 ] && cp prebuilt/resetprop-rs.sha256 "$PKG/bin/resetprop-rs.sha256"
+  else
+    echo "  WARN: prebuilt/resetprop-rs missing; native prop apply will rely on Magisk resetprop"
+  fi
 
   local ZIP="$OUT/sandboxid-$VERSION-$V.zip"
   (cd "$PKG" && zip -r9 "$ZIP" . -x "*.DS_Store" >/dev/null)

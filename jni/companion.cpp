@@ -7,7 +7,6 @@
 #include <errno.h>
 #include <sched.h>
 #include <sys/mount.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
@@ -18,7 +17,6 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include <unordered_set>
 #include <array>
 #include <fstream>
 #include <sstream>
@@ -29,7 +27,6 @@
 #include <android/log.h>
 #include "config.hpp"
 #include "sbx_mountinfo.hpp"
-#include "sbx_transaction.hpp"
 
 #define LOG_TAG "SandboxIDCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -48,88 +45,24 @@ static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 
 static void watch_target_death(uint32_t pid, int client_fd);
 
-struct TargetFileStamp {
-    decltype(((struct stat*)nullptr)->st_dev) dev = 0;
-    decltype(((struct stat*)nullptr)->st_ino) ino = 0;
-    decltype(((struct stat*)nullptr)->st_size) size = 0;
-    decltype(((struct stat*)nullptr)->st_mtim.tv_sec) mtime_sec = 0;
-    decltype(((struct stat*)nullptr)->st_mtim.tv_nsec) mtime_nsec = 0;
-    decltype(((struct stat*)nullptr)->st_ctim.tv_sec) ctime_sec = 0;
-    decltype(((struct stat*)nullptr)->st_ctim.tv_nsec) ctime_nsec = 0;
-    bool valid = false;
-};
-
 static std::vector<std::string> g_targets;
-static std::unordered_set<std::string> g_target_set;
-static TargetFileStamp g_targets_stamp;
-static std::mutex g_targets_mtx;
+static time_t                   g_targets_mtime_sec = 0;
+static long                     g_targets_mtime_nsec = 0;
+static std::recursive_mutex     g_targets_mtx;
 
-static bool same_target_stamp(const TargetFileStamp& stamp,
-                              const struct stat& st) {
-    return stamp.valid && stamp.dev == st.st_dev && stamp.ino == st.st_ino &&
-           stamp.size == st.st_size && stamp.mtime_sec == st.st_mtim.tv_sec &&
-           stamp.mtime_nsec == st.st_mtim.tv_nsec &&
-           stamp.ctime_sec == st.st_ctim.tv_sec &&
-           stamp.ctime_nsec == st.st_ctim.tv_nsec;
-}
+static void reload_targets_if_changed() {
+    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
+    struct stat st{};
+    bool have = (::stat(sandboxid::TARGET_FILE, &st) == 0);
+    if (!have) return;
 
-static bool same_file_state(const struct stat& a, const struct stat& b) {
-    return a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
-           a.st_size == b.st_size && a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
-           a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
-           a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
-           a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
-}
-
-static void reload_targets_if_changed_locked() {
-    int fd = ::open(sandboxid::TARGET_FILE, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return;
-
-    struct stat before{};
-    if (::fstat(fd, &before) != 0) {
-        ::close(fd);
+    if (!g_targets.empty() &&
+        st.st_mtim.tv_sec == g_targets_mtime_sec &&
+        st.st_mtim.tv_nsec == g_targets_mtime_nsec)
         return;
-    }
 
-    if (same_target_stamp(g_targets_stamp, before)) {
-        ::close(fd);
-        return;
-    }
-
-    std::string contents;
-    if (before.st_size > 0)
-        contents.reserve(static_cast<size_t>(before.st_size));
-    char buf[4096];
-    bool complete = false;
-    for (;;) {
-        ssize_t n = ::read(fd, buf, sizeof(buf));
-        if (n > 0) {
-            contents.append(buf, static_cast<size_t>(n));
-            continue;
-        }
-        if (n == 0) {
-            complete = true;
-            break;
-        }
-        if (errno == EINTR) continue;
-        int read_errno = errno;
-        LOGW("target.txt reload aborted after read failure errno=%d", read_errno);
-        break;
-    }
-
-    struct stat after{};
-    bool stable = complete && (::fstat(fd, &after) == 0) &&
-                  same_file_state(before, after);
-    ::close(fd);
-    if (!stable) {
-        if (complete)
-            LOGW("target.txt changed during reload; keeping previous target set");
-        return;
-    }
-
-    std::istringstream f(contents);
+    std::ifstream f(sandboxid::TARGET_FILE);
     std::vector<std::string> next;
-    std::unordered_set<std::string> next_set;
     std::string line;
     while (std::getline(f, line)) {
         size_t hash = line.find('#');
@@ -141,40 +74,30 @@ static void reload_targets_if_changed_locked() {
         size_t s = line.find_first_not_of(" \t");
         if (s == std::string::npos) continue;
         line = line.substr(s);
-        if (line.empty() || !next_set.insert(line).second) continue;
+        if (line.empty()) continue;
         next.push_back(line);
     }
+    if (next.empty()) {
 
-    if (next.empty() && !g_targets.empty()) {
-        LOGW("target.txt now yields zero targets (was %zu); spoofing will be "
-             "disabled for all packages until target.txt is repopulated",
-             g_targets.size());
-    }
-
-    g_targets = std::move(next);
-    g_target_set = std::move(next_set);
-    g_targets_stamp = {
-        after.st_dev, after.st_ino, after.st_size,
-        after.st_mtim.tv_sec, after.st_mtim.tv_nsec,
-        after.st_ctim.tv_sec, after.st_ctim.tv_nsec, true,
-    };
-    LOGI("target.txt loaded: %zu pkg(s) dev=%llu ino=%llu size=%lld "
-         "mtime=%ld.%09ld", g_targets.size(),
-         static_cast<unsigned long long>(after.st_dev),
-         static_cast<unsigned long long>(after.st_ino),
-         static_cast<long long>(after.st_size),
-         static_cast<long>(after.st_mtim.tv_sec),
-         static_cast<long>(after.st_mtim.tv_nsec));
+        LOGW("target.txt has 0 valid entries; keeping previous list (%zu pkgs)", g_targets.size());
+    } else {
+        g_targets = std::move(next);
+        LOGI("target.txt loaded: %zu pkg(s) mtime=%ld.%09ld", g_targets.size(),
+             (long)st.st_mtim.tv_sec, (long)st.st_mtim.tv_nsec);
 #ifdef SBX_DEBUG
-    for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
+        for (const auto& p : g_targets) LOGD("  target: %s", p.c_str());
 #endif
+    }
+    g_targets_mtime_sec  = st.st_mtim.tv_sec;
+    g_targets_mtime_nsec = st.st_mtim.tv_nsec;
 }
 
 static bool is_target(const std::string& pkg) {
     if (pkg.empty()) return false;
-    std::lock_guard<std::mutex> lock(g_targets_mtx);
-    reload_targets_if_changed_locked();
-    return g_target_set.find(pkg) != g_target_set.end();
+    std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
+    reload_targets_if_changed();
+    for (const auto& t : g_targets) if (t == pkg) return true;
+    return false;
 }
 
 static std::string read_file(const char* p) {
@@ -183,80 +106,6 @@ static std::string read_file(const char* p) {
     std::stringstream ss;
     ss << f.rdbuf();
     return ss.str();
-}
-
-enum class BoundIdentityStatus {
-    Ready,
-    Missing,
-    Busy,
-    Invalid,
-};
-
-static BoundIdentityStatus read_bound_identity(std::string& identity) {
-    identity.clear();
-    int lock_fd = ::open(sandboxid::STATE_LOCK, O_RDONLY | O_CLOEXEC);
-    if (lock_fd < 0 && errno == ENOENT)
-        lock_fd = ::open(sandboxid::STATE_LOCK,
-                         O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (lock_fd < 0) {
-        LOGE("canonical state lock open failed errno=%d", errno);
-        return BoundIdentityStatus::Invalid;
-    }
-    if (::flock(lock_fd, LOCK_SH | LOCK_NB) != 0) {
-        const int lock_errno = errno;
-        ::close(lock_fd);
-        if (lock_errno == EWOULDBLOCK || lock_errno == EAGAIN)
-            return BoundIdentityStatus::Busy;
-        LOGE("canonical state lock failed errno=%d", lock_errno);
-        return BoundIdentityStatus::Invalid;
-    }
-    identity = read_file(sandboxid::IDENTITY_FILE);
-    std::string metadata = read_file(sandboxid::IDENTITY_META);
-    ::flock(lock_fd, LOCK_UN);
-    ::close(lock_fd);
-    if (identity.empty() && metadata.empty()) return BoundIdentityStatus::Missing;
-    sbxtxn::CanonicalMeta parsed;
-    std::string error;
-    if (identity.empty() || metadata.empty() ||
-        !sbxtxn::parse_identity_meta(metadata, parsed, error) ||
-        !sbxtxn::identity_matches(parsed, identity)) {
-        LOGE("canonical identity/meta rejected: %s", error.empty()
-             ? "identity/meta pair is incomplete or hash-mismatched" : error.c_str());
-        identity.clear();
-        return BoundIdentityStatus::Invalid;
-    }
-    return BoundIdentityStatus::Ready;
-}
-
-static void upsert_identity_value(std::string& data, const std::string& key,
-                                  const std::string& value) {
-    const std::string prefix = key + "=";
-    std::string next;
-    next.reserve(data.size() + prefix.size() + value.size() + 1);
-    bool replaced = false;
-    size_t pos = 0;
-    while (pos < data.size()) {
-        size_t eol = data.find('\n', pos);
-        size_t end = eol == std::string::npos ? data.size() : eol + 1;
-        if (data.compare(pos, prefix.size(), prefix) == 0) {
-            if (!replaced) {
-                next += prefix;
-                next += value;
-                next.push_back('\n');
-                replaced = true;
-            }
-        } else {
-            next.append(data, pos, end - pos);
-        }
-        pos = end;
-    }
-    if (!replaced) {
-        if (!next.empty() && next.back() != '\n') next.push_back('\n');
-        next += prefix;
-        next += value;
-        next.push_back('\n');
-    }
-    data.swap(next);
 }
 
 struct MountResult {
@@ -287,10 +136,15 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
         ::close(pipefd[0]);
         MountResult r;
 
+        // NOTE: this runs in a fork()ed child of the multithreaded companion, so only
+        // async-signal-safe calls are permitted until _exit. snprintf()/open() are safe;
+        // std::string concatenation (heap alloc) is NOT — build the path on the stack.
         std::array<int, sandboxid::BIND_ENTRIES_N> src_fds{};
         for (size_t i = 0; i < sandboxid::BIND_ENTRIES_N; ++i) {
-            std::string src = std::string(sandboxid::MOUNTDIR) + "/" + sandboxid::BIND_ENTRIES[i].src_rel;
-            src_fds[i] = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
+            char src[512];
+            ::snprintf(src, sizeof(src), "%s/%s",
+                       sandboxid::MOUNTDIR, sandboxid::BIND_ENTRIES[i].src_rel);
+            src_fds[i] = ::open(src, O_RDONLY | O_CLOEXEC);
         }
 
         char path[64];
@@ -379,89 +233,174 @@ struct HideResult {
     int32_t  first_fail_errno = 0;
 };
 
-static uint32_t do_hide_via_fork(uint32_t target_pid) {
+// Bug #1b: the original single child ran std::ifstream (read_file) and
+// sbxmnt::select_umount_targets — both allocate — INSIDE a fork() of the
+// multithreaded companion, where only async-signal-safe calls are legal (a
+// heap lock held by another thread at fork time would deadlock the child).
+//
+// Split into two async-signal-safe children with all allocation kept in the
+// parent, reusing the audited selection logic unchanged:
+//   child A: setns(target) -> raw read(/proc/self/mountinfo) -> pipe to parent
+//   parent : select_umount_targets(raw)  (normal context: malloc ok)
+//   child B: setns(target) -> MS_SLAVE -> umount2() each selected path
+static bool sbx_hide_read_mountinfo(uint32_t target_pid, std::string& out,
+                                    int32_t& ns_open_errno, int32_t& setns_errno,
+                                    int32_t& read_errno) {
+    struct MiHdr { int32_t ns_open_errno, setns_errno, read_errno; };
+    // Chunk buffer only: NOT static, so concurrent companion threads/forks never
+    // alias the same storage. It is stack-local and present at fork (no child
+    // malloc); the child streams mountinfo to the parent in fixed-size chunks
+    // instead of capping into one fixed-size buffer, so no truncation can occur
+    // regardless of mountinfo size.
+    constexpr uint32_t kChunk = 64 * 1024;
+    char chunk[kChunk];
+
     int pipefd[2];
-    if (::pipe(pipefd) != 0) {
-        LOGE("hide: pipe failed errno=%d", errno);
-        return 0;
-    }
+    if (::pipe(pipefd) != 0) { read_errno = errno; return false; }
 
     pid_t child = ::fork();
-    if (child < 0) {
-        LOGE("hide: fork failed errno=%d", errno);
-        ::close(pipefd[0]); ::close(pipefd[1]);
-        return 0;
-    }
+    if (child < 0) { read_errno = errno; ::close(pipefd[0]); ::close(pipefd[1]); return false; }
 
-    if (child == 0) {
-
+    if (child == 0) {                        // ---- child A (async-signal-safe only) ----
         ::close(pipefd[0]);
-        HideResult r;
-
+        MiHdr h{0, 0, 0};
+        int mf = -1;
         char path[64];
         ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
-        int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
-        if (tgt_ns < 0) {
-            r.ns_open_errno = errno;
-        } else if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
-            r.setns_errno = errno;
-            ::close(tgt_ns);
+        int ns = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (ns < 0) {
+            h.ns_open_errno = errno;
+        } else if (::setns(ns, CLONE_NEWNS) != 0) {
+            h.setns_errno = errno; ::close(ns);
         } else {
-
-            if (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) != 0)
-                r.slave_errno = errno;
-
-            std::string mi = read_file("/proc/self/mountinfo");
-            if (mi.empty()) {
-                r.mountinfo_errno = errno ? errno : ENOENT;
-            } else {
-                std::vector<std::string> targets = sbxmnt::select_umount_targets(mi);
-                r.candidates = (uint32_t)targets.size();
-
-                for (const auto& mp : targets) {
-                    if (::umount2(mp.c_str(), MNT_DETACH) == 0) {
-                        r.detached++;
-                    } else {
-                        if (!r.first_fail_errno) r.first_fail_errno = errno;
-                        r.fail++;
-                    }
-                }
-            }
-            ::close(tgt_ns);
+            mf = ::open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
+            if (mf < 0) h.read_errno = errno ? errno : ENOENT;
+            ::close(ns);
         }
-
-        sandboxid::write_full(pipefd[1], &r, sizeof(r));
+        sandboxid::write_full(pipefd[1], &h, sizeof(h));
+        if (mf >= 0) {
+            for (;;) {
+                ssize_t k = ::read(mf, chunk, kChunk);
+                if (k < 0) { if (errno == EINTR) continue; break; }
+                uint32_t clen = (uint32_t)k;
+                if (!sandboxid::write_full(pipefd[1], &clen, sizeof(clen))) break;
+                if (clen == 0) break;                 // EOF marker
+                if (!sandboxid::write_full(pipefd[1], chunk, clen)) break;
+            }
+            ::close(mf);
+        }
         ::close(pipefd[1]);
         ::_exit(0);
     }
 
-    ::close(pipefd[1]);
-    HideResult r;
+    ::close(pipefd[1]);                       // ---- parent ----
+    MiHdr h{};
+    bool got = sandboxid::read_full(pipefd[0], &h, sizeof(h));
+    out.clear();
+    if (got && !h.ns_open_errno && !h.setns_errno && !h.read_errno) {
+        for (;;) {
+            uint32_t clen = 0;
+            if (!sandboxid::read_full(pipefd[0], &clen, sizeof(clen))) { got = false; break; }
+            if (clen == 0) break;                          // EOF marker
+            out.append(clen, '\0');
+            if (!sandboxid::read_full(pipefd[0], &out[out.size() - clen], clen)) { got = false; break; }
+        }
+    }
+    ::close(pipefd[0]);
+    ::waitpid(child, nullptr, 0);
+
+    ns_open_errno = h.ns_open_errno;
+    setns_errno   = h.setns_errno;
+    read_errno    = h.read_errno;
+    if (!got) { if (!read_errno) read_errno = EIO; return false; }
+    if (h.ns_open_errno || h.setns_errno || h.read_errno) return false;
+    return true;
+}
+
+// child B: apply the umounts the parent selected. `targets` lives in parent memory
+// and is inherited read-only by the fork — the child only reads it and calls
+// setns/mount/umount2 (all async-signal-safe).
+static bool sbx_hide_apply_umounts(uint32_t target_pid,
+                                   const std::vector<std::string>& targets, HideResult& r) {
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) { r.first_fail_errno = errno; return false; }
+
+    pid_t child = ::fork();
+    if (child < 0) { r.first_fail_errno = errno; ::close(pipefd[0]); ::close(pipefd[1]); return false; }
+
+    if (child == 0) {                         // ---- child B (async-signal-safe only) ----
+        ::close(pipefd[0]);
+        HideResult cr;
+        cr.candidates = (uint32_t)targets.size();
+        char path[64];
+        ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
+        int ns = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (ns < 0) {
+            cr.ns_open_errno = errno;
+        } else if (::setns(ns, CLONE_NEWNS) != 0) {
+            cr.setns_errno = errno; ::close(ns);
+        } else {
+            if (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) != 0)
+                cr.slave_errno = errno;
+            for (const auto& mp : targets) {  // read-only iteration: no alloc
+                if (::umount2(mp.c_str(), MNT_DETACH) == 0) {
+                    cr.detached++;
+                } else {
+                    if (!cr.first_fail_errno) cr.first_fail_errno = errno;
+                    cr.fail++;
+                }
+            }
+            ::close(ns);
+        }
+        sandboxid::write_full(pipefd[1], &cr, sizeof(cr));
+        ::close(pipefd[1]);
+        ::_exit(0);
+    }
+
+    ::close(pipefd[1]);                        // ---- parent ----
     bool got = sandboxid::read_full(pipefd[0], &r, sizeof(r));
     ::close(pipefd[0]);
+    ::waitpid(child, nullptr, 0);
+    return got;
+}
 
-    int status = 0;
-    ::waitpid(child, &status, 0);
+static uint32_t do_hide_via_fork(uint32_t target_pid) {
+    HideResult r;
 
-    if (!got) {
+    std::string mi;
+    if (!sbx_hide_read_mountinfo(target_pid, mi, r.ns_open_errno, r.setns_errno, r.mountinfo_errno)) {
+        if (r.ns_open_errno)
+            LOGE("hide pid=%u: open /proc/%u/ns/mnt failed errno=%d", target_pid, target_pid, r.ns_open_errno);
+        else if (r.setns_errno)
+            LOGE("hide pid=%u: setns failed errno=%d", target_pid, r.setns_errno);
+        else
+            LOGE("hide pid=%u: baca /proc/self/mountinfo gagal errno=%d", target_pid, r.mountinfo_errno);
+        return 0;
+    }
+
+    // Parent-side selection (malloc is safe here): reuse the audited matcher.
+    std::vector<std::string> targets = sbxmnt::select_umount_targets(mi);
+    r.candidates = (uint32_t)targets.size();
+    if (targets.empty()) {
+        LOGI("hide pid=%u: 0 candidate(s) [%s]", target_pid, SBX_VARIANT_TAG);
+        return 0;
+    }
+
+    if (!sbx_hide_apply_umounts(target_pid, targets, r)) {
         LOGE("hide child for pid=%u produced no result (crashed?)", target_pid);
         return 0;
     }
     if (r.ns_open_errno) {
-        LOGE("hide pid=%u: open /proc/%u/ns/mnt failed errno=%d", target_pid, target_pid, r.ns_open_errno);
+        LOGE("hide pid=%u: open /proc/%u/ns/mnt failed errno=%d (phase 2)", target_pid, target_pid, r.ns_open_errno);
         return 0;
     }
     if (r.setns_errno) {
-        LOGE("hide pid=%u: setns failed errno=%d", target_pid, r.setns_errno);
+        LOGE("hide pid=%u: setns failed errno=%d (phase 2)", target_pid, r.setns_errno);
         return 0;
     }
     if (r.slave_errno) {
         LOGW("hide pid=%u: MS_SLAVE gagal errno=%d — detach bisa bocor ke host ns!",
              target_pid, r.slave_errno);
-    }
-    if (r.mountinfo_errno) {
-        LOGE("hide pid=%u: baca /proc/self/mountinfo gagal errno=%d", target_pid, r.mountinfo_errno);
-        return 0;
     }
     if (r.fail) {
         LOGW("hide pid=%u: %u detach GAGAL (first errno=%d) dari %u kandidat [%s]",
@@ -484,20 +423,23 @@ static void watch_target_death(uint32_t pid, int client_fd) {
 
     if (::fork() > 0) ::_exit(0);
 
+    // Bug #1c: this detached grandchild was forked out of the multithreaded
+    // companion, so it may only call async-signal-safe functions. Replace
+    // std::this_thread::sleep_for with ::nanosleep, and drop the android_log
+    // calls entirely — __android_log_print takes an internal lock (and may
+    // allocate), which would deadlock if another thread held it at fork time.
+    // The watcher's sole job is to reap itself once the target exits; it does
+    // that silently now.
     ::close(client_fd);
 
-    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (int i = 0; i < 3600; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const struct timespec nap = { 0, 500L * 1000L * 1000L };  // 500 ms
+    for (int i = 0; i < 3600; ++i) {                          // ~30 min ceiling
+        ::nanosleep(&nap, nullptr);
         if (::kill((pid_t)pid, 0) == 0) continue;
         if (errno != ESRCH) continue;
-        struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-        long ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
-        LOGI("DEATH target pid=%u disappeared after %ldms [%s]", pid, ms, SBX_VARIANT_TAG);
-        ::_exit(0);
+        ::_exit(0);                                           // target gone: done
     }
-    LOGD("death watcher for pid=%u timed out after 30min", pid);
-    ::_exit(0);
+    ::_exit(0);                                               // timed out
 }
 
 static bool try_seed_ondemand() {
@@ -553,7 +495,7 @@ extern "C" void sandboxid_companion(int client) {
     bool have_peer = (::getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) == 0
                       && peer_len == sizeof(peer));
     if (!have_peer)
-        LOGW("SO_PEERCRED failed errno=%d — mount/hide authorization will fail closed", errno);
+        LOGW("SO_PEERCRED gagal errno=%d — otorisasi DO_MOUNTS fail-open", errno);
     else
         LOGD("peer creds pid=%d uid=%d gid=%d", peer.pid, peer.uid, peer.gid);
 
@@ -578,21 +520,19 @@ extern "C" void sandboxid_companion(int client) {
                 continue;
             }
 
-            std::string d;
-            BoundIdentityStatus identity_status = read_bound_identity(d);
-            for (int attempt = 0;
-                 identity_status == BoundIdentityStatus::Busy && attempt < 3;
-                 ++attempt) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                identity_status = read_bound_identity(d);
+            std::string d = read_file(sandboxid::IDENTITY_FILE);
+            if (d.empty()) {
+
+                for (int attempt = 0; attempt < 3 && d.empty(); ++attempt) {
+                    if (attempt > 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (try_seed_ondemand())
+                        d = read_file(sandboxid::IDENTITY_FILE);
+                }
+                if (d.empty())
+                    LOGE("target '%s' tapi identity.prop kosong SETELAH seed on-demand — "
+                         "fail-open: app jalan TANPA spoofing", pkg.c_str());
             }
-            if (identity_status == BoundIdentityStatus::Missing &&
-                try_seed_ondemand())
-                identity_status = read_bound_identity(d);
-            if (identity_status != BoundIdentityStatus::Ready)
-                LOGE("target '%s' but canonical identity is unavailable (status=%d) — "
-                     "fail-open: app runs without spoofing", pkg.c_str(),
-                     static_cast<int>(identity_status));
 
             if (!d.empty()) {
                 std::string kill = std::string(sandboxid::MODDIR) + "/no_uptime";
@@ -619,18 +559,19 @@ extern "C" void sandboxid_companion(int client) {
                     LOGD("no_uptime aktif -> UPTIME_SECONDS/UPTIME_HUMAN dipaksa 0 utk '%s'", pkg.c_str());
                 }
 
-                // Broad native PLT registration is forced off after an observed
-                // manager-specific commit failure. Keep no_native_read as a visible
-                // compatibility marker for existing installations.
-                upsert_identity_value(d, "SBX_NATIVE_READ", "0");
                 std::string nrkill = std::string(sandboxid::MODDIR) + "/no_native_read";
                 struct stat nrst;
                 if (::stat(nrkill.c_str(), &nrst) == 0) {
+
+                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
+                    d += "SBX_NATIVE_READ=0\n";
                     LOGD("no_native_read aktif -> SBX_NATIVE_READ=0 utk '%s'", pkg.c_str());
                 }
 
                 if (::stat(sandboxid::ENABLE_HIDE, &nrst) == 0) {
-                    upsert_identity_value(d, "SBX_HIDE", "1");
+
+                    if (!d.empty() && d.back() != '\n') d.push_back('\n');
+                    d += "SBX_HIDE=1\n";
                     LOGD("enable_hide aktif -> SBX_HIDE=1 utk '%s'", pkg.c_str());
                 }
             }
