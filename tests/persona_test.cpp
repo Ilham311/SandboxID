@@ -179,21 +179,12 @@ static bool validates(std::map<std::string, std::string> values) {
 static void test_local_identity_validation() {
     auto values = valid_identity();
     values["GOOGLE_AID"] = "123e4567-e89b-42d3-a456-426614174000";
-    values["WIFI_MAC"] = "02:11:22:33:44:55";
-    values["BLUETOOTH_ADDR"] = "a2:bb:cc:dd:ee:ff";
-    values["BLUETOOTH_NAME"] = "Pixel 8 Pro";
     values["BOOT_COUNT"] = "42";
-    CHECK(validates(values), "valid local identity fields accepted");
+    CHECK(validates(values), "valid remaining local identity fields accepted");
 
-    auto bad_mac = values;
-    bad_mac["WIFI_MAC"] = "00:11:22:33:44:55";
-    CHECK(!validates(bad_mac), "globally administered MAC rejected");
     auto bad_gaid = values;
     bad_gaid["GOOGLE_AID"] = "123e4567-e89b-12d3-a456-426614174000";
     CHECK(!validates(bad_gaid), "non-v4 GAID rejected");
-    auto bad_name = values;
-    bad_name["BLUETOOTH_NAME"] = "Pixel & Device";
-    CHECK(!validates(bad_name), "XML-sensitive Bluetooth name rejected");
     auto bad_boot = values;
     bad_boot["BOOT_COUNT"] = "1000001";
     CHECK(!validates(bad_boot), "oversized boot count rejected");
@@ -282,15 +273,16 @@ static void test_transaction_metadata() {
         "version=1\nschema=persona-v1\nparser=autopif-v1\n"
         "retrieved_utc=1720000000\nruntime_sdk=35\n"
         "candidate_sha256=" + sbxhash::sha256(candidate) +
-        "\nadapter=complete-marker\n"
-        "url=https://developer.android.com/catalog?build=AP3A.241105.008\n";
+        "\nadapter=pixel-ota-v1\n"
+        "url=https://dl.google.com/developers/android/vic/images/ota/"
+        "shiba_beta-ota-bp11.241210.004-a1bcf4f0.zip\n";
     CHECK(sbxtxn::validate_provenance(provenance, 35, candidate, error),
-          "complete-marker provenance and canonical candidate hash accepted");
+          "Pixel OTA provenance and canonical candidate hash accepted");
     CHECK(!sbxtxn::validate_provenance(provenance, 35, candidate + "\n", error),
           "provenance hash rejects changed candidate bytes");
     std::string unknown_adapter = provenance;
-    const size_t adapter = unknown_adapter.find("adapter=complete-marker");
-    unknown_adapter.replace(adapter, std::string("adapter=complete-marker").size(),
+    const size_t adapter = unknown_adapter.find("adapter=pixel-ota-v1");
+    unknown_adapter.replace(adapter, std::string("adapter=pixel-ota-v1").size(),
                             "adapter=unknown");
     CHECK(!sbxtxn::validate_provenance(unknown_adapter, 35, candidate, error),
           "unknown provenance adapter rejected");
@@ -301,10 +293,16 @@ static void test_transaction_metadata() {
     CHECK(!sbxtxn::validate_provenance(wrong_sdk, 35, candidate, error),
           "wrong provenance runtime SDK rejected");
     std::string invalid_url = provenance;
-    const size_t url = invalid_url.find("https://developer.android.com/");
+    const size_t url = invalid_url.find("https://dl.google.com/");
     invalid_url.replace(url, std::string("https://").size(), "http://");
     CHECK(!sbxtxn::validate_provenance(invalid_url, 35, candidate, error),
           "non-HTTPS provenance URL rejected");
+    std::string wrong_host = provenance;
+    const size_t host = wrong_host.find("dl.google.com");
+    wrong_host.replace(host, std::string("dl.google.com").size(),
+                       "example.com");
+    CHECK(!sbxtxn::validate_provenance(wrong_host, 35, candidate, error),
+          "non-Google OTA provenance host rejected");
 }
 
 static void test_sha256() {

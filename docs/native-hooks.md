@@ -16,14 +16,13 @@ This is the method-level native reference for the one-click identity architectur
 | `sbx_sha256.hpp` | Header-pure SHA-256 used for all content bindings. |
 | `sbx_property.hpp` | Mapped/hidden/pass decisions and typed/callback helpers. |
 | `sbx_native_read.hpp` | Read classification/transforms and deterministic AppLog IDs. |
-| `sbx_carrier.hpp` | Strict carrier config parsing and identity merge/removal. |
 | `sbx_mountinfo.hpp` | Protected mount recognition and trace-detach selection. |
 
 ## Identity, persona, and metadata contracts
 
-Identity input is bounded, line-oriented, unique-key, control-character checked, and validated against the genuine runtime SDK. Required build/lifecycle relationships include canonical fingerprint, description, flavor, display/build ID, UTC build date, and paired SoC fields. `ANDROID_ID` is 16 lowercase hex; GAID is UUID-v4 or the all-zero sentinel; Wi-Fi/Bluetooth MACs are locally administered unicast; boot count and AppLog epoch are decimal; device name is bounded and printable. The six operational flags accept only `0|1`.
+Identity input is bounded, line-oriented, unique-key, control-character checked, and validated against the genuine runtime SDK. Required build/lifecycle relationships include canonical fingerprint, description, flavor, display/build ID, UTC build date, and paired SoC fields. `ANDROID_ID` is 16 lowercase hex; GAID is UUID-v4 or the all-zero sentinel; boot count and AppLog epoch are decimal. The five operational flags accept only `0|1`.
 
-Capability, ABI, preview, verified-boot, and other service/hardware-owned legacy keys are not promoted into the presentation identity. Migration may drop only the explicit legacy set; app activation remains strict.
+Capability, ABI, preview, verified-boot, and other service/hardware-owned legacy keys are not promoted into the presentation identity. Migration may drop only the explicit legacy/retired sets; app activation remains strict. Retired state includes synthetic Wi-Fi/Bluetooth identities, sysfs-MAC presentation, and SIM/carrier keys. Canonical serialization cannot emit those keys.
 
 Persona priority is: valid exact-SDK override, persistent validated cache, reviewed extension row, then compiled reviewed row. Invalid optional tiers warn and fall through. Compiled rows cover SDK 31–36; an unknown SDK fails before mutation instead of fabricating metadata. Override removal occurs only after successful commit. Cache replacement requires exact-SDK candidate parsing, full derived-identity validation, and matching acquisition provenance.
 
@@ -41,15 +40,14 @@ Overlays are generated as one checked five-part set (`system`, `vendor`, `odm`, 
 
 | Command | Native behavior |
 |---|---|
-| `prepare [run-id]` | Reject locked mode; select exact-SDK persona; preserve validated operational flags; merge carrier; generate local values once; validate; publish pending pair bound to current base. No property, package, store, or AppLog mutation. |
+| `prepare [run-id]` | Reject locked mode; select exact-SDK persona; preserve validated operational flags; generate remaining local values once; validate; publish pending pair bound to current base. No property, package, store, or AppLog mutation. |
 | `commit <run-id>` | Revalidate pending run/hash/identity and unchanged base; build/stage overlays; preserve old canonical pair; activate overlays and canonical pair; consume override only after success; print committed digest. |
 | `abort <run-id>` | Remove only a matching valid pending pair. |
 | `restore` | Validate backup pair, rebuild overlays, and restore canonical state; does not clear targets or reapply properties/settings. |
 | `verify [--run-id …] [--identity-sha256 …]` | Shared-lock, strict-validate canonical pair, optional exact run/digest, and exact overlay contents/modes. |
 | `persona-import <candidate> <meta>` | Validate one canonical candidate plus HTTPS provenance and atomically replace the cache pair while preserving old cache on failure. |
 | `targets --processes|--packages` | Return exact deduplicated processes or normalized unique base packages from one parser. |
-| `set-local`, `set-flag` | Validate owner, key/value, whole identity, metadata, and overlays before coherent publication. |
-| `carrier apply|disable` | Co-publish strict carrier config and carrier-owned identity fields/removal. |
+| `set-local`, `set-flag` | Validate owner, remaining supported key/value, whole identity, metadata, and overlays before coherent publication. |
 | `action-write state|result <source>` | Validate the bounded Action document/protocol and durably publish it under `debug/`. |
 | `apply-props` | Strict-load canonical identity and apply global property aliases/removals through the selected backend. |
 | `apply-boot` | Apply framework-ready settings and regenerate checked overlays. |
@@ -62,7 +60,7 @@ Exit values distinguish ordinary failure, usage/configuration (`64`), busy owner
 
 ## Property and framework behavior
 
-Native property application prefers the verified bundled `resetprop-rs`, then supported PATH backends according to implementation policy. Required aliases are attempted and any backend failure is reported. The explicitly classified OEM alias `ro.build.expect.baseband` is existing-only: genuine absence is a successful skip, while a failed write when present remains fatal. `gsm.version.baseband` remains required, and both radio aliases remain represented in build-property overlays. Presentation aliases cover build/product/serial/radio metadata while selected direct-ID, emulator, custom-ROM, and OEM leak properties are removed rather than invented. Stable-release aliases are changed only when the genuine runtime is stable. Framework application writes user-0 device-name settings; it does not pretend `ANDROID_ID` is one global secure value.
+Native property application prefers the verified bundled `resetprop-rs`, then supported PATH backends according to implementation policy. Required aliases are attempted and any backend failure is reported. The explicitly classified OEM alias `ro.build.expect.baseband` is existing-only: genuine absence is a successful skip, while a failed write when present remains fatal. `gsm.version.baseband` remains required, and both radio aliases remain represented in build-property overlays. Presentation aliases cover build/product/serial/radio metadata while selected direct-ID, emulator, custom-ROM, and OEM leak properties—including genuine telephony, Wi-Fi, and Bluetooth identifiers—are removed rather than invented. Stable-release aliases are changed only when the genuine runtime is stable. Framework application writes user-0 device-name settings from persona `MODEL`; this general setting is distinct from retired synthetic Bluetooth-name state and does not pretend `ANDROID_ID` is one global secure value.
 
 ## Companion target and identity service
 
@@ -88,7 +86,7 @@ Selected Java `Build` fields and stable-release `Build.VERSION` fields are chang
 
 The uptime hook offsets only `CLOCK_BOOTTIME` and `CLOCK_BOOTTIME_ALARM`. Incomplete registration/commit resets the offset. It covers only currently scanned imports.
 
-Native read hooks classify read-only `open`/`openat`/`fopen` families and may serve memfd content for boot ID, SELinux enforce, allowlisted AppLog state, and opt-in proc/sysfs surfaces. AppLog IDs are deterministic from fingerprint, serial, Android ID, package, and one committed epoch. Proc version, meminfo, CPU aggregate revision, and sysfs MAC require their child flags. Classification is lexical rather than symlink-canonical; descriptor flags and late-loaded-library coverage are not complete. Transform failure normally delegates to genuine reads.
+Native read hooks classify read-only `open`/`openat`/`fopen` families and may serve memfd content for boot ID, SELinux enforce, allowlisted AppLog state, and opt-in proc surfaces. AppLog IDs are deterministic from fingerprint, serial, Android ID, package, and one committed epoch. Proc version, meminfo, and CPU aggregate revision require their child flags. WLAN/P2P sysfs address paths are not classified or synthesized. Classification is lexical rather than symlink-canonical; descriptor flags and late-loaded-library coverage are not complete. Transform failure normally delegates to genuine reads.
 
 PLT scanning covers currently mapped libraries and active status does not prove every symbol/import was hooked. Host tests cannot prove JNI signatures, field availability, PLT registration, callbacks, late loads, or manager-specific Zygisk behavior.
 
@@ -100,4 +98,4 @@ The target-death watcher is informational and bounded. The crash watchdog handle
 
 ## Verification boundary
 
-Header/mocked tests establish parser, derivation, ownership, transaction-return, target, property, native-read, AppLog, carrier, and mount-selection contracts. They do not establish real Android property/settings behavior, SELinux labels, namespace isolation, mount propagation, GMS/OEM stores, signal chaining, companion socket deadlines, Zygisk/JNI/PLT coverage, or ABI package execution. Missing `jni/zygisk.hpp` remains an explicit `main.cpp` syntax blocker.
+Header/mocked tests establish parser, derivation, ownership, transaction-return, target, property, native-read, AppLog, and mount-selection contracts. They do not establish real Android property/settings behavior, SELinux labels, namespace isolation, mount propagation, GMS/OEM stores, signal chaining, companion socket deadlines, Zygisk/JNI/PLT coverage, or ABI package execution. Missing `jni/zygisk.hpp` remains an explicit `main.cpp` syntax blocker.

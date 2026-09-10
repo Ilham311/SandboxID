@@ -19,7 +19,7 @@ inline constexpr size_t kMaxIdentityValue = 1024u;
 
 inline constexpr std::string_view kOperationalFlags[] = {
     "SBX_NATIVE_READ", "SBX_HIDE", "SBX_CPU_REVISION",
-    "SBX_PROC_VERSION", "SBX_MEMINFO", "SBX_SYSFS_MAC",
+    "SBX_PROC_VERSION", "SBX_MEMINFO",
 };
 
 inline bool operational_flag_key(std::string_view key) {
@@ -44,8 +44,7 @@ inline bool presentation_property_key(std::string_view key) {
         "FINGERPRINT", "ID", "DISPLAY", "DESCRIPTION", "BOOTLOADER", "HOST",
         "USER", "TYPE", "TAGS", "INCREMENTAL", "RELEASE", "SECURITY_PATCH",
         "SERIAL", "RADIO", "FLAVOR", "BUILD_TIME_UTC", "BUILD_DATE", "SKU",
-        "ODM_SKU", "GSM_OPERATOR_NUMERIC", "GSM_OPERATOR_ALPHA",
-        "GSM_OPERATOR_ISO", "GSM_SIM_STATE",
+        "ODM_SKU",
     };
     for (std::string_view candidate : keys)
         if (key == candidate) return true;
@@ -66,6 +65,17 @@ inline bool legacy_capability_key(std::string_view key) {
     return false;
 }
 
+inline bool retired_identity_key(std::string_view key) {
+    static constexpr std::string_view keys[] = {
+        "WIFI_MAC", "BLUETOOTH_ADDR", "BLUETOOTH_NAME", "SBX_SYSFS_MAC",
+        "GSM_OPERATOR_NUMERIC", "GSM_OPERATOR_ALPHA", "GSM_OPERATOR_ISO",
+        "GSM_SIM_STATE", "GSM_CARRIER_ID",
+    };
+    for (std::string_view candidate : keys)
+        if (key == candidate) return true;
+    return false;
+}
+
 inline bool forbidden_capability_key(std::string_view key) {
     return legacy_capability_key(key);
 }
@@ -74,11 +84,13 @@ struct ValidationContext {
     int runtime_sdk = 0;
     size_t max_blob = kDefaultMaxBlob;
     bool drop_legacy_capabilities = false;
+    bool drop_retired_identity = false;
 };
 
 struct IdentitySnapshot {
     std::map<std::string, std::string> values;
     std::set<std::string> dropped_legacy_capabilities;
+    std::set<std::string> dropped_retired_identity;
 };
 
 inline bool reject(std::string& error, const std::string& message) {
@@ -147,39 +159,6 @@ inline bool valid_uuid(const std::string& value) {
             value[19] == 'A' || value[19] == 'B');
 }
 
-inline bool valid_local_mac(const std::string& value) {
-    if (value.size() != 17) return false;
-    unsigned first_octet = 0;
-    bool any_nonzero = false;
-    for (size_t i = 0; i < value.size(); ++i) {
-        if (i % 3 == 2) {
-            if (value[i] != ':') return false;
-            continue;
-        }
-        char c = value[i];
-        unsigned nibble = 0;
-        if (c >= '0' && c <= '9') nibble = static_cast<unsigned>(c - '0');
-        else if (c >= 'a' && c <= 'f') nibble = static_cast<unsigned>(c - 'a' + 10);
-        else if (c >= 'A' && c <= 'F') nibble = static_cast<unsigned>(c - 'A' + 10);
-        else return false;
-        if (nibble != 0) any_nonzero = true;
-        if (i == 0) first_octet = nibble << 4;
-        else if (i == 1) first_octet |= nibble;
-    }
-    return any_nonzero && (first_octet & 0x01u) == 0 && (first_octet & 0x02u) != 0;
-}
-
-inline bool valid_device_name(const std::string& value) {
-    if (value.empty() || value.size() > 64 || value.front() == ' ' ||
-        value.back() == ' ')
-        return false;
-    for (unsigned char c : value)
-        if (c < 0x20 || c > 0x7e || c == '<' || c == '>' || c == '&' ||
-            c == '\'' || c == '"')
-            return false;
-    return true;
-}
-
 inline std::string utc_date_string(uint64_t seconds) {
     time_t t = static_cast<time_t>(seconds);
     struct tm tmv{};
@@ -243,16 +222,6 @@ inline bool validate_snapshot(const ValidationContext& ctx,
     auto gaid = snapshot.values.find("GOOGLE_AID");
     if (gaid != snapshot.values.end() && !gaid->second.empty() && !valid_uuid(gaid->second))
         return reject(error, "invalid GOOGLE_AID");
-    for (const char* key : {"WIFI_MAC", "BLUETOOTH_ADDR"}) {
-        auto mac = snapshot.values.find(key);
-        if (mac != snapshot.values.end() && !mac->second.empty() &&
-            !valid_local_mac(mac->second))
-            return reject(error, std::string("invalid locally administered ") + key);
-    }
-    auto bluetooth_name = snapshot.values.find("BLUETOOTH_NAME");
-    if (bluetooth_name != snapshot.values.end() &&
-        !valid_device_name(bluetooth_name->second))
-        return reject(error, "invalid BLUETOOTH_NAME");
     auto boot_count = snapshot.values.find("BOOT_COUNT");
     if (boot_count != snapshot.values.end()) {
         uint64_t parsed = 0;
@@ -287,7 +256,7 @@ inline bool serialize_identity_values(
     std::set<std::string_view> emitted;
     auto append = [&](const std::string& key, const std::string& value) -> bool {
         if (!valid_key(key) || legacy_capability_key(key) ||
-            value.size() > kMaxIdentityValue)
+            retired_identity_key(key) || value.size() > kMaxIdentityValue)
             return false;
         if (value.find('\n') != std::string::npos ||
             value.find('\r') != std::string::npos ||
@@ -324,6 +293,7 @@ inline bool parse_and_validate_identity(std::string_view blob,
                                         std::string& error) {
     out.values.clear();
     out.dropped_legacy_capabilities.clear();
+    out.dropped_retired_identity.clear();
     if (blob.empty()) return reject(error, "identity blob is empty");
     if (blob.size() > ctx.max_blob) return reject(error, "identity blob is oversized");
     if (blob.find('\0') != std::string_view::npos)
@@ -356,6 +326,17 @@ inline bool parse_and_validate_identity(std::string_view blob,
                     return reject(error, "runtime capability key is not allowed: " +
                                          std::string(key_view));
                 if (!out.dropped_legacy_capabilities.emplace(key_view).second)
+                    return reject(error, "duplicate identity key " +
+                                         std::string(key_view));
+                if (end == blob.size()) break;
+                pos = end + 1;
+                continue;
+            }
+            if (retired_identity_key(key_view)) {
+                if (!ctx.drop_retired_identity)
+                    return reject(error, "retired identity key is not allowed: " +
+                                         std::string(key_view));
+                if (!out.dropped_retired_identity.emplace(key_view).second)
                     return reject(error, "duplicate identity key " +
                                          std::string(key_view));
                 if (end == blob.size()) break;

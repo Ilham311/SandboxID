@@ -31,12 +31,18 @@ if [ "$MODE" = --source ]; then
     'build still packages obsolete devices.tsv'
   check '! grep -q "AUTOPIF_REFRESH" "$ROOT/build.sh"' \
     'build still supports network persona refresh'
+  check '! grep -q "carriers.tsv" "$ROOT/build.sh"' \
+    'build still packages retired carriers.tsv'
+  check '! grep -q "carrier.conf" "$ROOT/build.sh"' \
+    'build still packages retired carrier state'
+  check '! grep -q "SBX_SYSFS_MAC" "$ROOT/customize.sh"' \
+    'installer still restores retired sysfs-MAC flag'
   check 'grep -q "tests/package_manifest_test.sh" "$ROOT/build.sh"' \
     'build does not run the package manifest gate'
   check 'grep -q "for suite in action autopif rotation helpers_applog customize package_manifest" "$ROOT/validate.sh"' \
     'validation does not run the installer preservation suite'
-  check 'grep -q "preserve_validated_pair" "$ROOT/customize.sh" && grep -q "persona.cache.meta" "$ROOT/customize.sh" && grep -q "enable_remote_refresh" "$ROOT/customize.sh"' \
-    'installer does not preserve coherent identity/cache state and refresh preference'
+  check 'grep -q "preserve_validated_pair" "$ROOT/customize.sh" && grep -q "persona.cache.meta" "$ROOT/customize.sh" && ! grep -q "enable_remote_refresh" "$ROOT/customize.sh"' \
+    'installer does not preserve coherent identity/cache state or still retains the obsolete refresh toggle'
   check 'grep -q "MANDATORY_RUNTIME" "$ROOT/build.sh"' \
     'build does not declare mandatory runtime inputs'
   if [ -e "$ROOT/prebuilt/resetprop-rs" ] || [ -e "$ROOT/prebuilt/resetprop-rs.sha256" ] ||
@@ -61,6 +67,8 @@ else
     check '[ -s "$PKG/bin/$cli" ]' "native CLI missing: $cli"
   done
   check '[ ! -e "$PKG/devices.tsv" ]' 'obsolete devices.tsv was packaged'
+  check '[ ! -e "$PKG/carriers.tsv" ]' 'retired carriers.tsv was packaged'
+  check '[ ! -e "$PKG/carrier.conf" ]' 'retired carrier state was packaged'
   if [ -e "$PKG/bin/resetprop-rs" ] || [ -e "$PKG/bin/resetprop-rs.sha256" ] ||
      [ -e "$PKG/bin/resetprop-rs.LICENSE" ]; then
     check '[ -f "$PKG/bin/resetprop-rs" ] && [ -f "$PKG/bin/resetprop-rs.sha256" ] && [ -f "$PKG/bin/resetprop-rs.LICENSE" ]' \

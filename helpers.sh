@@ -3,8 +3,6 @@
 MODDIR="${MODDIR:-/data/adb/modules/sandboxid}"
 LOGFILE="${LOGFILE:-/cache/sandboxid-boot.log}"
 IDENTITY_FILE="${IDENTITY_FILE:-$MODDIR/identity.prop}"
-CARRIER_CONF="${CARRIER_CONF:-$MODDIR/carrier.conf}"
-CARRIERS_FILE="${CARRIERS_FILE:-$MODDIR/carriers.tsv}"
 BACKUP_DIR_ROOT="${BACKUP_DIR_ROOT:-$MODDIR/backups}"
 
 mkdir -p "$BACKUP_DIR_ROOT" 2>/dev/null
@@ -338,16 +336,6 @@ generate_uuid() {
         "$(echo "$r" | cut -c21-32)"
 }
 
-generate_mac() {
-    b=$(od -An -N5 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
-    printf '02:%s:%s:%s:%s:%s\n' \
-        "$(echo "$b" | cut -c1-2)" \
-        "$(echo "$b" | cut -c3-4)" \
-        "$(echo "$b" | cut -c5-6)" \
-        "$(echo "$b" | cut -c7-8)" \
-        "$(echo "$b" | cut -c9-10)"
-}
-
 _fw_run() {
     _n=0
     while [ "$_n" -lt 2 ]; do
@@ -439,9 +427,9 @@ identity_persist() {
         return 1
     }
     case "$key" in
-        GOOGLE_AID|WIFI_MAC|BLUETOOTH_ADDR|BLUETOOTH_NAME|BOOT_COUNT)
+        GOOGLE_AID|BOOT_COUNT)
             "$_cli" set-local "$key" "$val" </dev/null >/dev/null 2>&1 ;;
-        SBX_NATIVE_READ|SBX_HIDE|SBX_CPU_REVISION|SBX_PROC_VERSION|SBX_MEMINFO|SBX_SYSFS_MAC)
+        SBX_NATIVE_READ|SBX_HIDE|SBX_CPU_REVISION|SBX_PROC_VERSION|SBX_MEMINFO)
             "$_cli" set-flag "$key" "$val" </dev/null >/dev/null 2>&1 ;;
         *)
             log_warn "identity update '$key' tidak memiliki transaksi native"

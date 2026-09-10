@@ -276,12 +276,18 @@ inline bool validate_provenance(const std::string& raw, int runtime_sdk,
         error = "invalid retrieval timestamp";
         return false;
     }
-    if (meta["url"].rfind("https://", 0) != 0 ||
-        meta["url"].find_first_of(" \t\r\n") != std::string::npos) {
-        error = "invalid provenance URL";
+    const std::string& url = meta["url"];
+    static constexpr char kOtaPrefix[] =
+        "https://dl.google.com/developers/android/vic/images/ota/";
+    if (url.rfind(kOtaPrefix, 0) != 0 ||
+        url.find_first_of(" \t\r\n?#") != std::string::npos ||
+        url.size() <= sizeof(kOtaPrefix) - 1 ||
+        url.size() > 2048 || url.substr(url.size() - 4) != ".zip" ||
+        url.find("_beta-ota-") == std::string::npos) {
+        error = "invalid Pixel OTA provenance URL";
         return false;
     }
-    if (meta["adapter"] != "complete-marker") {
+    if (meta["adapter"] != "pixel-ota-v1") {
         error = "unsupported provenance adapter";
         return false;
     }

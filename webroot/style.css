@@ -392,11 +392,6 @@ input:not([type="checkbox"]) {
   border: 1px solid var(--border); border-radius: var(--r-sm);
   font: inherit;
 }
-.manual-carrier { margin-bottom: 12px; }
-.manual-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 8px; }
-.manual-grid label { color: var(--muted); font-size: 11px; }
-.manual-grid input { display: block; margin-top: 4px; }
-.manual-grid label:first-child, .manual-grid label:last-child { grid-column: 1 / -1; }
 .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
 
 /* ---- Experimental settings ---------------------------------------------- */

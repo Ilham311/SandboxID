@@ -48,25 +48,6 @@ static void test_uuid() {
     CHECK(uuid_from_seed(seed2) != u1, "uuid differs for different seed");
 }
 
-static void test_mac() {
-    uint64_t seed = fnv1a("husky-serial-ABC123");
-    std::string m1 = mac_from_seed(seed);
-    std::string m2 = mac_from_seed(seed);
-    CHECK(m1 == m2, "mac deterministic");
-    CHECK(m1.size() == 17, "mac length 17");
-    CHECK(m1.substr(0, 3) == "02:", "mac first octet is locally-administered 02");
-    CHECK(is_valid_mac(m1), "generated mac is valid");
-    CHECK(mac_from_seed(fnv1a("other")) != m1, "mac differs for different seed");
-
-    CHECK(!is_valid_mac(""), "empty mac invalid");
-    CHECK(!is_valid_mac("02:00:00:00:00"), "short mac invalid");
-    CHECK(!is_valid_mac("00:00:00:00:00:00"), "all-zero mac invalid");
-    CHECK(!is_valid_mac("02-00-11-22-33-44"), "wrong-separator mac invalid");
-    CHECK(!is_valid_mac("0g:00:11:22:33:44"), "non-hex mac invalid");
-    CHECK(is_valid_mac("aa:bb:cc:dd:ee:ff"), "lowercase mac valid");
-    CHECK(is_valid_mac("AA:BB:CC:DD:EE:FF"), "uppercase mac valid");
-}
-
 static void test_proc_version() {
 
     std::string v = synth_proc_version("14", "11583682", "zuma", "abfarm42", 0x1234abcd);
@@ -199,9 +180,12 @@ static void test_classify() {
     CHECK(classify("/proc/version") == VERSION, "version classify");
     CHECK(classify("/proc/meminfo") == MEMINFO, "meminfo classify");
     CHECK(classify("/proc/cpuinfo") == CPUINFO, "cpuinfo classify");
-    CHECK(classify("/sys/class/net/wlan0/address") == MAC, "wlan0 address classify");
-    CHECK(classify("/sys/class/net/wlan1/address") == MAC, "wlan1 address classify");
-    CHECK(classify("/sys/class/net/p2p0/address") == MAC, "p2p0 address classify");
+    CHECK(classify("/sys/class/net/wlan0/address") == NONE,
+          "wlan0 address is not presented");
+    CHECK(classify("/sys/class/net/wlan1/address") == NONE,
+          "wlan1 address is not presented");
+    CHECK(classify("/sys/class/net/p2p0/address") == NONE,
+          "p2p0 address is not presented");
 
     CHECK(classify("/proc/cpuinfo/x") == NONE, "cpuinfo subpath not matched");
     CHECK(classify("/proc/versionx") == NONE, "version prefix not matched");
@@ -563,8 +547,8 @@ static void test_path_normalization() {
               out == "/proc/cpuinfo",
           "relative dot segments normalize");
     CHECK(join_and_normalize_path("/sys/class/net/wlan0", "./address", out) &&
-              out == "/sys/class/net/wlan0/address" && classify(out.c_str()) == MAC,
-          "normalized relative sysfs path classifies");
+              out == "/sys/class/net/wlan0/address" && classify(out.c_str()) == NONE,
+          "normalized relative sysfs MAC path is not presented");
     CHECK(!join_and_normalize_path("relative", "proc/version", out),
           "relative base is rejected");
     CHECK(!join_and_normalize_path("/", "../proc/version", out),
@@ -630,6 +614,44 @@ static void test_identity_validation() {
               error.find("duplicate identity key") != std::string::npos,
           "duplicate legacy capability keys remain invalid");
 
+    const std::string retired =
+        blob + "WIFI_MAC=02:11:22:33:44:55\n"
+               "BLUETOOTH_ADDR=a2:bb:cc:dd:ee:ff\n"
+               "BLUETOOTH_NAME=Pixel 8 Pro\n"
+               "SBX_SYSFS_MAC=1\n"
+               "GSM_OPERATOR_NUMERIC=310260\n"
+               "GSM_OPERATOR_ALPHA=T-Mobile\n"
+               "GSM_OPERATOR_ISO=us\n"
+               "GSM_SIM_STATE=READY\n"
+               "GSM_CARRIER_ID=1\n";
+    CHECK(!sbxid::parse_and_validate_identity(retired, strict, snapshot, error) &&
+              error.find("retired identity key") != std::string::npos,
+          "strict app-side parser rejects retired identity keys");
+
+    sbxid::ValidationContext retired_migrate = strict;
+    retired_migrate.drop_retired_identity = true;
+    CHECK(sbxid::parse_and_validate_identity(retired, retired_migrate, snapshot,
+                                              error),
+          "CLI migration parser accepts known retired identity keys");
+    CHECK(snapshot.dropped_retired_identity.size() == 9,
+          "migration records every dropped retired identity key");
+    CHECK(snapshot.values.find("WIFI_MAC") == snapshot.values.end() &&
+              snapshot.values.find("BLUETOOTH_ADDR") == snapshot.values.end() &&
+              snapshot.values.find("BLUETOOTH_NAME") == snapshot.values.end() &&
+              snapshot.values.find("SBX_SYSFS_MAC") == snapshot.values.end() &&
+              snapshot.values.find("GSM_OPERATOR_NUMERIC") == snapshot.values.end() &&
+              snapshot.values.find("GSM_OPERATOR_ALPHA") == snapshot.values.end() &&
+              snapshot.values.find("GSM_OPERATOR_ISO") == snapshot.values.end() &&
+              snapshot.values.find("GSM_SIM_STATE") == snapshot.values.end() &&
+              snapshot.values.find("GSM_CARRIER_ID") == snapshot.values.end(),
+          "retired identity keys are dropped, not published");
+
+    const std::string duplicate_retired = retired + "WIFI_MAC=02:00:00:00:00:01\n";
+    CHECK(!sbxid::parse_and_validate_identity(duplicate_retired, retired_migrate,
+                                              snapshot, error) &&
+              error.find("duplicate identity key") != std::string::npos,
+          "duplicate retired identity keys remain invalid");
+
     std::string bad_sdk = blob;
     size_t sdk = bad_sdk.find("SDK_INT=35");
     bad_sdk.replace(sdk, std::strlen("SDK_INT=35"), "SDK_INT=34");
@@ -639,12 +661,12 @@ static void test_identity_validation() {
 
     const char* operational_flags[] = {
         "SBX_NATIVE_READ", "SBX_HIDE", "SBX_CPU_REVISION",
-        "SBX_PROC_VERSION", "SBX_MEMINFO", "SBX_SYSFS_MAC",
+        "SBX_PROC_VERSION", "SBX_MEMINFO",
     };
     CHECK(sizeof(operational_flags) / sizeof(operational_flags[0]) ==
               sizeof(sbxid::kOperationalFlags) /
                   sizeof(sbxid::kOperationalFlags[0]),
-          "all six operational flags share one canonical native list");
+          "all five operational flags share one canonical native list");
     for (const char* key : operational_flags) {
         const std::string valid_flags = blob + key + "=1\n";
         CHECK(sbxid::parse_and_validate_identity(valid_flags, strict, snapshot,
@@ -851,7 +873,7 @@ static void test_property_callbacks() {
 
 static void test_environment_gates() {
     EnvironmentGates gates;
-    for (Kind kind : {BOOTID, VERSION, MEMINFO, MAC, CPUINFO,
+    for (Kind kind : {BOOTID, VERSION, MEMINFO, CPUINFO,
                       SELINUX_ENFORCE, APPLOG_XML})
         CHECK(!environment_surface_enabled(kind, gates),
               "master gate defaults closed");
@@ -865,29 +887,21 @@ static void test_environment_gates() {
           "existing AppLog presentation follows native-read master");
     CHECK(!environment_surface_enabled(VERSION, gates) &&
               !environment_surface_enabled(MEMINFO, gates) &&
-              !environment_surface_enabled(MAC, gates) &&
               !environment_surface_enabled(CPUINFO, gates),
           "experimental environment surfaces default off");
 
     gates.proc_version = true;
     CHECK(environment_surface_enabled(VERSION, gates) &&
               !environment_surface_enabled(MEMINFO, gates) &&
-              !environment_surface_enabled(MAC, gates) &&
               !environment_surface_enabled(CPUINFO, gates),
           "proc/version opt-in is independent");
     gates.proc_version = false;
     gates.meminfo = true;
     CHECK(environment_surface_enabled(MEMINFO, gates) &&
               !environment_surface_enabled(VERSION, gates) &&
-              !environment_surface_enabled(MAC, gates),
+              !environment_surface_enabled(CPUINFO, gates),
           "meminfo opt-in is independent");
     gates.meminfo = false;
-    gates.sysfs_mac = true;
-    CHECK(environment_surface_enabled(MAC, gates) &&
-              !environment_surface_enabled(VERSION, gates) &&
-              !environment_surface_enabled(CPUINFO, gates),
-          "sysfs MAC opt-in is independent");
-    gates.sysfs_mac = false;
     gates.cpu_revision = true;
     CHECK(environment_surface_enabled(CPUINFO, gates) &&
               !environment_surface_enabled(VERSION, gates) &&
@@ -903,13 +917,12 @@ static void test_operational_flag_lifecycle() {
     const std::map<std::string, std::string> selected = {
         {"SBX_NATIVE_READ", "0"}, {"SBX_HIDE", "1"},
         {"SBX_CPU_REVISION", "1"}, {"SBX_PROC_VERSION", "1"},
-        {"SBX_MEMINFO", "0"}, {"SBX_SYSFS_MAC", "1"},
+        {"SBX_MEMINFO", "0"},
     };
     std::map<std::string, std::string> next = {
         {"MODEL", "Pixel 9"}, {"SBX_NATIVE_READ", "1"},
         {"SBX_HIDE", "0"}, {"SBX_CPU_REVISION", "0"},
         {"SBX_PROC_VERSION", "0"}, {"SBX_MEMINFO", "1"},
-        {"SBX_SYSFS_MAC", "0"},
     };
     sbxid::preserve_operational_flags(selected, next);
     for (std::string_view key : sbxid::kOperationalFlags) {
@@ -922,7 +935,7 @@ static void test_operational_flag_lifecycle() {
 
     static constexpr std::string_view order[] = {
         "MODEL", "SBX_NATIVE_READ", "SBX_HIDE", "SBX_CPU_REVISION",
-        "SBX_PROC_VERSION", "SBX_MEMINFO", "SBX_SYSFS_MAC",
+        "SBX_PROC_VERSION", "SBX_MEMINFO",
     };
     std::string serialized;
     CHECK(sbxid::serialize_identity_values(
@@ -944,15 +957,14 @@ static void test_operational_flag_lifecycle() {
     std::map<std::string, std::string> generated = {
         {"SBX_NATIVE_READ", "1"}, {"SBX_HIDE", "0"},
         {"SBX_CPU_REVISION", "0"}, {"SBX_PROC_VERSION", "0"},
-        {"SBX_MEMINFO", "0"}, {"SBX_SYSFS_MAC", "0"},
+        {"SBX_MEMINFO", "0"},
     };
     sbxid::preserve_operational_flags(legacy_current, generated);
     CHECK(generated["SBX_NATIVE_READ"] == "0" && generated["SBX_HIDE"] == "1",
           "legacy present selections survive replacement");
     CHECK(generated["SBX_CPU_REVISION"] == "0" &&
               generated["SBX_PROC_VERSION"] == "0" &&
-              generated["SBX_MEMINFO"] == "0" &&
-              generated["SBX_SYSFS_MAC"] == "0",
+              generated["SBX_MEMINFO"] == "0",
           "legacy missing children retain safe generated defaults");
 }
 
@@ -969,9 +981,21 @@ static void test_identity_serialization() {
         "RELEASE_DATE=2024-09-05\n"
         "SAFE_METADATA=kept\n"
         "SUPPORTED_ABIS=arm64-v8a,armeabi-v7a\n"
-        "VBMETA_DIGEST=deadbeef\n";
+        "VBMETA_DIGEST=deadbeef\n"
+        "WIFI_MAC=02:11:22:33:44:55\n"
+        "BLUETOOTH_ADDR=a2:bb:cc:dd:ee:ff\n"
+        "BLUETOOTH_NAME=Pixel 8 Pro\n"
+        "SBX_SYSFS_MAC=1\n"
+        "GSM_OPERATOR_NUMERIC=310260\n"
+        "GSM_OPERATOR_ALPHA=T-Mobile\n"
+        "GSM_OPERATOR_ISO=us\n"
+        "GSM_SIM_STATE=READY\n"
+        "GSM_CARRIER_ID=1\n";
+    migrate.drop_retired_identity = true;
     CHECK(sbxid::parse_and_validate_identity(blob, migrate, snapshot, error),
           "migration identity with safe metadata parses");
+    CHECK(snapshot.dropped_retired_identity.size() == 9,
+          "migration records every retired identity key");
 
     static constexpr std::string_view order[] = {
         "BRAND", "MODEL", "FINGERPRINT", "SUPPORTED_ABIS", "VBMETA_DIGEST",
@@ -988,8 +1012,15 @@ static void test_identity_serialization() {
               serialized.find("SAFE_METADATA=kept\n") != std::string::npos,
           "safe unknown and lifecycle metadata survive serialization");
     CHECK(serialized.find("SUPPORTED_ABIS=") == std::string::npos &&
-              serialized.find("VBMETA_DIGEST=") == std::string::npos,
-          "dropped capability keys cannot be re-emitted");
+              serialized.find("VBMETA_DIGEST=") == std::string::npos &&
+              serialized.find("WIFI_MAC=") == std::string::npos &&
+              serialized.find("BLUETOOTH_ADDR=") == std::string::npos &&
+              serialized.find("BLUETOOTH_NAME=") == std::string::npos &&
+              serialized.find("SBX_SYSFS_MAC=") == std::string::npos &&
+              serialized.find("GSM_OPERATOR_") == std::string::npos &&
+              serialized.find("GSM_SIM_STATE=") == std::string::npos &&
+              serialized.find("GSM_CARRIER_ID=") == std::string::npos,
+          "dropped capability and retired identity keys cannot be re-emitted");
 
     std::map<std::string, std::string> unsafe = snapshot.values;
     unsafe["SUPPORTED_ABIS"] = "arm64-v8a";
@@ -997,11 +1028,16 @@ static void test_identity_serialization() {
               unsafe, order, sizeof(order) / sizeof(order[0]), serialized) &&
               serialized.empty(),
           "serializer rejects a reintroduced capability key");
+    unsafe.erase("SUPPORTED_ABIS");
+    unsafe["WIFI_MAC"] = "02:11:22:33:44:55";
+    CHECK(!sbxid::serialize_identity_values(
+              unsafe, order, sizeof(order) / sizeof(order[0]), serialized) &&
+              serialized.empty(),
+          "serializer rejects a reintroduced retired identity key");
 }
 
 int main() {
     test_uuid();
-    test_mac();
     test_proc_version();
     test_meminfo();
     test_pixel_ram();

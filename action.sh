@@ -645,8 +645,8 @@ if [ ! -r "$ROTATE" ]; then
     stage_done FAIL rotate-missing
     finish 127 failed rotate-missing
 fi
-if [ -f "$MODDIR/enable_remote_refresh" ] && [ ! -r "$AUTOPIF" ]; then
-    failure "Remote refresh aktif tetapi autopif.sh tidak dapat dibaca."
+if [ ! -r "$AUTOPIF" ]; then
+    failure "autopif.sh tidak tersedia sebelum refresh persona."
     stage_done FAIL refresh-helper-missing
     finish 127 failed refresh-helper-missing
 fi
@@ -811,17 +811,13 @@ if [ "$PACKAGE_QUERY_NEEDED_RECOVERY" -ne 0 ]; then
 fi
 stage_done OK ready
 
-stage refresh "Memeriksa pembaruan persona opsional"
-if [ -f "$MODDIR/enable_remote_refresh" ] && [ -r "$AUTOPIF" ]; then
-    if MODDIR="$MODDIR" SBX_BIN="$BIN" sh "$AUTOPIF" refresh >> "$ACTION_LOG" 2>&1; then
-        stage_done OK refresh-complete
-    else
-        _refresh_rc=$?
-        warning "Refresh persona gagal (rc=$_refresh_rc); sumber offline tetap digunakan."
-        stage_done WARN offline-fallback
-    fi
+stage refresh "Mencoba pembaruan persona Pixel exact-SDK"
+if MODDIR="$MODDIR" SBX_BIN="$BIN" sh "$AUTOPIF" refresh >> "$ACTION_LOG" 2>&1; then
+    stage_done OK refresh-complete
 else
-    stage_done SKIP disabled
+    _refresh_rc=$?
+    warning "Refresh persona gagal (rc=$_refresh_rc); sumber offline tetap digunakan."
+    stage_done WARN offline-fallback
 fi
 
 stage prepare "Menyiapkan snapshot identitas tanpa mutasi perangkat"
@@ -961,7 +957,7 @@ else
         [ "$_rotate_reboot" = 1 ] && REBOOT=1
         while IFS='=' read -r _component _outcome; do
             case "$_component:$_outcome" in
-                ssaid:*|gaid:*|wlan_mac:*|bluetooth_mac:*|device_name:*|boot_count:*)
+                ssaid:*|gaid:*|boot_count:*)
                     proto "ROTATE\tcomponent=$_component\tstatus=${_outcome%%:*}\trc=${_outcome#*:}" ;;
             esac
         done < "$_rotation_report"

@@ -275,7 +275,6 @@ fi
 _native="$(id_get SBX_NATIVE_READ)"; [ -n "$_native" ] || _native=1
 _proc="$(id_get SBX_PROC_VERSION)"; [ -n "$_proc" ] || _proc=0
 _mem="$(id_get SBX_MEMINFO)"; [ -n "$_mem" ] || _mem=0
-_mac="$(id_get SBX_SYSFS_MAC)"; [ -n "$_mac" ] || _mac=0
 _cpu="$(id_get SBX_CPU_REVISION)"; [ -n "$_cpu" ] || _cpu=0
 [ -f "$MODDIR/no_native_read" ] && _native=0
 
@@ -284,7 +283,7 @@ if [ "$_native" = 1 ]; then
 else
     emit hooks INFO "native-read master: nonaktif — seluruh surface native pass-through"
 fi
-for _entry in "proc/version:$_proc" "proc/meminfo:$_mem" "sysfs MAC:$_mac" "CPU revision:$_cpu"; do
+for _entry in "proc/version:$_proc" "proc/meminfo:$_mem" "CPU revision:$_cpu"; do
     _name=${_entry%:*}; _flag=${_entry##*:}
     if [ "$_native" = 1 ] && [ "$_flag" = 1 ]; then
         emit hooks INFO "eksperimental $_name: AKTIF (presentasi parsial; API lintas-lensa tetap genuine)"

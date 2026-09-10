@@ -10,7 +10,7 @@ The CSP permits local external scripts/styles and blocks inline script, handlers
 
 The privileged bridge is `ksu.exec(command, '{}', callbackName)`. `exec` creates a unique global callback, applies a bounded timeout, and deletes the callback on success, error, synchronous throw, or timeout. A timeout is classified as unknown outcome—not command failure and not permission to retry. Action reconciliation reads only durable state/result matching the generated 32-lowercase-hex run.
 
-One Promise-tail mutation coordinator serializes Action, rotation, carrier, flag, target-save, and refresh operations. Mutation controls and relevant `aria-busy` state remain blocked while work is active. Shell/native ownership remains authoritative across WebViews and processes.
+One Promise-tail mutation coordinator serializes Action, rotation, flag, target-save, and refresh operations. Mutation controls and relevant `aria-busy` state remain blocked while work is active. Shell/native ownership remains authoritative across WebViews and processes.
 
 Most observational reads intentionally tolerate missing files and can therefore render empty state for absence or unreadability. Mutation commands do not use that permissive policy.
 
@@ -38,13 +38,11 @@ Reads canonical identity for display and runs the one-click Action. It shows mea
 
 Standalone cards invoke supported `rotate_ids.sh` commands through the global mutation queue. Commands capture combined output and the original exit code, append output to `debug/rotate.log`, then exit with that original code; no `tee` pipeline can mask script failure. Rendering uses explicit component/report status, warnings, and reboot requirement. Reloads are awaited.
 
-### SIM
-
-`carriers.tsv` is optional convenience data. Parsed catalog rows are validated before use. When absent, manual MCC, MNC, name, ISO, phantom, and optional carrier-ID fields remain available with client-side format checks; native carrier parsing/transaction is final authority. Apply and disable preserve the original shell exit status while appending logs.
-
 ### Eksperimen
 
-Six operational flags are changed through native `set-flag` and canonical state is reloaded after mutation. Copy states the partial cross-lens scope. Marker files and native policy remain authoritative for hide/native-read effective behavior.
+Five operational flags are changed through native `set-flag` and canonical state is reloaded after mutation. Copy states the partial cross-lens scope. Marker files and native policy remain authoritative for hide/native-read effective behavior. The retired sysfs-MAC control is absent.
+
+Synthetic Wi-Fi/Bluetooth identity and SIM/carrier controls are not exposed. The Perangkat tab may still show persona `MODEL`, and native framework apply uses that model for general user-0 device-name settings; this is not Bluetooth-name rotation.
 
 ### Target
 
@@ -60,7 +58,7 @@ Self-test parses only exact `SELFTEST` records and states that root-shell diagno
 
 `build.sh` requires the NDK path, CMake, zip, `module.prop`, mandatory runtime/WebUI inputs, and SHA-256 tooling. It fetches only missing pinned `jni/zygisk.hpp` from commit `8ce26128f81baaed0b969aaf7f52f886b61af4ab` and requires SHA-256 `f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28`. No persona refresh or network persona source runs during packaging.
 
-Release/debug variants build arm64-v8a, armeabi-v7a, x86_64, and x86 at minimum API 26 by default. Core lifecycle scripts, target file, WebUI, and four CLI binaries are mandatory. `personas.tsv` and `carriers.tsv` are optional. `tests/package_manifest_test.sh` verifies staged inputs and rejects obsolete acquisition artifacts. `dist` is not cleaned, so stale ZIPs can coexist with new output.
+Release/debug variants build arm64-v8a, armeabi-v7a, x86_64, and x86 at minimum API 26 by default. Core lifecycle scripts, target file, WebUI, and four CLI binaries are mandatory. `personas.tsv` is the only optional reviewed catalog; retired carrier state/catalog files are not staged. `tests/package_manifest_test.sh` verifies staged inputs and rejects obsolete acquisition and carrier artifacts. `dist` is not cleaned, so stale ZIPs can coexist with new output.
 
 Missing `module.prop` remains a deliberate full-build blocker. Missing generated `jni/zygisk.hpp` remains a `main.cpp` syntax blocker during non-network validation.
 
@@ -74,16 +72,16 @@ The optional bundled arm64 binary/checksum/license form one indivisible package 
 
 1. strict debug/release syntax for native files available without Zygisk, and `main.cpp` only when the generated header exists;
 2. tracked shell and JavaScript syntax;
-3. carrier, native-read, persona, and target C++ host suites plus Python probe policy;
+3. native-read, persona, and target C++ host suites plus Python probe policy;
 4. mocked Action, acquisition, rotation, AppLog/helper, installer, package-manifest, and dependency-free WebUI suites;
 5. acquisition adapter/no-redirect policy;
 6. explicit package blockers and obsolete-source policy;
 7. `git diff --check`;
 8. ShellCheck when installed.
 
-`tests/webui_test.js` covers protocol parsing, callback timeout cleanup, unknown-result reconciliation, mutation serialization, exit-preserving logging, awaited reloads, target-save construction, and tab behavior. Static assertions cover CSP/ARIA contracts. Package tests cover mandatory inputs, optional catalogs, resetprop completeness, and obsolete-file exclusion.
+`tests/webui_test.js` covers protocol parsing, callback timeout cleanup, unknown-result reconciliation, mutation serialization, exit-preserving logging, awaited reloads, target-save construction, and tab behavior. Static assertions cover CSP/ARIA contracts. Package tests cover mandatory inputs, the optional persona catalog, resetprop completeness, and obsolete/retired-file exclusion.
 
-Host/mocked success establishes code-level parsers, state machines, generated commands, ownership, accounting, and UI behavior. It does not prove a real root-manager callback ABI, WebView/CSP implementation, Android property/settings operations, SELinux ownership, OEM identifier layouts, package-data mutation, Wi-Fi/Bluetooth acceptance, Zygisk/JNI/PLT coverage, namespaces, or four-ABI execution.
+Host/mocked success establishes code-level parsers, state machines, generated commands, ownership, accounting, and UI behavior. It does not prove a real root-manager callback ABI, WebView/CSP implementation, Android property/settings operations, SELinux ownership, OEM identifier layouts, package-data mutation, Zygisk/JNI/PLT coverage, namespaces, or four-ABI execution.
 
 ## CI and release boundary
 

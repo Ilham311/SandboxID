@@ -51,30 +51,6 @@ inline std::string uuid_from_seed(uint64_t seed) {
     return s;
 }
 
-inline std::string mac_from_seed(uint64_t seed) {
-    uint8_t b[6];
-    fill_bytes(seed, b, sizeof(b));
-    b[0] = 0x02;
-    char buf[18];
-    std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
-                  b[0], b[1], b[2], b[3], b[4], b[5]);
-    return std::string(buf);
-}
-
-inline bool is_valid_mac(const std::string& m) {
-    if (m.size() != 17) return false;
-    for (int i = 0; i < 17; ++i) {
-        char c = m[i];
-        if ((i % 3) == 2) { if (c != ':') return false; }
-        else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
-            return false;
-    }
-
-    bool all_zero = true;
-    for (char c : m) if (c != '0' && c != ':') { all_zero = false; break; }
-    return !all_zero;
-}
-
 inline std::string hex_from_seed(uint64_t seed, size_t nbytes) {
     std::string s;
     s.reserve(nbytes * 2);
@@ -389,7 +365,7 @@ inline bool patch_cpuinfo_aggregate_revision(const std::string& real,
 }
 
 enum Kind {
-    NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE,
+    NONE = 0, BOOTID, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE,
 
     APPLOG_XML,
     BD_RAW_DID,
@@ -403,7 +379,6 @@ struct EnvironmentGates {
     bool native_read = false;
     bool proc_version = false;
     bool meminfo = false;
-    bool sysfs_mac = false;
     bool cpu_revision = false;
 };
 
@@ -413,7 +388,6 @@ inline bool environment_surface_enabled(Kind kind,
     switch (kind) {
         case VERSION: return gates.proc_version;
         case MEMINFO: return gates.meminfo;
-        case MAC: return gates.sysfs_mac;
         case CPUINFO: return gates.cpu_revision;
         default: return true;
     }
@@ -483,19 +457,6 @@ inline Kind classify(const char* path) {
     if (std::strcmp(path, "/proc/cpuinfo") == 0) return CPUINFO;
 
     if (std::strcmp(path, "/sys/fs/selinux/enforce") == 0) return SELINUX_ENFORCE;
-
-    static const char pfx[] = "/sys/class/net/";
-    const size_t pl = sizeof(pfx) - 1;
-    if (std::strncmp(path, pfx, pl) == 0) {
-        const char* rest = path + pl;
-        const char* slash = std::strchr(rest, '/');
-        if (slash && std::strcmp(slash, "/address") == 0) {
-            size_t iflen = static_cast<size_t>(slash - rest);
-            if ((iflen >= 4 && std::strncmp(rest, "wlan", 4) == 0) ||
-                (iflen >= 3 && std::strncmp(rest, "p2p", 3) == 0))
-                return MAC;
-        }
-    }
 
     const size_t pl2 = std::strlen(path);
     if (ends_with(path, pl2, "/shared_prefs/applog.xml") ||

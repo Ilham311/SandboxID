@@ -65,10 +65,11 @@ cleanup_fixture() {
 new_fixture
 printf 'com.example.app:worker\n' > "$LIVE/target.txt"
 printf 'fresh\n' > "$LIVE/identity.mode"
-make_pair "$LIVE" identity.prop identity.meta identity_sha256 'MODEL=Pixel\nSBX_NATIVE_READ=1\n'
-make_pair "$LIVE" identity.prop.bak identity.meta.bak identity_sha256 'MODEL=Pixel-old\n'
-make_pair "$LIVE" persona.cache persona.cache.meta candidate_sha256 'SBX_PERSONA_V1\t35\tcandidate\n'
-touch "$LIVE/enable_remote_refresh"
+make_pair "$LIVE" identity.prop identity.meta identity_sha256 $'MODEL=Pixel\nSBX_NATIVE_READ=1\nSBX_SYSFS_MAC=1\n'
+make_pair "$LIVE" identity.prop.bak identity.meta.bak identity_sha256 $'MODEL=Pixel-old\n'
+make_pair "$LIVE" persona.cache persona.cache.meta candidate_sha256 $'SBX_PERSONA_V1\t35\tcandidate\n'
+printf 'legacy carrier\n' > "$LIVE/carrier.conf"
+printf 'legacy catalog\n' > "$LIVE/carriers.tsv"
 run_installer "$LIVE" "$STAGE" "$MODULES" "$FIXTURE/out"
 rc=$?
 check 'installer accepts complete validated state pairs' test "$rc" -eq 0
@@ -76,8 +77,10 @@ check 'installer preserves canonical pair' cmp -s "$LIVE/identity.prop" "$STAGE/
 check 'installer preserves canonical metadata' cmp -s "$LIVE/identity.meta" "$STAGE/identity.meta"
 check 'installer preserves backup pair' cmp -s "$LIVE/identity.meta.bak" "$STAGE/identity.meta.bak"
 check 'installer preserves remote cache pair' cmp -s "$LIVE/persona.cache.meta" "$STAGE/persona.cache.meta"
-check 'installer preserves refresh preference' test -f "$STAGE/enable_remote_refresh"
 check 'installer preserves exact process targets' cmp -s "$LIVE/target.txt" "$STAGE/target.txt"
+check 'installer does not preserve retired carrier state' test ! -e "$STAGE/carrier.conf"
+check 'installer does not preserve retired carrier catalog' test ! -e "$STAGE/carriers.tsv"
+check 'installer does not restore retired sysfs-MAC flag' sh -c '! grep -q "^SBX_SYSFS_MAC=" "$1/.operational-flags" 2>/dev/null' sh "$STAGE"
 check 'installer restricts canonical state permissions' test "$(stat -c %a "$STAGE/identity.prop")" = 600
 check 'installer restricts cache permissions' test "$(stat -c %a "$STAGE/persona.cache")" = 600
 cleanup_fixture

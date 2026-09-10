@@ -6,7 +6,7 @@ This is the responsibility and state-ownership map for the one-click identity ar
 
 ```text
 customize.sh
-  preserve validated state and preferences -> permissions -> ABI CLI link
+  preserve validated state -> permissions -> ABI CLI link
 
 post-fs-data.sh (pre-Zygote)
   restore flags -> effective-target gate -> seed -> apply-props
@@ -15,7 +15,7 @@ service.sh (framework ready)
   effective-target gate -> apply-boot -> optional debug workers
 
 Action / WebUI
-  preflight -> optional refresh -> prepare -> commit -> apply
+  preflight -> refresh -> prepare -> commit -> apply
   -> installed target reset -> committed-value rotation
   -> shared-epoch AppLog -> exact verify -> durable result
 
@@ -40,9 +40,8 @@ The primary outcome is one Action run that gives configured target apps a fresh,
 | `jni/sbx_sha256.hpp` | Header-pure SHA-256 used for identity/base/provenance binding. |
 | `jni/sbx_property.hpp` | Mapped/hidden/pass property decisions and typed/callback helpers. |
 | `jni/sbx_native_read.hpp` | Native read gates/transforms, deterministic AppLog IDs, path handling. |
-| `jni/sbx_carrier.hpp` | Strict carrier config parsing and identity-field merge/removal. |
 | `jni/sbx_mountinfo.hpp` | Protected/trace mount selection for optional hide. |
-| `jni/sandboxid.cpp` | Privileged canonical writer, transactions, overlays, apply, persona import, targets, carrier/local state. |
+| `jni/sandboxid.cpp` | Privileged canonical writer, transactions, overlays, apply, persona import, targets, and remaining local state. |
 | `jni/companion.cpp` | Stable target cache, bound canonical read under shared state lock, peer-authorized mounts/hide. |
 | `jni/main.cpp` | Target-process Zygisk lifecycle, Build/property/uptime/native-read hooks and IPC client. |
 | `jni/CMakeLists.txt` | Android artifacts and optional header-pure host test targets. |
@@ -52,8 +51,8 @@ The primary outcome is one Action run that gives configured target apps a fresh,
 | Path | Responsibility |
 |---|---|
 | `action.sh` | Whole-operation ownership, staged Action, accounting, rollback/forward recovery, protocol persistence. |
-| `autopif.sh` | Optional bounded `refresh`; extraction of one explicit complete candidate and native import. |
-| `rotate_ids.sh` | Standalone or committed-snapshot SSAID/GAID/Wi-Fi/Bluetooth/name/boot rotation and reports. |
+| `autopif.sh` | Always-attempted bounded Pixel OTA catalog/prefix acquisition and native persona import. |
+| `rotate_ids.sh` | Standalone or committed-snapshot SSAID/GAID/boot rotation and reports. |
 | `helpers.sh` | Mutation-owner checks, property/framework helpers, AppLog wipe/seed/probe, SELinux cleanup. |
 | `customize.sh` | Verified preservation, ABI selection, permissions, resetprop-set integrity. |
 | `post-fs-data.sh` | Pre-Zygote flag restore, seed, and property apply. |
@@ -62,7 +61,7 @@ The primary outcome is one Action run that gives configured target apps a fresh,
 | `build.sh` | Deterministic four-ABI staging/package policy; no persona network acquisition. |
 | `validate.sh` | Aggregate non-device validation and explicit blocker reporting. |
 | `webroot/app.js` | Privileged bridge, timeout/reconciliation, mutation serialization, parsers and mutations. |
-| `webroot/index.html`, `style.css`, `theme-init.js` | CSP-safe static UI, accessible tabs/progress/manual carrier/theme. |
+| `webroot/index.html`, `style.css`, `theme-init.js` | CSP-safe static UI, accessible tabs/progress/theme. |
 
 ### Tests and package policy
 
@@ -71,9 +70,8 @@ The primary outcome is one Action run that gives configured target apps a fresh,
 | `tests/persona_test.cpp` | Persona parsing, exact SDK, source priority, compiled coverage, local values. |
 | `tests/target_test.cpp` | Exact process preservation, package normalization/deduplication, rejection. |
 | `tests/native_read_test.cpp` | Identity/property/native-read/AppLog/mount header-pure behavior. |
-| `tests/carrier_test.cpp` | Strict carrier parsing/application. |
 | `tests/action_test.sh` | Locking, precommit safety, rollback, forward recovery, accounting, protocol/exits. |
-| `tests/autopif_test.sh` | Refresh gate, bounds/adapter/import, last-known-good preservation. |
+| `tests/autopif_test.sh` | Official-catalog join, bounded OTA metadata, non-repeat traversal, provenance/import, and last-known-good preservation. |
 | `tests/rotation_test.sh` | Native standalone writes, snapshot mode, reports, failure restoration. |
 | `tests/helpers_applog_test.sh` | Package normalization and per-package AppLog outcomes/shared epoch. |
 | `tests/customize_test.sh` | Empty-target/mode/state preservation, ABI/resetprop policy. |
@@ -91,7 +89,6 @@ The primary outcome is one Action run that gives configured target apps a fresh,
 | `persona.override` | Operator/packaged input | One-shot exact-SDK source; removed only after successful commit. |
 | `persona.cache` + `.meta` | Native `persona-import` | Persistent last-known-good candidate plus strict acquisition provenance. |
 | `personas.tsv` | Optional reviewed package catalog | Extension tier; never replaces compiled coverage. |
-| `carrier.conf` | Native carrier transaction | Co-published with carrier identity fields; `carriers.tsv` is optional UI data only. |
 | `target.txt` | Installer/WebUI/operator | Exact process list. Native parser exposes process and normalized package views. Stable effective empty is off. |
 | `mount/` | Native checked staged publisher | Five source trees bind to eight destinations; tied to canonical identity verification. |
 | `.state.lock` | Native mutation/read guard | Exclusive canonical writers, shared companion reader. |
@@ -106,9 +103,9 @@ Do not infer live values from checkout files. Runtime state is under `/data/adb/
 
 ## Identity and persona contract
 
-Required presentation/build fields remain those enforced by `sbx_identity.hpp`; additionally the Action snapshot carries strictly validated `GOOGLE_AID`, `WIFI_MAC`, `BLUETOOTH_ADDR`, `BLUETOOTH_NAME`, `BOOT_COUNT`, and `APPLOG_EPOCH`. GAID is UUID-v4 or the zero sentinel. MAC addresses are unicast, locally administered.
+Required presentation/build fields remain those enforced by `sbx_identity.hpp`; additionally the Action snapshot carries strictly validated `GOOGLE_AID`, `BOOT_COUNT`, and `APPLOG_EPOCH`. GAID is UUID-v4 or the zero sentinel. Explicit migration can drop recognized retired synthetic Wi-Fi/Bluetooth/SIM keys only after metadata has been validated against the untouched legacy bytes; canonical serialization cannot emit them again.
 
-Persona source order is strict: override, cache, reviewed extension, compiled built-in. All candidates must match the exact runtime SDK. Compiled reviewed rows cover 31–36; unsupported SDK fails before mutation with an update request. Remote acquisition is not a source of truth: `autopif.sh refresh` is opt-in, allowlisted HTTPS, bounded, and can only submit one complete marked row plus provenance to `persona-import`. A failed refresh cannot erase a prior cache or override.
+Persona source order is strict: override, cache, reviewed extension, compiled built-in. All candidates must match the exact runtime SDK. Compiled reviewed rows cover 31–36; unsupported SDK fails before mutation with an update request. After package classification, every otherwise-valid Action attempts `autopif.sh refresh` before native `prepare`. SDK 35/36 use official exact-release Android 15/16 Pixel OTA catalogs; older supported SDKs fail acquisition before networking because their historical version URLs redirect to a generic page. The adapter reads a bounded prefix of direct allowlisted OTA ZIPs, extracts the authoritative fingerprint and security patch, fills only pinned supported Pixel platform/SoC mappings, and submits one complete 16-column candidate with `pixel-ota-v1` provenance to native `persona-import`. A hash-bound prior cache device is excluded when a supported alternative is present, and refresh fails without publication when no alternative exists. Acquisition failure warns and falls through; it cannot erase the prior cache, override, canonical identity, reviewed extension, or compiled fallback.
 
 ## Action and result ownership
 
@@ -124,14 +121,14 @@ Durability is rollback-on-return, not a journal. Pair and overlay routines detec
 
 For a target GET, the companion takes a nonblocking shared state lock, reads identity/metadata together, validates binding, and distinguishes ready, missing, busy, and invalid. It invokes seed only for genuinely missing state. The module then strict-validates with genuine runtime SDK before activating any presentation. Invalid/unavailable state unloads the module and leaves the app genuine.
 
-The hook layers remain Java Build/SystemProperties, Bionic property APIs, uptime, selected native reads/AppLog, build-property mounts, and optional hide. They do not guarantee late-loaded import coverage or cross-lens hardware/attestation virtualization. IPC IDs remain `GET_IDENTITY=2`, `DO_MOUNTS=3`, `DO_HIDE=4` with local integer framing in `config.hpp`.
+The hook layers remain Java Build/SystemProperties, Bionic property APIs, uptime, selected native reads/AppLog, build-property mounts, and optional hide. Synthetic Wi-Fi/Bluetooth identities, sysfs-MAC reads, and SIM/carrier presentation are absent. General framework `device_name` settings still follow persona `MODEL`, while defensive property hiding continues to remove genuine telephony/Wi-Fi/Bluetooth identifiers where covered. The hooks do not guarantee late-loaded import coverage or cross-lens hardware/attestation virtualization. IPC IDs remain `GET_IDENTITY=2`, `DO_MOUNTS=3`, `DO_HIDE=4` with local integer framing in `config.hpp`.
 
 ## Build and release boundary
 
-Core runtime inputs are mandatory package files; `personas.tsv` and `carriers.tsv` are optional. `devices.tsv` and `device.identity` are rejected as obsolete. The complete resetprop binary/checksum/license trio is required if any member is present. `module.prop` absence is an explicit full-build blocker, and `jni/zygisk.hpp` absence is an explicit `main.cpp` syntax blocker.
+Core runtime inputs are mandatory package files; `personas.tsv` is optional. Retired `carriers.tsv`/carrier state and obsolete `devices.tsv`/`device.identity` are rejected from package contracts. The complete resetprop binary/checksum/license trio is required if any member is present. `module.prop` absence is an explicit full-build blocker, and `jni/zygisk.hpp` absence is an explicit `main.cpp` syntax blocker.
 
 The tracked release workflow runs on default-branch pushes/tags/manual dispatch and can commit metadata, tag, and publish. It does not run for pull requests. A feature-branch PR may be opened, but do not merge or trigger release automation without separate authorization.
 
 ## Verified and unverified boundaries
 
-`bash validate.sh` is the authoritative safe aggregate gate. It never intentionally runs a real Action, rotation, remote refresh, Android settings/package mutation, or release operation. Header/mocked tests establish parser and orchestration contracts only. They do not prove real Zygisk/JNI/PLT registration, property service, framework Settings, SELinux contexts, mount namespaces/hide, OEM GMS/Wi-Fi/Bluetooth layouts, Android ABI package execution, or power-loss recovery.
+`bash validate.sh` is the authoritative safe aggregate gate. It never intentionally runs a real Action, rotation, remote refresh, Android settings/package mutation, or release operation. Header/mocked tests establish parser and orchestration contracts only. They do not prove real Zygisk/JNI/PLT registration, property service, framework Settings, SELinux contexts, mount namespaces/hide, OEM GMS layouts, Android ABI package execution, or power-loss recovery.

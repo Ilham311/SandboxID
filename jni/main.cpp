@@ -125,14 +125,6 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.build.version.security_patch", "SECURITY_PATCH"},
         {"ro.build.version.incremental",    "INCREMENTAL"},
         {"gsm.version.baseband",            "RADIO"},
-        {"gsm.operator.numeric",            "GSM_OPERATOR_NUMERIC"},
-        {"gsm.sim.operator.numeric",        "GSM_OPERATOR_NUMERIC"},
-        {"gsm.operator.alpha",              "GSM_OPERATOR_ALPHA"},
-        {"gsm.sim.operator.alpha",          "GSM_OPERATOR_ALPHA"},
-        {"gsm.operator.iso-country",        "GSM_OPERATOR_ISO"},
-        {"gsm.sim.operator.iso-country",    "GSM_OPERATOR_ISO"},
-        {"gsm.sim.state",                   "GSM_SIM_STATE"},
-        {"gsm.sim.state.ril",               "GSM_SIM_STATE"},
         {"ro.build.user",                   "USER"},
         {"ro.build.host",                   "HOST"},
         {"ro.build.tags",                   "TAGS"},
@@ -720,7 +712,6 @@ static sbx_sprcb_fn  orig_sprcb  = nullptr;
 
 static bool        g_nr_active    = false;
 static std::string g_boot_id;
-static std::string g_wifi_mac;
 static std::string g_proc_version;
 static int         g_ram_gb = 0;
 static sbxnr::EnvironmentGates g_environment_gates;
@@ -833,8 +824,6 @@ static bool sbx_build_content(sbxnr::Kind kind, const char* path, std::string& o
         return false;
     switch (kind) {
         case sbxnr::BOOTID:  out = g_boot_id; out.push_back('\n'); return true;
-        case sbxnr::MAC:
-            out = g_wifi_mac; out.push_back('\n'); return true;
         case sbxnr::VERSION:
             out = g_proc_version; out.push_back('\n'); return true;
         case sbxnr::SELINUX_ENFORCE:
@@ -1039,16 +1028,8 @@ static void install_native_read_hooks(Api* api) {
     g_environment_gates.native_read = true;
     g_environment_gates.proc_version = val("SBX_PROC_VERSION") == "1";
     g_environment_gates.meminfo = val("SBX_MEMINFO") == "1";
-    g_environment_gates.sysfs_mac = val("SBX_SYSFS_MAC") == "1";
     g_environment_gates.cpu_revision = val("SBX_CPU_REVISION") == "1";
 
-    if (g_environment_gates.sysfs_mac) {
-        const std::string& pmac = val("WIFI_MAC");
-        g_wifi_mac = sbxnr::is_valid_mac(pmac) ? pmac
-            : sbxnr::mac_from_seed(seed ^ 0x9E3779B97F4A7C15ULL);
-    } else {
-        g_wifi_mac.clear();
-    }
     if (g_environment_gates.proc_version) {
         g_proc_version = sbxnr::synth_proc_version(
             val("RELEASE"), val("INCREMENTAL"), val("BOARD_PLATFORM"),
@@ -1098,11 +1079,10 @@ static void install_native_read_hooks(Api* api) {
         return;
     }
     LOGD("L9 aktif (%d lib): boot_id=%s proc_version=%d meminfo=%d "
-         "sysfs_mac=%d cpu_revision=%d "
+         "cpu_revision=%d "
          "[open=%p openat=%p fopen=%p spg=%p spr=%p sprcb=%p]",
          libs, g_boot_id.c_str(), g_environment_gates.proc_version ? 1 : 0,
          g_environment_gates.meminfo ? 1 : 0,
-         g_environment_gates.sysfs_mac ? 1 : 0,
          g_environment_gates.cpu_revision ? 1 : 0,
          reinterpret_cast<void*>(orig_open),   reinterpret_cast<void*>(orig_openat),
          reinterpret_cast<void*>(orig_fopen),  reinterpret_cast<void*>(orig_spg),

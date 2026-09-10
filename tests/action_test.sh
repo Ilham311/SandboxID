@@ -41,6 +41,7 @@ reset_env() {
     export SBX_DUMPSYS_MISSING_EXTRA='' SBX_DUMPSYS_MISMATCH='' SBX_DUMPSYS_NO_USER=''
     export SBX_DUMPSYS_CONFLICT='' SBX_DUMPSYS_MALFORMED='' SBX_DUMPSYS_DENIED='' SBX_DUMPSYS_STDERR='' SBX_DUMPSYS_FAIL=''
     export SBX_APPLOG_WIPE_FAIL='' SBX_APPLOG_SEED_FAIL=''
+    export SBX_AUTOPIF_RC=0
 }
 
 setup_case() {
@@ -53,6 +54,7 @@ setup_case() {
     make_helpers
     make_native
     make_rotate
+    make_autopif
     make_tools
     chmod 0755 "$CASE/mod/action.sh" "$CASE/mod/bin/"* "$CASE/tools/"*
     reset_env
@@ -157,9 +159,6 @@ cat > "$report" <<EOF
 run=$SBX_ACTION_RUN_ID
 ssaid=ok:0
 gaid=ok:0
-wlan_mac=ok:0
-bluetooth_mac=ok:0
-device_name=ok:0
 boot_count=ok:0
 REBOOT_NEEDED=${SBX_ROTATE_REBOOT:-0}
 FAILURES=${SBX_ROTATE_FAILURES:-0}
@@ -167,7 +166,14 @@ UNSUPPORTED=${SBX_ROTATE_UNSUPPORTED:-0}
 EOF
 exit "${SBX_ROTATE_RC:-0}"
 SH
-    cp "$CASE/mod/rotate_ids.sh" "$CASE/mod/autopif.sh"
+}
+
+make_autopif() {
+    cat > "$CASE/mod/autopif.sh" <<'SH'
+#!/bin/sh
+printf 'autopif %s\n' "$*" >> "$SBX_CALLS"
+exit "${SBX_AUTOPIF_RC:-0}"
+SH
 }
 
 make_tools() {
@@ -471,9 +477,23 @@ export SBX_PM_USER_QUERY_RC SBX_PM_QUERY_RC SBX_PM_FILTER_USER_RC SBX_PM_FILTER_
 run_case
 check '[ "$CASE_RC" -eq 30 ]' 'all package queries failing exits before commit with 30'
 check 'result_has "code=package-query-failed"' 'package query failure remains explicit and durable'
-check '! call_has "native prepare" && ! call_has "pm clear"' 'package query failure performs no mutation'
+check '! call_has "native prepare" && ! call_has "pm clear" && ! call_has "autopif refresh"' 'package query failure performs neither refresh nor mutation'
 check '[ "$(grep -c "dumpsys package com.example.present" "$CASE/calls")" -eq 1 ] && [ "$(grep -c "pm list packages --user 0 com.example.present" "$CASE/calls")" -eq 3 ]' 'independent dump and final filtered compatibility paths stay bounded'
 check 'grep -q "package-dump.*unrecognized-output" "$CASE/mod/debug/action.log"' 'empty successful dump output is diagnosed and never treated as absent'
+
+setup_case refresh-helper-missing
+rm -f "$CASE/mod/autopif.sh"
+run_case
+check '[ "$CASE_RC" -eq 127 ] && result_has "code=refresh-helper-missing"' 'missing acquisition helper fails preflight'
+check '! call_has "native prepare" && ! call_has "autopif refresh"' 'missing acquisition helper performs no refresh or mutation'
+
+setup_case refresh-fail
+SBX_AUTOPIF_RC=22
+export SBX_AUTOPIF_RC
+run_case
+check '[ "$CASE_RC" -eq 0 ]' 'refresh failure retains the offline one-click transaction'
+check 'call_has "autopif refresh" && call_has "native prepare"' 'refresh failure still reaches offline prepare'
+check 'result_has "status=success" && result_has "warnings=1"' 'refresh failure is reported as one nonfatal warning'
 
 setup_case prepare-fail
 SBX_PREPARE_RC=1
@@ -512,6 +532,8 @@ check '! call_has "pm clear" && ! call_has "rotate " && ! call_has "wipe "' 'deg
 setup_case success-accounting
 run_case
 check '[ "$CASE_RC" -eq 0 ]' 'complete mocked Action exits 0'
+check 'call_has "autopif refresh"' 'every successful preflight attempts persona refresh'
+check '[ "$(grep -n "autopif refresh" "$CASE/calls" | cut -d: -f1)" -lt "$(grep -n "native prepare" "$CASE/calls" | cut -d: -f1)" ]' 'persona refresh precedes native prepare'
 check 'stdout_has "TARGET.*status=cleared" && stdout_has "TARGET.*status=absent"' 'installed and absent target statuses are both emitted'
 check 'stdout_has "APPLOG.*status=seeded" && stdout_has "APPLOG.*status=absent"' 'AppLog installed and absent statuses are both emitted'
 check 'call_has "pm clear --user 0 com.example.present"' 'only installed package is cleared'
@@ -545,7 +567,7 @@ SBX_ROTATE_UNSUPPORTED=1
 export SBX_ROTATE_RC SBX_ROTATE_UNSUPPORTED
 run_case
 check '[ "$CASE_RC" -eq 20 ]' 'required unsupported rotation returns partial 20'
-check 'stdout_has "ROTATE.*component=wlan_mac.*status=ok"' 'component rotation protocol is emitted'
+check 'stdout_has "ROTATE.*component=gaid.*status=ok" && stdout_has "ROTATE.*component=boot_count.*status=ok"' 'remaining component rotation protocol is emitted'
 
 setup_case reboot
 SBX_ROTATE_REBOOT=1

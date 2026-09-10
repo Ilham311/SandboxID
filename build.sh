@@ -117,10 +117,9 @@ build_variant() {
   [ -f LICENSE ]   && cp LICENSE "$PKG/"
   [ -f CREDITS.md ] && cp CREDITS.md "$PKG/"
   [ -f summarize.sh ] && cp summarize.sh "$PKG/"
-  # Optional reviewed convenience catalogs. The native offline catalog remains
-  # authoritative when these files are absent.
+  # Optional reviewed persona extension. The native offline catalog remains
+  # authoritative when this file is absent.
   [ -f personas.tsv ] && cp personas.tsv "$PKG/"
-  [ -f carriers.tsv ] && cp carriers.tsv "$PKG/"
 
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"

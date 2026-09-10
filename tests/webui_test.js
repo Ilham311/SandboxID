@@ -105,23 +105,6 @@ test('durable snapshot is split and matched by exact run', () => {
   assert.strictEqual(web.isActionLive(snap.state, snap.owner, RUN), false);
 });
 
-test('carrier validation rejects delimiters, controls, and malformed fields', () => {
-  const good = { name: 'Telkomsel', mcc: '510', mnc: '10', iso: 'id', carrierId: '1' };
-  assert.strictEqual(web.validCarrierInput(good), true);
-  assert.strictEqual(web.validCarrierInput({ ...good, name: 'Bad|Name' }), false);
-  assert.strictEqual(web.validCarrierInput({ ...good, name: 'Bad\nName' }), false);
-  assert.strictEqual(web.validCarrierInput({ ...good, name: ' padded ' }), false);
-  assert.strictEqual(web.validCarrierInput({ ...good, mcc: '51' }), false);
-  assert.strictEqual(web.validCarrierInput({ ...good, mnc: '1' }), false);
-  assert.strictEqual(web.validCarrierInput({ ...good, iso: 'ID' }), false);
-  const rows = web.parseCarriersTsv([
-    'Telkomsel\t510\t10\tid\t1',
-    'Bad|Carrier\t510\t11\tid\t2',
-    'Bad\t51\t11\tid\t3',
-  ].join('\n'));
-  assert.deepStrictEqual(rows, [good]);
-});
-
 test('mutation coordinator serializes asynchronous mutations', async () => {
   const seen = [];
   let release;
@@ -255,7 +238,7 @@ test('HTML has complete accessible tab and DOM contracts', () => {
   assert.deepStrictEqual(referenced.filter(id => !ids.includes(id)), []);
   assert.match(html, /<nav id="nav" role="tablist"/);
   const tabs = Array.from(html.matchAll(/<button class="tab[^>]*id="([^"]+)"[^>]*aria-controls="([^"]+)"[^>]*>/g));
-  assert.strictEqual(tabs.length, 7);
+  assert.strictEqual(tabs.length, 6);
   for (const match of tabs) {
     const [, tabId, panelId] = match;
     assert.match(match[0], /role="tab"/);

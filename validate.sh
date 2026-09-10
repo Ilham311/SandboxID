@@ -49,7 +49,7 @@ else
 fi
 
 echo "=== 3/8 C++ host suites ==="
-for suite in carrier native_read persona target; do
+for suite in native_read persona target; do
   if clang++ -std=c++20 -Wall -Wextra -Ijni -o "$TMP/sbx_${suite}_test" "tests/${suite}_test.cpp" &&
      "$TMP/sbx_${suite}_test"; then
     pass "${suite}_test"
@@ -82,9 +82,9 @@ else
 fi
 
 echo "=== 5/8 acquisition contract ==="
-if grep -q 'ADAPTER="${AUTOPIF_ADAPTER:-complete-marker}"' autopif.sh &&
-   grep -q 'meta\["adapter"\] != "complete-marker"' jni/sbx_transaction.hpp; then
-  pass "complete-marker adapter is synchronized"
+if grep -q 'ADAPTER="${AUTOPIF_ADAPTER:-pixel-ota-v1}"' autopif.sh &&
+   grep -q 'meta\["adapter"\] != "pixel-ota-v1"' jni/sbx_transaction.hpp; then
+  pass "pixel-ota-v1 adapter is synchronized"
 else
   fail "acquisition adapter contract is inconsistent"
 fi

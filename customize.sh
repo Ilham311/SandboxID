@@ -8,13 +8,13 @@ ui_print "- Satu Action menyiapkan persona exact-SDK, menerapkan presentasi,"
 ui_print "-   mereset data target terpasang, merotasi penyimpanan ID lokal,"
 ui_print "-   lalu memverifikasi hasil yang dapat dilanjutkan atau dipulihkan."
 ui_print "- Katalog offline tervalidasi tersedia di binary; personas.tsv hanya ekstensi."
-ui_print "- Refresh jaringan bersifat opsional, default-nonaktif, dan tidak diperlukan"
-ui_print "-   untuk menghasilkan identitas baru. Cache lama dipertahankan saat gagal."
+ui_print "- Setiap Action mencoba refresh Pixel OTA exact-SDK yang dibatasi; cache lama"
+ui_print "-   dan katalog offline tetap dipakai bila jaringan atau validasi gagal."
 ui_print "- Action dapat menghapus data aplikasi target dan mungkin perlu reboot."
 ui_print "- Kegagalan pasca-commit dilaporkan parsial; bukan disamarkan sebagai sukses."
 ui_print "- Properti presentasi diterapkan pre-Zygote; hook aktif saat target dibuat."
 ui_print "- Kemampuan runtime, API layanan, dan attestation perangkat tetap asli."
-ui_print "- Opsi /proc, meminfo, sysfs MAC, dan CPU eksperimental bersifat parsial."
+ui_print "- Opsi /proc, meminfo, dan CPU eksperimental bersifat parsial."
 ui_print "- Aplikasi target diatur di target.txt (file kosong = modul nonaktif)."
 ui_print "- WebUI: buka modul ini di manajer KernelSU/APatch."
 ui_print ""
@@ -67,9 +67,6 @@ LIVE_TARGET="$LIVE_MODULE_DIR/target.txt"
 if ! preserve_file "target.txt" "$LIVE_TARGET" "$MODPATH/target.txt"; then
     ui_print "- Menyiapkan target.txt (kosong dulu; isi proses target untuk mengaktifkan)"
 fi
-
-LIVE_CARRIER="$LIVE_MODULE_DIR/carrier.conf"
-preserve_file "carrier.conf (pilihan operator)" "$LIVE_CARRIER" "$MODPATH/carrier.conf" || true
 
 LIVE_MODE="$LIVE_MODULE_DIR/identity.mode"
 if ! preserve_file "identity.mode" "$LIVE_MODE" "$MODPATH/identity.mode"; then
@@ -148,15 +145,13 @@ preserve_optional_pair() {
 
 preserve_optional_pair "identity backup" identity.prop.bak identity.meta.bak identity_sha256
 preserve_optional_pair "cache persona" persona.cache persona.cache.meta candidate_sha256
-preserve_file "preferensi refresh remote" "$LIVE_MODULE_DIR/enable_remote_refresh" \
-    "$MODPATH/enable_remote_refresh" || true
 
 if [ "$IDENTITY_PRESERVED" -eq 1 ]; then
     if ! : > "$MODPATH/.operational-flags"; then
         abort "! Gagal menyiapkan pemulihan pengaturan operasional"
     fi
     for key in SBX_NATIVE_READ SBX_HIDE SBX_CPU_REVISION \
-               SBX_PROC_VERSION SBX_MEMINFO SBX_SYSFS_MAC; do
+               SBX_PROC_VERSION SBX_MEMINFO; do
         value=$(awk -F= -v k="$key" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$LIVE_IDENTITY" 2>/dev/null)
         case "$value" in
             0|1) printf '%s=%s\n' "$key" "$value" >> "$MODPATH/.operational-flags" ||
@@ -207,11 +202,9 @@ set_perm "$MODPATH/rotate_ids.sh"             0 0 0755
 [ -f "$MODPATH/selftest.sh" ] && set_perm "$MODPATH/selftest.sh" 0 0 0755
 [ -f "$MODPATH/autopif.sh" ] && set_perm "$MODPATH/autopif.sh" 0 0 0755
 [ -f "$MODPATH/personas.tsv" ] && set_perm "$MODPATH/personas.tsv" 0 0 0644
-[ -f "$MODPATH/carriers.tsv" ] && set_perm "$MODPATH/carriers.tsv" 0 0 0644
-[ -f "$MODPATH/carrier.conf" ] && set_perm "$MODPATH/carrier.conf" 0 0 0644
 [ -f "$MODPATH/target.txt" ] && set_perm "$MODPATH/target.txt" 0 0 0644
 for _private_state in identity.prop identity.meta identity.prop.bak identity.meta.bak \
-                      persona.cache persona.cache.meta enable_remote_refresh; do
+                      persona.cache persona.cache.meta; do
     [ -f "$MODPATH/$_private_state" ] && set_perm "$MODPATH/$_private_state" 0 0 0600
 done
 

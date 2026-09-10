@@ -23,9 +23,6 @@ cp "$ROOT/helpers.sh" "$ROOT/rotate_ids.sh" "$WORK/mod/"
 printf 'version=test\n' > "$WORK/mod/module.prop"
 printf '%s\n' \
     'GOOGLE_AID=12345678-1234-4abc-8def-1234567890ab' \
-    'WIFI_MAC=02:11:22:33:44:55' \
-    'BLUETOOTH_ADDR=02:66:77:88:99:aa' \
-    'BLUETOOTH_NAME=Sandbox Test' \
     'BOOT_COUNT=17' \
     'APPLOG_EPOCH=1700000000000' > "$WORK/mod/identity.prop"
 printf 'com.example.app\n' > "$WORK/mod/target.txt"
@@ -38,11 +35,6 @@ printf '%s\n' '#!/bin/sh' \
     '  printf "com.example.app\n"' \
     'fi' \
     'exit "${SBX_NATIVE_RC:-0}"' > "$WORK/mod/bin/sandboxid"
-printf '%s\n' '#!/bin/sh' \
-    'case "$1 $2 $3" in' \
-    '  "link show wlan0") exit "${SBX_IP_SHOW_RC:-0}" ;;' \
-    'esac' \
-    'printf "%s\n" "$*" >> "$SBX_IP_CALLS"' > "$WORK/tools/ip"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/tools/settings"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/tools/am"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/tools/setprop"
@@ -53,7 +45,7 @@ printf '#!/bin/sh\nexit 0\n' > "$WORK/tools/setenforce"
 printf '#!/bin/sh\nexit 0\n' > "$WORK/tools/chcon"
 chmod 0755 "$WORK/mod/bin/sandboxid" "$WORK/tools/"*
 
-export SBX_NATIVE_CALLS="$WORK/native.calls" SBX_IP_CALLS="$WORK/ip.calls"
+export SBX_NATIVE_CALLS="$WORK/native.calls"
 
 : > "$WORK/native.calls"
 PATH="$WORK/tools:$PATH" MODDIR="$WORK/mod" LOGFILE="$WORK/rotate.log" \
@@ -102,12 +94,12 @@ PATH="$WORK/tools:$PATH" MODDIR="$WORK/mod" LOGFILE="$WORK/action.log" \
     sh "$WORK/mod/rotate_ids.sh" all --from-identity > "$WORK/action.out" 2>&1
 action_rc=$?
 REPORT="$WORK/mod/debug/rotation.0123456789abcdef0123456789abcdef"
-check '[ "$action_rc" -eq 3 ]' 'required unsupported component returns partial status'
+check '[ "$action_rc" -eq 0 ]' 'remaining required components complete successfully'
 check '[ -s "$REPORT" ]' 'Action rotation report is published'
 check 'grep -q "^run=0123456789abcdef0123456789abcdef$" "$REPORT"' 'report is bound to Action run'
-check 'grep -q "^wlan_mac=unsupported:3$" "$REPORT"' 'report records unsupported Wi-Fi component'
-check 'grep -q "^UNSUPPORTED=1$" "$REPORT"' 'unsupported count matches component status'
-check 'grep -q "^gaid=ok:0$" "$REPORT" && grep -q "^boot_count=ok:0$" "$REPORT"' 'report records successful components'
+check 'grep -q "^UNSUPPORTED=0$" "$REPORT"' 'report has no retired or unsupported components'
+check 'grep -q "^ssaid=ok:0$" "$REPORT" && grep -q "^gaid=ok:0$" "$REPORT" && grep -q "^boot_count=ok:0$" "$REPORT"' 'report records all remaining components'
+check '! grep -Eq "^(wlan_mac|bluetooth_mac|device_name)=" "$REPORT"' 'report omits retired components'
 check '! grep -q "^set-local " "$WORK/native.calls"' 'Action snapshot mode does not rewrite canonical local IDs'
 
 rm -rf "$WORK/mod/.action.lock" "$WORK/mod/.mutation.lock"

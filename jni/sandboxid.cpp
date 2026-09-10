@@ -20,7 +20,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include "config.hpp"
-#include "sbx_carrier.hpp"
 #include "sbx_identity.hpp"
 #include "sbx_native_read.hpp"
 #include "sbx_persona.hpp"
@@ -50,7 +49,6 @@ static const char* MUTATION_OWNER = sandboxid::MUTATION_OWNER;
 static const char* ACTION_OWNER = sandboxid::ACTION_OWNER;
 static const char* ACTION_STATE = sandboxid::ACTION_STATE;
 static const char* ACTION_RESULT = sandboxid::ACTION_RESULT;
-static const char* CARRIER_CONF   = sandboxid::CARRIER_CONF;
 static const char* LEGACY_SETTINGS_OVERLAY = sandboxid::LEGACY_SETTINGS_OVERLAY;
 
 static bool load_target_set(sbxtarget::TargetSet& out, std::string& error) {
@@ -547,11 +545,9 @@ struct Identity {
         "BOOTLOADER","HOST","USER","TYPE","TAGS",
         "INCREMENTAL","RELEASE","SDK_INT","SECURITY_PATCH",
         "SERIAL","RADIO","ANDROID_ID","GOOGLE_AID",
-        "GSM_OPERATOR_NUMERIC","GSM_OPERATOR_ALPHA","GSM_OPERATOR_ISO","GSM_SIM_STATE",
         "SKU","ODM_SKU","BUILD_TIME_UTC","BUILD_DATE","FLAVOR","APPLOG_EPOCH",
-        "WIFI_MAC","BLUETOOTH_ADDR","BLUETOOTH_NAME","BOOT_COUNT",
-        "SBX_NATIVE_READ","SBX_HIDE","SBX_CPU_REVISION",
-        "SBX_PROC_VERSION","SBX_MEMINFO","SBX_SYSFS_MAC",
+        "BOOT_COUNT", "SBX_NATIVE_READ","SBX_HIDE","SBX_CPU_REVISION",
+        "SBX_PROC_VERSION","SBX_MEMINFO",
         };
         std::string out;
         if (!sbxid::serialize_identity_values(
@@ -699,21 +695,6 @@ static bool select_persona(sbxpersona::Selection& selection,
     return selected;
 }
 
-static std::string local_mac() {
-    std::string raw = random_hex(6, false);
-    unsigned first = static_cast<unsigned>(std::strtoul(raw.substr(0, 2).c_str(), nullptr, 16));
-    first = (first | 0x02u) & 0xfeu;
-    char octet[3];
-    std::snprintf(octet, sizeof(octet), "%02x", first);
-    raw.replace(0, 2, octet);
-    std::string mac;
-    for (size_t i = 0; i < raw.size(); i += 2) {
-        if (!mac.empty()) mac.push_back(':');
-        mac.append(raw, i, 2);
-    }
-    return mac;
-}
-
 static Identity derive_identity(const PixelEntry& p) {
     const bool tensor = is_tensor_platform(p.platform);
 
@@ -776,9 +757,6 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["SERIAL"]         = random_hex(8, true);
     id.kv["ANDROID_ID"]     = random_hex(8, false);
     id.kv["GOOGLE_AID"]     = uuid_v4();
-    id.kv["WIFI_MAC"]       = local_mac();
-    id.kv["BLUETOOTH_ADDR"] = local_mac();
-    id.kv["BLUETOOTH_NAME"] = p.model;
     {
         std::random_device random;
         id.kv["BOOT_COUNT"] = std::to_string(1 + random() % 30);
@@ -806,7 +784,6 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["SBX_CPU_REVISION"] = "0";
     id.kv["SBX_PROC_VERSION"] = "0";
     id.kv["SBX_MEMINFO"] = "0";
-    id.kv["SBX_SYSFS_MAC"] = "0";
 
     return id;
 }
@@ -1486,11 +1463,14 @@ static bool parse_identity_blob(const std::string& blob, const char* path,
     context.runtime_sdk = sdk;
     context.max_blob = sandboxid::MAX_IDENTITY_BLOB;
     context.drop_legacy_capabilities = true;
+    context.drop_retired_identity = true;
     if (!sbxid::parse_and_validate_identity(blob, context, snapshot, error))
         return false;
-    if (!snapshot.dropped_legacy_capabilities.empty()) {
-        fprintf(stderr, "* ignored %zu legacy runtime-capability key(s) in %s\n",
-                snapshot.dropped_legacy_capabilities.size(), path);
+    size_t dropped = snapshot.dropped_legacy_capabilities.size() +
+                     snapshot.dropped_retired_identity.size();
+    if (dropped != 0) {
+        fprintf(stderr, "* ignored %zu legacy/retired identity key(s) in %s\n",
+                dropped, path);
         if (needs_migration) *needs_migration = true;
     }
     id.kv = std::move(snapshot.values);
@@ -1513,12 +1493,6 @@ static bool validate_identity(const Identity& id, std::string& error) {
     context.runtime_sdk = sdk;
     context.max_blob = sandboxid::MAX_IDENTITY_BLOB;
     return sbxid::parse_and_validate_identity(id.serialize(), context, snapshot, error);
-}
-
-static bool merge_carrier(Identity& id) {
-
-    sbxcarrier::CarrierSel sel = sbxcarrier::parse_carrier_conf(read_file(CARRIER_CONF));
-    return sbxcarrier::apply_carrier(id.kv, sel);
 }
 
 static bool ensure_root() {
@@ -1658,7 +1632,6 @@ static int prepare_locked(std::string& run_id,
     }
     if (!current_identity.empty())
         sbxid::preserve_operational_flags(current.kv, pending.kv);
-    merge_carrier(pending);
     if (!validate_identity(pending, error)) {
         fprintf(stderr, "! prepared identity rejected: %s\n", error.c_str());
         return 30;
@@ -1771,18 +1744,28 @@ static int commit_locked(const char* run_id) {
     }
     if (!current.empty()) {
         Identity validated_current;
-        if (!load_identity_file(IDENTITY_FILE, validated_current, error)) {
+        bool needs_migration = false;
+        if (!load_identity_file(IDENTITY_FILE, validated_current, error,
+                                &needs_migration)) {
             fprintf(stderr, "! current canonical identity rejected: %s\n",
                     error.c_str());
             return 30;
         }
-        const std::string current_identity = validated_current.serialize();
-        if (current_identity != current) {
-            fprintf(stderr, "! current canonical identity is non-canonical; run seed migration first\n");
+        const std::string backup_identity = validated_current.serialize();
+        if (backup_identity.empty() || (!needs_migration && backup_identity != current)) {
+            fprintf(stderr, "! current canonical identity is non-canonical\n");
             return 30;
         }
+        sbxtxn::CanonicalMeta backup_meta;
+        if (!sbxtxn::parse_identity_meta(current_meta, backup_meta, error)) {
+            fprintf(stderr, "! current canonical metadata rejected: %s\n",
+                    error.c_str());
+            return 30;
+        }
+        backup_meta.identity_sha256 = sbxhash::sha256(backup_identity);
         PairReplaceResult backed_up = replace_pair(
-            IDENTITY_BAK, current, IDENTITY_META_BAK, current_meta);
+            IDENTITY_BAK, backup_identity, IDENTITY_META_BAK,
+            sbxtxn::serialize_meta(backup_meta));
         if (backed_up != PairReplaceResult::Committed) {
             fprintf(stderr, backed_up == PairReplaceResult::FailedDegraded
                         ? "! backup publication failed and prior backup pair is degraded\n"
@@ -1856,7 +1839,8 @@ static int cmd_restore() {
         return 75;
     }
     Identity backup;
-    if (!load_identity_file(IDENTITY_BAK, backup, error)) {
+    bool needs_migration = false;
+    if (!load_identity_file(IDENTITY_BAK, backup, error, &needs_migration)) {
         fprintf(stderr, "! backup rejected: %s\n", error.c_str());
         return 1;
     }
@@ -1878,10 +1862,13 @@ static int cmd_restore() {
         return 1;
     }
     const std::string restored_identity = backup.serialize();
-    if (restored_identity != backup_identity) {
+    if (restored_identity.empty() ||
+        (!needs_migration && restored_identity != backup_identity)) {
         fprintf(stderr, "! backup identity is non-canonical; refusing inexact restore\n");
         return 1;
     }
+    parsed_backup_meta.identity_sha256 = sbxhash::sha256(restored_identity);
+    backup_meta = sbxtxn::serialize_meta(parsed_backup_meta);
     OverlayPublication overlay_publication;
     if (!publish_mount_files(overlays, &overlay_publication)) {
         if (overlay_publication.activated &&
@@ -2160,15 +2147,13 @@ static int cmd_set_flag(const char* key, const char* value) {
 
 static bool local_identity_key(const char* key) {
     if (!key) return false;
-    return !strcmp(key, "GOOGLE_AID") || !strcmp(key, "WIFI_MAC") ||
-           !strcmp(key, "BLUETOOTH_ADDR") || !strcmp(key, "BLUETOOTH_NAME") ||
-           !strcmp(key, "BOOT_COUNT");
+    return !strcmp(key, "GOOGLE_AID") || !strcmp(key, "BOOT_COUNT");
 }
 
 static int cmd_set_local(const char* key, const char* value) {
     if (!ensure_root()) return 1;
     if (!local_identity_key(key) || !value || !*value) {
-        fprintf(stderr, "Usage: sandboxid set-local <GOOGLE_AID|WIFI_MAC|BLUETOOTH_ADDR|BLUETOOTH_NAME|BOOT_COUNT> <value>\n");
+        fprintf(stderr, "Usage: sandboxid set-local <GOOGLE_AID|BOOT_COUNT> <value>\n");
         return 64;
     }
     StateLock lock;
@@ -2194,65 +2179,6 @@ static int cmd_set_local(const char* key, const char* value) {
         return published;
     }
     printf("OK: %s updated atomically\n", key);
-    return 0;
-}
-
-static int cmd_carrier(const char* operation, const char* candidate_path) {
-    if (!ensure_root()) return 1;
-    if (!operation || (strcmp(operation, "apply") && strcmp(operation, "disable"))) {
-        fprintf(stderr, "Usage: sandboxid carrier <apply <candidate>|disable>\n");
-        return 64;
-    }
-    std::string config;
-    sbxcarrier::CarrierSel selection;
-    if (!strcmp(operation, "apply")) {
-        if (!candidate_path || !(config = read_file(candidate_path)).size()) {
-            fprintf(stderr, "! carrier candidate is empty or unreadable\n");
-            return 64;
-        }
-        selection = sbxcarrier::parse_carrier_conf(config);
-        if (!selection.valid) {
-            fprintf(stderr, "! carrier candidate is invalid\n");
-            return 64;
-        }
-    }
-    StateLock lock;
-    std::string error;
-    if (!lock.acquire(error)) {
-        fprintf(stderr, "! %s\n", error.c_str());
-        return 75;
-    }
-    Identity identity;
-    sbxtxn::CanonicalMeta meta;
-    if (!load_current_identity_state(identity, meta, error)) {
-        fprintf(stderr, "! canonical identity state rejected: %s\n", error.c_str());
-        return 1;
-    }
-    sbxcarrier::apply_carrier(identity.kv, selection);
-    if (!validate_identity(identity, error)) {
-        fprintf(stderr, "! carrier identity update rejected: %s\n", error.c_str());
-        return 64;
-    }
-    std::string old_config = read_file(CARRIER_CONF);
-    struct stat old_status{};
-    const bool old_config_existed = ::stat(CARRIER_CONF, &old_status) == 0;
-    const bool config_published = !strcmp(operation, "disable")
-                                      ? remove_file_durable(CARRIER_CONF)
-                                      : atomic_write(CARRIER_CONF, config);
-    if (!config_published) {
-        fprintf(stderr, "! failed to publish carrier configuration\n");
-        return 1;
-    }
-    int identity_published = publish_canonical_identity(identity, meta, error);
-    if (identity_published != 0) {
-        bool restored = restore_path(CARRIER_CONF, old_config_existed, old_config);
-        fprintf(stderr, restored
-                    ? "! failed to publish carrier identity; configuration restored: %s\n"
-                    : "! failed to publish carrier identity and restore configuration: %s\n",
-                error.c_str());
-        return !restored || identity_published == 32 ? 32 : identity_published;
-    }
-    printf("OK: carrier %s committed coherently\n", operation);
     return 0;
 }
 
@@ -2390,7 +2316,6 @@ static int cmd_seed() {
             fprintf(stderr, "! seed: cannot generate identity: %s\n", error.c_str());
             return 1;
         }
-        merge_carrier(identity);
         if (!validate_identity(identity, error)) {
             fprintf(stderr, "! seed: generated identity rejected: %s\n", error.c_str());
             return 1;
@@ -2511,8 +2436,6 @@ static void usage(const char* p) {
         "               Set one operational SBX_* flag atomically\n"
         "  set-local <key> <value>\n"
         "               Validate and atomically update a local rotation value\n"
-        "  carrier apply <candidate>|disable\n"
-        "               Commit validated carrier config and identity state\n"
         "  rollback     Deprecated alias for restore; never wipes targets\n"
         "  lock         Prevent freshen (safety)\n"
         "  unlock       Re-enable freshen\n"
@@ -2605,9 +2528,6 @@ int main(int argc, char** argv) {
                                                             argc > 2 ? argv[2] : nullptr,
                                                             argc > 3 ? argv[3] : nullptr);
     if (!strcmp(c, "set-local"))  return run_mutation_args(cmd_set_local,
-                                                            argc > 2 ? argv[2] : nullptr,
-                                                            argc > 3 ? argv[3] : nullptr);
-    if (!strcmp(c, "carrier"))    return run_mutation_args(cmd_carrier,
                                                             argc > 2 ? argv[2] : nullptr,
                                                             argc > 3 ? argv[3] : nullptr);
     if (!strcmp(c, "rollback"))   return run_mutation(cmd_rollback);

@@ -4,8 +4,6 @@ const MODDIR = '/data/adb/modules/sandboxid';
 const ROTATE_SH = `${MODDIR}/rotate_ids.sh`;
 const IDENTITY = `${MODDIR}/identity.prop`;
 const TARGETS = `${MODDIR}/target.txt`;
-const CARRIERS = `${MODDIR}/carriers.tsv`;
-const CARRIER_CONF = `${MODDIR}/carrier.conf`;
 const SELFTEST_SH = `${MODDIR}/selftest.sh`;
 
 const ROTATE_LOG = `${MODDIR}/debug/rotate.log`;
@@ -13,7 +11,6 @@ const ACTION_LOG = `${MODDIR}/debug/action.log`;
 const ACTION_STATE = `${MODDIR}/debug/action.state`;
 const ACTION_RESULT = `${MODDIR}/debug/action.result`;
 const ACTION_LOCK = `${MODDIR}/.action.lock`;
-const REMOTE_REFRESH = `${MODDIR}/enable_remote_refresh`;
 const BRIDGE_TIMEOUT_MS = 120000;
 const ACTION_POLL_MS = 2000;
 const RUN_ID_RE = /^[0-9a-f]{32}$/;
@@ -399,7 +396,6 @@ function moveIndicator() {
 function onTab(id) {
   if (id === 'persona') loadPersona();
   else if (id === 'rotate') loadRotate();
-  else if (id === 'sim') loadSim();
   else if (id === 'settings') loadSettings();
   else if (id === 'targets') loadTargets();
   else if (id === 'selftest') loadSelftest();
@@ -434,7 +430,6 @@ const DETAIL_KEYS = [
   ['MANUFACTURER', 'Pabrikan'], ['PRODUCT', 'Product'],
   ['SECURITY_PATCH', 'Security patch'],
   ['SERIAL', 'Serial'], ['ANDROID_ID', 'Entropy profil'], ['GOOGLE_AID', 'GAID lokal'],
-  ['WIFI_MAC', 'WiFi MAC'], ['BLUETOOTH_ADDR', 'BT MAC'], ['BLUETOOTH_NAME', 'Nama BT'],
   ['RADIO', 'Radio'], ['FIRST_BOOT', 'Boot awal'], ['LAST_BOOT', 'Boot terakhir'],
 ];
 
@@ -603,9 +598,6 @@ document.getElementById('freshenBtn').addEventListener('click', ev =>
 const ROT_CARDS = [
   { key: 'ssaid',       name: 'Regenerasi SSAID', desc: 'Hapus penyimpanan SSAID sistem; Android membuat ulang saat reboot (bukan hook API per-aplikasi)', get: null },
   { key: 'gaid',        name: 'GAID lokal',      desc: 'Tulis Settings.Global + XML GMS best-effort; nilai nol mempertahankan opt-out lokal, API tetap milik layanan', get: 'GOOGLE_AID' },
-  { key: 'wlan-mac',    name: 'WiFi MAC',      desc: 'MAC wlan0 + reset WifiConfigStore',                 get: 'WIFI_MAC' },
-  { key: 'bt-mac',      name: 'Bluetooth MAC', desc: 'MAC adapter BT + Address di bt_config.conf',        get: 'BLUETOOTH_ADDR' },
-  { key: 'device-name', name: 'Nama perangkat', desc: 'device_name = MODEL dari identity.prop',           get: 'MODEL' },
   { key: 'boot-count',  name: 'Boot count',    desc: 'Settings.Global.boot_count = BOOT_COUNT identity.prop', get: 'BOOT_COUNT' },
   { key: 'applog',      name: 'AppLog ByteDance', desc: 'did/iid/ssid/openudid/clientudid/cdid untuk TikTok/Douyin — di-spoof in-process oleh hook JNI (L9)', get: null, applog: true },
 ];
@@ -707,166 +699,9 @@ document.getElementById('rotAll').addEventListener('click', ev => withLoading(ev
   })));
 }
 
-let SIM_DB = null;
-
-function parseCarriersTsv(text) {
-  const rows = [];
-  for (const line of String(text).split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t[0] === '#') continue;
-    const f = line.split('\t');
-    if (f.length < 4) continue;
-    const name = f[0].trim(), mcc = f[1].trim(), mnc = f[2].trim(), iso = f[3].trim();
-    if (!name || !mcc || !mnc) continue;
-    const carrierId = (f[4] || '').trim();
-    const row = { name, mcc, mnc, iso, carrierId };
-    if (validCarrierInput(row)) rows.push(row);
-  }
-  return rows;
-}
-
-function validCarrierInput(row) {
-  return /^[ -~]{1,64}$/.test(row.name) && !row.name.includes('|') && row.name.trim() === row.name &&
-    /^\d{3}$/.test(row.mcc) && /^\d{2,3}$/.test(row.mnc) &&
-    /^(?:[a-z]{2})?$/.test(row.iso) && /^(?:\d{1,10})?$/.test(row.carrierId);
-}
-
-function setManualCarrierMode(manual, current) {
-  document.getElementById('simCatalogFields').hidden = manual;
-  const fields = document.getElementById('simManualFields');
-  fields.hidden = !manual;
-  if (!manual) return;
-  document.getElementById('simName').value = (current && current.NAME) || '';
-  document.getElementById('simMcc').value = (current && current.MCC) || '';
-  document.getElementById('simMnc').value = (current && current.MNC) || '';
-  document.getElementById('simIso').value = (current && current.ISO) || '';
-  document.getElementById('simCid').value = (current && current.CARRIER_ID) || '';
-}
-
-function simFillCarriers(current) {
-  const iso = document.getElementById('simCountry').value;
-  const carSel = document.getElementById('simCarrier');
-  const list = SIM_DB.filter(r => !iso || r.iso === iso)
-    .sort((a, b) => a.name.localeCompare(b.name));
-  carSel.innerHTML = '<option value="">Operator…</option>' +
-    list.map(r => {
-      const val = `${r.mcc}|${r.mnc}|${r.name}|${r.iso}`;
-      return `<option value="${escapeHtml(val)}" data-cid="${escapeHtml(r.carrierId || '')}">${escapeHtml(r.name)} · ${escapeHtml(r.mcc + r.mnc)}</option>`;
-    }).join('');
-  if (current && current.MCC && current.MNC) {
-    const want = `${current.MCC}|${current.MNC}|`;
-    for (const opt of carSel.options) {
-      if (opt.value.startsWith(want)) { carSel.value = opt.value; break; }
-    }
-  }
-}
-
-function simFill(current) {
-  const cSel = document.getElementById('simCountry');
-  const isos = Array.from(new Set(SIM_DB.map(r => r.iso).filter(Boolean))).sort();
-  cSel.innerHTML = '<option value="">Negara…</option>' +
-    isos.map(i => `<option value="${escapeHtml(i)}">${escapeHtml(i.toUpperCase())}</option>`).join('');
-  const curIso = (current && current.ISO) ? current.ISO.toLowerCase() : '';
-  if (curIso && isos.includes(curIso)) cSel.value = curIso;
-  simFillCarriers(current);
-}
-
-function renderSimCurrent(cc) {
-  const el = document.getElementById('simCurrent');
-  const st = document.getElementById('simState');
-  if (!cc || !cc.MCC) {
-    st.textContent = 'Bawaan';
-    st.className = 'chip';
-    el.className = 'kv';
-    el.innerHTML = '<div class="empty">Belum ada operator dipilih — pakai bawaan.</div>';
-    return;
-  }
-  st.textContent = (cc.PHANTOM === '1') ? 'Aktif · phantom' : 'Aktif';
-  st.className = 'chip chip-on';
-  const rows = [
-    ['Operator', cc.NAME || ''],
-    ['Kode (MCC+MNC)', (cc.MCC || '') + (cc.MNC || '')],
-    ['Negara', (cc.ISO || '').toUpperCase()],
-    ['Carrier ID', cc.CARRIER_ID ? cc.CARRIER_ID : 'UNKNOWN (-1)'],
-    ['Mode Tambah SIM', cc.PHANTOM === '1' ? 'Ya' : 'Tidak'],
-  ];
-  el.className = 'kv in';
-  el.innerHTML = rows.map(([k, v]) => v !== ''
-    ? `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>` : '').join('');
-}
-
-async function loadSim() {
-  const el = document.getElementById('simCurrent');
-  el.className = 'kv';
-  el.innerHTML = skKv(3);
-  if (!SIM_DB || !SIM_DB.length) {
-    const r = await run(`cat ${shq(CARRIERS)} 2>/dev/null || true`);
-    SIM_DB = (r.ok && r.out.trim()) ? parseCarriersTsv(r.out) : [];
-  }
-  const rc = await run(`cat ${shq(CARRIER_CONF)} 2>/dev/null || true`);
-  const cc = (rc.ok && rc.out.trim()) ? parseProp(rc.out) : {};
-  if (!SIM_DB.length) {
-    document.getElementById('simState').textContent = 'Manual';
-    setManualCarrierMode(true, cc);
-    el.className = 'kv';
-    renderSimCurrent(cc);
-  } else {
-    setManualCarrierMode(false, cc);
-    simFill(cc);
-  }
-  document.getElementById('simPhantom').checked = (cc.PHANTOM === '1');
-  renderSimCurrent(cc);
-}
-
-function carrierCmd(arg) {
-  const op = arg.split('|')[0] === 'off' ? 'off' : 'set';
-  return loggedScriptCmd(`carrier ${op}`, `sh ${shq(ROTATE_SH)} carrier ${shq(arg)}`);
-}
-
-if (typeof document !== 'undefined') {
-document.getElementById('simCountry').addEventListener('change', () => simFillCarriers(null));
-
-document.getElementById('simApply').addEventListener('click', ev => withLoading(ev.currentTarget, () =>
-  mutate(async () => {
-    const manual = !SIM_DB || SIM_DB.length === 0;
-    let spec = '';
-    let cid = '';
-    if (manual) {
-      const name = document.getElementById('simName').value.trim();
-      const mcc = document.getElementById('simMcc').value.trim();
-      const mnc = document.getElementById('simMnc').value.trim();
-      const iso = document.getElementById('simIso').value.trim().toLowerCase();
-      cid = document.getElementById('simCid').value.trim();
-      if (!validCarrierInput({ name, mcc, mnc, iso, carrierId: cid })) {
-        toast('Data operator manual tidak valid', { kind: 'warn' });
-        return;
-      }
-      spec = `${mcc}|${mnc}|${name}|${iso}`;
-    } else {
-      const carSel = document.getElementById('simCarrier');
-      spec = carSel.value;
-      if (!spec) { toast('Pilih operator dulu', { kind: 'warn' }); return; }
-      const opt = carSel.options[carSel.selectedIndex];
-      cid = (opt && opt.dataset ? opt.dataset.cid : '') || '';
-    }
-    const phantom = document.getElementById('simPhantom').checked ? '1' : '0';
-    const r = await run(carrierCmd(`${spec}|${phantom}|${cid}`));
-    await finishRotate(r, 'SIM / operator');
-    await loadSim();
-  })));
-
-document.getElementById('simOff').addEventListener('click', ev => withLoading(ev.currentTarget, () =>
-  mutate(async () => {
-    const r = await run(carrierCmd('off'));
-    await finishRotate(r, 'SIM / operator');
-    document.getElementById('simPhantom').checked = false;
-    await loadSim();
-  })));
-}
-
 const EXPERIMENT_FLAGS = [
   'SBX_NATIVE_READ', 'SBX_PROC_VERSION', 'SBX_MEMINFO',
-  'SBX_SYSFS_MAC', 'SBX_CPU_REVISION',
+  'SBX_CPU_REVISION',
 ];
 
 function renderSettingsState(kv, available = true) {
@@ -893,25 +728,9 @@ async function loadSettings() {
     return;
   }
   renderSettingsState(parseProp(r.out));
-  const refresh = await run(`[ -f ${shq(REMOTE_REFRESH)} ] && printf 1 || printf 0`);
-  document.getElementById('setRemoteRefresh').checked = refresh.ok && refresh.out.trim() === '1';
-}
-
-async function setRemoteRefresh(enabled) {
-  const fileAction = enabled
-    ? `umask 077 && : > ${shq(REMOTE_REFRESH)} && chmod 0600 ${shq(REMOTE_REFRESH)}`
-    : `rm -f ${shq(REMOTE_REFRESH)}`;
-  const cmd = guardedMutationCmd(fileAction);
-  const r = await run(cmd);
-  if (!r.ok) toast('Gagal mengubah refresh persona opsional', { kind: 'error', detail: r.err.message });
-  else toast(enabled ? 'Refresh persona opsional diaktifkan' : 'Refresh persona opsional dinonaktifkan', { kind: 'ok' });
-  await loadSettings();
 }
 
 if (typeof document !== 'undefined') {
-document.getElementById('setRemoteRefresh').addEventListener('change', event =>
-  mutate(() => setRemoteRefresh(event.currentTarget.checked)));
-
 document.getElementById('settingsReload').addEventListener('click', loadSettings);
 document.querySelectorAll('#settings input[data-flag]').forEach(input => {
   input.addEventListener('change', () => mutate(async () => {
@@ -1144,7 +963,7 @@ if (typeof module !== 'undefined' && module.exports) {
     actionMutationGuardShell, actionPresentation, actionResult,
     actionRunFromRecords, cleanupBridgeCallback, exec, guardedMutationCmd,
     isActionLive, loggedScriptCmd, moduleEnv, mutate, ownerProcessProbeShell,
-    parseActionProtocol, parseCarriersTsv, parseKeyValues, shq,
-    splitActionSnapshot, targetSaveCmd, validCarrierInput,
+    parseActionProtocol, parseKeyValues, shq,
+    splitActionSnapshot, targetSaveCmd,
   };
 }
