@@ -683,6 +683,18 @@ static void test_property_helpers() {
           "plain release is not a hybrid alias");
     CHECK(!sbxprop::release_alias_property("ro.build.version.codename"),
           "codename is never treated as a release alias");
+    CHECK(sbxprop::apply_mode_for_property("ro.build.expect.baseband") ==
+              sbxprop::ApplyMode::kExistingOnly,
+          "optional OEM baseband alias is existing-only");
+    CHECK(sbxprop::apply_mode_for_property("gsm.version.baseband") ==
+              sbxprop::ApplyMode::kRequired,
+          "primary baseband alias remains required");
+    CHECK(sbxprop::should_apply(sbxprop::ApplyMode::kRequired, false),
+          "required property is attempted even when absent");
+    CHECK(sbxprop::should_apply(sbxprop::ApplyMode::kExistingOnly, true),
+          "existing-only property is attempted when present");
+    CHECK(!sbxprop::should_apply(sbxprop::ApplyMode::kExistingOnly, false),
+          "absent existing-only property is skipped");
     CHECK(sbxprop::legacy_copy_length(std::string(90, 'a')) == 90,
           "legacy property length reports full short value");
     CHECK(sbxprop::legacy_copy_length(std::string(91, 'a')) == 91 &&

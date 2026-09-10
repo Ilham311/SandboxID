@@ -11,6 +11,21 @@
 
 namespace sbxprop {
 
+enum class ApplyMode {
+    kRequired,
+    kExistingOnly,
+};
+
+inline ApplyMode apply_mode_for_property(std::string_view key) {
+    return key == "ro.build.expect.baseband"
+               ? ApplyMode::kExistingOnly
+               : ApplyMode::kRequired;
+}
+
+inline bool should_apply(ApplyMode mode, bool property_exists) {
+    return mode == ApplyMode::kRequired || property_exists;
+}
+
 enum class ValueAction {
     kPassThrough,
     kMapped,

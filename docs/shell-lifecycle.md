@@ -48,7 +48,7 @@ Stages and mutation policy:
 2. **refresh** optionally invokes bounded `autopif.sh refresh`; failure warns when an offline source remains.
 3. **prepare** asks native code to create and validate pending identity bound to current canonical state; it performs no device/app mutation.
 4. **commit** publishes checked overlays and canonical identity/metadata for the exact run.
-5. **apply** runs native property and framework application. Failure before irreversible work invokes restore, reapply, and exact verification.
+5. **apply** runs native property and framework application. Required property aliases remain fatal on backend failure. The explicitly classified OEM alias `ro.build.expect.baseband` is existing-only: genuine absence is a successful skip, but a failed attempted write remains fatal. Any fatal apply failure before irreversible work invokes restore, reapply, and exact verification.
 6. **targets** attempts force-stop and independently attempts `pm clear` for every installed unique base package; absent packages are explicit skips.
 7. **rotate** invokes `rotate_ids.sh all --from-identity` and consumes its run-bound component report.
 8. **applog** wipes/seeds every installed unique package with the one committed epoch.

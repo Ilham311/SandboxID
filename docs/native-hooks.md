@@ -62,7 +62,7 @@ Exit values distinguish ordinary failure, usage/configuration (`64`), busy owner
 
 ## Property and framework behavior
 
-Native property application prefers the verified bundled `resetprop-rs`, then supported PATH backends according to implementation policy; a failed required backend is reported. Presentation aliases cover build/product/serial/radio metadata while selected direct-ID, emulator, custom-ROM, and OEM leak properties are removed rather than invented. Stable-release aliases are changed only when the genuine runtime is stable. Framework application writes user-0 device-name settings; it does not pretend `ANDROID_ID` is one global secure value.
+Native property application prefers the verified bundled `resetprop-rs`, then supported PATH backends according to implementation policy. Required aliases are attempted and any backend failure is reported. The explicitly classified OEM alias `ro.build.expect.baseband` is existing-only: genuine absence is a successful skip, while a failed write when present remains fatal. `gsm.version.baseband` remains required, and both radio aliases remain represented in build-property overlays. Presentation aliases cover build/product/serial/radio metadata while selected direct-ID, emulator, custom-ROM, and OEM leak properties are removed rather than invented. Stable-release aliases are changed only when the genuine runtime is stable. Framework application writes user-0 device-name settings; it does not pretend `ANDROID_ID` is one global secure value.
 
 ## Companion target and identity service
 

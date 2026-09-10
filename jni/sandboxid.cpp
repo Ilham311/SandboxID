@@ -841,7 +841,12 @@ static int apply_properties(const Identity& id) {
         return it != id.kv.end() ? it->second : std::string();
     };
 
-    struct Rp { const char* key; std::string val; bool del_if_empty = false; };
+    struct Rp {
+        const char* key;
+        std::string val;
+        bool del_if_empty = false;
+        sbxprop::ApplyMode mode = sbxprop::ApplyMode::kRequired;
+    };
 
     const std::string SERIAL       = get("SERIAL");
     const std::string MODEL        = get("MODEL");
@@ -988,7 +993,8 @@ static int apply_properties(const Identity& id) {
         {"ro.odm.build.tags",                        TAGS},
 
         {"gsm.version.baseband",               RADIO, true},
-        {"ro.build.expect.baseband",           RADIO, true},
+        {"ro.build.expect.baseband",           RADIO, true,
+         sbxprop::apply_mode_for_property("ro.build.expect.baseband")},
 
         {"ro.bootloader",                      std::string("unknown")},
         {"ro.boot.bootloader",                 std::string("unknown")},
@@ -1012,9 +1018,16 @@ static int apply_properties(const Identity& id) {
     int failures = 0;
     bool have_bundled = (::access(RESETPROP, X_OK) == 0);
     {
-        int applied = 0, failed = 0;
+        int applied = 0, skipped = 0, failed = 0;
         for (const auto& r : rp) {
             if (r.val.empty() && !r.del_if_empty) continue;
+            const bool property_exists =
+                r.mode == sbxprop::ApplyMode::kRequired ||
+                __system_property_find(r.key) != nullptr;
+            if (!sbxprop::should_apply(r.mode, property_exists)) {
+                skipped++;
+                continue;
+            }
             int rc;
             if (r.val.empty()) {
 
@@ -1040,7 +1053,8 @@ static int apply_properties(const Identity& id) {
                 fprintf(stderr, "! resetprop gagal (exit!=0): %s\n", r.key);
             }
         }
-        printf("  Native prop: %d ok, %d gagal%s\n", applied, failed,
+        printf("  Native prop: %d ok, %d gagal, %d optional absent%s\n",
+               applied, failed, skipped,
                have_bundled ? "" : " [fallback PATH]");
         if (applied == 0 && failed > 0)
             fprintf(stderr, "! SEMUA resetprop gagal%s — cek ketersediaan resetprop / resetprop-rs\n",
