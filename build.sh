@@ -32,7 +32,7 @@ fi
 
 LSP_CMAKE=""
 LSP_STATUS="disabled (SBX_ENABLE_LSPLANT=OFF requested)"
-if [ "${SBX_ENABLE_LSPLANT:-ON}" = "ON" ]; then
+if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then
   LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
   LSP_REV="$(grep -E '^LSPLANT_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
   DOBBY_REV="$(grep -E '^DOBBY_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
