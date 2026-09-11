@@ -30,20 +30,6 @@ if [ -z "${VERSION:-}" ]; then
   exit 1
 fi
 
-LSP_CMAKE=""
-LSP_STATUS="disabled (SBX_ENABLE_LSPLANT=OFF requested)"
-if [ "${SBX_ENABLE_LSPLANT:-OFF}" = "ON" ]; then
-  LSP_CMAKE="-DSBX_ENABLE_LSPLANT=ON"
-  LSP_REV="$(grep -E '^LSPLANT_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
-  DOBBY_REV="$(grep -E '^DOBBY_REF='  jni/fetch_lsplant_deps.sh 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)"
-  LSP_STATUS="enabled [LSPlant=${LSP_REV:-?} Dobby=${DOBBY_REV:-?}]"
-  echo "==> L3 LSPlant $LSP_STATUS — preparing dependencies + callback DEX"
-  bash "$ROOT/jni/fetch_lsplant_deps.sh"
-  if ! bash "$ROOT/jni/tools/gen_hook_dex.sh"; then
-    echo "  WARN: hook_dex.h generation failed — L3 ANDROID_ID hook will be skipped" >&2
-    echo "        at runtime (install a JDK + Android SDK build-tools to enable it)" >&2
-  fi
-fi
 OUT="$ROOT/dist"
 
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
@@ -52,7 +38,6 @@ echo "==> SandboxID $VERSION"
 echo "==> NDK:        $ANDROID_NDK_HOME"
 echo "==> MIN_SDK:    $MIN_SDK"
 echo "==> Variant(s): $VARIANT"
-echo "==> LSPlant:    $LSP_STATUS"
 
 ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
 ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
@@ -103,21 +88,20 @@ build_variant() {
     local BUILD="build/$V/$ABI"
     rm -rf "$BUILD"
     mkdir -p "$BUILD"
-    # shellcheck disable=SC2086
-    cmake -S jni -B "$BUILD" \
+    cmake -S native -B "$BUILD" \
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$ABI" \
       -DANDROID_PLATFORM="android-$MIN_SDK" \
       -DCMAKE_BUILD_TYPE=Release \
-      $DBG_FLAG ${LSP_CMAKE:-} >/dev/null
+      "$DBG_FLAG" >/dev/null
     cmake --build "$BUILD" -j
   done
 
   rm -rf "$PKG"
   mkdir -p "$PKG/zygisk" "$PKG/bin"
 
-  # Di repo, berkas ditata rapi per-folder (scripts/, data/). Namun framework
-  # Magisk/KSU/APatch dan path absolut di jni/config.hpp mengharapkan semuanya
+  # Di repo, berkas ditata rapi per-folder (sh/, data/). Namun framework
+  # Magisk/KSU/APatch dan path absolut di native/include/config.hpp mengharapkan semuanya
   # berada DATAR di root modul (/data/adb/modules/sandboxid/). Karena itu build.sh
   # "meratakan" kembali seluruh berkas ke root paket ($PKG/) di sini.
 
@@ -127,17 +111,17 @@ build_variant() {
   [ -f CREDITS.md ] && cp CREDITS.md "$PKG/"
 
   # Skrip lifecycle yang dipanggil framework (install, boot, tombol Action)
-  cp scripts/lifecycle/customize.sh "$PKG/"
-  cp scripts/lifecycle/service.sh   "$PKG/"
-  cp scripts/lifecycle/action.sh    "$PKG/"
-  [ -f scripts/lifecycle/post-fs-data.sh ] && cp scripts/lifecycle/post-fs-data.sh "$PKG/"
+  cp sh/lifecycle/customize.sh "$PKG/"
+  cp sh/lifecycle/service.sh   "$PKG/"
+  cp sh/lifecycle/action.sh    "$PKG/"
+  [ -f sh/lifecycle/post-fs-data.sh ] && cp sh/lifecycle/post-fs-data.sh "$PKG/"
 
   # Pustaka bersama + skrip identitas + diagnostik
-  [ -f scripts/lib/helpers.sh ]         && cp scripts/lib/helpers.sh         "$PKG/"
-  [ -f scripts/identity/rotate_ids.sh ] && cp scripts/identity/rotate_ids.sh "$PKG/"
-  [ -f scripts/identity/autopif.sh ]    && cp scripts/identity/autopif.sh    "$PKG/"
-  [ -f scripts/debug/summarize.sh ]     && cp scripts/debug/summarize.sh     "$PKG/"
-  [ -f scripts/debug/selftest.sh ]      && cp scripts/debug/selftest.sh      "$PKG/"
+  [ -f sh/lib/helpers.sh ]         && cp sh/lib/helpers.sh         "$PKG/"
+  [ -f sh/identity/rotate_ids.sh ] && cp sh/identity/rotate_ids.sh "$PKG/"
+  [ -f sh/identity/autopif.sh ]    && cp sh/identity/autopif.sh    "$PKG/"
+  [ -f sh/debug/summarize.sh ]     && cp sh/debug/summarize.sh     "$PKG/"
+  [ -f sh/debug/selftest.sh ]      && cp sh/debug/selftest.sh      "$PKG/"
 
   # Data referensi + konfigurasi pengguna
   [ -f data/personas.tsv ] && cp data/personas.tsv "$PKG/"

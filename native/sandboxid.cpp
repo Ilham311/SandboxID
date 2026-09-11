@@ -17,8 +17,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include "config.hpp"
-#include "sbx_carrier.hpp"
-#include "sbx_native_read.hpp"
+#include "carrier.hpp"
+#include "native_read.hpp"
 #include <sys/system_properties.h>
 
 static const char* IDENTITY_FILE  = sandboxid::IDENTITY_FILE;

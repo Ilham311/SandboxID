@@ -78,8 +78,8 @@ the verb (verified against the on-device usage banners).
 
 These features adopt the **technique** and, where noted, **factual property-name
 lists** from the projects below. All are **reimplemented** in this repo's own
-code (`jni/config.hpp`, `jni/sandboxid.cpp`, `jni/main.cpp`,
-`jni/sbx_native_read.hpp`, `jni/sbx_mountinfo.hpp`, `jni/companion.cpp`); no
+code (`native/include/config.hpp`, `native/sandboxid.cpp`, `jni/module.cpp`,
+`native/include/native_read.hpp`, `native/include/mountinfo.hpp`, `jni/companion.cpp`); no
 source is copied.
 
 - **reveny/Android-VBMeta-Fixer** — [reveny/Android-VBMeta-Fixer](https://github.com/reveny/Android-VBMeta-Fixer)
@@ -109,7 +109,7 @@ source is copied.
   a forked companion `setns()` into the target's mount namespace, `MS_SLAVE|MS_REC`
   to isolate propagation, then reverse-order `umount2(…, MNT_DETACH)` of
   root-manager overlay/tmpfs mounts. SandboxID **deliberately diverges** (and says
-  so in `jni/sbx_mountinfo.hpp`): it does **not** port the `unshare`-strip /
+  so in `native/include/mountinfo.hpp`): it does **not** port the `unshare`-strip /
   `setresuid` PLT hooks (they fight this module's containment model), it **defers**
   the `libnativebridge had_error` fix (would pull in ELFIO / Apache-2.0), and it
   uses a deliberately **narrow** target selector that never touches this module's
@@ -175,7 +175,7 @@ the exact slug before redistribution.
   GSF-style ids). AGPL is the strongest copyleft here, so the caution is
   strictest: **idea only, never code, never a derived work.** SandboxID's SSAID
   / GAID rotation is independently implemented in `rotate_ids.sh` +
-  `jni/sandboxid.cpp` against the documented `settings`/Ad-ID surface.
+  `native/sandboxid.cpp` against the documented `settings`/Ad-ID surface.
   *Status: independently implemented; no AGPL code or structure adopted.*
 
 - **DeviceSpoofLab-Magisk** — `yubunus/DeviceSpoofLab-Magisk` (**MIT**; same

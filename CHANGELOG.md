@@ -2,9 +2,23 @@
 
 ## Unreleased
 
-### Fix: CI shellcheck merah — direktif `# shellcheck disable=` ikut terhapus saat purge komentar
+### Refactor: source layout cleanup and dependency removal
 
-Purge komentar menghapus dua baris yang tampak seperti komentar tapi sebenarnya
+- Removed the unused experimental Java-method hook stack and all related
+  third-party integration, callback, generated-bytecode, build-option, and
+  runtime code.
+- Split sources by responsibility: `jni/` contains the Zygisk module and
+  companion, `native/` contains the CLI, CMake project, and shared headers, and
+  `sh/` contains lifecycle, identity, library, and debug scripts.
+- `build.sh` still flattens shell scripts and data into the installed module
+  root, preserving the Magisk/KernelSU/APatch runtime layout, binary paths, and
+  four-ABI Zygisk package structure.
+- Removed obsolete host tests, local validator tooling, and the architecture
+  document; retained user-facing project, changelog, credit, and license files.
+
+### Fix: CI shellcheck merah — direktif fungsional ikut terhapus saat purge komentar
+
+Purge komentar menghapus baris yang tampak seperti komentar tapi sebenarnya
 **direktif fungsional** untuk shellcheck, sehingga CI gagal:
 
 ```
@@ -12,21 +26,13 @@ customize.sh:2  SC2034 (warning): SKIPUNZIP appears unused
 ```
 
 `SKIPUNZIP` dibaca installer Magisk (eksternal), bukan oleh script itu, jadi
-`# shellcheck disable=SC2034` di atasnya wajib ada. Hal yang sama untuk
-`# shellcheck disable=SC2086` di `build.sh` (`$DBG_FLAG ${LSP_CMAKE:-}` memang
-sengaja tidak dikutip).
+`# shellcheck disable=SC2034` di atasnya wajib ada.
 
-- **customize.sh**, **build.sh** — kedua direktif dipulihkan (tanpa prosa
-  penjelasnya, hanya baris direktifnya).
+- **customize.sh** — direktif installer dipulihkan (tanpa prosa penjelasnya,
+  hanya baris direktifnya).
 - Seluruh tree revisi pra-purge disisir ulang untuk pola direktif lain
   (`shellcheck`, `SPDX`, `NOLINT`, `clang-format`, `eslint`, `@ts-`, `noqa`,
-  `NOSONAR`, dll) — hanya dua itu yang ada, keduanya sudah kembali.
-- **validate.sh** — akar masalahnya: stage lint lokal hanya memeriksa
-  `build.sh autopif.sh selftest.sh` sementara CI memeriksa `git ls-files '*.sh'`,
-  jadi `customize.sh` lolos secara lokal. Stage 2 dan 4 sekarang meniru CI:
-  semua `*.sh` terlacak, `bash -n`/`sh -n` sesuai shebang, `shellcheck
-  -S warning` atas set yang sama. Stage 4 juga tidak lagi "advisory" — kegagalan
-  shellcheck kini men-set rc=1 seperti CI (13 file, bersih).
+  `NOSONAR`, dll).
 
 ### Fix: `applog_seed` fail-closed + skema per-file (hasil code review)
 
@@ -105,7 +111,7 @@ Diagnosis uptime dan diagnosis wrapper L9 keduanya hilir dari sini.
 
 Fix:
 
-- **jni/sandboxid.cpp** — `ro.hardware`, `ro.product.board`, `ro.board.platform`
+- **native/sandboxid.cpp** — `ro.hardware`, `ro.product.board`, `ro.board.platform`
   dan `ro.product.cpu.abi{,2,list,list32,list64}` dicabut dari daftar resetprop
   global `apply_native()`. Key yang nilainya memilih file driver / ABI untuk
   dimuat tidak boleh pernah ditulis system-wide. Key itu tetap dispoof di L1
@@ -130,7 +136,7 @@ mendaftar ulang ke server dan menulis file baru. Persis "print doang".
 
 Fix:
 
-- **jni/sandboxid.cpp** — subcommand baru `sandboxid applog-ids <pkg>` mencetak
+- **native/sandboxid.cpp** — subcommand baru `sandboxid applog-ids <pkg>` mencetak
   did/iid/ssid/openudid/clientudid/cdid yang **sama persis** dengan yang
   disajikan hook L9 (`fnv1a(FINGERPRINT|SERIAL|ANDROID_ID|pkg)` + `APPLOG_EPOCH`,
   lewat `sbxnr::make_applog_ids`). Satu sumber kebenaran untuk layer shell.
@@ -141,10 +147,10 @@ Fix:
   (pola yang sudah terbukti di `set_gaid_value`). `applog_regen` sekarang
   wipe → seed, jadi `canRead()` true dan setiap pembacaan berikutnya dipatch
   hook.
-- **jni/main.cpp** — `sbx_build_content(APPLOG_XML)` menyajikan map hasil
+- **jni/module.cpp** — `sbx_build_content(APPLOG_XML)` menyajikan map hasil
   sintesis ketika file asli kosong/absen, bukan `return false`. Pembaca native
   (libbdtracker) tetap dapat nilai persona meski seed disk gagal.
-- **jni/sbx_native_read.hpp** — `applog_xml_synth()`; outputnya sengaja
+- **native/include/native_read.hpp** — `applog_xml_synth()`; outputnya sengaja
   dibuat bisa diproses `patch_applog_xml()` lagi (idempoten, diuji).
 
 ### Fix: output `rotate_ids.sh` tidak pernah terlihat
@@ -160,14 +166,11 @@ semua langkahnya berjalan. Inilah yang membuat rotasi terlihat seperti gimmick.
 
 ### Chore: hapus seluruh komentar dari kode
 
-Semua komentar dibuang dari `*.sh`, `jni/*.cpp`, `jni/*.hpp`, `jni/CMakeLists.txt`,
-`tests/*.cpp`, dan `webroot/app.js` (−719 baris). Header kolom `*.tsv`,
+Semua komentar dibuang dari `*.sh`, `jni/*.cpp`, `jni/*.hpp`, `native/CMakeLists.txt`,
+`webroot/app.js`, dan sumber native (−719 baris). Header kolom `*.tsv`,
 `.gitignore` dan dokumen `*.md` dibiarkan: itu dokumentasi format data
 positional yang dipakai `col "$_row" N`, bukan komentar kode.
 
-- **tests/native_read_test.cpp** — `test_applog_xml_synth()`: synth memuat enam
-  ID, bisa dipatch ulang, patch kedua no-op. Total 319 check, 0 gagal;
-  `validate.sh` PASS.
 
 ### Fix: blank putih v2.1.7 — L9 spoof `ro.hardware` / `ro.board.platform` / `ro.product.board` memutus resolusi driver grafis
 
@@ -221,34 +224,30 @@ Rantai kegagalannya, terverifikasi langsung dari sumber AOSP:
 
 Fix:
 
-- **jni/sbx_native_read.hpp** — `is_native_unsafe_prop()`: daftar property yang
+- **native/include/native_read.hpp** — `is_native_unsafe_prop()`: daftar property yang
   nilainya dipakai native code untuk memilih file/ABI yang dimuat, jadi tidak
   boleh pernah dipalsukan in-process — `ro.hardware`, prefix `ro.hardware.*`
   (egl, vulkan, gralloc, hwcomposer, camera, …), `ro.product.board`,
   `ro.board.platform`, `ro.arch`, `ro.zygote`, `ro.vendor.api_level`,
   `persist.graphics.egl`, `ro.product.cpu.abi{,2,list,list32,list64}`, prefix
   `ro.dalvik.vm.isa.*` / `dalvik.vm.isa.*`.
-- **jni/main.cpp** — gate baru `sbx_nr_spoofable()` dipakai `sbx_spg()`,
+- **jni/module.cpp** — gate baru `sbx_nr_spoofable()` dipakai `sbx_spg()`,
   `sbx_spr()`, dan `sbx_cb_tramp()`: key native-unsafe diteruskan ke
   implementasi asli tanpa diubah dan tanpa disembunyikan. Spoof L1 (`Build.*`)
   dan L2 (`SystemProperties.get`) **tidak berubah** — `Build.BOARD`,
   `Build.HARDWARE`, `Build.SUPPORTED_ABIS` tetap bernilai persona, karena di
   layer Java nilai itu inert (tidak ada yang memuat driver dari string Java).
   Yang dikembalikan ke nilai asli hanya pembacaan native.
-- **jni/sbx_native_read.hpp** — `classify()` tidak lagi mengalokasi
+- **native/include/native_read.hpp** — `classify()` tidak lagi mengalokasi
   `std::string p(path)` di setiap panggilan. Sejak `g_nr_active` benar-benar
   aktif, fungsi ini jalan di **setiap** `open`/`openat`/`fopen` di seluruh
   proses (termasuk linker saat memegang loader lock, RenderThread, dan thread
   GC ART); `malloc` di jalur itu adalah hazard reentrancy. Sekarang murni
   `strlen` + `memcmp` lewat overload `ends_with(const char*, size_t, const
   char*)`.
-- **jni/main.cpp (L8)** — variabel `found` yang redundan (selalu sama dengan
+- **jni/module.cpp (L8)** — variabel `found` yang redundan (selalu sama dengan
   `registered`) dihapus; menghilangkan warning
   `-Wunused-but-set-variable` di build release.
-- **tests/native_read_test.cpp** — `test_native_unsafe_prop()` (19 key unsafe,
-  17 key yang harus TETAP bisa dispoof termasuk `ro.soc.model`, `ro.hardwaremodel`,
-  `ro.arch2` sebagai penjaga prefix) dan `test_classify_no_alloc_paths()`.
-  Total 305 check, 0 gagal; `validate.sh` PASS.
 
 Kill switch tetap tersedia: `SBX_NATIVE_READ=0` di identity blob mematikan L9
 seluruhnya.
@@ -284,13 +283,13 @@ hidup dan tanpa crash signature apa pun. Penyebab sebenarnya:
 
 Fix:
 
-- **jni/main.cpp** — `orig_*` di-resolve via `dlsym(RTLD_DEFAULT, ...)` SEBELUM
+- **jni/module.cpp** — `orig_*` di-resolve via `dlsym(RTLD_DEFAULT, ...)` SEBELUM
   registrasi hook, sehingga wrapper selalu punya fungsi asli untuk ditelepon
   baik commit sukses penuh, parsial, maupun gagal total. Reset `orig_*` saat
   commit gagal DICABUT (itu justru racunnya). `g_nr_active` kini aktif selama
   orig resolvable: lib yang ter-hook dispoof, sisanya transparan lihat nilai
   asli — partial commit berubah dari "merusak app" jadi "best-effort".
-- **jni/main.cpp (L8)** — hazard kembar dihapus: saat commit uptime gagal,
+- **jni/module.cpp (L8)** — hazard kembar dihapus: saat commit uptime gagal,
   offset di-nol-kan (bukan orig yang di-null-kan) supaya reader yang kebetulan
   sudah ter-hook melihat jam asli — menghilangkan divergence
   hooked-vs-unhooked yang jadi dugaan hang sebelumnya. `orig_clock_gettime`
@@ -300,9 +299,9 @@ Fix:
   blob identitas nyata berisi `FLAVOR=caiman-userBUILD_TIME_UTC=1727839200`
   (FLAVOR rusak + key BUILD_TIME_UTC hilang, terlihat di log user). Append
   kini mulai dengan newline-nya sendiri.
-- **validate.sh** — regression test baru: generate artifact autopif asli dan
+- **Autopif acquisition check** — generate artifact autopif asli dan
   assert setiap baris tepat satu pasangan KEY=VALUE + `BUILD_TIME_UTC` jadi
-  key tersendiri (test ini gagal pada kode lama, lolos pada fix).
+  key tersendiri (cek ini gagal pada kode lama, lolos pada fix).
 
 ### Fix: aplikasi target blank putih (hang di loading screen) — uptime spoof kembali opt-in
 
@@ -333,7 +332,7 @@ Fix:
 - **autopif.sh** — `UPTIME_SECONDS=0` default; hanya emit nilai asli jika
   `$MODDIR/enable_uptime` ada DAN `no_uptime` tidak ada (kill switch tetap
   menang). `UPTIME_S` internal tetap valid untuk `validate_lifecycle`.
-- **jni/main.cpp** — daftar chokepoint L8 dikembalikan ke libutils +
+- **jni/module.cpp** — daftar chokepoint L8 dikembalikan ke libutils +
   libandroid_runtime saja (libbase/libcutils dicabut dengan alasan
   terdokumentasi). Tanpa reflash pun fix sudah efektif karena nilai default
   sekarang 0 → hook no-op.
@@ -373,9 +372,6 @@ decodes to its registration date), not the previously-assumed
   paper is about TikTok post sampling, not ID formats) and
   `helpers.sh::applog_seed`. `applog_probe` states simplify to
   fresh/active/absent.
-- **Tests** — `tests/native_read_test.cpp` gains classify/synthesize/patch
-  coverage (262 checks total), including snowflake decode round-trip and
-  idempotence of the XML patcher.
 
 ### Review fixes (shell)
 
@@ -386,7 +382,7 @@ decodes to its registration date), not the previously-assumed
   `FAILURES` like BT-MAC already did.
 - `action.sh` — rotation warnings now surface every nonzero rc (rc=1, the
   common failure code, was explicitly suppressed).
-- `jni/main.cpp` — fixed latent build break from `bool ok =
+- `jni/module.cpp` — fixed latent build break from `bool ok =
   api->hookJniNativeMethods(...)`: the pinned zygisk.hpp API returns void
   (failure is signalled by `fnPtr == null`).
 
@@ -453,12 +449,12 @@ value for keys the persona overrides. Both gaps are closed, and the autopif
 
 ### Robustness
 
-- **`main.cpp` L9 `fopen` fallback** — if the `fopen` PLT slot fails to
+- **`jni/module.cpp` L9 `fopen` fallback** — if the `fopen` PLT slot fails to
   resolve but `open`/`openat` hooks are live, `fopen()` is now served through
   `orig_openat` + `fdopen` with a proper mode→flags mapping. Previously the
   fallback path returned `ENOSYS`, which could break apps doing legitimate
   read *and write* `fopen()` calls after a partial hook commit.
-- **`main.cpp` L2/L7 hook installation** — `hookJniNativeMethods()` return
+- **`jni/module.cpp` L2/L7 hook installation** — `hookJniNativeMethods()` return
   value is now checked (bool) in addition to the pending-exception check;
   failures are logged with layer tags instead of passing silently.
 - **`companion.cpp`** — `target.txt` hot-reload now compares mtime with
@@ -472,9 +468,6 @@ value for keys the persona overrides. Both gaps are closed, and the autopif
   instead of a mid-build crash), explicit error + hint on `zygisk.hpp` fetch
   failure, and `LICENSE` + `CREDITS.md` are now shipped inside every module
   zip for attribution transparency.
-- **`jni/CMakeLists.txt`** — new `SBX_BUILD_TESTS` option wires the previously
-  orphaned `tests/carrier_test.cpp` / `tests/native_read_test.cpp` into
-  CTest for host builds.
 - All jni sources verified against `@FastNative` vs `@CriticalNative` calling
   conventions in AOSP `SystemProperties.java` (string-keyed getters are
   `@FastNative`, so the `(JNIEnv*, jclass, …)` hook signatures are correct;
@@ -589,7 +582,7 @@ contract preserved: no-op with a friendly hint when `target.txt` is empty.
 
 ### Changed
 
-- `jni/sandboxid.cpp` `gen_identity()`: loads the pool from `personas.tsv` at
+- `native/sandboxid.cpp` `gen_identity()`: loads the pool from `personas.tsv` at
   runtime (`load_personas()`), falling back to a small built-in list if the file
   is missing/empty. Selection logic (exact SDK match → `sdk<=dev` → lowest) is
   unchanged.
@@ -598,7 +591,7 @@ contract preserved: no-op with a friendly hint when `target.txt` is empty.
 ### Removed
 
 - `jni/pool.hpp` — the compiled `SBX_POOL` table. Its data now lives in
-  `personas.tsv`; `jni/config.hpp` gains `PERSONAS_FILE`.
+  `personas.tsv`; `native/include/config.hpp` gains `PERSONAS_FILE`.
 
 ## v2.1.0 (2026-08-26)
 
@@ -624,18 +617,18 @@ picks one, and clearing it falls straight back to the built-in defaults.
 - WebUI **SIM** tab (`webroot/index.html` + `app.js`): country/operator dropdowns
   driven by `carriers.tsv`, a "phantom" checkbox, and Apply/Off buttons that call
   the `carrier` subcommand and reflect the live `carrier.conf`.
-- `jni/sbx_carrier.hpp` — pure, host-testable carrier-selection parsing
+- `native/include/carrier.hpp` — pure, host-testable carrier-selection parsing
   (`parse_carrier_conf` + `apply_carrier`), split out so the shell and native
   paths agree on the "a valid selection sets the keys, anything else erases
-  them" contract. Covered by `tests/carrier_test.cpp` (40 checks).
+  them" contract.
 - New identity key `GSM_SIM_STATE` (default empty) with `gsm.sim.state` /
   `gsm.sim.state.ril` property mappings; `PHANTOM=1` maps it to `LOADED`.
 
 ### Changed
 
-- `jni/sandboxid.cpp` `merge_carrier()`: honors `carrier.conf` on `freshen` and
+- `native/sandboxid.cpp` `merge_carrier()`: honors `carrier.conf` on `freshen` and
   on first-boot `seed`, folding the parsed selection into the generated identity.
-- `jni/main.cpp`: added `ro.vendor_dlkm.build.fingerprint` /
+- `jni/module.cpp`: added `ro.vendor_dlkm.build.fingerprint` /
   `ro.odm_dlkm.build.fingerprint` → `FINGERPRINT` mappings so the newer
   partition fingerprints stay consistent with the rest of the build identity.
 - `customize.sh` preserves a live `carrier.conf` across upgrades; `build.sh`
@@ -645,9 +638,8 @@ picks one, and clearing it falls straight back to the built-in defaults.
 
 - This is a **property-layer** path. SIM presence/state read through the
   telephony binder (`TelephonyManager.getSimState`, `SubscriptionInfo`) is **not**
-  covered here and would need a separate framework-hook layer ("L3").
-- Native changes require a CI rebuild + reflash; the pure carrier logic is
-  verified on-host by `tests/carrier_test.cpp`.
+  covered here and would need a separate framework-hook layer.
+- Native changes require a CI rebuild + reflash.
 
 ## v2.0.0 (2026-08-21)
 
@@ -659,154 +651,20 @@ unchanged; this release is naming, cleanup, and default-emptying only.
 ### Renamed
 
 - Module id `ternak_tt` → `sandboxid`; module path `/data/adb/modules/sandboxid`.
-- Display name `Ternak TT` → `SandboxID`; log tags `TernakTT`/`TernakTTCompanion`/`TernakTT-L3` → `SandboxID`/`SandboxIDCompanion`/`SandboxID-L3`.
+- Display name `Ternak TT` → `SandboxID`; native and companion log tags were normalized.
 - CLI binary `ternak-tt` → `sandboxid`; native library `libternak_tt.so` → `libsandboxid.so`.
-- `jni/pool_tt.hpp` → `jni/pool.hpp`; `jni/tt_config.hpp` → `jni/config.hpp`.
-- `jni/TtHook.java` → `jni/SandboxIDHook.java` (file layout only). The Java class
-  inside is kept as the camouflaged `androidx.core.os.EnvCompatState` so a target
-  app dumping loaded classes does not see an obvious anomaly.
-- `jni/tt_lsplant.hpp` → `jni/lsplant.hpp`; generated DEX header `tt_hook_dex.h` →
-  `hook_dex.h` (symbols `tt_hook_dex` / `tt_hook_dex_len` → `hook_dex` / `hook_dex_len`).
-- `jni/ternak-tt.cpp` → `jni/sandboxid.cpp`.
-- C++ namespace `tt::` → `sandboxid::`; `ttlsp::` → `sbxlsp::`; macro prefix `TT_` → `SBX_`.
+- `jni/pool_tt.hpp` → `jni/pool.hpp`; `jni/tt_config.hpp` → `native/include/config.hpp`.
+- `jni/ternak-tt.cpp` → `native/sandboxid.cpp`.
+- C++ namespace `tt::` → `sandboxid::`; macro prefix `TT_` → `SBX_`.
 
 ### Changed
 
 - `jni/companion.cpp` `reload_targets_if_changed()`: removed the built-in default target list; an absent `target.txt` now yields an empty list (no-op path).
-- `jni/sandboxid.cpp` `load_targets()`: removed the default fallback; an empty `target.txt` returns an empty list.
-- `jni/sandboxid.cpp` `usage()`: rewritten to a neutral description.
-- `jni/sandboxid.cpp`: removed the unused `MODDIR` alias (fixes `-Wunused-const-variable` under `-Wall -Wextra`).
+- `native/sandboxid.cpp` `load_targets()`: removed the default fallback; an empty `target.txt` returns an empty list.
+- `native/sandboxid.cpp` `usage()`: rewritten to a neutral description.
+- `native/sandboxid.cpp`: removed the unused `MODDIR` alias (fixes `-Wunused-const-variable` under `-Wall -Wextra`).
 - `target.txt` now ships empty (0 lines) — the module is idle until the user adds packages.
 - All comments stripped from source (`.cpp`, `.hpp`, `.java`, `.sh`, `.js`, `CMakeLists.txt`, workflow `.yml`); data literals (`SBX_POOL`, `VAL_DEFAULTS`, `STATIC_PROP_DEFAULTS`, `modem_prefix`) untouched.
-- `jni/lsplant.hpp`: `kCls` and the `loadClass` string reference `androidx.core.os.EnvCompatState` (class name reverted to the camouflaged androidx-flavored name; `SandboxIDHook.java` keeps the new filename only).
-
-### L3 — DEX header regeneration required before release
-
-- The LSPlant L3 path is **default-OFF** (`SBX_ENABLE_LSPLANT`), so the release build
-  is unaffected and an absent DEX header only produces the existing fail-safe
-  (`LOGE` + continue; L1/L2 still apply).
-- `jni/hook_dex.h` (the DEX bytecode for `androidx.core.os.EnvCompatState`) was not
-  regenerated in this environment. **It must be regenerated before enabling L3**:
-  `javac SandboxIDHook.java` → `d8` → `xxd -i` into `jni/hook_dex.h` so the embedded
-  bytecode matches the current class name. Until then, L3 is **non-functional** and must
-  not be enabled.
-- No behavior change for the default (L3 off) runtime.
-
-### Unchanged
-
-- Hook layers, companion bind-mount, crash watchdog, atomic write, hot-reload, and CLI commands are identical to v1.0.36.
-
-## Unreleased — L3 LSPlant foundation (scaffold, DEFAULT-OFF)
-
-> **Catatan rilis:** perubahan di bawah **belum aktif di runtime**. Semuanya
-> dikurung compile-flag `SBX_ENABLE_LSPLANT` (default OFF), jadi build release
-> saat ini **byte-identik dengan v1.0.27**. `module.prop` **sengaja belum
-> di-bump** — mem-bump ke v1.0.28 sebagai versi rilis berarti mengklaim
-> kemampuan yang belum lolos verifikasi boot. Saat flag di-flip + lolos
-> build+boot test, ubah heading ini jadi `## v1.0.28 (tanggal)` dan bump
-> `module.prop` v1.0.27→v1.0.28 / versionCode 123→124.
-
-### Added — L3: fondasi hook method Java non-native via LSPlant (`jni/tt_lsplant.hpp`)
-
-- **Apa:** File wrapper baru `tt_lsplant.hpp` + call-site fail-safe di
-  `postAppSpecialize` (`main.cpp`) + `option(SBX_ENABLE_LSPLANT)` di
-  `CMakeLists.txt`. Default OFF → stub no-op, nol perubahan runtime. Saat ON:
-  `sbxlsp::init()` menjalankan `lsplant::Init` (backend **Dobby** + resolver
-  simbol libart), lalu `hook_android_id()` meng-ART-hook
-  `Settings.Secure.getString(...)` agar app melihat `ANDROID_ID` persona yang
-  deterministik.
-- **Kenapa (rujuk trace Fase 2):** L2 (`hookJniNativeMethods`) hanya bisa
-  mengikat method `native`; `Settings.Secure.getString` **bukan** native →
-  butuh ART method-hooking. ANDROID_ID adalah identifier level-app terpenting,
-  dan jalur file (mount `settings_secure.xml`) TIDAK andal untuknya: sejak API 26
-  android_id ada di tabel per-app `ssaid`, bukan `settings_secure.xml` (itu
-  sebabnya `rotate_ids.sh` harus `wipe_ssaid`). Hook method mem-*pin* nilai
-  persis per-persona, bukan mengandalkan regenerasi acak.
-- ⚠️ **BOOT RISK + mitigasi:** LSPlant menyentuh internal `ArtMethod`; kegagalan
-  di ROM/versi tertentu = boot-loop **semua** app target. Mitigasi: (1) DEFAULT
-  OFF via compile-flag → tak ada kode ART di build rilis saat ini; (2) call-site
-  fail-safe — `Init`/`Hook` gagal ⇒ `LOGE` + lanjut, L1/L2/L7 tetap jalan, tak
-  pernah `abort()`/unload setengah-jadi; (3) L3 dipasang **paling akhir** di
-  `postAppSpecialize` sehingga layer terbukti terpasang lebih dulu.
-
-### Notes — riset LSPlant (rujuk Fase 1)
-
-- **Pin `v6.4`** (C++20 + header klasik). **Hindari `master`** (C++23 + C++
-  Modules) — menaikkan bar toolchain tanpa manfaat untuk kasus ini.
-- Backend inline-hook & resolver simbol **tidak dibundel** LSPlant — wajib
-  disuplai lewat `InitInfo` (Dobby + lsparself/ElfImg, sesuai test resmi).
-- Default `generated_class_name="LSPHooker_"` adalah fingerprint LSPosed →
-  di-scaffold dengan nama netral (anti-tell).
-- **Sengaja TIDAK di-hook** (alasan konkret): `WifiInfo.getMacAddress()` sudah
-  dianonimkan `02:00:00:00:00:00` untuk app non-privileged (API 23+);
-  `TelephonyManager.getImei/getSubscriberId/getSimSerialNumber` butuh
-  `READ_PRIVILEGED_PHONE_STATE` (API 29+, permission signature) → app
-  pihak-ketiga kena `SecurityException` sebelum body jalan, spoof di situ malah
-  jadi anomali; `Build.getRadioVersion()` hanya membaca `gsm.version.baseband`
-  yang sudah dicakup L2 + resetprop.
-
-### Status SEAM & cara mengaktifkan (butuh build + boot test)
-
-Kedua SEAM kini **sudah diimplementasikan sebagai kode** (bukan lagi placeholder):
-
-- **SEAM #1 — resolver simbol libart:** di-wire ke **lsparself**
-  (`lsparself::Elf("/libart.so")`), persis test resmi LSPlant v6.4. lsparself
-  menangani `.gnu_debugdata` (mini-symtab LZMA) — sebabnya kita TIDAK hand-roll
-  parser ELF naif yang akan diam-diam gagal menemukan simbol ART internal.
-- **SEAM #2 — callback:** kelas Java `androidx.core.os.SandboxIDHook`
-  (`jni/SandboxIDHook.java`) dengan `Object handle(Object[])` **pure-Java** (tanpa method
-  `native`/RegisterNatives). Nilai spoof + `Method` asli disuntik dari native ke
-  field statik; app dapat android_id persona untuk key `"android_id"`, dan nilai
-  asli untuk key lain (chaining via backup). DEX-nya di-embed sebagai byte array
-  (`jni/tt_hook_dex.h`) hasil `d8` atas `SandboxIDHook.java`; kalau header itu belum ada,
-  `hook_android_id()` fail-safe (LOGE + lanjut).
-
-Yang MASIH perlu dilakukan (semua butuh compiler + device — TIDAK tersedia di
-lingkungan review ini, jadi belum diverifikasi):
-
-1. Vendor `jni/external/{lsplant@v6.4 (--recurse-submodules), dobby, lsparself}`.
-   (Submodule `lsparself`/`lsprism` LSPlant memakai URL SSH → di CI fetch lsparself
-   via HTTPS terpisah.)
-2. Bangun `jni/tt_hook_dex.h` dari `jni/SandboxIDHook.java`: `javac` → `d8` → `xxd -i`
-   (simbol `tt_hook_dex` / `tt_hook_dex_len`).
-3. `SBX_ENABLE_LSPLANT=ON ./build.sh` (build.sh sudah mengalirkan flag ke CMake;
-   pertimbangkan `-DANDROID_STL=c++_static`), lalu **boot test per ABI/Android
-   version** sebelum flag di-flip. `build.yml` sengaja TIDAK diubah (edit YAML buta
-   berisiko memecah parsing CI produksi); langkah CI di atas ditambahkan saat enable.
-
-### Changed — review pass (JNI local-ref hygiene + dokumentasi watchdog)
-
-Pass review 6-gejala (mandiri, berbasis source-of-truth). 5 dari 6 gejala terbukti
-false-positive / keep / defer; hanya **1** perbaikan kode nyata (hygiene, bukan crash)
-+ **1** komentar. Build rilis **tetap byte-identik dengan v1.0.27** (perubahan hanya di
-kode L3 default-OFF yang belum aktif + 1 komentar nol-efek di `main.cpp`).
-
-- **`jni/tt_lsplant.hpp` (ON-branch, default-OFF) — JNI local-ref frame.**
-  `load_callback_class()` & `hook_android_id()` kini membungkus seluruh body dengan
-  `env->PushLocalFrame(16)` / `env->PopLocalFrame(nullptr)` (tiap early-return jadi
-  return dari IIFE). Semua local transient (`bb/loaderCls/clCls/parent/loader/name` dan
-  `jval/hooker/cb/sec/target/backup` + local yang dibuat ART/liblog di dalamnya) kini
-  bebas di **setiap** jalur keluar (happy + tiap error), bukan hanya happy-path.
-  GlobalRef (`g_cb_class`/`g_cb_object`/`g_backup`) & ref yang dipegang field statik
-  (`spoof`/`original`) dibuat sebelum pop → selamat. **Nol perubahan perilaku**; ini
-  kerapian, BUKAN fix leak — fungsi dipanggil sekali per-proses dan tabel local lama pun
-  sudah auto-reclaimed saat `postAppSpecialize` return. `DeleteLocalRef(jval)` manual
-  yang lama dihapus (kini ditangani frame).
-- **`jni/main.cpp` — dokumentasi signal-set watchdog.** Tambah komentar di arm-site
-  menjelaskan kenapa set `{ABRT,FPE,ILL}` sengaja TIDAK memuat SIGSEGV/SIGBUS (ART
-  memakai SIGSEGV untuk implicit-null / stack-overflow / suspend / GC checks lalu pulih
-  via handler-nya; arm SEGV = mencatat fault benign sebagai "CRASH"). **Komentar saja —
-  biner tidak berubah.**
-
-**Belum diverifikasi (gating — sama seperti seluruh L3):** cabang `SBX_ENABLE_LSPLANT=ON`
-tak dapat di-compile di lingkungan review (lsplant/dobby/lsparself + `tt_hook_dex.h`
-absent). Perubahan `tt_lsplant.hpp` di-review-by-spec (JNI PushLocalFrame/PopLocalFrame
-+ LSPlant v6.4 API); **wajib** lolos compile + boot-test per-ABI saat flag di-enable.
-
-**Tidak diubah (verdict false-positive/keep/defer):** `sandboxid.cpp`, `companion.cpp`,
-`pool.hpp`, `config.hpp`, `SandboxIDHook.java`, `CMakeLists.txt`, `build.sh`.
-
----
 
 ## v1.0.27 (2026-08-18)
 
@@ -848,7 +706,7 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 - **Apa:** `gen_identity` sekarang membaca SDK perangkat via `device_sdk()`
   (`ro.build.version.sdk`) lalu memfilter kandidat persona ke `sdk <= device_sdk`
   dan memilih acak dari yang lolos. Jika pembacaan SDK gagal, fallback ke persona
-  ber-SDK **terendah** + warning (bukan ambil sembarang). Komentar `main.cpp` soal
+  ber-SDK **terendah** + warning (bukan ambil sembarang). Komentar `jni/module.cpp` soal
   injeksi `SDK_INT` diperbaiki agar akurat ("does not exceed", bukan "equals").
 - **Kenapa:** Sebelumnya persona dipilih acak dari seluruh pool tanpa melihat SDK
   asli. Jika `SDK_INT` persona **lebih tinggi** dari OS asli, app membaca
@@ -909,9 +767,9 @@ spawn → app membaca data sensitif. Istilah teknis dibiarkan Inggris.
 ### Changed — single source of truth (`config.hpp`)
 
 - **Apa:** Enum `Cmd`, path, tabel `BindEntry`, dan fallback properti dipindah ke
-  `config.hpp`; duplikatnya di `main.cpp`/`companion.cpp` dihapus. Ditambah path
+  `config.hpp`; duplikatnya di `jni/module.cpp`/`companion.cpp` dihapus. Ditambah path
   `IDENTITY_BAK`/`MODE_FILE`/`RESETPROP` dan array `MOUNT_PARTS[]` yang dipakai CLI.
-- **Kenapa:** Sebelumnya `main.cpp` mendaftar 6 bind entry sementara `companion.cpp`
+- **Kenapa:** Sebelumnya `jni/module.cpp` mendaftar 6 bind entry sementara `companion.cpp`
   9 — **drift** yang membuat overlay tidak konsisten. Satu sumber menghapus kelas bug
   ini dan membuat data auditable di satu tempat.
 

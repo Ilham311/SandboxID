@@ -27,8 +27,7 @@
 #include <atomic>
 #include "zygisk.hpp"
 #include "config.hpp"
-#include "sbx_lsplant.hpp"
-#include "sbx_native_read.hpp"
+#include "native_read.hpp"
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -1198,26 +1197,6 @@ public:
         for (auto& kv : g_identity) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
         install_crash_watchdog(pkg_);
-
-#ifdef SBX_ENABLE_LSPLANT
-        {
-            // L3 spoofs identifiers that arrive over Binder (telephony/DRM) and so are
-            // out of reach of the property layers. Values come from the identity blob;
-            // IMEI/IMSI/ICCID/MEID/Widevine are synthesized from the same persona seed
-            // used by L9, so they rotate together on every action.sh run.
-            sbxlsp::HookValues hv;
-            hv.android_id = val("ANDROID_ID");
-            hv.serial     = val("SERIAL");
-            hv.wifi_mac   = val("WIFI_MAC");
-            hv.op_num     = val("GSM_OPERATOR_NUMERIC");
-            hv.op_alpha   = val("GSM_OPERATOR_ALPHA");
-            hv.op_iso     = val("GSM_OPERATOR_ISO");
-            hv.seed       = sbxnr::fnv1a(val("FINGERPRINT") + "|" + val("SERIAL") + "|" +
-                                         val("ANDROID_ID"));
-            if (!sbxlsp::install_all(env_, hv))
-                LOGE("L3 hooks not installed (continuing with L1/L2/L9)");
-        }
-#endif
 
         if (comp_fd_ >= 0) {
             request_companion_mounts(comp_fd_);

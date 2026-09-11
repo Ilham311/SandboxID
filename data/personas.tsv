@@ -1,6 +1,6 @@
 # SandboxID persona pool (device fingerprint source)
 #
-# This file REPLACES the old compiled-in jni/pool.hpp. The `sandboxid` CLI
+# This file replaces the old compiled-in native persona table. The `sandboxid` CLI
 # parses it at `freshen`/`seed` time and picks one persona matched to the
 # device's real SDK level. It is the OFFLINE FALLBACK pool: when autopif.sh can
 # fetch (curl/wget + network), it writes ONE fresh random persona to
