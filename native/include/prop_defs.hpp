@@ -157,7 +157,14 @@ inline constexpr NativePropEntry NATIVE_PROPS[] = {
     {"ro.boot.hardware",        nullptr, "HARDWARE", false},
     {"ro.boot.mode",            "normal", "", false},
     {"ro.arch",                 "arm64", "", false},
+    {"gsm.operator.numeric",         nullptr, "GSM_OPERATOR_NUMERIC", false},
+    {"gsm.sim.operator.numeric",     nullptr, "GSM_OPERATOR_NUMERIC", false},
+    {"gsm.operator.alpha",           nullptr, "GSM_OPERATOR_ALPHA", false},
+    {"gsm.sim.operator.alpha",       nullptr, "GSM_OPERATOR_ALPHA", false},
+    {"gsm.operator.iso-country",     nullptr, "GSM_OPERATOR_ISO", false},
     {"gsm.sim.operator.iso-country", nullptr, "GSM_OPERATOR_ISO", false},
+    {"gsm.sim.state",                nullptr, "GSM_SIM_STATE", false},
+    {"gsm.operator.isroaming",       "false", "", false},
     {"ro.sf.lcd_density",       nullptr, "LCD_DENSITY", false},
 };
 

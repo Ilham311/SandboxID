@@ -86,6 +86,77 @@ static thread_local sbxnr::Kind g_last_kind = sbxnr::NONE;
 static thread_local std::string g_synth_buf;
 static thread_local size_t     g_synth_off = 0;
 
+// ---------- __system_property hooks (NATIVE layer) ----------
+// Intercepts __system_property_find and __system_property_read_callback
+// so that native-layer property reads (used by vdinfos NATIVE lens and
+// getprop SHELL lens) return spoofed values instead of real device values.
+
+typedef const prop_info* (*find_fn)(const char*);
+typedef void (*read_cb_fn)(const prop_info*, void (*)(void*, const char*, const char*, uint32_t), void*);
+
+static find_fn    orig_prop_find = nullptr;
+static read_cb_fn orig_prop_read_cb = nullptr;
+
+static void hook_system_property_read_callback(
+        const prop_info* pi,
+        void (*callback)(void*, const char*, const char*, uint32_t),
+        void* cookie) {
+    if (!pi || !callback || !orig_prop_read_cb) {
+        if (orig_prop_read_cb) orig_prop_read_cb(pi, callback, cookie);
+        return;
+    }
+    char name_buf[PROP_NAME_MAX] = {};
+    char val_buf[PROP_VALUE_MAX] = {};
+    __system_property_read(pi, name_buf, val_buf);
+
+    if (sbx_prop_hidden(name_buf)) {
+        callback(cookie, name_buf, "", 0);
+        return;
+    }
+
+    std::string spoofed;
+    if (spoof_prop_value(std::string(name_buf), spoofed)) {
+        LOGD("NATIVE_PROP SPOOF '%s' -> '%s'", name_buf, spoofed.c_str());
+        callback(cookie, name_buf, spoofed.c_str(), 0);
+        return;
+    }
+    orig_prop_read_cb(pi, callback, cookie);
+}
+
+static const prop_info* hook_system_property_find(const char* name) {
+    if (!name) return orig_prop_find ? orig_prop_find(name) : nullptr;
+    if (sbx_prop_hidden(name)) {
+        LOGD("NATIVE_PROP HIDE '%s'", name);
+        return nullptr;
+    }
+    return orig_prop_find ? orig_prop_find(name) : nullptr;
+}
+
+typedef int (*prop_get_fn)(const char*, char*);
+static prop_get_fn orig_prop_get = nullptr;
+
+static int hook_system_property_get(const char* name, char* value) {
+    if (!name) return orig_prop_get ? orig_prop_get(name, value) : 0;
+    if (sbx_prop_hidden(name)) {
+        LOGD("NATIVE_PROP_GET HIDE '%s'", name);
+        if (value) value[0] = '\0';
+        return 0;
+    }
+    std::string spoofed;
+    if (spoof_prop_value(std::string(name), spoofed)) {
+        LOGD("NATIVE_PROP_GET SPOOF '%s' -> '%s'", name, spoofed.c_str());
+        if (value) {
+            size_t len = spoofed.size();
+            if (len >= PROP_VALUE_MAX) len = PROP_VALUE_MAX - 1;
+            std::memcpy(value, spoofed.c_str(), len);
+            value[len] = '\0';
+            return static_cast<int>(len);
+        }
+        return static_cast<int>(spoofed.size());
+    }
+    return orig_prop_get ? orig_prop_get(name, value) : 0;
+}
+
 static int hook_open(const char* path, int flags, ...) {
     mode_t mode = 0;
     if (flags & O_CREAT) {
@@ -223,6 +294,9 @@ void install_native_read_hooks(Api* api) {
 
     static const char* const kLibs[] = {
         "/libc.so",
+        "/libbase.so",
+        "/libcutils.so",
+        "/libutils.so",
     };
     int registered = 0;
     for (const char* suffix : kLibs) {
@@ -254,6 +328,15 @@ void install_native_read_hooks(Api* api) {
         api->pltHookRegister(dev, ino, "open",
                              reinterpret_cast<void*>(hook_open),
                              reinterpret_cast<void**>(&orig_open));
+        api->pltHookRegister(dev, ino, "__system_property_read_callback",
+                             reinterpret_cast<void*>(hook_system_property_read_callback),
+                             reinterpret_cast<void**>(&orig_prop_read_cb));
+        api->pltHookRegister(dev, ino, "__system_property_find",
+                             reinterpret_cast<void*>(hook_system_property_find),
+                             reinterpret_cast<void**>(&orig_prop_find));
+        api->pltHookRegister(dev, ino, "__system_property_get",
+                             reinterpret_cast<void*>(hook_system_property_get),
+                             reinterpret_cast<void**>(&orig_prop_get));
         ++registered;
     }
     if (registered == 0) {
@@ -264,7 +347,7 @@ void install_native_read_hooks(Api* api) {
         LOGW("NATIVE_READ: pltHookCommit failed");
         return;
     }
-    LOGD("NATIVE_READ hooks installed (%d lib(s))", registered);
+    LOGD("NATIVE_READ hooks installed (%d lib(s), incl. prop find/read_callback/get)", registered);
 }
 
 // ---------- install_crash_watchdog ----------
