@@ -30,6 +30,7 @@
 #include "config.hpp"
 #include "native_read.hpp"
 #include "raii.hpp"
+#include "jni_string.hpp"
 
 #define LOG_TAG "SandboxID"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)

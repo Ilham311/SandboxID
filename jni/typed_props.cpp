@@ -51,10 +51,9 @@ static const std::map<std::string, jlong>& sbx_long_spoof() {
 
 static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def) {
     if (!j_key) return def;
-    const char* r = env->GetStringUTFChars(j_key, nullptr);
+    JniString r(env, j_key);
     if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
-    std::string k(r);
-    env->ReleaseStringUTFChars(j_key, r);
+    std::string k(r.c_str());
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
@@ -68,10 +67,9 @@ static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def
 }
 static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong def) {
     if (!j_key) return def;
-    const char* r = env->GetStringUTFChars(j_key, nullptr);
+    JniString r(env, j_key);
     if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
-    std::string k(r);
-    env->ReleaseStringUTFChars(j_key, r);
+    std::string k(r.c_str());
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
@@ -85,10 +83,9 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong 
 }
 static jboolean hook_prop_get_bool(JNIEnv* env, jclass clazz, jstring j_key, jboolean def) {
     if (!j_key) return def;
-    const char* r = env->GetStringUTFChars(j_key, nullptr);
+    JniString r(env, j_key);
     if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
-    std::string k(r);
-    env->ReleaseStringUTFChars(j_key, r);
+    std::string k(r.c_str());
     const auto& m = sbx_bool_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("TYPED SPB '%s' -> %d", k.c_str(), (int)it->second); return it->second; }

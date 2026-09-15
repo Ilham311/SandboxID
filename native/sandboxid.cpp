@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "config.hpp"
+#include "prop_defs.hpp"
 #include "carrier.hpp"
 #include "native_read.hpp"
 #include <sys/system_properties.h>
@@ -549,195 +550,61 @@ static bool take_persona_override(PixelEntry& out) {
 #define DBG(...) ((void)0)
 #endif
 
+static std::string resolve_prop_value(const sandboxid::NativePropEntry& e,
+                                      const Identity& id) {
+    if (e.identity_val && e.identity_val[0]) {
+        auto it = id.kv.find(e.identity_val);
+        if (it != id.kv.end()) return it->second;
+    }
+    if (e.val) return std::string(e.val);
+    return std::string();
+}
+
 static void apply_native(const Identity& id) {
     DBG("apply_native: enter (identity has %zu kv pairs)", id.kv.size());
+
+    bool have_bundled = (::access(RESETPROP, X_OK) == 0);
+    int applied = 0, failed = 0;
+    for (size_t i = 0; i < sandboxid::NATIVE_PROPS_N; ++i) {
+        const auto& e = sandboxid::NATIVE_PROPS[i];
+        std::string v = resolve_prop_value(e, id);
+        if (v.empty() && !e.del_if_empty) continue;
+        int rc;
+        if (v.empty()) {
+            if (have_bundled) {
+                rc = run_bin(RESETPROP, {"resetprop-rs", "--delete", e.key});
+            } else {
+                rc = run_bin_path("resetprop", {"resetprop", "--delete", e.key});
+                if (rc != 0)
+                    rc = run_bin_path("resetprop-rs", {"resetprop-rs", "--delete", e.key});
+            }
+        } else if (have_bundled) {
+            rc = run_bin(RESETPROP, {"resetprop-rs", "-n", e.key, v.c_str()});
+        } else {
+            rc = run_bin_path("resetprop", {"resetprop", "-n", e.key, v.c_str()});
+            if (rc != 0)
+                rc = run_bin_path("resetprop-rs", {"resetprop-rs", "-n", e.key, v.c_str()});
+        }
+        if (rc == 0) {
+            applied++;
+        } else {
+            failed++;
+            fprintf(stderr, "! resetprop gagal (exit!=0): %s\n", e.key);
+        }
+    }
+    printf("  Native prop: %d ok, %d gagal%s\n", applied, failed,
+           have_bundled ? "" : " [fallback PATH]");
+    if (applied == 0 && failed > 0)
+        fprintf(stderr, "! SEMUA resetprop gagal%s — cek ketersediaan resetprop / resetprop-rs\n",
+                have_bundled ? "" : " (bundled absent + PATH fallback gagal)");
+
     auto get = [&](const char* k) -> std::string {
         auto it = id.kv.find(k);
         return it != id.kv.end() ? it->second : std::string();
     };
-
-    struct Rp { const char* key; std::string val; bool del_if_empty = false; };
-
-    const std::string SERIAL       = get("SERIAL");
-    const std::string MODEL        = get("MODEL");
-    const std::string BRAND        = get("BRAND");
-    const std::string MANUFACTURER = get("MANUFACTURER");
-    const std::string DEVICE       = get("DEVICE");
-    const std::string PRODUCT      = get("PRODUCT");
-    const std::string ID_          = get("ID");
-    const std::string FP           = get("FINGERPRINT");
-    const std::string DISPLAY      = get("DISPLAY");
-    const std::string DESC         = get("DESCRIPTION");
-    const std::string RELEASE      = get("RELEASE");
-    const std::string SECPATCH     = get("SECURITY_PATCH");
-    const std::string INCREMENTAL  = get("INCREMENTAL");
-    const std::string RADIO        = get("RADIO");
-    const std::string TAGS         = get("TAGS");
-    const std::string TYPE         = get("TYPE");
-    const std::string USER_        = get("USER");
-    const std::string HOST         = get("HOST");
-    const std::string SOC_MANUF    = get("SOC_MANUFACTURER");
-    const std::string SOC_MODEL    = get("SOC_MODEL");
-    const std::string MARKETNAME   = get("MARKETNAME");
-
-    const std::string SKU        = get("SKU");
-    const std::string ODM_SKU    = get("ODM_SKU");
-    const std::string BASE_OS    = get("BASE_OS");
-    const std::string MPC        = get("MEDIA_PERFORMANCE_CLASS");
-
-    const std::string FLAVOR     = get("FLAVOR");
-    const std::string BUILD_UTC  = get("BUILD_TIME_UTC");
-    const std::string BUILD_DATE = get("BUILD_DATE");
-
-    std::vector<Rp> rp = {
-        {"ro.serialno",                        SERIAL},
-        {"ro.boot.serialno",                   SERIAL},
-
-        {"ro.build.fingerprint",               FP},
-        {"ro.bootimage.build.fingerprint",     FP},
-        {"ro.system.build.fingerprint",        FP},
-        {"ro.vendor.build.fingerprint",        FP},
-        {"ro.odm.build.fingerprint",           FP},
-        {"ro.product.build.fingerprint",       FP},
-        {"ro.system_ext.build.fingerprint",    FP},
-        {"ro.vendor_dlkm.build.fingerprint",   FP},
-        {"ro.odm_dlkm.build.fingerprint",      FP},
-
-        {"ro.product.model",                   MODEL},
-        {"ro.product.system.model",            MODEL},
-        {"ro.product.vendor.model",            MODEL},
-        {"ro.product.odm.model",               MODEL},
-        {"ro.product.product.model",           MODEL},
-        {"ro.product.system_ext.model",        MODEL},
-
-        {"ro.product.brand",                   BRAND},
-        {"ro.product.system.brand",            BRAND},
-        {"ro.product.vendor.brand",            BRAND},
-        {"ro.product.odm.brand",               BRAND},
-        {"ro.product.product.brand",           BRAND},
-        {"ro.product.system_ext.brand",        BRAND},
-
-        {"ro.product.manufacturer",            MANUFACTURER},
-        {"ro.product.system.manufacturer",     MANUFACTURER},
-        {"ro.product.vendor.manufacturer",     MANUFACTURER},
-        {"ro.product.odm.manufacturer",        MANUFACTURER},
-        {"ro.product.product.manufacturer",    MANUFACTURER},
-        {"ro.product.system_ext.manufacturer", MANUFACTURER},
-
-        {"ro.product.device",                  DEVICE},
-        {"ro.product.system.device",           DEVICE},
-        {"ro.product.vendor.device",           DEVICE},
-        {"ro.product.odm.device",              DEVICE},
-        {"ro.product.product.device",          DEVICE},
-        {"ro.product.system_ext.device",       DEVICE},
-
-        {"ro.product.name",                    PRODUCT},
-        {"ro.product.system.name",             PRODUCT},
-        {"ro.product.vendor.name",             PRODUCT},
-        {"ro.product.odm.name",                PRODUCT},
-        {"ro.product.product.name",            PRODUCT},
-        {"ro.product.system_ext.name",         PRODUCT},
-
-        {"ro.build.product",                   DEVICE},
-
-        {"ro.soc.manufacturer",                SOC_MANUF},
-        {"ro.soc.model",                       SOC_MODEL},
-        {"ro.product.marketname",              MARKETNAME},
-
-        {"ro.product.brand_for_attestation",        BRAND},
-        {"ro.product.name_for_attestation",         PRODUCT},
-        {"ro.product.device_for_attestation",       DEVICE},
-        {"ro.product.model_for_attestation",        MODEL},
-        {"ro.product.manufacturer_for_attestation", MANUFACTURER},
-
-        {"ro.build.id",                        ID_},
-        {"ro.build.display.id",                DISPLAY},
-        {"ro.build.description",               DESC},
-        {"ro.build.tags",                      TAGS},
-        {"ro.build.type",                      TYPE},
-        {"ro.build.user",                      USER_},
-        {"ro.build.host",                      HOST},
-        {"ro.build.flavor",                    FLAVOR},
-        {"ro.build.date.utc",                  BUILD_UTC},
-        {"ro.build.date",                      BUILD_DATE},
-
-        {"ro.build.version.codename",          std::string("REL")},
-        {"ro.build.version.all_codenames",     std::string("REL")},
-
-        {"ro.build.version.release",           RELEASE},
-        {"ro.build.version.release_or_codename", RELEASE},
-        {"ro.build.version.security_patch",    SECPATCH},
-        {"ro.vendor.build.security_patch",     SECPATCH},
-        {"ro.build.version.incremental",       INCREMENTAL},
-
-        {"gsm.version.baseband",               RADIO, true},
-        {"ro.build.expect.baseband",           RADIO, true},
-
-        {"ro.bootloader",                      std::string("unknown")},
-        {"ro.boot.bootloader",                 std::string("unknown")},
-
-        {"ro.boot.verifiedbootstate",          std::string("green")},
-        {"ro.boot.vbmeta.device_state",        std::string("locked")},
-        {"ro.boot.flash.locked",               std::string("1")},
-        {"ro.boot.veritymode",                 std::string("enforcing")},
-        {"ro.boot.vbmeta.hash_alg",            std::string("sha256")},
-        {"ro.boot.vbmeta.avb_version",         std::string("1.0")},
-        {"ro.boot.vbmeta.invalidate_on_error", std::string("yes")},
-        {"ro.boot.vbmeta.digest",              get("VBMETA_DIGEST")},
-        {"ro.secure",                          std::string("1")},
-        {"ro.debuggable",                      std::string("0")},
-        {"ro.build.selinux",                   std::string("1")},
-
-        {"sys.oem_unlock_allowed",             std::string("0")},
-
-        {"ro.boot.hardware.sku",               SKU},
-        {"ro.boot.product.hardware.sku",       ODM_SKU},
-
-        {"ro.build.version.base_os",           BASE_OS},
-        {"ro.build.version.preview_sdk",       std::string("0")},
-        {"ro.build.version.preview_sdk_fingerprint", std::string("REL")},
-
-        {"ro.odm.build.media_performance_class", MPC},
-    };
-
-    bool have_bundled = (::access(RESETPROP, X_OK) == 0);
-    {
-        int applied = 0, failed = 0;
-        for (const auto& r : rp) {
-            if (r.val.empty() && !r.del_if_empty) continue;
-            int rc;
-            if (r.val.empty()) {
-
-                if (have_bundled) {
-                    rc = run_bin(RESETPROP, {"resetprop-rs", "--delete", r.key});
-                } else {
-                    rc = run_bin_path("resetprop", {"resetprop", "--delete", r.key});
-                    if (rc != 0)
-                        rc = run_bin_path("resetprop-rs", {"resetprop-rs", "--delete", r.key});
-                }
-            } else if (have_bundled) {
-                rc = run_bin(RESETPROP, {"resetprop-rs", "-n", r.key, r.val.c_str()});
-            } else {
-                rc = run_bin_path("resetprop", {"resetprop", "-n", r.key, r.val.c_str()});
-                if (rc != 0)
-                    rc = run_bin_path("resetprop-rs", {"resetprop-rs", "-n", r.key, r.val.c_str()});
-            }
-            if (rc == 0) {
-                applied++;
-            } else {
-                failed++;
-                fprintf(stderr, "! resetprop gagal (exit!=0): %s\n", r.key);
-            }
-        }
-        printf("  Native prop: %d ok, %d gagal%s\n", applied, failed,
-               have_bundled ? "" : " [fallback PATH]");
-        if (applied == 0 && failed > 0)
-            fprintf(stderr, "! SEMUA resetprop gagal%s — cek ketersediaan resetprop / resetprop-rs\n",
-                    have_bundled ? "" : " (bundled absent + PATH fallback gagal)");
-    }
-
-    std::string aid = get("ANDROID_ID");
-    if (!aid.empty() || !MODEL.empty()) {
+    std::string aid   = get("ANDROID_ID");
+    std::string model = get("MODEL");
+    if (!aid.empty() || !model.empty()) {
         wait_boot_completed(5000);
         int sok = 0, sfail = 0;
         if (!aid.empty()) {
@@ -746,17 +613,14 @@ static void apply_native(const Identity& id) {
                     "settings put secure android_id");
             if (rc == 0) sok++; else sfail++;
         }
-        if (!MODEL.empty()) {
-
+        if (!model.empty()) {
             int rc1 = run_framework("/system/bin/settings",
-                    {"settings", "put", "--user", "0", "global", "device_name", MODEL.c_str()},
+                    {"settings", "put", "--user", "0", "global", "device_name", model.c_str()},
                     "settings put global device_name");
             if (rc1 == 0) sok++; else sfail++;
-
             int rc2 = run_framework("/system/bin/settings",
-                    {"settings", "put", "--user", "0", "system", "device_name", MODEL.c_str()},
+                    {"settings", "put", "--user", "0", "system", "device_name", model.c_str()},
                     "settings put system device_name");
-
             if (rc2 == 0) {
                 sok++;
             } else if (rc1 != 0) {
@@ -775,8 +639,8 @@ static void generate_mount_files(const Identity& id) {
     };
 
     ::mkdir(MOUNTDIR, 0755);
-    for (size_t i = 0; i < sandboxid::MOUNT_PARTS_N; ++i) {
-        std::string d = std::string(MOUNTDIR) + "/" + sandboxid::MOUNT_PARTS[i];
+    for (size_t i = 0; i < sandboxid::MOUNT_PART_ENTRIES_N; ++i) {
+        std::string d = std::string(MOUNTDIR) + "/" + sandboxid::MOUNT_PART_ENTRIES[i].dir;
         ::mkdir(d.c_str(), 0755);
     }
 
@@ -887,22 +751,12 @@ static void generate_mount_files(const Identity& id) {
     add("ro.debuggable",                      std::string("0"));
     add("ro.build.selinux",                   std::string("1"));
 
-    struct { const char* dir; const char* pfx; } parts[] = {
-        {"system",     "ro.product.system."},
-        {"vendor",     "ro.product.vendor."},
-        {"odm",        "ro.product.odm."},
-        {"product",    "ro.product.product."},
-        {"system_ext", "ro.product.system_ext."},
-    };
-    for (const auto& p : parts) {
+    for (size_t i = 0; i < sandboxid::MOUNT_PART_ENTRIES_N; ++i) {
+        const auto& mp = sandboxid::MOUNT_PART_ENTRIES[i];
         std::string c = base;
-        std::string pfx = p.pfx;
-        if (!MODEL.empty())        c += pfx + "model="        + MODEL        + "\n";
-        if (!BRAND.empty())        c += pfx + "brand="        + BRAND        + "\n";
-        if (!MANUFACTURER.empty()) c += pfx + "manufacturer=" + MANUFACTURER + "\n";
-        if (!DEVICE.empty())       c += pfx + "device="       + DEVICE       + "\n";
-        if (!PRODUCT.empty())      c += pfx + "name="         + PRODUCT      + "\n";
-        std::string path = std::string(MOUNTDIR) + "/" + p.dir + "/build.prop";
+        c += sandboxid::generate_mount_part_props(mp.prefix, MODEL, BRAND,
+                                                   MANUFACTURER, DEVICE, PRODUCT);
+        std::string path = std::string(MOUNTDIR) + "/" + mp.dir + "/build.prop";
         atomic_write(path, c);
         ::chmod(path.c_str(), 0644);
     }

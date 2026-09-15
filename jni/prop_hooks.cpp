@@ -183,10 +183,9 @@ bool spoof_prop_value(const std::string& k, std::string& out) {
 
 static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
-    const char* raw = env->GetStringUTFChars(j_key, nullptr);
+    JniString raw(env, j_key);
     if (!raw) { if (env->ExceptionCheck()) env->ExceptionClear(); return j_def; }
-    std::string k(raw);
-    env->ReleaseStringUTFChars(j_key, raw);
+    std::string k(raw.c_str());
     LOGD("PROP native_get('%s')", k.c_str());
     std::string v;
     if (spoof_prop_value(k, v)) {

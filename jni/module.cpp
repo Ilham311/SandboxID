@@ -31,10 +31,9 @@ public:
     void preAppSpecialize(AppSpecializeArgs* args) override {
         std::string pkg;
         if (args && args->nice_name) {
-            const char* raw = env_->GetStringUTFChars(args->nice_name, nullptr);
+            JniString raw(env_, args->nice_name);
             if (env_->ExceptionCheck()) env_->ExceptionClear();
-            pkg = raw ? raw : "";
-            if (raw) env_->ReleaseStringUTFChars(args->nice_name, raw);
+            pkg = raw ? raw.c_str() : "";
         }
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
         if (pkg.empty()) { unload(); return; }

@@ -24,12 +24,17 @@ endif()
 
 add_library(sandboxid_module SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/../jni/module.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../jni/companion.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../jni/companion.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../jni/module_hooks.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../jni/prop_hooks.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../jni/typed_props.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../jni/uptime_hook.cpp
+    native_read.cpp)
 set_target_properties(sandboxid_module PROPERTIES OUTPUT_NAME sandboxid)
 target_include_directories(sandboxid_module PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../jni)
 target_link_libraries(sandboxid_module PRIVATE log)
 
-add_executable(sandboxid sandboxid.cpp)
+add_executable(sandboxid sandboxid.cpp native_read.cpp)
 target_include_directories(sandboxid PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

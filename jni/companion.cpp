@@ -207,9 +207,9 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
         return 0;
     }
     if (r.slave_errno) {
-
-        LOGW("mount pid=%u: MS_SLAVE gagal errno=%d — bind mount bisa bocor via propagasi!",
+        LOGW("mount pid=%u: MS_SLAVE gagal errno=%d — child skipped all binds, aborting",
              target_pid, r.slave_errno);
+        return 0;
     }
     if (r.fail && r.first_fail_idx >= 0 && r.first_fail_idx < (int)sandboxid::BIND_ENTRIES_N) {
         LOGE("mount pid=%u: %u bind(s) FAILED (first: %s errno=%d) [%s]",
@@ -340,10 +340,11 @@ static bool sbx_hide_apply_umounts(uint32_t target_pid,
         } else if (::setns(ns, CLONE_NEWNS) != 0) {
             cr.setns_errno = errno; ::close(ns);
         } else {
-            if (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) != 0)
-                cr.slave_errno = errno;
-            for (const auto& mp : targets) {  // read-only iteration: no alloc
-                if (::umount2(mp.c_str(), MNT_DETACH) == 0) {
+            bool propagation_isolated =
+                (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) == 0);
+            if (!propagation_isolated) cr.slave_errno = errno;
+            for (size_t i = 0; propagation_isolated && i < targets.size(); ++i) {
+                if (::umount2(targets[i].c_str(), MNT_DETACH) == 0) {
                     cr.detached++;
                 } else {
                     if (!cr.first_fail_errno) cr.first_fail_errno = errno;
@@ -443,10 +444,10 @@ static void watch_target_death(uint32_t pid, int client_fd) {
 }
 
 static bool try_seed_ondemand() {
-
-    std::string base = std::string(sandboxid::MODDIR) + "/bin";
-    std::string bin = base + "/sandboxid";
-    if (::access(bin.c_str(), X_OK) != 0) {
+    // All path building uses stack buffers — no heap allocation before fork.
+    char bin[512];
+    ::snprintf(bin, sizeof(bin), "%s/bin/sandboxid", sandboxid::MODDIR);
+    if (::access(bin, X_OK) != 0) {
 #if defined(__aarch64__)
         const char* abi = "arm64";
 #elif defined(__arm__)
@@ -459,15 +460,17 @@ static bool try_seed_ondemand() {
         const char* abi = nullptr;
 #endif
         if (abi == nullptr) {
-            LOGE("seed on-demand: no runnable binary in %s (unknown ABI)", base.c_str());
+            LOGE("seed on-demand: no runnable binary (unknown ABI)");
             return false;
         }
-        bin = base + "/sandboxid-" + abi;
-        if (::access(bin.c_str(), X_OK) != 0) {
-            LOGE("seed on-demand: binary not found at %s or %s",
-                 (base + "/sandboxid").c_str(), bin.c_str());
+        char fallback[512];
+        ::snprintf(fallback, sizeof(fallback), "%s/bin/sandboxid-%s",
+                   sandboxid::MODDIR, abi);
+        if (::access(fallback, X_OK) != 0) {
+            LOGE("seed on-demand: binary not found at %s or %s", bin, fallback);
             return false;
         }
+        ::memcpy(bin, fallback, sizeof(bin));
     }
 
     pid_t s = ::fork();
@@ -476,7 +479,7 @@ static bool try_seed_ondemand() {
         char arg0[] = "sandboxid";
         char arg1[] = "seed";
         char* const argv[] = {arg0, arg1, nullptr};
-        execv(bin.c_str(), argv);
+        ::execv(bin, argv);
         ::_exit(127);
     }
     int st = 0;
