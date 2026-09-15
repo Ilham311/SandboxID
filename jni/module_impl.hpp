@@ -51,7 +51,6 @@ using zygisk::ServerSpecializeArgs;
 // ---- Shared state (defined in module.cpp) ----
 extern std::map<std::string, std::string> g_identity;
 extern std::string g_pkg;
-extern int64_t g_boot_off_sec;
 
 // ---- Shared helpers (defined in split TUs) ----
 extern const std::string& val(const std::string& k);
