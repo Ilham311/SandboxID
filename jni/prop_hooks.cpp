@@ -4,7 +4,6 @@ const std::string& val(const std::string& k) {
     static const std::string empty;
     auto it = g_identity.find(k);
     if (it != g_identity.end() && !it->second.empty()) return it->second;
-
     static const std::map<std::string, std::string> defaults = [] {
         std::map<std::string, std::string> m;
         for (size_t i = 0; i < sandboxid::VAL_DEFAULTS_N; ++i)
@@ -116,6 +115,52 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
         {"ro.build.version.preview_sdk",             "PREVIEW_SDK_INT"},
         {"ro.build.version.preview_sdk_fingerprint", "PREVIEW_SDK_FINGERPRINT"},
         {"ro.odm.build.media_performance_class",     "MEDIA_PERFORMANCE_CLASS"},
+        // New additions from DeviceSpoofLab/DeviceAnon research
+        {"ro.kernel.qemu",                   "QEMU_0"},
+        {"ro.boot.qemu",                    "QEMU_0"},
+        {"ro.adb.secure",                   "ADB_SECURE_1"},
+        {"ro.boot.warranty_bit",            "WARRANTY_0"},
+        {"ro.crypto.state",                 "CRYPTO_ENCRYPTED"},
+        {"ro.treble.enabled",               "TREBLE_TRUE"},
+        {"ro.boot.mode",                    "BOOT_MODE_NORMAL"},
+        {"ro.arch",                         "ARCH_ARM64"},
+        {"ro.boot.hardware",                "HARDWARE"},
+        {"ro.build.brand",                  "BRAND"},
+        {"ro.build.manufacturer",           "MANUFACTURER"},
+        {"ro.build.device",                 "DEVICE"},
+        {"ro.sf.lcd_density",               "LCD_DENSITY"},
+        {"ro.product.vendor_dlkm.model",    "MODEL"},
+        {"ro.product.bootimage.model",      "MODEL"},
+        {"ro.product.system_dlkm.model",    "MODEL"},
+        {"gsm.sim.operator.iso-country",    "GSM_OPERATOR_ISO"},
+        {"ro.system_dlkm.build.fingerprint", "FINGERPRINT"},
+        {"ro.vendor_dlkm.build.version.release", "RELEASE"},
+        {"ro.odm.build.version.release",    "RELEASE"},
+        {"ro.bootimage.build.version.release", "RELEASE"},
+        {"ro.system_dlkm.build.version.release", "RELEASE"},
+        {"ro.vendor.build.version.release_or_codename", "RELEASE"},
+        {"ro.vendor_dlkm.build.version.release_or_codename", "RELEASE"},
+        {"ro.odm.build.version.release_or_codename", "RELEASE"},
+        {"ro.bootimage.build.version.release_or_codename", "RELEASE"},
+        {"ro.system_dlkm.build.version.release_or_codename", "RELEASE"},
+        {"ro.product.build.version.sdk",    "SDK_INT"},
+        {"ro.product.build.version.release", "RELEASE"},
+        {"ro.product.build.id",             "ID"},
+        {"ro.product.build.tags",           "TAGS"},
+        {"ro.product.build.type",           "TYPE"},
+        {"ro.product.build.version.incremental", "INCREMENTAL"},
+        {"ro.product.vendor_dlkm.brand",    "BRAND"},
+        {"ro.product.bootimage.brand",      "BRAND"},
+        {"ro.product.system_dlkm.brand",    "BRAND"},
+        {"ro.product.vendor_dlkm.device",   "DEVICE"},
+        {"ro.product.bootimage.device",     "DEVICE"},
+        {"ro.product.system_dlkm.device",   "DEVICE"},
+        {"ro.product.vendor_dlkm.name",     "PRODUCT"},
+        {"ro.product.bootimage.name",       "PRODUCT"},
+        {"ro.product.system_dlkm.name",     "PRODUCT"},
+        {"ro.product.vendor_dlkm.manufacturer", "MANUFACTURER"},
+        {"ro.product.bootimage.manufacturer",   "MANUFACTURER"},
+        {"ro.product.system_dlkm.manufacturer", "MANUFACTURER"},
     };
     return m;
 }
@@ -138,26 +183,21 @@ bool spoof_prop_value(const std::string& k, std::string& out) {
 
 static jstring hook_prop_get(JNIEnv* env, jclass clazz, jstring j_key, jstring j_def) {
     if (!j_key) return j_def;
-
     const char* raw = env->GetStringUTFChars(j_key, nullptr);
     if (!raw) { if (env->ExceptionCheck()) env->ExceptionClear(); return j_def; }
     std::string k(raw);
     env->ReleaseStringUTFChars(j_key, raw);
     LOGD("PROP native_get('%s')", k.c_str());
-
     std::string v;
     if (spoof_prop_value(k, v)) {
         LOGD("PROP SPOOF '%s' -> '%s'", k.c_str(), v.c_str());
         return env->NewStringUTF(v.c_str());
     }
-
     if (sbx_prop_hidden(k.c_str())) {
         LOGD("PROP HIDE '%s' (report absent)", k.c_str());
         return j_def;
     }
-
     if (orig_native_get) return orig_native_get(env, clazz, j_key, j_def);
-
     char buf[PROP_VALUE_MAX] = {0};
     if (__system_property_get(k.c_str(), buf) > 0) return env->NewStringUTF(buf);
     return j_def;
@@ -169,13 +209,12 @@ void install_prop_hook(Api* api, JNIEnv* env) {
         const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
         reinterpret_cast<void*>(hook_prop_get),
     };
-
     api->hookJniNativeMethods(env, "android/os/SystemProperties", &m, 1);
     if (env->ExceptionCheck())
         env->ExceptionClear();
     orig_native_get = reinterpret_cast<jstring (*)(JNIEnv*, jclass, jstring, jstring)>(m.fnPtr);
     if (!orig_native_get)
-        LOGE("PROP: native_get hook FAILED (fnPtr null) — prop spoofing off for this process");
+        LOGE("PROP: native_get hook FAILED (fnPtr null)");
     else
         LOGD("PROP native_get hooked (orig=%p)", reinterpret_cast<void*>(orig_native_get));
 }
