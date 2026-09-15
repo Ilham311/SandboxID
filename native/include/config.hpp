@@ -20,7 +20,6 @@ inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/sandboxid/identity.pr
 inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mode";
 
 inline constexpr char CARRIER_CONF[]  = "/data/adb/modules/sandboxid/carrier.conf";
-inline constexpr char CARRIERS_FILE[] = "/data/adb/modules/sandboxid/carriers.tsv";
 inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetprop-rs";
 
 inline constexpr char ENABLE_HIDE[]   = "/data/adb/modules/sandboxid/enable_hide";
@@ -73,6 +72,14 @@ inline constexpr KV VAL_DEFAULTS[] = {
     {"MEDIACODEC_MAX_RATE",    "192000"},
     {"DEBUG_FORCE_RTL",        "false"},
     {"MULTISIM_CONFIG",        ""},
+    {"LCD_DENSITY",            "420"},
+    {"QEMU_0",                 "0"},
+    {"ADB_SECURE_1",           "1"},
+    {"WARRANTY_0",             "0"},
+    {"CRYPTO_ENCRYPTED",       "encrypted"},
+    {"TREBLE_TRUE",            "true"},
+    {"BOOT_MODE_NORMAL",       "normal"},
+    {"ARCH_ARM64",             "arm64"},
 };
 inline constexpr size_t VAL_DEFAULTS_N = sizeof(VAL_DEFAULTS) / sizeof(VAL_DEFAULTS[0]);
 
