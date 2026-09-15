@@ -55,13 +55,11 @@ static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def
     if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
     std::string k(r);
     env->ReleaseStringUTFChars(j_key, r);
-
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
         if (sbx_parse_longlong(v, n)) { LOGD("TYPED SPI(id) '%s' -> %d", k.c_str(), (int)n); return (jint)n; }
     }
-
     const auto& m = sbx_int_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("TYPED SPI '%s' -> %d", k.c_str(), it->second); return it->second; }
@@ -74,13 +72,11 @@ static jlong hook_prop_get_long(JNIEnv* env, jclass clazz, jstring j_key, jlong 
     if (!r) { if (env->ExceptionCheck()) env->ExceptionClear(); return def; }
     std::string k(r);
     env->ReleaseStringUTFChars(j_key, r);
-
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
         if (sbx_parse_longlong(v, n)) { LOGD("TYPED SPL(id) '%s' -> %lld", k.c_str(), (long long)n); return (jlong)n; }
     }
-
     const auto& m = sbx_long_spoof();
     auto it = m.find(k);
     if (it != m.end()) { LOGD("TYPED SPL '%s' -> %lld", k.c_str(), (long long)it->second); return it->second; }
@@ -112,7 +108,6 @@ void install_leak_sensors(Api* api, JNIEnv* env) {
          const_cast<char*>("(Ljava/lang/String;Z)Z"),
          reinterpret_cast<void*>(hook_prop_get_bool)},
     };
-
     api->hookJniNativeMethods(env, "android/os/SystemProperties", m, 3);
     if (env->ExceptionCheck())
         env->ExceptionClear();
