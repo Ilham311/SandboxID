@@ -37,6 +37,42 @@ if ! command -v "$CXX" >/dev/null 2>&1; then
     exit 2
 fi
 
+# jni/zygisk.hpp is .gitignored — build.sh downloads it from a pinned commit
+# and checksums it. The suites compile the real module headers, which include
+# it, so a fresh checkout cannot run these tests until it is present. Fetch it
+# the same way rather than leaving that to the build job. The pin is parsed out
+# of build.sh so there is one source of truth; a second copy here would drift.
+if [ ! -f "$REPO/jni/zygisk.hpp" ]; then
+    z_commit=$(sed -n 's/^ZYGISK_HPP_COMMIT="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$REPO/build.sh" | head -n 1)
+    if [ -z "$z_commit" ]; then
+        echo "run.sh: could not read the zygisk.hpp pin from build.sh" >&2
+        exit 2
+    fi
+    echo "run.sh: jni/zygisk.hpp absent (build.sh fetches it), pulling @ $z_commit"
+    if ! curl -fsSL -o "$REPO/jni/zygisk.hpp" \
+        "https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/$z_commit/module/jni/zygisk.hpp"; then
+        echo "run.sh: fetch failed — check network, or place jni/zygisk.hpp by hand" >&2
+        exit 2
+    fi
+fi
+# Verify it whether it was just fetched or was already there: the pin is
+# supply-chain protection, and silently compiling against a different
+# zygisk.hpp than the module ships would test the wrong thing.
+z_sha=$(sed -n 's/^ZYGISK_HPP_SHA256="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$REPO/build.sh" | head -n 1)
+if command -v sha256sum >/dev/null 2>&1; then
+    z_got=$(sha256sum "$REPO/jni/zygisk.hpp" | cut -d' ' -f1)
+elif command -v shasum >/dev/null 2>&1; then
+    z_got=$(shasum -a 256 "$REPO/jni/zygisk.hpp" | cut -d' ' -f1)
+else
+    echo "run.sh: no sha256 tool (sha256sum/shasum) to verify zygisk.hpp" >&2
+    exit 2
+fi
+if [ "$z_got" != "$z_sha" ]; then
+    echo "run.sh: zygisk.hpp checksum mismatch — expected $z_sha, got $z_got" >&2
+    echo "         delete jni/zygisk.hpp to re-fetch from the pinned commit" >&2
+    exit 2
+fi
+
 # -DNDEBUG keeps release behaviour: LOGD compiles to nothing, exactly as the
 # shipped release variant does, so the test exercises what users actually run.
 # Declared before the jni.h probe below, which APPENDS to FLAGS — an array
@@ -67,7 +103,7 @@ fi
 # and <sys/system_properties.h>. Termux ships both; a stock Linux runner ships
 # neither, and the suite would die at the #include before any check ran.
 # tests/host/include holds minimal shims for the tiny surface actually used
-# (see those files for why a no-op/incomplete-type shim is faithful here).
+# (see those files for why a declaration/incomplete-type shim is faithful).
 # Added only when the real headers are absent, so a machine that has them
 # keeps compiling against the real ones.
 if ! { echo '#include <android/log.h>'; echo '#include <sys/system_properties.h>'; } \
