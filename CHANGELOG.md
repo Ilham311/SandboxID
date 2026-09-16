@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.8 (2026-09-16)
+
 ### Add: WebUI bisa melihat kesalahan JS-nya sendiri — konsol + runner shell
 
 **Mengapa ini penting:** seluruh tujuan modul adalah membuat hal yang tak
