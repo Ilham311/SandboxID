@@ -34,6 +34,13 @@ if ! command -v "$CXX" >/dev/null 2>&1; then
     exit 2
 fi
 
+# -DNDEBUG keeps release behaviour: LOGD compiles to nothing, exactly as the
+# shipped release variant does, so the test exercises what users actually run.
+# Declared before the jni.h probe below, which APPENDS to FLAGS — an array
+# assignment here would reset it and silently discard the probe's -I flags.
+FLAGS=(-std=c++20 -O1 -DNDEBUG -Wall -Wextra
+       -I"$REPO/jni" -I"$REPO/native/include")
+
 # The TUs under test include the real module headers, which pull in <jni.h>.
 # Some hosts (notably GitHub's ubuntu runners) do not ship it on the default
 # path, and the failure then surfaces as an opaque 'fatal error: jni.h file not
@@ -55,11 +62,6 @@ fi
 
 OUT="${TMPDIR:-/tmp}/sbx-host-tests"
 mkdir -p "$OUT"
-
-# -DNDEBUG keeps release behaviour: LOGD compiles to nothing, exactly as the
-# shipped release variant does, so the test exercises what users actually run.
-FLAGS=(-std=c++20 -O1 -DNDEBUG -Wall -Wextra
-       -I"$REPO/jni" -I"$REPO/native/include")
 
 exit_code=0
 
