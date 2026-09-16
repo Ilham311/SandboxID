@@ -19,8 +19,8 @@
 #                  DOM: capture, badge semantics, stream guards, save transport.
 #                  Skipped unless node is on PATH.
 #
-# Requirements: a C++20 compiler (clang++ or g++) on the host, and node for the
-# console suite. No NDK needed.
+# Requirements: a C++20 compiler (clang++ or g++) on the host, a JDK for jni.h,
+# and node for the console suite. No NDK needed.
 # Usage:   ./tests/host/run.sh          # build + run all suites
 #          CXX=g++ ./tests/host/run.sh
 
@@ -32,6 +32,25 @@ CXX="${CXX:-clang++}"
 if ! command -v "$CXX" >/dev/null 2>&1; then
     echo "run.sh: C++ compiler '$CXX' not found (set CXX= to override)" >&2
     exit 2
+fi
+
+# The TUs under test include the real module headers, which pull in <jni.h>.
+# Some hosts (notably GitHub's ubuntu runners) do not ship it on the default
+# path, and the failure then surfaces as an opaque 'fatal error: jni.h file not
+# found'. Locate a JDK include dir instead of leaving that to chance.
+if ! echo '#include <jni.h>' | "$CXX" -fsyntax-only -x c++ - >/dev/null 2>&1; then
+    jni_inc=$(ls -d /usr/lib/jvm/*/include 2>/dev/null | head -n 1)
+    if [ -n "$jni_inc" ]; then
+        echo "run.sh: jni.h not on the default path, using $jni_inc"
+        # jni.h does `#include "jni_md.h"`, which on a Linux JDK sits one level
+        # deeper in include/linux. A quoted include searches the including
+        # file's own directory first and then the -I list, so include/ alone
+        # would fail with 'jni_md.h file not found' — both dirs are needed.
+        FLAGS+=("-I$jni_inc" "-I$jni_inc/linux")
+    else
+        echo "run.sh: jni.h not found — install a JDK (e.g. 'sudo apt install default-jdk')" >&2
+        exit 2
+    fi
 fi
 
 OUT="${TMPDIR:-/tmp}/sbx-host-tests"
