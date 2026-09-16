@@ -311,6 +311,15 @@ BUILD_TIME_UTC=$BUILD_UTC"
     IDENTITY_KV="${IDENTITY_KV}
 BUILD_DATE=$BUILD_DATE_STR"
   fi
+  # Derived descriptors that a bare Build.* mapping does not cover but that
+  # every fingerprinting app reads. Must stay in lockstep with the same three
+  # derivations in native/sandboxid.cpp derive_identity(), otherwise the shell
+  # path (autopif) and the native path (freshen) hand the runtime two different
+  # values for the same property.
+  IDENTITY_KV="${IDENTITY_KV}
+MOD_DEVICE=${PRODUCT}_global
+FOTA_OEM=${MANUFACTURER}
+GOOGLE_CLIENTIDBASE=android-$(printf '%s' "$MANUFACTURER" | tr 'A-Z' 'a-z')"
   return 0
 }
 

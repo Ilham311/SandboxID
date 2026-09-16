@@ -353,6 +353,148 @@ bool patch_cpuinfo(const std::string& real, int action,
     return true;
 }
 
+// ---- Full /proc/cpuinfo synthesis for Tensor/Pixel personas ----
+
+// Upstream arm64 /proc/cpuinfo (arch/arm64/kernel/cpuinfo.c, c_show) emits, per
+// core and nothing else: processor, BogoMIPS, Features, "CPU architecture: 8",
+// CPU implementer, CPU variant, CPU part, CPU revision. There is no "Hardware :"
+// line and no capital-P "Processor :" line — those are the 32-bit ARM format,
+// which msm-4.19-era Qualcomm vendor kernels port back over. A real Pixel's
+// cpuinfo therefore starts directly at "processor : 0".
+//
+// Consequence for this module: under a Pixel persona, patch_cpuinfo() rewrites
+// the one "Hardware :" line and leaves every per-core MIDR field untouched, so
+// the served file still advertises e.g. Qualcomm 0x51 / Kryo-4xx-silver 0x805
+// alongside ARM 0x41 / Cortex-A77 0xd0d — the real SoC, in the persona's own
+// file. That contradiction is a direct detection tell. So for those personas we
+// stop patching and rebuild the file from the persona's platform instead, the
+// same way synth_proc_version() already builds a persona-matched /proc/version.
+//
+// Part numbers are the ARM cores each Tensor generation is actually built from
+// (arch/arm64/include/asm/cputype.h), cross-checked against real Pixel dumps in
+// the ThomasKaiser/sbc-bench cpuinfo archive:
+//   G1 gs101   A55 0xd05 / A76 0xd0b / X1 0xd44
+//   G2 gs201   A55 0xd05 / A78 0xd41 / X1 0xd44
+//   G3 zuma    A510 0xd46 / A715 0xd4d / X3 0xd4e
+//   G4 zumapro A520 0xd80 / A720 0xd81 / X4 0xd82
+std::string cpuinfo_synth(const std::string& platform, const std::string& real,
+                          uint64_t seed) {
+    // The core count is taken from the real file: a persona whose cpuinfo
+    // advertises a different core count than the hardware it runs on is a
+    // tell of its own.
+    int ncores = 0;
+    {
+        size_t pos = 0;
+        while (pos < real.size()) {
+            size_t eol = real.find('\n', pos);
+            size_t le = (eol == std::string::npos) ? real.size() : eol;
+            if (le - pos >= 11 && std::memcmp(real.data() + pos, "processor\t:", 11) == 0) {
+                size_t j = pos + 11;
+                while (j < le && real[j] == ' ') ++j;
+                int n = 0;
+                while (j < le && real[j] >= '0' && real[j] <= '9') {
+                    n = n * 10 + (real[j] - '0');
+                    ++j;
+                }
+                if (j > pos + 11) { ++ncores; pos = le; }
+                else pos = le;
+            } else {
+                pos = le;
+            }
+            if (eol == std::string::npos) break;
+            ++pos;
+        }
+    }
+    if (ncores <= 0 || ncores > 64) return std::string();   // refuse to guess
+
+    // mid_width is the generation's real mid-cluster size: Tensor G1/G2 are
+    // 1x X* + 3x A7x + 4x A5x (8 cores), G3/G4 are 1x X* + 4x A7x + 4x A5x
+    // (9 cores). A fixed width of 3 synthesises a 1+3+5 layout for the 9-core
+    // parts - a per-cluster combination no real Tensor generation ships, which
+    // is exactly the self-consistency tell this function exists to remove.
+    struct Gen { const char* plat; const char* little; const char* mid; const char* prime; int mid_width; };
+    static const Gen gens[] = {
+        {"gs101",   "0xd05", "0xd0b", "0xd44", 3},
+        {"gs201",   "0xd05", "0xd41", "0xd44", 3},
+        {"zuma",    "0xd46", "0xd4d", "0xd4e", 4},
+        {"zumapro", "0xd80", "0xd81", "0xd82", 4},
+        {"laguna",  "0xd80", "0xd81", "0xd82", 4},
+    };
+    // Unrecognised platforms fall through to the G4 parts. That is a deliberate
+    // best-effort default, not a claim: the persona pool is curated to the
+    // generations above, and a hand-written persona.override naming anything
+    // else gets a plausible ARM core block rather than a real one.
+    const char* little = "0xd80";
+    const char* mid    = "0xd81";
+    const char* prime  = "0xd82";
+    int mid_width = 4;
+    for (const Gen& g : gens) {
+        if (platform == g.plat) {
+            little = g.little; mid = g.mid; prime = g.prime; mid_width = g.mid_width;
+        }
+    }
+
+    // The Features and BogoMIPS lines are carried over from the real file.
+    // They describe the kernel's CPU-capability surface and carry no device
+    // identity, whereas inventing a list the persona's kernel could not have
+    // produced would be a worse tell (Tensor kernels advertise sve/sve2/mte;
+    // an msm-4.19 kernel does not).
+    std::string features, bogomips;
+    {
+        size_t fp = real.find("Features\t:");
+        if (fp != std::string::npos) {
+            size_t s = fp + 10;
+            size_t e = real.find('\n', s);
+            if (e != std::string::npos) features = real.substr(s, e - s);
+        }
+        size_t bp = real.find("BogoMIPS\t:");
+        if (bp == std::string::npos) bp = real.find("BogoMips\t:");
+        if (bp != std::string::npos) {
+            size_t s = bp + 10;
+            size_t e = real.find('\n', s);
+            if (e != std::string::npos) bogomips = real.substr(s, e - s);
+        }
+    }
+    if (features.empty()) features = " fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp ssbs";
+    if (bogomips.empty()) bogomips = "38.40";
+
+    std::string out;
+    out.reserve(static_cast<size_t>(ncores) * (256 + features.size()));
+    for (int i = 0; i < ncores; ++i) {
+        // Cluster layout: one prime core, the generation's mid-width mid cores,
+        // rest little. ncores is the *real* device's count (see above), so when
+        // it does not equal the generation's real core count the split is
+        // inevitably a hybrid - but when it matches, this now reproduces the
+        // actual silicon layout instead of a fixed 1+3+rest.
+        const char* part = little;
+        int cluster = 0;          // 0 = little, 1 = mid, 2 = prime
+        if (i == ncores - 1) { part = prime; cluster = 2; }
+        else if (i >= ncores - 1 - mid_width) { part = mid; cluster = 1; }
+
+        // variant/revision are per-cluster and derived, so the served file is
+        // deterministic for a given persona but does not copy the real SoC's
+        // silicon stepping. Real MIDR variants are small (0..7), revisions 0/1.
+        unsigned variant  = 1u + static_cast<unsigned>(
+            (seed >> static_cast<uint64_t>(cluster * 11)) % 7u);
+        unsigned revision = static_cast<unsigned>(
+            (seed >> static_cast<uint64_t>(cluster * 7 + 3)) % 2u);
+
+        char blk[512];
+        std::snprintf(blk, sizeof(blk),
+            "processor\t: %d\n"
+            "BogoMIPS\t:%s\n"
+            "Features\t:%s\n"
+            "CPU implementer\t: 0x41\n"
+            "CPU architecture: 8\n"
+            "CPU variant\t: 0x%x\n"
+            "CPU part\t: %s\n"
+            "CPU revision\t: %u\n\n",
+            i, bogomips.c_str(), features.c_str(), variant, part, revision);
+        out.append(blk);
+    }
+    return out;
+}
+
 Kind classify(const char* path) {
     if (!path) return NONE;
     if (std::strcmp(path, "/proc/sys/kernel/random/boot_id") == 0) return BOOTID;
@@ -426,8 +568,28 @@ bool is_custom_rom_prop(const char* name) {
     return false;
 }
 
+// MIUI / HyperOS: a stock Pixel has none of these, so an in-app read should
+// behave as if the property did not exist (empty), exactly like the custom-ROM
+// props above. Observed on a HyperOS device: ro.miui.ui.version.name=V816,
+// persist.sys.hardcoder.name=miui_booster — unambiguous OEM tells that the
+// persona's Build surface contradicts.
+bool is_vendor_rom_prop(const char* name) {
+    if (!name) return false;
+    static const char* const exact[] = {
+        "persist.sys.hardcoder.name",
+        "ro.com.miui.rsa",
+    };
+    for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
+    if (std::strncmp(name, "ro.miui.", 8) == 0)          return true;
+    if (std::strncmp(name, "ro.vendor.miui.", 15) == 0) return true;
+    if (std::strncmp(name, "ro.ril.miui.", 12) == 0)    return true;
+    if (std::strncmp(name, "persist.sys.miui.", 17) == 0) return true;
+    return false;
+}
+
 bool should_hide_prop(const char* name) {
-    return is_emulator_prop(name) || is_custom_rom_prop(name);
+    return is_emulator_prop(name) || is_custom_rom_prop(name) ||
+           is_vendor_rom_prop(name);
 }
 
 }

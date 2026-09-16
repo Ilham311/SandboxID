@@ -257,6 +257,28 @@ property name — none of AOSP's code is copied.
   the header is fetched at build time and pinned by commit SHA + SHA256 in
   `build.sh` (see the header block there for the exact revision).
 
+- **PLT-hook commit semantics (why L9 probes its own trampolines instead of
+  trusting `pltHookCommit()`'s bool)**:
+  - `LSPosed/LSPlt` — `lsplt.cc`, `HookInfos::DoHook()` folds every
+    registration's every GOT slot into one AND
+    (`res = DoHook(addr, …) && res`), and `CommitHook()` returns `true` when
+    nothing was registered and `false` when the maps scan is empty:
+    <https://github.com/LSPosed/LSPlt/blob/master/lsplt/src/main/jni/lsplt.cc>
+  - `topjohnwu/Magisk` — `ZygiskContext::plt_hook_commit()` delegates to that
+    same `lsplt::CommitHook()`:
+    <https://github.com/topjohnwu/Magisk/blob/master/native/src/core/zygisk/module.cpp>
+  - `PerformanC/ReZygisk` — `api_plt_hook_commit_v4()` returns `!any_failed`,
+    where one failing `plti_add_hook()` sets the flag; and the v4 `exempt_fd`
+    slot is declared `void (*)(int)` in a union with `plt_hook_exclude` while
+    `api_exempt_fd()` ends in a bare `return;`, so no return value is ever
+    written for a caller to read:
+    <https://github.com/PerformanC/ReZygisk/blob/master/loader/src/injector/hook.c>
+    <https://github.com/PerformanC/ReZygisk/blob/master/loader/src/injector/module.h>
+  Read together these are why the module treats the commit bool as a batch
+  verdict and re-reads its own `orig_*` trampoline pointers as ground truth,
+  and why `exemptFd()`'s bool is probed on the socket instead.
+
+
 - **AOSP chokepoint libraries for `clock_gettime` PLT hook** (Apache-2.0):
   - `frameworks/native/libs/utils/SystemClock.cpp` — `libutils`.
   - `frameworks/base/core/jni/android_os_SystemClock.cpp` — `libandroid_runtime`.

@@ -8,11 +8,13 @@
  * runners) it does not exist, and the suite dies at the #include before a
  * single check can run.
  *
- * The surface the module actually uses is tiny: four priority constants, and
- * __android_log_print itself. LOGD compiles to nothing under -DNDEBUG, so on
- * a release-style host build the only live callers are LOGW/LOGI/LOGE, and a
- * logcat-less host has nowhere to send them anyway — stubbing to a no-op is
- * the honest behaviour, not a silence.
+ * The surface the module actually uses is small: the ANDROID_LOG_* priority
+ * constants it formats with, plus __android_log_print (every LOG[DIWE]) and
+ * __android_log_write, which the crash handler calls directly because it must
+ * not go through a variadic formatter from a signal handler. LOGD expands to
+ * nothing unless SBX_DEBUG is defined, so on a release-style host build the
+ * live callers are LOGW/LOGI/LOGE — and a logcat-less host has nowhere to send
+ * them anyway, so stubbing to a no-op is the honest behaviour, not a silence.
  *
  * run.sh adds this directory to the include path ONLY when the real
  * <android/log.h> is absent, so Termux and any box with the NDK headers keep
@@ -30,7 +32,10 @@ enum {
     ANDROID_LOG_SILENT,
 };
 
-/* Declared only. The definition lives in tests/host/sbx_hook_sm.cpp, which
- * stubs it to a no-op for the host build — declared extern "C" there, so the
- * linkage must match here or the two conflict. */
+/* Declared only. The definitions live in tests/host/sbx_hook_sm.cpp, which
+ * stubs them to no-ops for the host build — declared extern "C" there, so the
+ * linkage must match here or the two conflict. __android_log_write is used by
+ * the crash handler, which must not go through the variadic __android_log_print
+ * from a signal handler. */
 extern "C" int __android_log_print(int prio, const char* tag, const char* fmt, ...);
+extern "C" int __android_log_write(int prio, const char* tag, const char* text);

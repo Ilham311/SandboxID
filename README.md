@@ -68,17 +68,39 @@ SandboxID combines three cooperating layers:
    - `/proc/meminfo` — `MemTotal` for the persona's model; for a model not in
      the RAM table, the real total is rounded **up** to the nearest marketing
      GB tier (the exact kB value is itself a fingerprint), never leaked as-is.
-   - `/proc/cpuinfo` — the `Hardware` line rewritten for Qualcomm/MediaTek SoCs,
-     or removed for Tensor, where present.
+   - `/proc/cpuinfo` — for a Qualcomm/MediaTek persona the `Hardware` line is
+     rewritten. For **every other** persona — which includes all the
+     Tensor/Pixel ones — the whole file is rebuilt, because a real Pixel's
+     cpuinfo has no `Hardware` and no `Processor` line at all and reports ARM
+     implementer `0x41` on every core. Patching the `Hardware` line alone still
+     left the real SoC's per-core fields (`CPU implementer 0x51`,
+     `CPU part 0x805` Kryo-silver, `0xd0d` Cortex-A77) inside the persona's own
+     file — a
+     direct contradiction of `Build.MODEL`. The rebuilt file keeps the real core
+     count, `Features` and `BogoMIPS` and substitutes the ARM cores of the
+     persona's Tensor generation in that generation's real cluster layout (G1
+     `0xd05/0xd0b/0xd44` and G2 `0xd05/0xd41/0xd44`, both 1+3+4; G3
+     `0xd46/0xd4d/0xd4e` and G4 `0xd80/0xd81/0xd82`, both 1+4+4). A persona whose
+     platform is not one of those four falls back to the G4 core block, which is
+     best-effort rather than real.
    - `/proc/sys/kernel/random/boot_id`, `/sys/class/net/wlan0|p2p0/address`,
      `/sys/fs/selinux/enforce`.
    - the ByteDance AppLog cache files (see `rotate_ids.sh applog` below).
 
    If the identity is incomplete for a file, the hook fails **closed** (serves
    EOF) rather than letting real bytes through. PLT hooking only sees calls
-   that cross a library boundary, so reads from an app's own `.so` (not loaded
-   yet at hook-install time) are covered by the on-disk pre-warm in layer 3
-   instead, which writes the same deterministically-derived values.
+   that cross a library boundary, so the hooks are registered against the
+   system libraries above **and** the app's own already-loaded libraries — a
+   native probe that calls `__system_property_read_callback` from its own `.so`
+   would otherwise bypass every hook and read real values. Libraries the app
+   loads *after* `postAppSpecialize` are still outside that one-shot scan. For
+   the prop files and the AppLog cache that gap is closed from disk: layer 3
+   has already bind-mounted spoofed `build.prop` files into the process's mount
+   namespace, and `rotate_ids.sh applog` writes the same derived values into the
+   cache files in place, so a late library reading those files still sees the
+   persona. The `/proc` and `/sys` paths above have no on-disk form to
+   pre-warm, so a library loaded after specialize reading one of those *does*
+   see real bytes — the one residual gap in this layer.
 
 The architecture is deliberately split so the Zygisk hook layer and the shell
 layer report the same values for a given persona. Repository sources are grouped
@@ -108,6 +130,12 @@ and data files into the module layout expected by Magisk, KernelSU, and APatch.
 3. Reboot.
 4. (Optional) Tap the module **Action** button in your root manager to run a
    full rotation, or configure `target.txt` first (see *Configuration*).
+
+Two zips are published per release. `sandboxid-vX.Y.Z-release.zip` is what to
+run; `sandboxid-vX.Y.Z-debug.zip` adds verbose `LOGD` and on-device log capture
+under `/data/adb/modules/sandboxid/debug/` for troubleshooting. Each variant
+reads its own update channel, so an in-app update installs the same variant the
+device already runs — a debug install does not silently become a release one.
 
 The module path is `/data/adb/modules/sandboxid`.
 
@@ -361,6 +389,88 @@ Two suites run, and both must pass:
 The same suites run in CI (`host-tests` job). They are deliberately outside the
 release-critical path, so an environment quirk on a CI runner cannot block a
 release.
+
+---
+
+## Known limits
+
+These are things a sufficiently determined probe can still see. They are
+structural to Android, not bugs in this module — the code that would fix them
+does not run in userspace.
+
+- **Hardware attestation.** `KEY_ATTESTATION` / `MERCHANT` style checks are
+  answered by the TEE with the device's *real* certificate chain. The observed
+  report shows `osPatchLevel`/`vendorPatchLevel` and `verifiedBootHash`
+  disagreeing with the persona's `ro.build.version.security_patch` and the
+  spoofed vbmeta digest. No Zygisk module can re-sign these; the only real
+  answers are an unlocked bootloader with a compromised keybox (out of scope)
+  or accepting the mismatch.
+- **Carrier properties.** `gsm.operator.*` and `gsm.sim.operator.*` are written
+  by the RIL, continuously, so a `resetprop` at boot is overwritten as soon as
+  the modem reports and the live property reverts to the real carrier. Inside a
+  target process that does not matter — the persona's value is served through
+  the Java lens *and* through the native property hooks, including to a probe
+  that calls `__system_property_read_callback` from the app's own library. The
+  real carrier still wins anywhere the hooks are not installed: other
+  processes, `system_server`, the RIL itself, and a shell `getprop`. That is a
+  mismatch, not a leak of anything else, and the two cannot be reconciled from
+  userspace without hooking the RIL process.
+- **Bootloader/kernel build identity.** `/proc/version` and the `Build.TIME`
+  field are patched in-process, but a reader that shells out (`uname -r`) reads
+  the running kernel, which is whatever the device actually boots.
+- **Layer-2 bind-mounts need a Zygisk provider that honours `exemptFd()`.**
+  ReZygisk declares the v4 `exempt_fd` slot as `void (*)(int)` where Magisk and
+  ZygiskNext declare `bool (*)(int)`, so the return value is garbage on that
+  provider while the socket usually survives anyway. The module therefore
+  probes the socket itself rather than trusting the boolean, and logs the
+  outcome; if the socket is genuinely reaped, on-disk `build.prop` readers see
+  real values while every in-process layer keeps working. Run
+  `sh/debug/summarize.sh` on a debug session log for a per-layer verdict.
+
+---
+
+## Debugging a session
+
+Capture a session and summarise it — the summary reports, per layer, whether
+spoofing actually landed.
+
+**To start capturing**, create the marker file and reboot. `service.sh` waits
+for `sys.boot_completed`, sleeps, clears the buffers, and only then starts
+`logcat` — so the capture begins about thirteen seconds after boot finishes,
+and anything logged before that point is discarded by the clear. That is late
+enough that a target app the system starts at boot may already be running, so
+launch or re-launch the app yourself once the device is up:
+
+```bash
+su -c 'touch /data/adb/modules/sandboxid/debug_variant'
+# reboot, then launch the target app and exercise it
+```
+
+That starts a `logcat -b main -b crash -b system -v threadtime
+-s SandboxID:V SandboxIDCompanion:V AndroidRuntime:E DEBUG:V libc:F` capture
+into `/data/adb/modules/sandboxid/debug/session-<timestamp>.log` (the five most
+recent are kept), a bounded `crashes.log` ledger of every native tombstone and
+Java `FATAL EXCEPTION` in the session, and records the module version, kernel,
+and Android/ABI in a header at the top of the session log. Remove the marker
+file and reboot to stop capturing. The **debug** release zip creates the marker
+for you, so a debug install is already capturing on the next boot. (The debug
+and release zips also read separate update channels, so an in-app update never
+silently turns a debug install into a release one.)
+
+Then summarise:
+
+```bash
+su -c 'sh /data/adb/modules/sandboxid/summarize.sh \
+        /data/adb/modules/sandboxid/debug/session-<timestamp>.log'
+```
+
+`summarize.sh` greps for the exact strings the module emits, so the layers that
+self-report — layer 9's hook installation and the layer-2 companion round trip —
+surface a warning when they are silently dead rather than a quiet row of
+zeroes. It also separates the module's own errors from unrelated tombstones in
+the log — a
+crashing system process (a third-party NFC stack aborting in its own JNI code,
+for instance) is reported as background noise, not as a module fault.
 
 ---
 

@@ -148,6 +148,72 @@ int main() {
     std::string ci_out2;
     CHECK(!patch_cpuinfo(ci_tensor, act2, repl, ci_out2), "tensor cpuinfo without Hardware line is not modified");
 
+    // ---- cpuinfo_synth -----------------------------------------------------
+    // A real Pixel/Tensor cpuinfo has no Hardware and no capital-P Processor
+    // line, and every core reports ARM implementer 0x41. Feeding the real
+    // (Qualcomm) file through it must produce exactly that shape while keeping
+    // the real core count, Features and BogoMIPS.
+    std::string ci_real_qcom =
+        "Processor\t: AArch64 Processor rev 14 (aarch64)\n";
+    for (int i = 0; i < 8; ++i) {
+        const char* impl = (i < 4) ? "0x51" : "0x41";
+        const char* part = (i < 4) ? "0x805" : "0xd0d";
+        const char* var  = (i < 4) ? "0xd"   : "0x1";
+        const char* rev  = (i < 4) ? "14"    : "0";
+        char blk[256];
+        std::snprintf(blk, sizeof(blk),
+            "processor\t: %d\n"
+            "BogoMIPS\t: 38.40\n"
+            "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32\n"
+            "CPU implementer\t: %s\n"
+            "CPU architecture: 8\n"
+            "CPU variant\t: %s\n"
+            "CPU part\t: %s\n"
+            "CPU revision\t: %s\n\n", i, impl, var, part, rev);
+        ci_real_qcom += blk;
+    }
+    ci_real_qcom += "Hardware\t: Qualcomm Technologies, Inc SM8250\n";
+    std::string cs = cpuinfo_synth("zumapro", ci_real_qcom, fnv1a("serial"));
+    CHECK(!cs.empty(), "cpuinfo synth produced output");
+    CHECK(cs.find("Hardware") == std::string::npos, "cpuinfo synth drops the Hardware line");
+    CHECK(cs.find("Processor\t:") == std::string::npos, "cpuinfo synth drops the vendor Processor line");
+    CHECK(cs.find("0x51") == std::string::npos, "cpuinfo synth drops the Qualcomm implementer");
+    CHECK(cs.find("0x805") == std::string::npos, "cpuinfo synth drops the Kryo part number");
+    CHECK(cs.find("0xd0d") == std::string::npos, "cpuinfo synth drops the real A77 part number");
+    CHECK(cs.find("CPU implementer\t: 0x41\n") != std::string::npos, "cpuinfo synth uses ARM implementer");
+    CHECK(cs.find("CPU architecture: 8\n") != std::string::npos, "cpuinfo synth keeps armv8 architecture");
+    CHECK(cs.find("0xd82") != std::string::npos, "cpuinfo synth emits the G4 prime part (X4)");
+    CHECK(cs.find("0xd81") != std::string::npos, "cpuinfo synth emits the G4 mid part (A720)");
+    CHECK(cs.find("0xd80") != std::string::npos, "cpuinfo synth emits the G4 little part (A520)");
+    CHECK(cs.find("fp asimd evtstrm") != std::string::npos, "cpuinfo synth carries the Features line");
+    CHECK(cs.find("38.40") != std::string::npos, "cpuinfo synth carries BogoMIPS");
+    // core count is preserved: 8 "processor :" blocks, and no extra
+    {
+        size_t p = 0, n = 0;
+        while ((p = cs.find("processor\t:", p)) != std::string::npos) { ++n; p += 11; }
+        CHECK(n == 8, "cpuinfo synth preserves the real core count");
+    }
+    // gs101 (Tensor G1) must use that generation's parts, not the G4 defaults
+    std::string cs_g1 = cpuinfo_synth("gs101", ci_real_qcom, fnv1a("serial"));
+    CHECK(cs_g1.find("0xd44") != std::string::npos, "cpuinfo synth gs101 uses the X1 prime part");
+    CHECK(cs_g1.find("0xd05") != std::string::npos, "cpuinfo synth gs101 uses the A55 little part");
+    CHECK(cs_g1.find("0xd82") == std::string::npos, "cpuinfo synth gs101 does not use G4 parts");
+    // an unparseable file must not be guessed at
+    CHECK(cpuinfo_synth("zumapro", std::string("garbage\nno cores\n"), 1).empty(),
+          "cpuinfo synth refuses to invent a core count");
+    // Determinism, and the property that actually depends on it: two installs
+    // must not collide on the derived variant/revision bytes, or every device
+    // would ship an identical synthetic cpuinfo. Comparing the function to
+    // itself cannot fail, so the variation is asserted against a second seed.
+    const uint64_t s_a = fnv1a("serial-a");
+    const uint64_t s_b = fnv1a("serial-b");
+    CHECK(cpuinfo_synth("zumapro", ci_real_qcom, s_a) ==
+          cpuinfo_synth("zumapro", ci_real_qcom, s_a),
+          "cpuinfo synth is deterministic for a given seed");
+    CHECK(cpuinfo_synth("zumapro", ci_real_qcom, s_a) !=
+          cpuinfo_synth("zumapro", ci_real_qcom, s_b),
+          "cpuinfo synth varies with the seed");
+
     // ---- synth_proc_version ----------------------------------------------
     std::string pv = synth_proc_version("15", "AP3A.240905.015", "zuma", "abfarm-release-01",
                                         fnv1a("serial"));

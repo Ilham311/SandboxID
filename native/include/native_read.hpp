@@ -89,11 +89,16 @@ int cpu_action_for(const std::string& soc_manuf, const std::string& soc_model,
                    std::string& repl_out);
 bool patch_cpuinfo(const std::string& real, int action,
                    const std::string& repl, std::string& out);
+// Builds a complete persona-shaped /proc/cpuinfo for Tensor/Pixel personas,
+// where patching the Hardware line is not enough. See native_read.cpp.
+std::string cpuinfo_synth(const std::string& platform, const std::string& real,
+                          uint64_t seed);
 
 Kind classify(const char* path);
 
 bool is_emulator_prop(const char* name);
 bool is_custom_rom_prop(const char* name);
+bool is_vendor_rom_prop(const char* name);
 bool should_hide_prop(const char* name);
 
 // ---- Canonical AppLog identity derivation ----

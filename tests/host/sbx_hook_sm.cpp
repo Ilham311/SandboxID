@@ -20,6 +20,7 @@ std::map<std::string, std::string> g_identity;
 std::string g_pkg = "com.test.app";
 bool spoof_prop_value(const std::string&, std::string&) { return false; }
 extern "C" int __android_log_print(int, const char*, const char*, ...) { return 0; }
+extern "C" int __android_log_write(int, const char*, const char*) { return 0; }
 // val() normally lives in prop_hooks.cpp; here it reads the test's g_identity.
 const std::string empty_val;
 const std::string& val(const std::string& k) {

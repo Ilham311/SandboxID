@@ -30,6 +30,13 @@ if [ -f "$MODDIR/debug_variant" ]; then
     LOGFILE="$MODDIR/debug/session-$TS.log"
     CRASHFILE="$MODDIR/debug/crashes.log"
 
+    # The crash ledger accumulates across sessions; bound it so it cannot grow
+    # without limit inside the module directory. The full text of every crash
+    # is still in the rotated session logs.
+    if [ -f "$CRASHFILE" ] && [ "$(wc -c < "$CRASHFILE" 2>/dev/null)" -gt 262144 ]; then
+        tail -n 2000 "$CRASHFILE" > "$CRASHFILE.tmp" 2>/dev/null && mv -f "$CRASHFILE.tmp" "$CRASHFILE"
+    fi
+
     {
         echo "==================================================="
         echo "SandboxID debug session"
@@ -53,11 +60,30 @@ if [ -f "$MODDIR/debug_variant" ]; then
     ) &
     echo "$!" > "$MODDIR/debug/logcat.pid"
 
+    # Crash extractor. NOTE: the patterns below are the markers that actually
+    # appear in the session log - the old '/CRASH|DEATH|LEAK/' filter matched
+    # nothing the module or the platform ever emits, so crashes.log stayed
+    # empty even while the session log contained a full tombstone. index() is
+    # used instead of an ERE so the literal banner survives awk dialect
+    # differences, and -n 0 starts at EOF so nothing logcat has not written
+    # yet is skipped.
     (
-        sleep 10
         touch "$CRASHFILE"
         chmod 0644 "$CRASHFILE"
-        tail -F "$LOGFILE" 2>/dev/null | awk '/CRASH|DEATH|LEAK/ { print; fflush() }' >> "$CRASHFILE" 2>&1
+        {
+            echo ""
+            echo "=== session $TS (module $(grep '^version=' "$MODDIR/module.prop" | cut -d= -f2)) ==="
+        } >> "$CRASHFILE"
+        tail -F -n 0 "$LOGFILE" 2>/dev/null | awk '
+            index($0, "SandboxID CRASH") ||
+            index($0, "Fatal signal") ||
+            index($0, "*** *** *** *** *** *** ***") ||
+            index($0, "Cmdline:") ||
+            index($0, ">>> ") ||
+            index($0, "Build fingerprint:") ||
+            index($0, " pc ") ||
+            index($0, "FATAL EXCEPTION") { print; fflush() }
+        ' >> "$CRASHFILE" 2>&1
     ) &
     echo "$!" > "$MODDIR/debug/journal.pid"
 fi

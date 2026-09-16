@@ -240,6 +240,11 @@ sync_device_name() {
     settings_put global bluetooth_name "$NEW_NAME" || log_warn "settings put bluetooth_name failed"
     settings_put global device_name    "$NEW_NAME" || log_warn "settings put device_name failed"
     rp_set persist.bluetooth.adaptername "$NEW_NAME"
+    # persist.sys.device_name is the marketing name a reader gets from the
+    # property service (see prop_defs.hpp). Before it was covered, this stayed
+    # "POCO F3" after a rotation while every other surface already showed the
+    # persona - a vdinfos dev:persist_device_name MISMATCH.
+    rp_set persist.sys.device_name "$NEW_NAME"
 
     se_permissive
     updated=0

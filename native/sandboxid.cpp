@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include "config.hpp"
 #include "prop_defs.hpp"
 #include "carrier.hpp"
@@ -498,6 +499,22 @@ static Identity derive_identity(const PixelEntry& p) {
 
     id.kv["VBMETA_DIGEST"] =
         sbxnr::hex_from_seed(sbxnr::fnv1a(id.kv["FINGERPRINT"] + "|" + id.kv["SERIAL"]), 32);
+
+    // Derived descriptors that a bare Build.* mapping does not cover but that
+    // every fingerprinting app reads (all three vdinfos lenses saw the REAL
+    // device in these before they were derived here):
+    //   ro.product.mod_device            -> "<product>_global"
+    //   persist.sys.device_name          -> MODEL  (was still "POCO F3" after a
+    //                                            rotation; sync_device_name only
+    //                                            touches Settings + BT config)
+    //   ro.fota.oem / ro.com.google.clientidbase -> MANUFACTURER
+    id.kv["MOD_DEVICE"]         = id.kv["PRODUCT"] + "_global";
+    id.kv["FOTA_OEM"]           = id.kv["MANUFACTURER"];
+    {
+        std::string cb = id.kv["MANUFACTURER"];
+        for (char& c : cb) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+        id.kv["GOOGLE_CLIENTIDBASE"] = "android-" + cb;
+    }
 
     id.kv["SUPPORTED_ABIS"]        = "arm64-v8a,armeabi-v7a,armeabi";
     id.kv["SUPPORTED_64_BIT_ABIS"] = "arm64-v8a";

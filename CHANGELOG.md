@@ -2,6 +2,296 @@
 
 ## Unreleased
 
+### Fix: mekanisme yang didokumentasikan untuk `pltHookCommit()` salah — perilaku kode sudah benar
+
+Diferifikasi langsung terhadap tiga sumber hulu, dan klaim yang ditulis sebelumnya
+tentang *mengapa* commit bisa false-padahal-hook-hidup **salah pada
+mekanismenya**, meskipun kesimpulan yang diambil kode sudah tepat:
+
+- `LSPosed/LSPlt` `lsplt.cc` — `HookInfos::DoHook()` melipat setiap GOT slot dari
+  setiap pendaftaran menjadi satu AND (`res = DoHook(addr, …) && res`), dan
+  `CommitHook()` mengembalikan `true` saat tak ada yang terdaftar serta `false`
+  saat scan maps kosong.
+- `PerformanC/ReZygisk` `loader/src/injector/hook.c` — `api_plt_hook_commit_v4()`
+  mengembalikan `!any_failed`, di mana satu `plti_add_hook()` yang gagal saja
+  menyetel flag-nya. Slot v4-nya **memang** `bool`, bukan `void`.
+- `topjohnwu/Magisk` `native/src/core/zygisk/module.cpp` —
+  `ZygiskContext::plt_hook_commit()` mendelegasikan ke `lsplt::CommitHook()`.
+
+Jadi `false` adalah **laporan kegagalan parsial atas seluruh batch** — satu simbol
+yang tidak diimpor oleh satu *library* saja sudah membaliknya, sementara pendaftaran
+lainnya hidup dan bekerja. Kode sudah memperlakukannya seperti itu sejak awal
+(membaca ulang pointer `orig_*` sebagai *ground truth* per-hook), jadi **tidak ada
+perilaku yang berubah** — yang diperbaiki adalah komentar di `jni/module_hooks.cpp`,
+dua pesan diagnostik di `sh/debug/summarize.sh`, dan referensi di `CREDITS.md`.
+
+Catatan jujur: klaim yang salah menyebut ReZygisk mendeklarasikan slot v4 sebagai
+`void`. Itu benar untuk **`exempt_fd`** (sangat terverifikasi: `void (*)(int)` di
+union dengan `plt_hook_exclude`, dan `api_exempt_fd()` berakhir dengan `return;`
+polos), tapi tidak untuk `plt_hook_commit`. Mekanisme baru yang sekarang
+didokumentasikan justru memperkuat pilihan desain yang ada: karena bool-nya adalah
+batch AND, ia tidak pernah bisa menyatakan hook mana yang mendarat, sehingga probe
+tramplin adalah satu-satunya jawaban yang benar.
+
+### Fix: empat diagnosis yang dilaporkan angka bersih padahal salah — tinjauan ulang adversarial
+
+Satu pass review kedua atas diff yang sama, dengan tiga reviewer paralel dan
+verifikasi adversarial per temuan, menemukan bahwa empat laporan di
+`sh/debug/summarize.sh` dan satu di C++ **secara terstruktur selalu mencetak
+nol atau selalu diam** — bug class yang persis sama dengan yang sudah diperbaiki
+sebelumnya, di sisi lain dari batasnya.
+
+1. **`exemptFd() returned true` selalu 0.** Satu-satunya baris di seluruh repo
+   yang mengandung `exemptFd(fd=` adalah cabang *kegagalan* di `jni/module.cpp`,
+   jadi `grep -cv 'returned false'` terbukti 0 di setiap perangkat, termasuk
+   yang exemptFd-nya berhasil untuk setiap target. Ditambahkan LOGD di cabang
+   sukses (`jni/module.cpp`), dan baris diubah ke `grep -c 'returned true'`.
+2. **`typed get spoofed (SPB/SPI/SPL)` menghitung suppress juga.** Pola
+   `'TYPED SPB |TYPED SPI |TYPED SPL '` diakhiri spasi telanjang; baris spoof
+   adalah `TYPED SPB 'key'` dan baris suppress adalah `TYPED SPB SUPPRESS
+   'key'`, jadi keduanya cocok — setiap key yang ditekan menggembungkan hitungan
+   satu, dan terhitung kedua kalinya di baris suppress di bawahnya. Selain itu,
+   tanpa tanda kurung hanya alternatif pertama yang terjangkar ke tag
+   `${MOD}`; dua alternatif lain cocok di mana saja di log. Diperbaiki ke
+   `TYPED (SPB|SPI|SPL) '` (diverifikasi: 3 spoof + 1 suppress sekarang
+   mencetak 3, bukan 4; baris fallback `TYPED SPI(id)` tetap dikecualikan).
+3. **Catatan "trampolines landed" tidak pernah bisa tercetak.** Rantai `elif`
+   menguji keberadaan baris *install* (`NR_OK`) lebih dulu, tapi LOGW
+   false-negative di `jni/module_hooks.cpp` **fall-through** ke LOGI install
+   yang tidak bersyarat — jadi setiap sesi yang punya baris troll juga selalu
+   punya baris install, dan cabang pertama selalu menang dengan `:`. Sesi
+   persis yang ditujukan untuk catatan itu (commit "gagal" 8/8 sementara 348
+   bacaan prop asli di-spoof melalui hook yang sama) melaporkan verdict yang
+   bersih dan diam. Troll sekarang diuji lebih dulu; ketiga kasus (sehat ->
+   diam, false-negative -> NOTE, gagal total -> "L9 is OFF") diverifikasi
+   dengan log sintetis.
+
+**Pelajaran yang sama, sisi lain:** sebuah diagnosis yang selalu nol atau selalu
+diam tidak bisa dibedakan dari yang benar hanya dengan membaca outputnya. Setiap
+satu dari ini ditemukan dengan *menjalankan* marker yang benar-benar dipancarkan
+melalui script, bukan dengan membaca scriptnya.
+
+### Fix: crash handler bisa overflow stack buffer + salah attribution — tinjauan native
+
+Ditemukan oleh reviewer native dan dikonfirmasi independen dengan reproduksi
+standalone:
+
+1. **Stack buffer overflow di dalam signal handler.** `sbx_fmt_hex` /
+   `sbx_fmt_dec` (`jni/module_hooks.cpp`) menulis tanpa tahu sisa kapasitas,
+   sementara `put` hanya menjepit `p` di 191. Nama proses adalah input
+   manifest yang tidak dibatasi (`args->nice_name` — AOSP `Zygote` hanya
+   memotong *thread* name 16-byte, bukan nice_name), jadi nama ≥145 char
+   membuat hex menulis hingga 14 byte melewati `char line[192]` **di dalam
+   handler SIGSEGV** — titik terburuk untuk overflow, dan di build dengan
+   `-fstack-protector-strong` canary meledak jadi SIGABRT yang handler ini
+   juga pegang, jadi handler re-entrant. **Diverifikasi dua arah:** kode lama
+   overflow di panjang nama 149; kode baru terikat di [0..190] untuk semua
+   panjang 0..400. Kedua formatter sekarang menerima kapasitas dan memotong.
+2. **False-positive crash marker untuk fault yang ART tangani.** Handler ini
+   adalah SIGSEGV handler terluar di app process (dipasang di
+   postAppSpecialize, di atas FaultManager ART di zygote), jadi ia jalan lebih
+   dulu untuk *implicit null check* dan *stack-overflow guard page* ART —
+   yang fault, ditangani, lalu dilanjutkan. Bukan crash. Setiap Java NPE di
+   target app jadi tercatat sebagai crash module. Sekarang hanya SIGABRT
+   (yang selalu fatal — ART melaporkan fault yang tak bisa ditangani via
+   `Runtime::Abort()`) dan SIGSEGV-tanpa-handler-pendahulu yang direkam;
+   fault yang bisa dilanjutkan langsung diteruskan ke handler ART.
+3. **Komentar menjanjikan jaminan yang tidak ada.** Komentar lama bilang
+   "jika crash di dalam liblog dan deadlock, debuggerd tetap menghasilkan
+   tombstone" — itu terbalik: sinyal sudah terkirim, tidak ada re-fault, jadi
+   proses *hang* tanpa tombstone, yang lebih buruk dari buang-sunyi yang
+   ingin diperbaiki. `jni/companion.cpp` sendiri sudah mendokumentasikan bahwa
+   `__android_log_*` mengambil lock internal liblog. Komentar sekarang
+   menyatakan tradeoff yang sebenarnya, dan exposure dipersempit dengan hanya
+   memanggilnya di jalur fatal (poin 2), bukan setiap SIGSEGV.
+4. **Warm-up setelah arm.** `sigaction()` dipanggil sebelum
+   `__android_log_print` yang ada untuk menghangatkan liblog — kebalikan dari
+   urutan yang diklaim komentar sendiri. Ditukar.
+
+### Fix: dokumentasi yang keliru — jalur on-device, waktu capture, cakupan lapisan
+
+- **Jalur summarize.sh salah.** `build.sh` meratakan `sh/debug/summarize.sh`
+  ke **root** modul (`$PKG/`), dan kedua konsumer on-device memanggilnya dari
+  sana (`sh/lifecycle/action.sh`, `sh/lifecycle/customize.sh`). README
+  menyuruh `sh /data/adb/modules/sandboxid/sh/debug/summarize.sh` — perintah
+  diagnostik utama, yang akan "not found". Dikoreksi ke
+  `/data/adb/modules/sandboxid/summarize.sh`.
+- **"sebelum aplikasi target apa pun spawn" tidak benar.** `service.sh`
+  menunggu `sys.boot_completed`, tidur, baru *clear buffer* lalu mulai
+  `logcat` — sekitar 13 detik setelah boot selesai, dan apa pun sebelum itu
+  dibuang oleh clear. README sekarang menyatakan keduanya, dan menyuruh user
+  me-relaunch app sendiri.
+- **"fallback ke pre-warm layer 3" hanya benar untuk 1 dari 7.** Layer 3
+  hanya bind-mount 8 path `build.prop` + `settings_secure.xml`
+  (`BIND_ENTRIES` di `native/include/config.hpp`). `/proc/cpuinfo`,
+  `/proc/meminfo`, `/sys/class/net/*/address`, `/proc/sys/...` tidak punya
+  bentuk on-disk untuk di-pre-warm — library yang dimuat setelah specialize
+  membaca byte asli di path itu. Itu satu-satunya celah residual di lapisan
+  ini; README sekarang mengatakannya apa adanya alih-alih mengklaim tertutup.
+- **Klaim carrier terbalik.** README bilang "carrier asli menang via
+  native/getprop", padahal `gsm.operator.*` dan `gsm.sim.operator.*` ada di
+  setelah prop yang di-spoof (`native/include/prop_defs.hpp`) dan dibaca lewat
+  hook yang sama baik dari Java maupun native — mismatch itu justru sudah
+  diperbaiki dengan meng-hook library milik app sendiri. Carrier asli hanya
+  menang di luar proses yang di-hook (proses lain, `system_server`, RIL,
+  shell `getprop`) karena RIL menimpa prop secara terus-menerus.
+- **Cakupan cpuinfo dan verdict summarize.** Rebuild cpuinfo bukan
+  Tensor-only — itu semua persona non-Qualcomm/non-MediaTek (`cpu_action_for`
+  kembali `CPU_STRIP`), dan platform yang tidak dikenal jatuh ke core block
+  G4; README sekarang menjelaskan keduanya. Janji "layer yang diam-diam mati
+  muncul sebagai peringatan" hanya berlaku untuk L9 dan layer 2, yang memang
+  punya heuristik liveness — dipersempit kalimatnya.
+- **Komentar shim `tests/host/include/android/log.h`** menyebut empat konstanta
+  prioritas (padahal lima) dan menyebut `-DNDEBUG` sebagai gerbang
+  (padahal `SBX_DEBUG`, lihat `jni/module_impl.hpp`). Komentar sekarang
+  akurat; `__android_log_write` juga terdaftar karena crash handler
+  memanggilnya langsung.
+- **Test determinisme yang tidak bisa gagal.** `cpuinfo_synth(x) ==
+  cpuinfo_synth(x)` membandingkan fungsi terhadap dirinya sendiri dengan
+  argumen byte-identik — hanya bisa gagal jika ada memory yang belum
+  diinisialisasi. Properti yang sebenarnya penting (dua device tidak boleh
+  collid di derived variant/revision) sekarang di-assert terhadap seed kedua.
+
+### Fix: layout cluster CPU persona Tensor salah untuk generasi 9-core
+
+`native/native_read.cpp` memetakan cluster dengan lebar mid **tetap 3**:
+satu prime, sampai tiga mid, sisanya little. Tapi Tensor G1/G2 adalah
+1 prime + 3 mid + 4 little (8 core), sementara G3/G4 adalah 1 + 4 + 4
+(9 core). Persona zuma/zumapro di perangkat 9-core jadi disintesis sebagai
+**1+3+5** — kombinasi core-count per-cluster yang tidak dimiliki generasi
+Tensor manapun, tepat jenis self-consistency tell yang ingin dihapus.
+`mid_width` sekarang per-generasi; saat core count real cocok, layout yang
+dihasilkan sekarang mereproduksi silicon asli (gs101/gs201 -> 1+3+4,
+zuma/zumapro -> 1+4+4).
+
+### Fix: probe companion socket sekarang membedakan EOF dari error sementara
+
+`companion_socket_alive()` mengembalikan false untuk errno apa pun selain
+EAGAIN, dan LOGW-nya menyatakan socket "verifiably dead". Untuk jalur yang
+realistis (1-byte `MSG_PEEK` di `AF_UNIX`) memang selalu EOF atau EAGAIN —
+verifikasi adversarial menunjukkan *harm*-nya tidak tercapai — tapi diagnostic
+yang mengklaim diagnosis harus didasarkan pada apa yang benar-benar
+diobservasi. Probe sekarang tri-state (`OPEN` / `CLOSED` / `UNKNOWN`), LOGW
+hanya mencetak saat `recv()` benar-benar EOF, dan `UNKNOWN` fail-open (round
+trip tetap dicoba; error read/write asli yang melapor).
+
+
+**Mengapa ini penting:** watchdog crash dipasang tepat supaya crash di kode
+ter-hook bisa dikaitkan dengan package target. Tapi penandanya ditulis dengan
+`write(STDERR_FILENO, ...)`, dan di proses app fd 2 **bukan** logcat —
+`SetStdioToDevNull()` di `system/core/init/util.cpp` (AOSP master) `dup2()`
+fds 0/1/2 ke `/dev/null` di second-stage init, zygote mewarisinya, dan setiap
+app yang di-fork juga. Jadi handler itu *jalan*, tapi hasilnya dibuang diam-diam;
+`sh/debug/summarize.sh` melaporkan "module-marked crashes: 0" padahal handler
+benar-benar aktif. Kegagalan diam persis seperti yang ingin diberi tanda.
+
+Mekanismenya bisa dibuktikan dari sumber AOSP (`SetStdioToDevNull()` di
+`system/core/init/util.cpp`). Catatan kejujuran: log lapangan (1.9 MB, 268
+spawn) menunjukkan `SandboxID CRASH` **0 kali** dengan 62 tombstone, tapi
+**itu bukan bukti** — ke-62 crash itu semuanya `com.android.nfc`, sebuah
+package yang REJECTED, jadi watchdognya memang tak pernah dipasang di proses
+yang crash itu. Nolnya konsisten dengan kedua penjelasan; alasan
+`/dev/null`-nya berasal dari sumbernya, bukan dari log.
+
+Yang berubah:
+
+- `sbx_crash_handler` sekarang juga memancarkan penandanya lewat
+  `__android_log_write(ANDROID_LOG_FATAL, ...)`. Ini bukan anggota POSIX
+  async-signal-safe, tapi ia tak memformat variadic dan di jalur yang sudah
+  hangat hanya menulis ke socket logd yang sudah ter-connect. liblog
+  dihangatkan dari konteks normal di `install_crash_watchdog()` — yang kini
+  memanggil `__android_log_print` **secara eksplisit** (bukan `LOGD`, yang
+  di-compile-out di build release) — sebelum sinyal apa pun bisa datang.
+  `write(2)` tetap dipertahankan untuk biner CLI yang dijalankan dari shell.
+- `sh/lifecycle/service.sh`: ekstraktor crash `awk '/CRASH|DEATH|LEAK/'`
+  mencocokkan **nol** string yang pernah dipancarkan modul maupun platform,
+  jadi `debug/crashes.log` selalu kosong selama bertahun-tahun. Diganti
+  `index()` terhadap marker nyata (penanda modul, `Fatal signal`, banner
+  tombstone, `Cmdline:`, `>>> pkg <<<`, frame `#NN pc`, `FATAL EXCEPTION`).
+  `index()` dipilih bukan ERE agar banner literalnya tahan perbedaan dialek
+  awk; register dump dan memory dump sengaja dilewatkan supaya ledaknya kecil.
+- Mulai segera dengan `tail -F -n 0` (sebelum `logcat` sendiri start, bukan
+  10 detik setelahnya) supaya baris awal tak terlewat; ledger di-bound 256 KiB
+  / 2000 baris terakhir.
+- `README.md` merujuk `sh/debug/collect.sh` yang **tidak ada** — mekanisme
+  sebenarnya adalah file penanda `debug_variant` yang dibaca `service.sh` dan
+  dibuat build debug oleh `build.sh`. Dokumentasi sekarang menjelaskan yang
+  sebenarnya.
+- Bug kelas yang sama ditemukan di tempat keempat: pola summarize.sh
+  `'pltHookCommit\(\) reported failure'` tak akan pernah match karena baris
+  yang dipancarkan memiliki `NATIVE_READ: ` di antara tag dan literal itu.
+  Lalu pola `live trampolines` memakai `\([^)]*\)` yang berhenti di `)` pada
+  `lib(s)`, sehingga angka trampoline selalu 0 meski hook hidup. Keduanya
+  diverifikasi dengan baris sintetik lalu dites end-to-end.
+
+### Fix: tiga lapisan yang diam-diam mati — terlihat dari log lapangan saja
+
+**Mengapa ini penting:** modul ini punya empat lapisan yang harus setuju; kalau
+satu mati tanpa kata, aplikasi melihat identitas campuran dan penyebabnya tak
+terlihat. Ketiganya ditemukan **dari session log nyata**, bukan dari membaca
+kode, dan semuanya berbentuk "lapisan terlihat sehat tapi sebenarnya tidak
+melakukan apa-apa".
+
+1. **`exemptFd()` false negative (layer-2 bind-mount).** Log: `exemptFd()
+   returned false` **268 dari 268** spawn, `MOUNTS: failed` 8 kali, **0 mount
+   sukses**. Penyebab: ReZygisk mendeklarasikan slot v4 `exempt_fd` sebagai
+   `void (*)(int)`, bukan `bool (*)(int)` seperti Magisk/ZygiskNext — register
+   return arm64 (w0) berisi sisa yang selalu dibaca false, padahal efek
+   sampingnya (fd tetap hidup) bekerja. Fix sebelumnya yang mempercayai bool
+   itu jadi mematikan layer-2 di semua provider. Sekarang `postAppSpecialize`
+   memprobe socketnya sendiri (`recv(MSG_PEEK|MSG_DONTWAIT)` — EOF = socket
+   mati, EAGAIN = hidup) dan baru memutuskan. Provider Magisk yang benar-benar
+   false (socket benar-benar ditutup) tetap terdeteksi, dan sekarang
+   dilaporkan akurat alih-alih menyalahkan companion.
+2. **`pltHookCommit()` false negative (layer 9).** Log: commit "gagal" **8/8**
+   padahal **348** native prop read berhasil di-spoof melalui hook yang sama.
+   `pltHookCommit` di lsplt/ReZygisk bukan transaksi — slot GOT di-patch
+   satu per satu tanpa rollback, jadi return false tetap meninggalkan hook
+   hidup. Sekarang module tersebut membaca kembali pointer `orig_*` sendiri
+   setelah commit sebagai ground truth, mempromosikan log sukses ke `LOGI`,
+   dan `summarize.sh` menyajikan false-negative itu sebagai catatan, bukan
+   baris nol.
+3. **Library milik app tak ter-hook (layer 9).** Daftar hook hanya enam library
+   sistem; `.so` milik app sendiri yang sudah ter-load (yang bisa memanggil
+   `__system_property_read_callback` langsung) tidak. Ini akar lensa NATIVE
+   `vdinfos` yang melihat nilai carrier asli. Sekarang scan tunggal
+   `/proc/self/maps` mengumpulkan keduanya, dan keduanya terdaftar.
+
+`summarize.sh` ditulis ulang sepenuhnya: setiap grep dipasangkan ke string
+yang benar-benar dipancarkan, dan layer yang mati muncul sebagai WARNING
+alih-alih baris 0 yang rapi.
+
+### Fix: `/proc/cpuinfo` persona Pixel bocor MIDR SoC asli
+
+Persona Google/Tensor punya cpuinfo tanpa baris `Hardware :` dan tanpa
+`Processor :` (format upstream `arch/arm64/kernel/cpuinfo.c`), dan setiap core
+melaporkan ARM implementer `0x41`. Patch baris `Hardware` saja — apalagi
+`return real` saat tak ada baris itu — **menyisakan** MIDR SoC asli di dalam
+file persona sendiri: implementer `0x51` (Qualcomm), part `0x805` (Kryo silver),
+`0xd0d` (Cortex-A77). Itu kontradiksi langsung dengan `Build.MODEL`.
+
+Dua bug sekaligus: kebocoran MIDR per-core, dan fail-open yang menyajikan file
+asli utuh. `cpuinfo_synth()` sekarang membangun ulang seluruh file dari
+platform persona (G1 `gs101` 0xd05/0xd0b/0xd44, G2 `gs201` 0xd05/0xd41/0xd44,
+G3 `zuma` 0xd46/0xd4d/0xd4e, G4 `zumapro` 0xd80/0xd81/0xd82), mempertahankan
+jumlah core, `Features`, dan `BogoMIPS` asli, dan **fail-closed** kalau file
+tak ter-parse (tak ada angka yang dikarang). Output diverifikasi byte-demi-byte
+melawan format upstream dan dump Pixel asli. 20 check baru di `tests/host`.
+
+### Fix: sinkronisasi shell-layer + dokumentasi batas yang tak bisa diperbaiki
+
+`persist.sys.device_name` (nama marketing yang dibaca dari property service)
+tetap `"POCO F3"` setelah rotasi sementara surface lain sudah persona — sebuah
+MISMATCH `vdinfos dev:persist_device_name`. `rotate_ids.sh` kini mengaturnya.
+`autopif.sh` menulis `MOD_DEVICE`, `FOTA_OEM`, `GOOGLE_CLIENTIDBASE` yang
+sebelumnya hanya diturunkan di C++.
+
+`README.md` sekarang mendokumentasikan batas yang **struktural**, bukan bug:
+hardware attestation (TEE menjawab dengan rantai sertifikat asli; tak bisa
+di-re-sign tanpa keybox terkompromi), property carrier (`gsm.operator.*`
+ditulis RIL terus-menerus, jadi persona menang di lensa Java dan carrier asli
+menang di native — MISMATCH, bukan kebocoran), identitas kernel/bootloader,
+dan ketergantungan layer-2 pada provider yang menghormati `exemptFd()`.
 
 ## v2.2.8 (2026-09-16)
 

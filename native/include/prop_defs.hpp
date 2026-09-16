@@ -60,6 +60,22 @@ inline constexpr NativePropEntry NATIVE_PROPS[] = {
     {"ro.soc.manufacturer",                nullptr, "SOC_MANUFACTURER", false},
     {"ro.soc.model",                       nullptr, "SOC_MODEL", false},
     {"ro.product.marketname",              nullptr, "MARKETNAME", false},
+    // Device-codename / OEM descriptors that a Build.* mapping does not reach.
+    // Before these were covered, all three vdinfos lenses reported the real
+    // device here (alioth_global / Xiaomi / android-xiaomi / "POCO F3") while
+    // every other surface already showed the persona.
+    {"ro.product.mod_device",              nullptr, "MOD_DEVICE", false},
+    {"ro.product.system.mod_device",       nullptr, "MOD_DEVICE", false},
+    {"ro.product.vendor.mod_device",       nullptr, "MOD_DEVICE", false},
+    {"ro.product.odm.mod_device",          nullptr, "MOD_DEVICE", false},
+    {"ro.fota.oem",                        nullptr, "FOTA_OEM", false},
+    {"ro.com.google.clientidbase",         nullptr, "GOOGLE_CLIENTIDBASE", false},
+    {"ro.com.google.clientidbase.ms",      nullptr, "GOOGLE_CLIENTIDBASE", false},
+    {"ro.com.google.clientidbase.tx",      nullptr, "GOOGLE_CLIENTIDBASE", false},
+    {"ro.com.google.clientidbase.vs",      nullptr, "GOOGLE_CLIENTIDBASE", false},
+    // The marketing device name. sync_device_name() only rewrites Settings and
+    // the BT config; this persist prop kept the real model name otherwise.
+    {"persist.sys.device_name",            nullptr, "MODEL", false},
     {"ro.product.brand_for_attestation",        nullptr, "BRAND", false},
     {"ro.product.name_for_attestation",         nullptr, "PRODUCT", false},
     {"ro.product.device_for_attestation",       nullptr, "DEVICE", false},

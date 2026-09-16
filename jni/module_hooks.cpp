@@ -1,5 +1,6 @@
 #include "module_impl.hpp"
 #include <climits>
+#include <algorithm>
 
 // ---------- install_build_hook ----------
 // Reflects into android.os.Build and overwrites identity-mapped fields via JNI.
@@ -20,6 +21,14 @@ static bool sbx_set_build_int(JNIEnv* env, jclass clz,
     jfieldID fid = env->GetStaticFieldID(clz, name, "I");
     if (!fid || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
     env->SetStaticIntField(clz, fid, v);
+    return true;
+}
+
+static bool sbx_set_build_long(JNIEnv* env, jclass clz,
+                               const char* name, long long v) {
+    jfieldID fid = env->GetStaticFieldID(clz, name, "J");
+    if (!fid || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    env->SetStaticLongField(clz, fid, v);
     return true;
 }
 
@@ -72,8 +81,24 @@ void install_build_hook(JNIEnv* env) {
         env->ExceptionClear();
     }
 
-    LOGD("BUILD hook: %d field(s) spoofed", set);
-    (void)set;   // counted for the debug log only
+    // Build.TIME is a `long` initialised once, inside the zygote, from
+    // ro.build.date.utc — long before apply-boot's resetprop rewrites that
+    // property. Unpatched it keeps the *real* image build date and contradicts
+    // the persona's own ro.build.date.utc (a vdinfos dev:build_time_utc
+    // MISMATCH: Build.TIME/1000 != ro.build.date.utc). ro.build.date.utc is in
+    // seconds while Build.TIME is in milliseconds, so scale here as well.
+    const std::string& bt = val("BUILD_TIME_UTC");
+    long long fields_set = set;
+    if (!bt.empty()) {
+        long long t = 0;
+        if (sbx_parse_longlong(bt, t) && t > 0) {
+            if (t < 4102444800LL) t *= 1000LL;   // seconds -> milliseconds
+            if (sbx_set_build_long(env, clz, "TIME", t)) ++fields_set;
+        }
+    }
+
+    LOGD("BUILD hook: %lld field(s) spoofed", fields_set);
+    (void)fields_set;   // counted for the debug log only
     env->DeleteLocalRef(clz);
 }
 
@@ -169,9 +194,24 @@ static std::string synth_content(sbxnr::Kind k, const std::string& real) {
     case sbxnr::CPUINFO: {
         std::string repl;
         int action = sbxnr::cpu_action_for(val("SOC_MANUFACTURER"), val("SOC_MODEL"), repl);
+        if (action == sbxnr::CPU_STRIP) {
+            // A Pixel/Tensor persona's cpuinfo has neither a "Hardware :" nor a
+            // "Processor :" line, and every core reports ARM implementer 0x41 -
+            // so rewriting the Hardware line alone still leaves the real SoC's
+            // per-core MIDR fields (e.g. 0x51/0x805 Kryo silver) inside the
+            // persona's own file. Rebuild the whole file from the persona's
+            // platform instead, mirroring synth_proc_version() above.
+            std::string s = sbxnr::cpuinfo_synth(val("BOARD_PLATFORM"), real,
+                                                 sbxnr::fnv1a(val("SERIAL")));
+            if (!s.empty()) return s;
+            break;   // no cores could be parsed: fail closed, do not serve real
+        }
         std::string patched;
         if (sbxnr::patch_cpuinfo(real, action, repl, patched)) return patched;
-        return real;
+        // No Hardware line to rewrite (an upstream-arm64 kernel). Serving the
+        // real file here would leak its per-core MIDR fields verbatim, so fail
+        // closed like every other kind above instead.
+        break;
     }
     case sbxnr::SELINUX_ENFORCE:
         return sbxnr::selinux_enforce_content();
@@ -567,50 +607,123 @@ void install_native_read_hooks(Api* api) {
                     reinterpret_cast<void**>(&orig_prop_get)},
     };
 
-    int registered = 0, symbols = 0;
-    for (const char* suffix : kLibs) {
-        dev_t dev = 0; ino_t ino = 0;
+    // Collect the libraries to hook, scanning /proc/self/maps once:
+    //  - the system set above, which covers every Java-level file and property
+    //    read (libjavacore / libandroid_runtime) plus libc for native callers;
+    //  - the app's OWN libraries. Without these, a native probe that lives in
+    //    the app's own .so - vdinfos's NATIVE lens calls
+    //    __system_property_read_callback straight from its own library - goes
+    //    through none of the hooks below and reads real values, which is
+    //    exactly the MISMATCH the report shows on gsm.sim.operator.*.
+    //    (Libraries the app loads later, after postAppSpecialize, are still
+    //    outside this one-shot scan - see README "Layer 9 limits".)
+    std::vector<std::string> targets;
+    {
         FILE* f = fopen("/proc/self/maps", "re");
-        if (!f) continue;
-        char* line = nullptr;
-        size_t cap = 0;
-        size_t sl = strlen(suffix);
-        bool found = false;
-        while (getline(&line, &cap, f) != -1) {
-            char* path = strchr(line, '/');
-            if (!path) continue;
-            size_t pl = strlen(path);
-            if (pl && path[pl - 1] == '\n') path[--pl] = '\0';
-            if (pl >= sl && strcmp(path + pl - sl, suffix) == 0) {
-                struct stat st;
-                if (stat(path, &st) == 0) { dev = st.st_dev; ino = st.st_ino; found = true; }
-                break;
+        if (f) {
+            char* line = nullptr;
+            size_t cap = 0;
+            while (getline(&line, &cap, f) != -1) {
+                char* path = strchr(line, '/');
+                if (!path) continue;
+                size_t pl = strlen(path);
+                if (pl && path[pl - 1] == '\n') path[--pl] = '\0';
+                bool want = (pl >= 10 && strncmp(path, "/data/app/", 10) == 0);
+                for (const char* sfx : kLibs) {
+                    if (want) break;
+                    size_t sl = strlen(sfx);
+                    if (pl >= sl && strcmp(path + pl - sl, sfx) == 0) want = true;
+                }
+                if (!want) continue;
+                if (std::find(targets.begin(), targets.end(),
+                              std::string(path, pl)) == targets.end())
+                    targets.emplace_back(path, pl);
             }
+            free(line);
+            fclose(f);
         }
-        free(line);
-        fclose(f);
-        if (!found) continue;
+    }
+    if (targets.empty()) {
+        LOGW("NATIVE_READ: no hookable libs found");
+        return;
+    }
 
+    int registered = 0, app_libs = 0, symbols = 0;
+    for (const std::string& path : targets) {
+        struct stat st;
+        if (stat(path.c_str(), &st) != 0) continue;
+        if (strncmp(path.c_str(), "/data/app/", 10) == 0) ++app_libs;
         for (const HookReg& r : regs) {
             // Zygisk's pltHookRegister returns void: a symbol this library does
             // not import is simply not redirected, which is harmless.
-            api->pltHookRegister(dev, ino, r.name, r.fn, r.orig);
+            api->pltHookRegister(st.st_dev, st.st_ino, r.name, r.fn, r.orig);
             ++symbols;
         }
         ++registered;
     }
     if (registered == 0) {
-        LOGW("NATIVE_READ: no hookable libs found");
+        // Distinct from the empty-scan case above: targets were found in
+        // /proc/self/maps but every stat() failed, i.e. the library was
+        // unmapped between the scan and registration. The shared prefix keeps
+        // summarize.sh's "no hookable libs" count correct.
+        LOGW("NATIVE_READ: no hookable libs survived stat() (unmapped between "
+             "the maps scan and registration)");
         return;
     }
-    if (!api->pltHookCommit()) {
-        LOGW("NATIVE_READ: pltHookCommit failed");
+    // Zygisk defers the pltHookRegister()ed redirects until commit. Commit's
+    // bool is a batch verdict, not a per-hook one, and that is why it cannot be
+    // trusted to say whether OUR hooks landed:
+    //   - Magisk's plt_hook_commit() -> lsplt::CommitHook() -> HookInfos::DoHook
+    //     folds every registration's every GOT slot into one AND
+    //     (`res = DoHook(addr, ...) && res`, LSPlt lsplt.cc), and CommitHook()
+    //     also returns false outright when the maps scan finds nothing and
+    //     - notably - true when nothing was registered at all.
+    //   - ReZygisk's api_plt_hook_commit_v4() returns `!any_failed`, set by any
+    //     single plti_add_hook() that did not land (PerformanC/ReZygisk
+    //     loader/src/injector/hook.c).
+    // So one symbol a library does not even import flips the batch false while
+    // every other registration is live and working. A debug session showed
+    // commit "failing" for all 8 targets while those same hooks spoofed
+    // hundreds of in-process reads, and trusting the bool here would have
+    // suppressed the only line that reports L9 as actually live. The
+    // trampoline back-pointer each landed registration writes into orig_* is
+    // the per-hook ground truth, so probe those instead.
+    bool committed = api->pltHookCommit();
+    int live = 0;
+    auto landed = [](void* trampoline) { return trampoline ? 1 : 0; };
+    live += landed(reinterpret_cast<void*>(orig_read));
+    live += landed(reinterpret_cast<void*>(orig_open));
+    live += landed(reinterpret_cast<void*>(orig_openat));
+    live += landed(reinterpret_cast<void*>(orig_pread64));
+    live += landed(reinterpret_cast<void*>(orig_close));
+    live += landed(reinterpret_cast<void*>(orig_lseek));
+    live += landed(reinterpret_cast<void*>(orig_lseek64));
+    live += landed(reinterpret_cast<void*>(orig_open_2));
+    live += landed(reinterpret_cast<void*>(orig_openat_2));
+    live += landed(reinterpret_cast<void*>(orig_prop_find));
+    live += landed(reinterpret_cast<void*>(orig_prop_get));
+    live += landed(reinterpret_cast<void*>(orig_prop_read_cb));
+
+    if (!committed && live == 0) {
+        LOGW("NATIVE_READ: pltHookCommit failed and no trampolines landed "
+             "(%d lib(s), %d symbol registration(s)) - L9 in-process file/prop "
+             "spoofing is OFF for this process; only Build.* and SystemProperties "
+             "are spoofed", registered, symbols);
         return;
     }
-    LOGD("NATIVE_READ hooks installed (%d lib(s), %d symbol registration(s)), "
-         "incl. openat/__open_2/pread64/lseek/close + prop find/read_callback/get",
-         registered, symbols);
-    (void)symbols;   // counted for the debug log only
+    if (!committed) {
+        LOGW("NATIVE_READ: pltHookCommit() reported failure but %d trampoline(s) "
+             "landed - the provider's bool is a batch verdict over every "
+             "registration (one symbol a library does not import flips it), not "
+             "a per-hook report; treating L9 as live on the trampolines",
+             live);
+    }
+    LOGI("NATIVE_READ hooks installed (%d lib(s) incl. %d app-owned, "
+         "%d registration(s), %d live trampoline(s)): "
+         "open/openat/__open_2/__openat_2/read/pread64/lseek/lseek64/close + "
+         "__system_property_find/get/read_callback",
+         registered, app_libs, symbols, live);
+    (void)symbols;   // counted for the log only
 }
 
 // ---------- install_crash_watchdog ----------
@@ -622,44 +735,105 @@ static std::atomic<struct sigaction*> g_old_abrt{nullptr};
 static std::string g_watchdog_pkg;
 
 // Async-signal-safe integer formatting (no malloc, no stdio, no locks — those
-// are exactly what is broken when the process crashed inside them).
-static size_t sbx_fmt_dec(char* out, unsigned v) {
-    if (v == 0) { out[0] = '0'; return 1; }
+// are exactly what is broken when the process crashed inside them). Both take a
+// remaining capacity and truncate instead of overrunning: the crash handler
+// formats an external, manifest-controlled process name, so the length is not
+// something this code controls.
+static size_t sbx_fmt_dec(char* out, size_t cap, unsigned v) {
     char tmp[10]; size_t i = 0;
+    if (v == 0) tmp[i++] = '0';
     while (v) { tmp[i++] = static_cast<char>('0' + v % 10); v /= 10; }
+    if (i > cap) i = cap;
     for (size_t j = 0; j < i; ++j) out[j] = tmp[i - 1 - j];
     return i;
 }
-static size_t sbx_fmt_hex(char* out, uintptr_t v) {
+static size_t sbx_fmt_hex(char* out, size_t cap, uintptr_t v) {
     static const char d[] = "0123456789abcdef";
-    out[0] = '0'; out[1] = 'x';
-    size_t i = 2;
+    char tmp[18]; size_t i = 2;
+    tmp[0] = '0'; tmp[1] = 'x';
     for (int shift = 60; shift >= 0; shift -= 4) {
         unsigned nib = static_cast<unsigned>((v >> shift) & 0xF);
-        if (nib || i > 2 || shift == 0) out[i++] = d[nib];
+        if (nib || i > 2 || shift == 0) tmp[i++] = d[nib];
     }
+    if (i > cap) i = cap;
+    for (size_t j = 0; j < i; ++j) out[j] = tmp[j];
     return i;
 }
 
 static void sbx_crash_handler(int sig, siginfo_t* info, void* ctx) {
-    // Signal handler: write(2) only. __android_log_print / std::string copies
-    // are NOT async-signal-safe and can deadlock on the malloc lock.
+    // Decide *first* whether this fault is genuinely fatal, because the
+    // previous handler must be handed the signal and it may resume the
+    // faulting thread rather than kill the process.
+    //
+    // This handler is the outermost SIGSEGV handler in an app process: it is
+    // installed in postAppSpecialize, on top of the one ART registered in the
+    // zygote. ART uses SIGSEGV for two routine, non-fatal purposes - implicit
+    // null checks and the stack-overflow guard page - which fault, get
+    // handled, and continue. Logging every one of those would record every
+    // Java NPE in a target app as a module-attributed crash. ART reports a
+    // fault it *cannot* handle through Runtime::Abort(), which arrives here as
+    // SIGABRT, so SIGABRT is recorded unconditionally. SIGSEGV is recorded
+    // only when there is no previous handler to defer to - the CLI binary, or
+    // a process with no runtime installed - where it really is fatal.
+    struct sigaction* old = (sig == SIGSEGV) ? g_old_segv.load() : g_old_abrt.load();
+    const bool no_prior = (!old) || old->sa_handler == SIG_DFL ||
+                          old->sa_handler == SIG_IGN;
+    if (sig != SIGABRT && !no_prior) {
+        if (old->sa_flags & SA_SIGINFO)
+            old->sa_sigaction(sig, info, ctx);
+        else
+            old->sa_handler(sig);
+        return;
+    }
+
+    // The marker is built by hand (no stdio, no std::string, no malloc - those
+    // are what is broken when the process crashed inside them) and emitted
+    // two ways:
+    //
+    //  - write(2): correct when stderr is a real pipe or tty, i.e. the CLI
+    //    binary run from a shell.
+    //  - __android_log_write: required for *app* processes. Second-stage init
+    //    (SecondStageMain, system/core/init/init.cpp) calls SetStdioToDevNull()
+    //    (system/core/init/util.cpp), which dup2()s fds 0/1/2 onto /dev/null;
+    //    the zygote inherits that, and so does every app it forks. write(2) is
+    //    therefore discarded, and the extractor in sh/lifecycle/service.sh
+    //    sees nothing at all - the crash looks unattributed even though this
+    //    handler ran.
+    //
+    // __android_log_write is NOT async-signal-safe: it takes liblog's internal
+    // lock, the same lock jni/companion.cpp deliberately avoids after fork.
+    // If the fault landed on a thread holding that lock, this call blocks, the
+    // signal is already delivered so nothing re-faults, and the process hangs
+    // without a tombstone - strictly worse than the silent discard it replaces.
+    // That is the accepted cost of attributing app crashes at all: liblog is
+    // the only write path an app process is permitted to use. The exposure is
+    // narrowed by never taking it on ART's resumable faults, and by warming
+    // liblog from normal context in install_crash_watchdog() below.
     char line[192];
     size_t p = 0;
+    // Every writer below stays inside [0, CAP]. The last two bytes of the
+    // buffer hold the '\n' write(2) needs and then the '\0' the log API needs,
+    // so a process name of unbounded length truncates the marker instead of
+    // overrunning a stack buffer inside a signal handler.
+    static constexpr size_t CAP = sizeof(line) - 2;
     auto put = [&](const char* s) {
-        while (*s && p + 1 < sizeof(line)) line[p++] = *s++;
+        while (*s && p < CAP) line[p++] = *s++;
     };
     put("SandboxID CRASH sig=");
-    p += sbx_fmt_dec(line + p, static_cast<unsigned>(sig));
+    p += sbx_fmt_dec(line + p, CAP - p, static_cast<unsigned>(sig));
     put(" pkg=");
     put(g_watchdog_pkg.c_str());
     put(" addr=");
-    p += sbx_fmt_hex(line + p, reinterpret_cast<uintptr_t>(info ? info->si_addr : nullptr));
-    line[p++] = '\n';
-    ssize_t rc = ::write(STDERR_FILENO, line, p);
+    p += sbx_fmt_hex(line + p, CAP - p,
+                     reinterpret_cast<uintptr_t>(info ? info->si_addr : nullptr));
+    line[CAP] = '\n';
+    ssize_t rc = ::write(STDERR_FILENO, line, CAP + 1);
     (void)rc;
+    line[CAP] = '\0';
+    __android_log_write(ANDROID_LOG_FATAL, LOG_TAG, line);
 
-    struct sigaction* old = (sig == SIGSEGV) ? g_old_segv.load() : g_old_abrt.load();
+    // Hand the fault on so ART / debuggerd still see it and a tombstone is
+    // produced. Reaching here implies no_prior when sig != SIGABRT.
     if (old && (old->sa_flags & SA_SIGINFO) && old->sa_sigaction)
         old->sa_sigaction(sig, info, ctx);
     else if (old && old->sa_handler != SIG_DFL && old->sa_handler != SIG_IGN)
@@ -679,9 +853,15 @@ void install_crash_watchdog(const std::string& pkg) {
     sa.sa_flags = SA_SIGINFO | SA_RESTART;
     sigemptyset(&sa.sa_mask);
 
+    // Warm liblog BEFORE the handlers are armed: __android_log_write connects
+    // to logd and may allocate on first use, and doing either inside the
+    // handler is the deadlock the comment above warns about. LOGD is compiled
+    // out without SBX_DEBUG, so this warms it unconditionally.
+    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
+                        "crash watchdog armed for '%s'", pkg.c_str());
+
     if (::sigaction(SIGSEGV, &sa, &old_segv) == 0) g_old_segv.store(&old_segv);
     if (::sigaction(SIGABRT, &sa, &old_abrt) == 0) g_old_abrt.store(&old_abrt);
-    LOGD("crash watchdog installed for '%s'", pkg.c_str());
 }
 
 // ---------- request_companion_mounts ----------
