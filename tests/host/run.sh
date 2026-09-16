@@ -20,7 +20,10 @@
 #                  Skipped unless node is on PATH.
 #
 # Requirements: a C++20 compiler (clang++ or g++) on the host, a JDK for jni.h,
-# and node for the console suite. No NDK needed.
+# and node for the console suite. No NDK needed — the two Android-only headers
+# the module pulls in are shimmed under tests/host/include when the host lacks
+# them. Both lookups are probes: a host that already has the real headers
+# (Termux, or a box with NDK headers on the path) uses them untouched.
 # Usage:   ./tests/host/run.sh          # build + run all suites
 #          CXX=g++ ./tests/host/run.sh
 
@@ -58,6 +61,19 @@ if ! echo '#include <jni.h>' | "$CXX" -fsyntax-only -x c++ - >/dev/null 2>&1; th
         echo "run.sh: jni.h not found — install a JDK (e.g. 'sudo apt install default-jdk')" >&2
         exit 2
     fi
+fi
+
+# The module headers also include two Android-only headers: <android/log.h>
+# and <sys/system_properties.h>. Termux ships both; a stock Linux runner ships
+# neither, and the suite would die at the #include before any check ran.
+# tests/host/include holds minimal shims for the tiny surface actually used
+# (see those files for why a no-op/incomplete-type shim is faithful here).
+# Added only when the real headers are absent, so a machine that has them
+# keeps compiling against the real ones.
+if ! { echo '#include <android/log.h>'; echo '#include <sys/system_properties.h>'; } \
+     | "$CXX" -fsyntax-only -x c++ - >/dev/null 2>&1; then
+    echo "run.sh: android headers not on the default path, using tests/host/include shims"
+    FLAGS+=("-I$REPO/tests/host/include")
 fi
 
 OUT="${TMPDIR:-/tmp}/sbx-host-tests"
