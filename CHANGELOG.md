@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.9 (2026-09-16)
+
 ### Fix: mekanisme yang didokumentasikan untuk `pltHookCommit()` salah — perilaku kode sudah benar
 
 Diferifikasi langsung terhadap tiga sumber hulu, dan klaim yang ditulis sebelumnya
