@@ -70,10 +70,13 @@ int main() {
     orig_lseek = [](int fd, off_t o, int w) { return ::lseek(fd, o, w); };
     orig_close = [](int fd) { return ::close(fd); };
 
-    auto read_all_synth = [](int fd) {
+    auto read_all_synth = [](int fd, size_t cap = 1 << 16) {
         std::string out;
         char buf[128];
-        for (int i = 0; i < 64; ++i) {   // bounded: a bug must not hang the test
+        // Bounded in bytes, not in passes: a fixed pass count would silently
+        // truncate any file longer than passes * sizeof(buf), and /proc files
+        // vary in length with the host kernel's config.
+        while (out.size() < cap) {
             ssize_t n = hook_read(fd, buf, sizeof(buf));
             if (n <= 0) break;
             out.append(buf, (size_t)n);
@@ -120,7 +123,12 @@ int main() {
     hook_lseek(fd, 0, SEEK_SET);
     std::string chunked;
     char c[7];   // deliberately not a divisor of the length
-    for (int i = 0; i < 200; ++i) {
+    // Bound by the buffer being reassembled, not by a fixed pass count: at 7
+    // bytes a pass, a 200-pass cap only ever assembles 1400 bytes and silently
+    // truncates anything longer. /proc/meminfo is ~1 KB on a phone but longer
+    // on a stock server kernel, which is exactly why this check passed locally
+    // and failed on the CI runner.
+    while (chunked.size() < first.size()) {
         ssize_t n = hook_read(fd, c, sizeof(c));
         if (n <= 0) break;
         chunked.append(c, (size_t)n);
