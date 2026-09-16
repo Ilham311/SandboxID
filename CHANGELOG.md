@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Fix: koreksi library hook I/O level Java — libjavacore.so, bukan libandroid_runtime.so
+
+**Ini koreksi dari klaim yang keliru di v2.2.0/v2.2.1.** Pass 2 menambahkan
+`libandroid_runtime.so` ke `kLibs` dengan alasan "semua I/O file level Java
+melewati library ini". Setelah diverifikasi langsung ke source AOSP
+(`platform/libcore`, `luni/src/main/native/`), klaim itu **salah**:
+
+- Native `libcore.io.Linux` yang benar-benar melakukan I/O file level Java —
+  `Linux_open`, `Linux_readBytes`, `Linux_preadBytes`, `Linux_lseek`,
+  `Linux_close` — didaftarkan oleh `register_libcore_io_Linux` di
+  **`libjavacore.so`** (lihat `Register.cpp`), bukan `libandroid_runtime.so.
+- `android.system.Os` sendiri tidak punya JNI; ia mendelegasikan ke
+  `libcore.io.Linux`.
+
+Akibatnya, selama v2.2.0/v2.2.1, **surface baca file level Java sebenarnya
+belum ter-hook** seperti yang diklaim. Diperbaiki: `libjavacore.so` (yang
+di-load oleh setiap proses Java) kini ada di `kLibs`, dan komentar
+`libandroid_runtime.so` dikoreksi — library itu membawa native
+`android.os.SystemProperties` (surface identitas ketiga), bukan I/O file.
+
+Validasi yang ikut terkonfirmasi: `Linux_lseek` membungkus **`lseek64**`,
+bukan `lseek` — jadi hook `lseek64` yang ditambahkan di pass 2 memang
+esensial untuk rewind level Java, bukan tambahan spekulatif.
+
 ### Fix: code review pass 3 — keamanan shell, webroot, dan test harness resmi
 
 Review ketiga, kali ini memakai standar mattpocock/skills (`code-review`
@@ -16,7 +40,10 @@ dua pass sebelumnya.
   membuat root menulis konten ke path pilihannya. Kini memakai `mktemp(1)`
   (O_EXCL, menolak path yang sudah ada — symlink atau bukan) dengan fallback
   yang tetap menolak path yang ada; bonus: file staging 0600 root-owned, tidak
-  ada jendela di mana app bisa membacanya sebelum chown.
+  ada jendela di mana app bisa membacanya sebelum chown. Diverifikasi langsung
+  ke source toybox (`toys/lsb/mktemp.c`): tanpa `-u` ia memanggil
+  `mkstemp()` — file dibuat atomik dengan `O_CREAT|O_EXCL`, bukan sekadar
+  mencetak nama seperti POSIX `mktemp` / GNU `-u`.
 - `module_hooks.cpp` — pembacaan file real kini **dibatasi 1 MB**. `/proc/
   meminfo` dan `cpuinfo` ukurannya kernel (beberapa KB), tapi `applog.xml`
   ada di direktori app dan ukurannya dikontrol app; tanpa cap, hook bisa

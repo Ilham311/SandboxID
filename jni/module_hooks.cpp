@@ -524,10 +524,16 @@ void install_native_read_hooks(Api* api) {
         "/libbase.so",
         "/libcutils.so",
         "/libutils.so",
-        // Every Java-level file I/O in the process (FileInputStream,
-        // BufferedReader, RandomAccessFile, SharedPreferences/XmlPullParser)
-        // funnels through android.system.Os, whose natives live here — so
-        // without it the whole Java read surface is unhooked.
+        // The Java-level file surface: every android.system.Os /
+        // FileInputStream / RandomAccessFile / SharedPreferences read goes
+        // through libcore.io.Linux's natives (Linux_open, Linux_readBytes,
+        // Linux_preadBytes, Linux_lseek, Linux_close — registered by
+        // register_libcore_io_Linux in Register.cpp), and those live in
+        // libjavacore.so, which every Java process loads. Note Linux_lseek
+        // wraps lseek64, which is why lseek64 must be hooked too.
+        "/libjavacore.so",
+        // Hosts android.os.SystemProperties natives (native_get etc.) — the
+        // third identity surface, see prop_hooks.cpp.
         "/libandroid_runtime.so",
     };
     struct HookReg { const char* name; void* fn; void** orig; };
