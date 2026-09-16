@@ -57,6 +57,28 @@ SandboxID combines three cooperating layers:
 3. **CLI / shell layer** — a native `sandboxid` binary and `rotate_ids.sh`
    script regenerate the persona, apply native properties, and synchronize
    shell-layer identifiers (SSAID, GAID, wlan/Bluetooth MAC, device name).
+4. **In-process file-read spoofing (L9)** — the Zygisk module PLT-hooks
+   `read`/`open`/`openat`/`pread64`/`lseek`/`close` (plus the `_FORTIFY_SOURCE`
+   `__open_2`/`__openat_2` variants) and serves synthetic content for the
+   hardware-exposing files an app can read, per file descriptor so that
+   chunked, repeated, rewound, or concurrent reads all stay consistent:
+
+   - `/proc/version` — a kernel version string synthesized from the persona's
+     release/platform/build number.
+   - `/proc/meminfo` — `MemTotal` for the persona's model; for a model not in
+     the RAM table, the real total is rounded **up** to the nearest marketing
+     GB tier (the exact kB value is itself a fingerprint), never leaked as-is.
+   - `/proc/cpuinfo` — the `Hardware` line rewritten for Qualcomm/MediaTek SoCs,
+     or removed for Tensor, where present.
+   - `/proc/sys/kernel/random/boot_id`, `/sys/class/net/wlan0|p2p0/address`,
+     `/sys/fs/selinux/enforce`.
+   - the ByteDance AppLog cache files (see `rotate_ids.sh applog` below).
+
+   If the identity is incomplete for a file, the hook fails **closed** (serves
+   EOF) rather than letting real bytes through. PLT hooking only sees calls
+   that cross a library boundary, so reads from an app's own `.so` (not loaded
+   yet at hook-install time) are covered by the on-disk pre-warm in layer 3
+   instead, which writes the same deterministically-derived values.
 
 The architecture is deliberately split so the Zygisk hook layer and the shell
 layer report the same values for a given persona. Repository sources are grouped
@@ -133,21 +155,41 @@ without applying a persona). `rotate_ids.sh` adds `WIFI_MAC`,
 ### `personas.tsv`
 
 The pool `sandboxid freshen` picks a persona from. Located at
-`/data/adb/modules/sandboxid/personas.tsv`; tab-separated, 10 columns:
+`/data/adb/modules/sandboxid/personas.tsv`; tab-separated, **10 required columns
+plus 6 optional ones (up to 16)**:
 
 ```
+# required (1-10):
 model	device	product	board	platform	sdk	release	id	incremental	security_patch
+# optional (11-16) — brand identity for NON-Google devices:
+brand	manufacturer	marketname	soc_manufacturer	soc_model	radio
 ```
+
+Google/Tensor Pixel rows omit columns 11-16: `brand` defaults to `google`,
+`manufacturer` to `Google`, and the SoC/model strings are derived from the
+platform. Non-Tensor rows **must** supply at least `brand` and `soc_model`, or
+the row is skipped with a warning (a persona can not be coherent without them).
 
 `#`-prefixed lines are comments. The bundled file is a curated set of **stable**
-Pixel builds — editing it (or dropping in your own rows) changes the pool
-directly; no rebuild needed. If the file is missing or empty, the native binary
-falls back to a small built-in list, so `freshen` always works.
+Pixel builds plus a set of real-device multi-brand rows — editing it (or dropping
+in your own rows) changes the pool directly; no rebuild needed. If the file is
+missing or empty, the native binary falls back to a small built-in list, so
+`freshen` always works.
 
-`autopif.sh` (run automatically by `action.sh`, best-effort) refreshes this file
-with the latest **canary** Pixel fingerprints scraped from Google, when the
-device has `curl`/`wget`. It is a **no-op offline** and skips any device whose
-SoC it can't map, so it never makes the pool inconsistent. See
+### `devices.tsv` and the multi-brand flow
+
+`devices.tsv` is the **real-device identity source** used by `autopif.sh device`
+(the script's default mode, also run by `action.sh`, best-effort). It is a
+tab-separated table of real, non-Pixel devices (Samsung / Xiaomi / POCO / OPPO /
+vivo / Redmi / Infinix). From it, `autopif.sh` generates a complete
+`identity.prop` written to `device.identity`, which `freshen` applies when
+present. `autopif.sh fetch` instead writes a single fresh canary **Pixel**
+persona to `persona.override`, which takes precedence over the pool.
+
+Neither file is rewritten into `personas.tsv` — the pool is a stable, shipped
+fallback, and the generated override is applied on top of it. Both scripts are a
+**no-op offline** (they need `curl`/`wget`) and skip any device whose SoC they
+can't map, so they never make the identity inconsistent. See
 [Credits](#credits--references).
 
 ---
@@ -211,10 +253,25 @@ These live in `shared_prefs/applog.xml`, `shared_prefs/snssdk_openudid.xml`,
 `shared_prefs/bd_device_info.xml`, `files/bd_setting/{device_id, install_id,
 openudid, clientudid}`, and `files/.cdid`.
 
-SandboxID does **not** seed these files anymore. The zygisk module (L9)
-spoofs them **in-process**: every read of an AppLog cache file is redirected
-to memfd content derived deterministically from the persona identity +
-package name + `APPLOG_EPOCH` from `identity.prop`.
+These files are served from **two layers that must agree**:
+
+1. **In-process (authoritative)** — the zygisk module (L9) intercepts every
+   read of an AppLog cache file and redirects it to memfd content derived
+   deterministically from `fnv1a(FINGERPRINT | SERIAL | ANDROID_ID | pkg)`
+   + `APPLOG_EPOCH` from `identity.prop`. This is what any running app
+   actually observes.
+2. **On-disk (best-effort pre-warm)** — `rotate_ids.sh applog` also *writes*
+   the same values to the cache files via the `applog_seed` helper, so an app
+   that reads them through a code path the hook does not cover (a backup /
+   restore, a direct `cat`, a non-zygote child) still sees the rotated IDs
+   instead of the stale ones.
+
+Both layers derive from the same seed and epoch — the `applog-ids` CLI
+command is the single source of truth, and `applog_seed` is a plain consumer
+of it — so an on-disk file and an in-process read can never disagree. If the
+CLI binary or the write is unavailable, `applog_seed` fails closed (it logs a
+warning and leaves no root-owned file behind); the hook still spoofs
+in-process.
 
 `rotate_ids.sh applog` is the rotation command:
 
@@ -255,8 +312,8 @@ programmatic access (atomic upsert via `awk` + rename).
 ## Build from Source
 
 ```bash
-git clone https://github.com/Ilham311/sandboxid.git
-cd sandboxid
+git clone https://github.com/Ilham311/SandboxID.git
+cd SandboxID
 
 export ANDROID_NDK_HOME=/opt/android-ndk-r26d
 

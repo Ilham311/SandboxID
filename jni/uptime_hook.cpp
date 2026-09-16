@@ -37,9 +37,10 @@ static bool sbx_find_lib_dev_inode(const char* suffix, dev_t* out_dev, ino_t* ou
 void install_uptime_hook(Api* api, JNIEnv*) {
     const std::string& us = val("UPTIME_SECONDS");
     if (us.empty()) return;
-    char* end = nullptr;
-    long long secs = std::strtoll(us.c_str(), &end, 10);
-    if (end == us.c_str() || secs <= 0) return;
+    long long secs = 0;
+    // Rejects trailing garbage ("100abc") and out-of-range values, which a
+    // bare strtoll would silently truncate into a wrong offset.
+    if (!sbx_parse_longlong(us, secs) || secs <= 0) return;
     g_boot_off_sec = (int64_t)secs;
 
     static const char* const kLibs[] = {

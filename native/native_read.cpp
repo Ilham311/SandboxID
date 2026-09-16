@@ -430,27 +430,4 @@ bool should_hide_prop(const char* name) {
     return is_emulator_prop(name) || is_custom_rom_prop(name);
 }
 
-bool is_native_unsafe_prop(const char* name) {
-    if (!name) return false;
-    static const char* const exact[] = {
-        "ro.hardware",
-        "ro.product.board",
-        "ro.board.platform",
-        "ro.arch",
-        "ro.zygote",
-        "ro.vendor.api_level",
-        "persist.graphics.egl",
-        "ro.product.cpu.abi",
-        "ro.product.cpu.abi2",
-        "ro.product.cpu.abilist",
-        "ro.product.cpu.abilist32",
-        "ro.product.cpu.abilist64",
-    };
-    for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
-    if (std::strncmp(name, "ro.hardware.", 12) == 0)      return true;
-    if (std::strncmp(name, "ro.dalvik.vm.isa.", 17) == 0) return true;
-    if (std::strncmp(name, "dalvik.vm.isa.", 14) == 0)    return true;
-    return false;
-}
-
 }

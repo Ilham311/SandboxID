@@ -152,8 +152,16 @@ WRAP
   chmod 0755 "$PKG/system/bin/sandboxid"
 
   if [ "${AUTOPIF_REFRESH:-0}" = "1" ] && [ -f "$PKG/autopif.sh" ]; then
-    echo "  ==> refreshing persona pool (autopif, build-time)"
-    PERSONAS_FILE="$PKG/personas.tsv" MODDIR="$PKG" sh "$PKG/autopif.sh" || true
+    # autopif.sh's default mode is `cmd_device`, which generates a fresh
+    # device.identity (and persona.override on `fetch`) into the package — it
+    # does not rewrite personas.tsv. The env names it actually reads are
+    # PERSONA_OVERRIDE / AUTOPIF_DEVICES / AUTOPIF_ARTIFACT.
+    echo "  ==> generating build-time device identity (autopif device)"
+    MODDIR="$PKG" \
+      AUTOPIF_DEVICES="$PKG/devices.tsv" \
+      AUTOPIF_ARTIFACT="$PKG/device.identity" \
+      PERSONA_OVERRIDE="$PKG/persona.override" \
+      sh "$PKG/autopif.sh" || true
   fi
 
   if [ "$V" = "debug" ]; then

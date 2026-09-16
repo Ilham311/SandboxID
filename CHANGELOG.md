@@ -2,6 +2,155 @@
 
 ## Unreleased
 
+### Fix: full-repo code review — dua bug CRITICAL pada hook baca file + penyatuan tiga surface identitas
+
+Review menyeluruh seluruh repo (C++, shell, docs) menemukan dua bug
+**critical** pada lapisan hook baca file Zygisk, plus sekumpulan drift
+antar-surface yang membuat satu identitas bisa bocor di satu surface tapi
+tidak di surface lain.
+
+**Critical 1 — chunked read membocorkan file asli (leak 100%).**
+`hook_read` hanya menserve sintetik pada *chunk pertama*; chunk kedua dan
+seterusnya jatuh ke `orig_read`, yang membaca posisi file asli yang sudah
+bergeser. Akibatnya untuk file spoof di atas ~4 KB (build.prop per-app,
+applog.xml), app mendapat header palsu + **isi asli** dalam satu stream yang
+sama. Diperbaiki dengan *per-fd synth state machine*: `SynthFd { kind, buf,
+off, ready }` melacak setiap fd, `synth_build()` mengisi sekali di luar lock,
+dan `synth_serve()` menyerap posisi sendiri sampai EOF — sehingga read
+berulang/chunked maupun `pread64` sama-sama konsisten.
+
+**Critical 2 — deadlock pada read kedua (app hang).**
+`hook_read` memegang `g_synth_mu` lewat `lock_guard` lalu memanggil
+`synth_serve()` yang mengunci mutex non-rekursif yang sama. Read pertama
+selamat, read kedua **hang** — terlihat sebagai aplikasi stuck di loading
+screen. Diperbaiki dengan pola "decide under lock, act outside lock":
+flag `need_build` ditentukan di dalam critical section, semua kerja
+(buffer build, copy ke caller) dilakukan setelah lock dilepas.
+
+**Penyatuan tiga surface (drift removal).**
+Properti identitas harus konsisten di tiga tempat: resetprop global
+(`NATIVE_PROPS`), build.prop per-app yang di-bind-mount, dan hook Java
+`SystemProperties.native_get`. Sebelumnya surface Java memakai copy
+~160-entry buatan tangan yang **hilang** `ro.product.bootimage.build.fingerprint`,
+`ro.product.vendor_dlkm.build.fingerprint`, `ro.product.system_dlkm.build.fingerprint`,
+seluruh prop `*_for_attestation`, serta menduplikasi
+`gsm.sim.operator.iso-country` — sementara `ro.product.board` justru absen.
+Sekarang `prop_to_identity_map()` di-generate dari tabel `NATIVE_PROPS` yang
+sama dengan surface native, plus daftar `extras` terdokumentasi untuk prop
+runtime (CPU ABI, Dalvik, density) yang sengaja **tidak** di-mount karena
+akan merusak art runtime. Ketiga surface tidak bisa drift lagi.
+
+**Determinisme AppLog lintas layer.**
+Seed dan epoch AppLog kini punya satu sumber kebenaran di
+`native_read.hpp` (`applog_seed` / `applog_epoch_or_default`); CLI
+`applog-ids` dan hook in-process memakai fungsi yang sama persis, jadi
+file di disk dan bacaan in-process tidak mungkin berbeda. `is_native_unsafe_prop`
+yang sudah stale (mendaftar `ro.product.cpu.abi*` sebagai "tidak boleh di-spoof"
+padahal prop tersebut memang di-mount) dihapus.
+
+**Robustness hook.**
+- Hook `pread64` kini ABI-neutral (`long long` offset, bukan `off64_t`)
+  dengan fallback `::syscall(__NR_pread64, ...)`; offset negatif ditolak.
+- `openat` resolve relative path via `readlink("/proc/self/fd/<dirfd>")`
+  (bionic `open()` adalah wrapper `openat`).
+- `close` menghapus tracking fd dulu sebelum mendelegasikan.
+- Registrasi hook memakai tabel `HookReg` dan menghitung simbol yang gagal
+  di-hook, bukan diam-diam melanjutkan.
+- Crash handler ditulis ulang **async-signal-safe** (tidak ada
+  malloc/stdio/lock; `write(2)` + format integer manual).
+- Pembacaan properti memakai `__system_property_read_callback` (yang
+  `__system_property_read` sudah deprecated).
+
+**Docs & branding.**
+- `README.md` — skema kolom `personas.tsv` (10 required + 6 optional, aturan
+  Tensor vs non-Tensor, baris multi-brand) dikoreksi; section baru
+  `devices.tsv and the multi-brand flow` mendokumentasikan precedence
+  `device.identity` / `persona.override`; deskripsi AppLog dijawab ulang
+  (hook in-process adalah yang authoritative, `applog_seed` adalah
+  best-effort pre-warm yang memakai CLI yang sama); `git clone` URL
+  dikoreksi ke casing repo sebenarnya (`Ilham311/SandboxID`).
+- `build.sh` — blok AUTOPIF_REFRESH sekarang meneruskan env name yang
+  benar-benar dibaca `autopif.sh`.
+- `module.cpp` — `parse_blob` kini mem-trim `\r`, spasi, dan tab dari key.
+- `config.hpp` — `STATIC_PROP_DEFAULTS` diperluas (props konstan retail);
+  `MOUNT_PARTS`/`MOUNT_PARTS_N` yang tak terpakai dihapus.
+
+Verifikasi: 15/15 test host state-machine lulus (chunked read 1658 byte,
+EOF pada read kedua, fd tak terlacak diteruskan, pread64 repeatable &
+non-consuming, boot_id 36-char uuid, applog XML cocok prediktor CLI,
+close hook drop tracking). Seluruh TU bersih secara sintaks.
+
+### Fix: code review pass 2 — build-breaking API misuse + leak vektor lseek
+
+Review kedua pada lapisan hook. Paling parah: **working tree tidak bisa
+dibangun sama sekali**.
+
+**Critical — `pltHookRegister` return type salah (compile error).**
+Zygisk API yang di-pin (`zygisk.hpp`) mendeklarasikan
+`void pltHookRegister(...)`, tapi kode memeriksa nilai kembalinya
+(`if (!api->pltHookRegister(...))`), sehingga setiap ABI gagal compile
+dengan `invalid argument type 'void' to unary expression`. Diperbaiki:
+registrasi sekarang menghitung simbol terdaftar tanpa menguji kembalian
+(sebuah simbol yang tidak di-import library target memang tidak
+di-redirect — itu aman, bukan kegagalan).
+
+**Leak: `lseek` rewind membocorkan file asli (100% untuk file besar).**
+Setelah synth buffer habis dikonsumsi, entri fd dihapus dari map. App yang
+`lseek(0)` lalu membaca ulang (Java `RandomAccessFile.seek`, parser C yang
+rewind) mendapatkan **byte asli kernel** karena tracking-nya hilang.
+Diperbaiki: entri tetap ada sampai `close`; `synth_seek()` menjepit cursor
+ke `[0, buf.size()]` berdasarkan offset laporan kernel (sehingga
+`SEEK_SET`/`SEEK_CUR`/`SEEK_END` semua benar, dan seek melewati EOF
+tinggal di EOF seperti file asli). Hook `lseek` **dan** `lseek64`
+keduanya terpasang.
+
+**Dead branch: kunci MAC salah (`WLAN_MAC` → `WIFI_MAC`).**
+`rotate_ids.sh` mempersist MAC yang juga diprogram ke `wlan0` di bawah nama
+`WIFI_MAC`, tapi hook membaca `WLAN_MAC` yang tidak pernah ditulis —
+MAC persona tidak pernah dipakai, spoof MAC tidak konsisten dengan
+interface fisik. Kunci dan komentarnya dikoreksi.
+
+**Coverage gap: varian `_FORTIFY_SOURCE` dan I/O level Java.**
+- `__open_2` / `__openat_2` (varian tanpa argumen mode yang di-inject
+  compiler saat `_FORTIFY_SOURCE` aktif — default di Android NDK release)
+  kini di-hook; tanpa mereka, `open()` app bisa lewat tanpa tracking.
+  Logika resolusi `dirfd` diekstrak ke `synth_track_dirfd()` agar tidak
+  terduplikasi antara `hook_openat` dan `hook_openat_2`.
+- `libandroid_runtime.so` ditambahkan ke `kLibs` — semua I/O file level
+  Java (`android.system.Os`, `FileInputStream` native) melewati library ini.
+
+**Robustness lain.**
+- `hook_system_property_read_callback` kembali awal bila pointer original
+  belum terisi (race dengan instalasi hook) — sebelumnya crash null-deref.
+- `uptime_hook` memakai `sbx_parse_longlong` (menolak suffix sampah seperti
+  `"100abc"`) alih-alih `strtoll` tanpa validasi.
+- `companion.cpp` — `memcpy` overlap diganti `memmove`.
+- Komentar `MEMINFO` yang menyesatkan dikoreksi: untuk model tak dikenal,
+  total asli **dibulatkan ke atas** ke tier GB marketing (nilai kB persis
+  itu sendiri adalah fingerprint); tidak pernah di-pass-through.
+- `(void)set;` untuk meredam `-Wunused-but-set-variable` saat `LOGD`
+  ter-compile-out di release.
+
+**Dokumentasi.** README mendapat section "layer 4" (in-process file-read
+spoofing): daftar simbol yang di-hook, jaminan konsistensi per-fd, daftar
+file yang di-spoof (`/proc/version`, `/proc/meminfo` + tier rounding,
+`/proc/cpuinfo`, `boot_id`, MAC, `selinux/enforce`, file AppLog),
+perilaku fail-closed, dan keterbatasan cakupan PLT (`.so` app sendiri
+ditangani oleh pre-warm on-disk di layer 3).
+
+**Verifikasi host.** 99 assertion lulus, 0 gagal:
+65 check fungsi murni (`classify`, validitas MAC, determinisme AppLog
+lintas dua entry point, `patch_applog_xml`/`patch_meminfo`/`patch_cpuinfo`,
+`synth_proc_version`, helper uuid/hex/snowflake, hide-list) plus **34 check
+state machine fd asli** — `module_hooks.cpp` di-include langsung sehingga
+`synth_*`/`hook_*` yang diuji adalah kode produksi; hook harus menimpa
+byte kernel asli `/proc/meminfo` dan `boot_id` host ini, termasuk:
+read penuh + EOF, rewind `lseek` + re-read byte-identical, read chunked
+7-byte, read pendek, passthrough fd tak terlacak setelah `close`,
+resolusi `openat` relative path, `pread64` pada offset yang tidak
+menggeser cursor sequential, dan **fail-closed** (identitas tidak lengkap
+→ EOF, bukan byte asli). Seluruh 8 TU bersih di `-Wall -Wextra`.
+
 ### Refactor: source layout cleanup and dependency removal
 
 - Removed the unused experimental Java-method hook stack and all related

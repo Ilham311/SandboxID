@@ -127,6 +127,8 @@ private:
             if (eq == std::string::npos) continue;
             std::string k = line.substr(0, eq);
             std::string v = line.substr(eq + 1);
+            while (!k.empty() && (k.back()=='\r' || k.back()==' ' || k.back()=='\t'))
+                k.pop_back();
             while (!v.empty() && (v.back()=='\r' || v.back()=='\n' || v.back()==' '))
                 v.pop_back();
             if (!k.empty()) g_identity[k] = v;

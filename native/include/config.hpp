@@ -48,9 +48,6 @@ inline constexpr BindEntry BIND_ENTRIES[] = {
 };
 inline constexpr size_t BIND_ENTRIES_N = sizeof(BIND_ENTRIES) / sizeof(BIND_ENTRIES[0]);
 
-inline constexpr const char* MOUNT_PARTS[] = {"system", "vendor", "odm", "product", "system_ext"};
-inline constexpr size_t MOUNT_PARTS_N = sizeof(MOUNT_PARTS) / sizeof(MOUNT_PARTS[0]);
-
 struct KV { const char* k; const char* v; };
 
 inline constexpr KV VAL_DEFAULTS[] = {
@@ -94,10 +91,24 @@ inline constexpr KV STATIC_PROP_DEFAULTS[] = {
     {"dalvik.vm.isa.arm.features",   "default"},
     {"dalvik.vm.heapsize",           "512m"},
     {"ro.build.version.preview_sdk", "0"},
+    {"ro.build.version.preview_sdk_fingerprint", "REL"},
+    // Constant-valued props a retail device advertises; previously spoofs via
+    // the identity map, now served from here so the identity map can be
+    // generated from NATIVE_PROPS without losing them.
+    {"ro.arch",                        "arm64"},
+    {"ro.boot.mode",                   "normal"},
+    {"ro.boot.qemu",                   "0"},
+    {"ro.kernel.qemu",                 "0"},
+    {"ro.boot.warranty_bit",           "0"},
+    {"ro.adb.secure",                  "1"},
+    {"ro.crypto.state",                "encrypted"},
+    {"ro.treble.enabled",              "true"},
 
     {"ro.build.version.codename",       "REL"},
     {"ro.build.version.all_codenames",  "REL"},
 
+    {"ro.bootloader",                   "unknown"},
+    {"ro.boot.bootloader",              "unknown"},
     {"ro.boot.verifiedbootstate",       "green"},
     {"ro.boot.vbmeta.device_state",     "locked"},
     {"ro.boot.flash.locked",            "1"},
@@ -109,6 +120,7 @@ inline constexpr KV STATIC_PROP_DEFAULTS[] = {
     {"ro.debuggable",                   "0"},
     {"ro.build.selinux",                "1"},
     {"sys.oem_unlock_allowed",          "0"},
+    {"persist.sys.usb.config",          "none"},
 };
 inline constexpr size_t STATIC_PROP_DEFAULTS_N =
     sizeof(STATIC_PROP_DEFAULTS) / sizeof(STATIC_PROP_DEFAULTS[0]);

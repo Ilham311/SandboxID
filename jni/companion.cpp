@@ -470,7 +470,9 @@ static bool try_seed_ondemand() {
             LOGE("seed on-demand: binary not found at %s or %s", bin, fallback);
             return false;
         }
-        ::memcpy(bin, fallback, sizeof(bin));
+        // Copy the string only: a full sizeof(bin) memcpy would drag the
+        // bytes past the terminator into `bin` too.
+        ::memmove(bin, fallback, ::strlen(fallback) + 1);
     }
 
     pid_t s = ::fork();

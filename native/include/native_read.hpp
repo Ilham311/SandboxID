@@ -95,6 +95,26 @@ Kind classify(const char* path);
 bool is_emulator_prop(const char* name);
 bool is_custom_rom_prop(const char* name);
 bool should_hide_prop(const char* name);
-bool is_native_unsafe_prop(const char* name);
+
+// ---- Canonical AppLog identity derivation ----
+// The CLI predictor (`sandboxid applog-ids <pkg>` in native/sandboxid.cpp) and
+// the runtime L9 read hook (jni/module_hooks.cpp) MUST derive the same IDs from
+// the same inputs, otherwise the CLI prints values that can never match what
+// the app actually observes. Keep the formula here, in one place.
+
+// Seed for a package: identity fingerprint + serial + android id + package name.
+inline uint64_t applog_seed(const std::string& fingerprint,
+                            const std::string& serial,
+                            const std::string& android_id,
+                            const std::string& pkg) {
+    return fnv1a(fingerprint + "|" + serial + "|" + android_id + "|" + pkg);
+}
+
+// AppLog snowflake epoch: the APPLOG_EPOCH identity key, falling back to the
+// shared constant when it is absent (identity.prop always sets it post-freshen).
+inline uint64_t applog_epoch_or_default(const std::string& raw) {
+    uint64_t e = std::strtoull(raw.c_str(), nullptr, 10);
+    return e ? e : 1700000000000ULL;
+}
 
 }

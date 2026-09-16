@@ -679,13 +679,16 @@ static void generate_mount_files(const Identity& id) {
     add("ro.boot.serialno",                   SERIAL);
     add("ro.build.fingerprint",               FP);
     add("ro.bootimage.build.fingerprint",     FP);
+    add("ro.product.bootimage.build.fingerprint", FP);
     add("ro.system.build.fingerprint",        FP);
     add("ro.vendor.build.fingerprint",        FP);
     add("ro.odm.build.fingerprint",           FP);
     add("ro.product.build.fingerprint",       FP);
     add("ro.system_ext.build.fingerprint",    FP);
     add("ro.vendor_dlkm.build.fingerprint",   FP);
+    add("ro.product.vendor_dlkm.build.fingerprint", FP);
     add("ro.odm_dlkm.build.fingerprint",      FP);
+    add("ro.product.system_dlkm.build.fingerprint", FP);
     add("ro.product.model",                   MODEL);
     add("ro.product.brand",                   BRAND);
     add("ro.product.manufacturer",            MANUFACTURER);
@@ -750,6 +753,32 @@ static void generate_mount_files(const Identity& id) {
     add("ro.secure",                          std::string("1"));
     add("ro.debuggable",                      std::string("0"));
     add("ro.build.selinux",                   std::string("1"));
+    add("sys.oem_unlock_allowed",             std::string("0"));
+    add("persist.sys.usb.config",             std::string("none"));
+    add("ro.adb.secure",                      std::string("1"));
+    add("ro.kernel.qemu",                     std::string("0"));
+    add("ro.boot.qemu",                       std::string("0"));
+    add("ro.boot.warranty_bit",               std::string("0"));
+    add("ro.crypto.state",                    std::string("encrypted"));
+    add("ro.treble.enabled",                  std::string("true"));
+    add("ro.boot.mode",                       std::string("normal"));
+    add("ro.arch",                            std::string("arm64"));
+    add("ro.boot.hardware",                   HARDWARE);
+    add("ro.sf.lcd_density",                  g("LCD_DENSITY"));
+    add("gsm.operator.isroaming",             std::string("false"));
+
+    // SELinux context for each partition's build.prop, in the same order as
+    // sandboxid::MOUNT_PART_ENTRIES, so a locked device accepts the bind mount.
+    static const char* const part_ctx[] = {
+        "u:object_r:system_file:s0",   // system
+        "u:object_r:vendor_file:s0",   // vendor
+        "u:object_r:vendor_file:s0",   // odm
+        "u:object_r:system_file:s0",   // product
+        "u:object_r:system_file:s0",   // system_ext
+    };
+    static_assert(sizeof(part_ctx) / sizeof(part_ctx[0]) ==
+                  sandboxid::MOUNT_PART_ENTRIES_N,
+                  "part_ctx must list exactly one context per mount partition");
 
     for (size_t i = 0; i < sandboxid::MOUNT_PART_ENTRIES_N; ++i) {
         const auto& mp = sandboxid::MOUNT_PART_ENTRIES[i];
@@ -759,6 +788,8 @@ static void generate_mount_files(const Identity& id) {
         std::string path = std::string(MOUNTDIR) + "/" + mp.dir + "/build.prop";
         atomic_write(path, c);
         ::chmod(path.c_str(), 0644);
+        run_bin("/system/bin/chcon",
+                {"chcon", part_ctx[i], path.c_str()});
     }
 
     std::string aid  = g("ANDROID_ID");
@@ -785,17 +816,6 @@ static void generate_mount_files(const Identity& id) {
     ::chmod(xml_path.c_str(), 0600);
     ::chown(xml_path.c_str(), 1000, 1000);
 
-    struct { const char* sub; const char* ctx; } part_ctx[] = {
-        {"system",     "u:object_r:system_file:s0"},
-        {"vendor",     "u:object_r:vendor_file:s0"},
-        {"odm",        "u:object_r:vendor_file:s0"},
-        {"product",    "u:object_r:system_file:s0"},
-        {"system_ext", "u:object_r:system_file:s0"},
-    };
-    for (const auto& pc : part_ctx) {
-        std::string p = std::string(MOUNTDIR) + "/" + pc.sub + "/build.prop";
-        run_bin("/system/bin/chcon", {"chcon", pc.ctx, p.c_str()});
-    }
     run_bin("/system/bin/chcon", {"chcon", "u:object_r:system_data_file:s0",
             xml_path.c_str()});
 
@@ -1017,10 +1037,12 @@ static int cmd_applog_ids(const char* pkg) {
         auto it = id.kv.find(k);
         return it != id.kv.end() ? it->second : std::string();
     };
-    uint64_t epoch_ms = strtoull(g("APPLOG_EPOCH").c_str(), nullptr, 10);
-    if (epoch_ms == 0) epoch_ms = 1700000000000ULL;
-    uint64_t seed = sbxnr::fnv1a(g("FINGERPRINT") + "|" + g("SERIAL") + "|" +
-                                 g("ANDROID_ID") + "|" + std::string(pkg));
+    // Same seed and epoch as the L9 read hook (sbxnr::applog_seed /
+    // applog_epoch_or_default in native_read.hpp) — this command is a
+    // predictor of what the hook serves, so the two must not diverge.
+    uint64_t epoch_ms = sbxnr::applog_epoch_or_default(g("APPLOG_EPOCH"));
+    uint64_t seed = sbxnr::applog_seed(g("FINGERPRINT"), g("SERIAL"),
+                                       g("ANDROID_ID"), pkg);
     sbxnr::ApplogIds ids = sbxnr::make_applog_ids(seed, epoch_ms);
     printf("PKG=%s\n",        pkg);
     printf("EPOCH=%llu\n",    (unsigned long long)epoch_ms);
