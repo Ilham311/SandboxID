@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+### Add: WebUI bisa melihat kesalahan JS-nya sendiri — konsol + runner shell
+
+**Mengapa ini penting:** seluruh tujuan modul adalah membuat hal yang tak
+terlihat menjadi teramati, tapi WebUI-nya sendiri buta. Kalau `identity.prop`
+gagal diparse, atau fetch `carriers.tsv` melempar, halamannya cuma diam —
+kegagalannya tak terlihat sama persis dengan identifier yang harusnya
+ditampilkannya. Pola ini diambil dari repo yang paling dekat secara mekanisme
+([AlirezaParsi/COPG](https://github.com/AlirezaParsi/COPG)) dan diterapkan
+dalam idiom SandboxID sendiri.
+
+Yang ditambahkan (`webroot/console.js`, tanpa CSS baru — dipakai ulang class
+`.logbody` / `.ln` / `.lvl-*` yang sudah ada):
+
+- **Capture** `console.log/info/warn/error`, `window.onerror`, dan
+  `unhandledrejection` ke buffer 800 baris, ditampilkan sebagai source "Konsol
+  WebUI" di halaman Log yang sudah ada.
+- **Badge error** di tab Log yang tidak hilang sendiri; hanya pengguna yang
+  bisa mengakuiinya (dengan mengetuk tab Log). `clear()` sengaja tidak
+  menghapus badge.
+- **Runner shell** di halaman Log. `ksu.exec` baru resolve ketika prosesnya
+  **exit**, jadi `logcat` telanjang, `top`, `tail -f`, dan `getevent` tidak
+  pernah selesai dan **mengunci bridge** sampai timeout. Runner menolak atau
+  menulis ulang perintah itu (mis. `logcat` → `logcat -d`) daripada
+  mengandalkan timeout — timeout itu jaring pengaman, bukan mekanismenya.
+- **Simpan** log ke `debug/webui.log` lewat transport base64, bukan quoting
+  shell: log bisa berisi karakter sama tajamnya dengan perintah shell.
+- Kontrak utama: **jalur logging tidak boleh melempar ke pemanggilnya**. Kalau
+  `render()` rusak, gejalanya akan jadi aplikasi crash di setiap pemanggilan
+  `console`, yang lebih buruk daripada baris log yang hilang.
+
+Tiga bug asli ditemukan dan diperbaiki oleh test harness saat menulis fitur
+ini — bukan ditebak, tapi terbukti gagal dulu:
+
+1. `add()` bisa melempar ke pemanggilnya saat `render()` rusak (guard re-entrancy
+   hanya mencegah rekursi, bukan propagasi). Dibungkus `try/catch` penuh.
+2. `ReferenceError: escapeHtml is not defined` saat `app.js` belum ter-load —
+   tepat skenario "dua file bisa disajikan terpisah" yang diklaim komentar
+   header-nya ditangani. Kini dijaga dengan `typeof`.
+3. `MODDIR` tidak pernah menjadi properti `window` karena ia `const` level
+   top — referensi telanjang melempar. Dijaga dengan `typeof` dan fallback ke
+   path modul yang sebenarnya.
+
+`logcat -s TAG:V` juga kini dapat `-d`: `-s` cuma spek filter, ia tetap
+streaming tanpa henti, jadi menambahkan `-d` adalah perilaku yang benar.
+
+**Test:** `tests/host/console_check.cjs` — 24 cek dijalankan terhadap
+`console.js` asli di bawah DOM stub. Dimasukkan sebagai suite ketiga di
+`tests/host/run.sh` (skip kalau `node` tidak ada — bukan failure, karena
+suite C++ adalah yang harus selalu jalan).
+
 ### Fix: koreksi library hook I/O level Java — libjavacore.so, bukan libandroid_runtime.so
 
 **Ini koreksi dari klaim yang keliru di v2.2.0/v2.2.1.** Pass 2 menambahkan

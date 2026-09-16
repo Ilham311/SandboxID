@@ -9,15 +9,19 @@
 # that translation unit, so the hook code under test is production code, not a
 # copy of it.
 #
-# Two suites:
-#   sbx_pure     pure functions: classify(), MAC validity, AppLog determinism,
-#                patch_applog_xml/patch_meminfo/patch_cpuinfo, uuid/snowflake.
-#   sbx_hook_sm  the per-fd state machine against this host's REAL /proc files:
-#                open/read/EOF, lseek rewind, chunked reads, pread64, close,
-#                relative openat, and fail-closed behaviour.
+# Three suites:
+#   sbx_pure       pure functions: classify(), MAC validity, AppLog determinism,
+#                  patch_applog_xml/patch_meminfo/patch_cpuinfo, uuid/snowflake.
+#   sbx_hook_sm    the per-fd state machine against this host's REAL /proc files:
+#                  open/read/EOF, lseek rewind, chunked reads, pread64, close,
+#                  relative openat, and fail-closed behaviour.
+#   console_check  the WebUI console module (webroot/console.js) under a stubbed
+#                  DOM: capture, badge semantics, stream guards, save transport.
+#                  Skipped unless node is on PATH.
 #
-# Requirements: a C++20 compiler (clang++ or g++) on the host. No NDK needed.
-# Usage:   ./tests/host/run.sh          # build + run both suites
+# Requirements: a C++20 compiler (clang++ or g++) on the host, and node for the
+# console suite. No NDK needed.
+# Usage:   ./tests/host/run.sh          # build + run all suites
 #          CXX=g++ ./tests/host/run.sh
 
 set -eu
@@ -57,6 +61,19 @@ for suite in sbx_pure sbx_hook_sm; do
         exit_code=1
     fi
 done
+
+# ---- console_check: webroot/console.js under a stubbed DOM -----------------
+# node is not a build requirement of this repo, so absent node is a skip, not
+# a failure — the C++ suites above are the ones that must always run.
+if command -v node >/dev/null 2>&1; then
+    echo "==> running console_check"
+    if ! node "$REPO/tests/host/console_check.cjs"; then
+        echo "FAIL: console_check reported failures"
+        exit_code=1
+    fi
+else
+    echo "==> skipping console_check (node not found)"
+fi
 
 if [ "$exit_code" -eq 0 ]; then
     echo "==> all host suites passed"

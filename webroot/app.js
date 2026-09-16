@@ -659,6 +659,9 @@ document.getElementById('stRun').addEventListener('click', (ev) =>
 async function loadLog() {
   const src = document.getElementById('logSrc').value;
   const body = document.getElementById('logBody');
+  // The WebUI console source is a live in-memory buffer, not a file: hand
+  // rendering to console.js instead of spawning a command for it.
+  if (src === 'webui' && window.SbxConsole) { SbxConsole.render(); return; }
   body.innerHTML = skLines(10);
   let cmd = `echo '(log source tidak dikenal: ${escapeHtml(src)})'`;
   if (src === 'action')  cmd = `tail -n 400 ${shq(ACTION_LOG)} 2>/dev/null || echo '(belum ada action.log \u2014 tekan "Acak perangkat baru" atau tombol Action di KSU/APatch)'`;

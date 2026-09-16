@@ -34,7 +34,7 @@
   <button class="tab" data-tab="sim">SIM</button>
   <button class="tab" data-tab="targets">Target</button>
   <button class="tab" data-tab="selftest">Uji</button>
-  <button class="tab" data-tab="log">Log</button>
+  <button class="tab" data-tab="log">Log<span class="tab-dot" id="tabLogDot" hidden></span></button>
   <span class="nav-ind" id="navInd"></span>
 </nav>
 
@@ -108,10 +108,19 @@
         <option value="rotate">Log Rotasi</option>
         <option value="session">Sesi terbaru (varian debug)</option>
         <option value="crashes">Crash</option>
+        <option value="webui">Konsol WebUI (jejak JS &amp; error)</option>
       </select>
       <button id="logRefresh" class="ghost sm">Muat ulang</button>
     </div>
     <div id="logBody" class="logbody"></div>
+    <form class="row shell" id="shellForm" autocomplete="off">
+      <span class="shell-prompt" aria-hidden="true">$</span>
+      <input id="shellCmd" type="text" spellcheck="false" autocapitalize="off"
+             autocorrect="off" placeholder="sandboxid status" aria-label="Perintah shell (root)">
+      <button class="ghost sm" type="submit">Jalankan</button>
+      <button class="ghost sm" id="logCopy" type="button">Salin</button>
+      <button class="ghost sm" id="logSave" type="button">Simpan</button>
+    </form>
   </section>
 </main>
 
@@ -124,5 +133,6 @@
 </div>
 
 <script src="app.js"></script>
+<script src="console.js"></script>
 </body>
 </html>
