@@ -31,6 +31,10 @@ if [ -z "${VERSION:-}" ]; then
 fi
 
 OUT="$ROOT/dist"
+# Clear the previous build's zips. A local rerun accumulates them under dist/,
+# and a stale zip from an older version would be checksummed and uploaded
+# beside this build's, which is how a release ships the wrong file.
+rm -f "$OUT"/*.zip
 
 ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
 
@@ -70,7 +74,7 @@ mkdir -p "$OUT"
 
 build_variant() {
   local V="$1"
-  local DBG_FLAG
+  local DBG_FLAG UJ
   case "$V" in
     debug)   DBG_FLAG="-DSBX_DEBUG=ON"  ;;
     release) DBG_FLAG="-DSBX_DEBUG=OFF" ;;
@@ -166,9 +170,28 @@ WRAP
 
   if [ "$V" = "debug" ]; then
     sed -i 's/^name=.*/&  [DEBUG]/' "$PKG/module.prop"
+
+    # Point the debug package at its own update channel. update.json carries a
+    # single zipUrl, so this is the only mechanism that keeps a debug install on
+    # the debug build across an update: without it, a debug device reads the
+    # release channel and its next update silently installs the release zip,
+    # discarding the verbose build it was installed for. Derived from the value
+    # already in module.prop rather than restated, so it follows the module's
+    # own channel URL wherever that points.
+    UJ=$(grep '^updateJson=' "$PKG/module.prop" | head -n 1 | cut -d= -f2-)
+    case "$UJ" in
+      */update.json) UJ="${UJ%/update.json}/update.debug.json" ;;
+      *)
+        echo "  WARN: updateJson '$UJ' does not end in /update.json;" \
+             "the debug package stays on the release channel" >&2
+        ;;
+    esac
+    sed -i "s|^updateJson=.*|updateJson=${UJ}|" "$PKG/module.prop"
+
     echo "variant=debug"              >  "$PKG/debug_variant"
     echo "created=$(date -u +%FT%TZ)" >> "$PKG/debug_variant"
     echo "version=$VERSION"           >> "$PKG/debug_variant"
+    echo "updateJson=$UJ"             >> "$PKG/debug_variant"
     mkdir -p "$PKG/debug"
     echo "Auto-populated by service.sh on boot. Latest session log lives here." \
       > "$PKG/debug/README.txt"
