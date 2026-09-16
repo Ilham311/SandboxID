@@ -336,6 +336,32 @@ Build with `-Wall -Wextra` per ABI. The `debug` variant enables verbose
 `[D]` logs and on-device session capture under
 `/data/adb/modules/sandboxid/debug/`.
 
+### Host verification suites
+
+The deterministic core that both the Zygisk hook layer and the CLI build on can
+be verified **without a device or an NDK** — any C++20 host compiler works:
+
+```bash
+bash tests/host/run.sh        # or: CXX=g++ bash tests/host/run.sh
+```
+
+Two suites run, and both must pass:
+
+- `sbx_pure` — the pure functions: `classify()`, MAC validity, AppLog ID
+  determinism across both entry points, `patch_applog_xml` /
+  `patch_meminfo` / `patch_cpuinfo`, and the uuid/hex/snowflake helpers.
+- `sbx_hook_sm` — the **real** per-fd synth state machine from
+  `jni/module_hooks.cpp`, which the suite includes directly so the code under
+  test is production code rather than a copy. It opens the host's actual
+  `/proc/meminfo` and `boot_id` and makes the hook overwrite their real bytes,
+  covering full read + EOF, `lseek` rewind, chunked reads, `pread64` (which
+  must not advance the sequential cursor), relative-path `openat`, and
+  fail-closed behaviour when the identity is incomplete.
+
+The same suites run in CI (`host-tests` job). They are deliberately outside the
+release-critical path, so an environment quirk on a CI runner cannot block a
+release.
+
 ---
 
 ## License

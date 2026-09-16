@@ -219,13 +219,23 @@ static void synth_build(int fd) {
 
     std::string real;
     if (need_real) {
+        // Bounded: /proc/meminfo and /proc/cpuinfo are kernel-sized (a few KB),
+        // but applog.xml lives in the app's own dir and its size is app-
+        // controlled. A pathological file must not make the hook buffer
+        // unbounded amounts in the app's process. The cap is far above any
+        // legitimate AppLog map; a truncation there makes patch_applog_xml
+        // decline the input and the hook fall back to the small synthetic map.
+        constexpr size_t kMaxReal = 1u * 1024 * 1024;
         char tmp[8192];
         for (;;) {
-            ssize_t n = orig_read ? orig_read(fd, tmp, sizeof(tmp))
-                                  : ::read(fd, tmp, sizeof(tmp));
+            const size_t want = sizeof(tmp) < kMaxReal - real.size()
+                                ? sizeof(tmp) : kMaxReal - real.size();
+            if (want == 0) break;
+            ssize_t n = orig_read ? orig_read(fd, tmp, want)
+                                  : ::read(fd, tmp, want);
             if (n <= 0) break;
             real.append(tmp, static_cast<size_t>(n));
-            if (static_cast<size_t>(n) < sizeof(tmp)) break;   // short read = EOF
+            if (static_cast<size_t>(n) < want) break;   // short read = EOF
         }
     }
 

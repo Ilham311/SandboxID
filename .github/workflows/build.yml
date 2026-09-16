@@ -22,6 +22,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Host verification suites
+        # Pins the deterministic core both layers build on, and executes the
+        # real per-fd synth state machine from jni/module_hooks.cpp against the
+        # runner's own /proc files. Runs outside the release job: a host
+        # environment quirk must not be able to block a release.
+        run: |
+          if command -v clang++ >/dev/null 2>&1; then
+            bash tests/host/run.sh
+          else
+            CXX=g++ bash tests/host/run.sh
+          fi
+
   build:
     runs-on: ubuntu-latest
     steps:

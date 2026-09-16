@@ -26,6 +26,11 @@ function setBrand(brand) {
   else root.removeProperty('--brand');
 }
 
+// Root bridge timeout: a command that never calls back would leave the button
+// spinner stuck forever. Root ops here can be slow (force-stop, sleep, tar),
+// so this is deliberately generous.
+const EXEC_TIMEOUT_MS = 300_000;
+
 function exec(cmd) {
   return new Promise((resolve, reject) => {
     if (typeof ksu === 'undefined' || !ksu.exec) {
@@ -33,7 +38,17 @@ function exec(cmd) {
       return;
     }
     const cbName = `__ksucb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { delete window[cbName]; } catch (_) { window[cbName] = undefined; }
+      reject(Object.assign(new Error('root bridge timeout — perintah tidak menjawab'), { code: -1, timedOut: true }));
+    }, EXEC_TIMEOUT_MS);
     window[cbName] = function (errno, stdout, stderr) {
+      if (settled) return;   // already timed out; the late callback is dropped
+      settled = true;
+      clearTimeout(timer);
       try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
       const code = Number(errno);
       const out = String(stdout || '');
@@ -48,17 +63,29 @@ function exec(cmd) {
     try {
       ksu.exec(cmd, '{}', cbName);
     } catch (e) {
+      clearTimeout(timer);
       try { delete window[cbName]; } catch (_) {}
       reject(e);
     }
   });
 }
 
-async function shell(cmd) { return exec(cmd); }
-
+// `run` is the primitive every command goes through: it never throws, always
+// returning a {ok, out|err} shape so callers decide whether to toast.
 async function run(cmd) {
-  try { return { ok: true, out: await shell(cmd) }; }
+  try { return { ok: true, out: await exec(cmd) }; }
   catch (e) { return { ok: false, err: e }; }
+}
+
+// run() + toast on the outcome, for callers that want the result reported.
+async function safeExec(cmd, okMsg) {
+  const r = await run(cmd);
+  if (!r.ok) {
+    toast(trimTitle(r.err.message || String(r.err)), { kind: 'error', detail: r.err.stdout || r.err.stderr || '' });
+  } else if (okMsg) {
+    toast(okMsg, { kind: 'ok' });
+  }
+  return r;
 }
 
 const ICON = { ok: '\u2713', error: '\u2715', warn: '\u26a0', info: '\u2139' };
@@ -107,17 +134,6 @@ function hideToast() {
 function trimTitle(s) {
   const first = String(s || '').split('\n').map(x => x.trim()).filter(Boolean)[0] || 'Error';
   return first.length > 90 ? first.slice(0, 89) + '\u2026' : first;
-}
-
-async function safeExec(cmd, okMsg) {
-  try {
-    const out = await shell(cmd);
-    if (okMsg) toast(okMsg, { kind: 'ok' });
-    return { ok: true, out };
-  } catch (e) {
-    toast(trimTitle(e.message || String(e)), { kind: 'error', detail: e.stdout || e.stderr || '' });
-    return { ok: false, err: e };
-  }
 }
 
 async function withLoading(btn, fn) {
@@ -399,8 +415,12 @@ async function renderApplogStatus(wrap) {
 }
 
 function rotateCmd(key) {
+  // `key` is passed as a printf ARGUMENT, not interpolated into the format
+  // string: the format is single-quoted in shell, so a key containing a quote
+  // would otherwise break out of it. Keys come from a static table today, but
+  // the argument form keeps that true by construction.
   return `${ENV} && mkdir -p ${shq(MODDIR)}/debug && ` +
-    `{ printf '[%s] ==> rotate ${key} (webui)\\n' "$(date '+%F %T')"; ` +
+    `{ printf '[%s] ==> rotate %s (webui)\\n' "$(date '+%F %T')" ${shq(key)}; ` +
     `sh ${shq(ROTATE_SH)} ${shq(key)} 2>&1; } | tee -a ${shq(ROTATE_LOG)}`;
 }
 
@@ -640,7 +660,7 @@ async function loadLog() {
   const src = document.getElementById('logSrc').value;
   const body = document.getElementById('logBody');
   body.innerHTML = skLines(10);
-  let cmd;
+  let cmd = `echo '(log source tidak dikenal: ${escapeHtml(src)})'`;
   if (src === 'action')  cmd = `tail -n 400 ${shq(ACTION_LOG)} 2>/dev/null || echo '(belum ada action.log \u2014 tekan "Acak perangkat baru" atau tombol Action di KSU/APatch)'`;
   else if (src === 'rotate') cmd = `tail -n 400 ${shq(ROTATE_LOG)} 2>/dev/null || echo '(belum ada rotate.log \u2014 tekan tombol Rotasi)'`;
   else if (src === 'session') cmd = `ls -t ${shq(MODDIR)}/debug/session-*.log 2>/dev/null | head -n 1 | xargs -r tail -n 400 || echo '(tidak ada session log \u2014 pasang varian debug)'`;

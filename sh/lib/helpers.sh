@@ -50,6 +50,21 @@ se_restore() {
     fi
 }
 
+# Resolves a package's data directory, preferring /data/data over /data/user/0.
+# Prints the path and returns 0 when the package is installed, else returns 1.
+# Every app-specific helper below resolves through this one place, so a change
+# to the lookup order (e.g. a secondary user) lands here once.
+pkg_data_dir() {
+    _pkg="$1"
+    for _base in /data/data /data/user/0; do
+        if [ -d "$_base/$_pkg" ]; then
+            printf '%s\n' "$_base/$_pkg"
+            return 0
+        fi
+    done
+    return 1
+}
+
 get_users() {
     if [ -d /data/system/users ]; then
         for d in /data/system/users/[0-9]*; do
@@ -215,14 +230,10 @@ applog_wipe() {
         return "$_rc"
     fi
 
-    _data_dir=""
-    for _base in /data/data /data/user/0; do
-        [ -d "$_base/$_pkg" ] && { _data_dir="$_base/$_pkg"; break; }
-    done
-    if [ -z "$_data_dir" ]; then
+    _data_dir="$(pkg_data_dir "$_pkg")" || {
         log_info "applog_wipe: $_pkg not installed — skipped"
         return 1
-    fi
+    }
 
     log_step "AppLog wipe: $_pkg ($_data_dir)"
 
@@ -328,7 +339,21 @@ _applog_map() {
 
 _applog_put() {
     _dst="$1"; _mode="$2"; _uid="$3"; _refctx="$4"; _body="$5"
-    _tmp="${_dst%/*}/.sbxseed.$$"
+    _dstdir="${_dst%/*}"
+    # The staged file lives inside the app's own directory, which the app
+    # itself can write to. A plain `> $tmp` FOLLOWS a symlink, so an app that
+    # pre-plants one at a guessed staging name would be writing root-authored
+    # content to a path of its choosing. mktemp(1) creates with O_EXCL, which
+    # refuses an existing path — symlink or not — and yields an unpredictable
+    # name; the fallback still checks the path is absent first.
+    if command -v mktemp >/dev/null 2>&1; then
+        _tmp="$(mktemp "${_dstdir}/.sbxseed.XXXXXX" 2>/dev/null)" || return 1
+    else
+        _tmp="${_dstdir}/.sbxseed.$$"
+        { [ -e "$_tmp" ] || [ -L "$_tmp" ]; } && return 1
+    fi
+    # mktemp gives 0600 root-owned: no window where the app can read the
+    # staged content before chown, unlike a umask-created file.
     if ! printf '%s\n' "$_body" > "$_tmp" 2>/dev/null || [ ! -s "$_tmp" ]; then
         rm -f "$_tmp" 2>/dev/null
         return 1
@@ -346,11 +371,7 @@ applog_seed() {
     _pkg="${1:-}"
     [ -n "$_pkg" ] || return 1
 
-    _data_dir=""
-    for _base in /data/data /data/user/0; do
-        [ -d "$_base/$_pkg" ] && { _data_dir="$_base/$_pkg"; break; }
-    done
-    [ -n "$_data_dir" ] || return 1
+    _data_dir="$(pkg_data_dir "$_pkg")" || return 1
 
     _cli="$(sbx_bin 2>/dev/null)"
     if [ -z "$_cli" ] || [ ! -x "$_cli" ]; then
@@ -451,14 +472,10 @@ applog_regen() {
         return "$_rc"
     fi
 
-    _found=0
-    for _base in /data/data /data/user/0; do
-        [ -d "$_base/$_pkg" ] && { _found=1; break; }
-    done
-    if [ "$_found" = 0 ]; then
+    _data_dir="$(pkg_data_dir "$_pkg")" || {
         log_info "applog_regen: $_pkg not installed — skipped"
         return 1
-    fi
+    }
 
     log_step "AppLog regen: $_pkg"
 
@@ -481,14 +498,10 @@ applog_regen() {
 applog_probe() {
     _pkg="${1:-}"
     [ -n "$_pkg" ] || return 1
-    _data_dir=""
-    for _base in /data/data /data/user/0; do
-        [ -d "$_base/$_pkg" ] && { _data_dir="$_base/$_pkg"; break; }
-    done
-    if [ -z "$_data_dir" ]; then
+    _data_dir="$(pkg_data_dir "$_pkg")" || {
         printf '%s 0 absent\n' "$_pkg"
         return 0
-    fi
+    }
     _sp="$_data_dir/shared_prefs"
     _bd="$_data_dir/files/bd_setting"
     _count=0

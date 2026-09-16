@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+### Fix: code review pass 3 — keamanan shell, webroot, dan test harness resmi
+
+Review ketiga, kali ini memakai standar mattpocock/skills (`code-review`
+two-axis + smell baseline Fowler, `codebase-design` deep-module, `tdd`
+test-at-seam) sebagai lensa utama, di luar bug hunting yang sudah dilakukan
+dua pass sebelumnya.
+
+**Keamanan shell (root).**
+- `helpers.sh` — staging file `applog_seed` ditulis di **dalam direktori app
+  sendiri**, yang bisa ditulis oleh app itu sendiri. `> "$tmp"` mengikuti
+  symlink, jadi app bisa menanam symlink di nama staging yang terduga dan
+  membuat root menulis konten ke path pilihannya. Kini memakai `mktemp(1)`
+  (O_EXCL, menolak path yang sudah ada — symlink atau bukan) dengan fallback
+  yang tetap menolak path yang ada; bonus: file staging 0600 root-owned, tidak
+  ada jendela di mana app bisa membacanya sebelum chown.
+- `module_hooks.cpp` — pembacaan file real kini **dibatasi 1 MB**. `/proc/
+  meminfo` dan `cpuinfo` ukurannya kernel (beberapa KB), tapi `applog.xml`
+  ada di direktori app dan ukurannya dikontrol app; tanpa cap, hook bisa
+  membuffer jumlah tak terbatas di proses app sendiri.
+
+**Duplikasi yang dihapus (Fowler: Duplicated Code).**
+- `helpers.sh` — loop resolusi `/data/data` vs `/data/user/0` muncul 4×
+  (`applog_wipe`, `applog_seed`, `applog_regen`, `applog_probe`). Kini
+  satu fungsi `pkg_data_dir()`; semua helper resolve lewat satu tempat, jadi
+  perubahan lookup (mis. secondary user) sekali kerja.
+- `webroot/app.js` — `shell()` adalah pure pass-through ke `exec()` (middle
+  man, gagal deletion test) — dihapus; `run()` dan `safeExec()` yang hampir
+  identik kini `safeExec` = `run` + toast, satu bentuk saja.
+
+**Webroot: robustness & hardening.**
+- `exec()` kini punya **timeout** (300s): perintah root yang tidak pernah
+  memanggil balik sebelumnya meninggalkan tombol loading selamanya; callback
+  yang telat di-drop dengan aman.
+- `rotateCmd()` — key di-pass sebagai **argumen printf**, bukan
+  di-interpolasi ke format string; formatnya single-quoted di shell, jadi
+  key dengan quote bisa keluar dari string tersebut (defense in depth; key
+  memang dari tabel statis hari ini).
+- `loadLog()` — guard untuk log source yang tidak dikenal (sebelumnya
+  `cmd` undefined diteruskan ke bridge).
+
+**Test harness resmi (skill `tdd`: tests at seams).**
+- Verifikasi host yang sebelumnya ad-hoc kini bagian dari repo:
+  `tests/host/run.sh` membangun dan menjalankan dua suite — `sbx_pure` (fungsi
+  murni) dan `sbx_hook_sm` (state machine fd asli dari `module_hooks.cpp`,
+  menimpa byte `/proc` host ini secara nyata). 99 assertion, 0 gagal.
+- CI mendapat job `host-tests` (di luar path release-critical, supaya
+  keanehan runner tidak bisa memblok rilis).
+- README: section baru "Host verification suites".
+
 ### Fix: full-repo code review — dua bug CRITICAL pada hook baca file + penyatuan tiga surface identitas
 
 Review menyeluruh seluruh repo (C++, shell, docs) menemukan dua bug
