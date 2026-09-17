@@ -130,14 +130,26 @@ static int     (*orig_openat)(int, const char*, int, ...) = nullptr;
 typedef ssize_t (*pread64_fn)(int, void*, size_t, long long);
 static pread64_fn orig_pread64 = nullptr;
 static int     (*orig_close)(int) = nullptr;
+// Declared here rather than beside hook_lseek: synth_build() rewinds a fd whose
+// seq_file position another reader consumed, and must call the ORIGINAL lseek
+// (hook_lseek would re-arm the synthetic cursor instead of moving the real one).
+typedef off_t (*lseek_fn)(int, off_t, int);
+static lseek_fn orig_lseek = nullptr;
 
 struct SynthFd {
-    sbxnr::Kind kind  = sbxnr::NONE;
+    sbxnr::Kind kind    = sbxnr::NONE;
     std::string buf;      // synthetic content once `ready`
-    size_t      off   = 0;
-    bool        ready = false;
+    size_t      off     = 0;
+    bool        ready   = false;   // buf is populated and servable
+    bool        building = false;  // another thread is producing buf
+    // Identity of the open file behind this fd, snapshotted when the entry was
+    // created. `have_ident` is false only when that fstat failed.
+    dev_t       dev     = 0;
+    ino_t       ino     = 0;
+    bool        have_ident = false;
 };
 static std::mutex            g_synth_mu;
+static std::condition_variable g_synth_cv;   // waiters for an in-flight build
 static std::map<int, SynthFd> g_synth_fds;
 
 // AppLog IDs for the current process, derived from the SAME seed and epoch as
@@ -237,52 +249,155 @@ static std::string synth_content(sbxnr::Kind k, const std::string& real) {
 static void synth_track(int fd, const char* path) {
     if (fd < 0 || !path) return;
     sbxnr::Kind k = sbxnr::classify(path);
-    if (k == sbxnr::NONE) return;
     std::lock_guard<std::mutex> lk(g_synth_mu);
-    g_synth_fds[fd] = SynthFd{ k, std::string(), 0, false };
+    if (k == sbxnr::NONE) {
+        // This fd is now bound to a file we do not spoof. Erasing any stale entry
+        // matters more than skipping the work: fd numbers are recycled, and an
+        // entry left behind by a close() we did not intercept (hook_close is not
+        // the only way a fd goes away) would serve synthetic /proc/meminfo bytes
+        // to whatever unrelated file inherited the number. "Untracked" has to
+        // mean passthrough in both directions.
+        g_synth_fds.erase(fd);
+        return;
+    }
+    SynthFd& s = g_synth_fds[fd];
+    s.kind = k; s.buf.clear(); s.off = 0;
+    s.ready = false; s.building = false;
+    s.dev = 0; s.ino = 0; s.have_ident = false;
+    // Snapshot who this fd currently is. See synth_identity_ok_locked().
+    struct stat st{};
+    if (::fstat(fd, &st) == 0) { s.dev = st.st_dev; s.ino = st.st_ino; s.have_ident = true; }
+}
+
+// A fd we recorded can be closed without hook_close ever seeing it: the app may
+// issue a raw syscall, a library we did not PLT-hook may close it, or the fd can
+// be handed to another process and closed there. The NUMBER is then handed out
+// again by the next open() of an unrelated file, and the stale entry would serve
+// synthetic /proc/meminfo bytes to a reader of that unrelated file. synth_track()
+// cannot catch this - it only sees opens that come through our hooks - so check
+// the file itself instead: (dev, ino) identifies the open file, and a recycled
+// number names a different one.
+//
+// Called with g_synth_mu held. fstat is a raw syscall and cannot re-enter our
+// own hooks, so holding the mutex across it is safe.
+static bool synth_identity_ok_locked(int fd, const SynthFd& s) {
+    if (!s.have_ident) return true;   // identity unknown: trust the entry
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) return false;
+    return st.st_dev == s.dev && st.st_ino == s.ino;
 }
 
 // Reads the whole real file (for patch-style kinds) and stores the synthetic
 // replacement. Called lazily from read()/pread64(); the real read happens
 // outside the mutex so a slow file cannot block other threads' reads.
+//
+// If another thread is already building this fd, the call waits for it rather
+// than returning: an earlier revision claimed the fd by setting `ready` before
+// filling `buf` and returned immediately when it saw the claim, so a concurrent
+// first reader of a freshly opened classified fd took `ready` at face value and
+// got EOF for a file that was about to have content. `ready` now means "buf is
+// populated", and a concurrent builder is waited for.
 static void synth_build(int fd) {
     sbxnr::Kind kind = sbxnr::NONE;
     bool need_real = false;
     {
-        std::lock_guard<std::mutex> lk(g_synth_mu);
+        // unique_lock, not lock_guard: the build-wait below must release the
+        // mutex while parked.
+        std::unique_lock<std::mutex> lk(g_synth_mu);
         auto it = g_synth_fds.find(fd);
         if (it == g_synth_fds.end() || it->second.ready) return;
+        if (it->second.building) {
+            // Bounded, and the bound is deliberately reachable in practice rather
+            // than only on a dead builder: a /proc read is microseconds, but
+            // applog.xml lives on app-controlled storage and can take far longer,
+            // and any build can be descheduled on a loaded device. When this fires
+            // the waiter below becomes a second builder, so the real read of this
+            // fd is then contended - the empty-read handling further down is what
+            // makes that safe rather than a source of wrong data.
+            g_synth_cv.wait_for(lk, std::chrono::milliseconds(100));
+            // Re-acquire state. Nothing below holds an iterator across the wait,
+            // because the mutex was released while waiting and another thread
+            // could have erased this fd.
+            it = g_synth_fds.find(fd);
+            if (it == g_synth_fds.end() || it->second.ready) return;
+            if (!it->second.building) return;   // built; buf holds the content
+            // Still building after the wait: the previous builder is gone or just
+            // slow. Seize the work rather than leaving the fd stuck on EOF.
+        }
         kind      = it->second.kind;
         need_real = synth_needs_real(kind);
-        it->second.ready = true;   // claim before the (unlocked) real read
+        it->second.building = true;
     }
 
-    std::string real;
-    if (need_real) {
-        // Bounded: /proc/meminfo and /proc/cpuinfo are kernel-sized (a few KB),
-        // but applog.xml lives in the app's own dir and its size is app-
-        // controlled. A pathological file must not make the hook buffer
-        // unbounded amounts in the app's process. The cap is far above any
-        // legitimate AppLog map; a truncation there makes patch_applog_xml
-        // decline the input and the hook fall back to the small synthetic map.
+    // Bounded: /proc/meminfo and /proc/cpuinfo are kernel-sized (a few KB), but
+    // applog.xml lives in the app's own dir and its size is app-controlled. A
+    // pathological file must not make the hook buffer unbounded amounts in the
+    // app's process. The cap is far above any legitimate AppLog map; a truncation
+    // there makes patch_applog_xml decline the input and the hook fall back to the
+    // small synthetic map.
+    auto read_real = [fd]() {
         constexpr size_t kMaxReal = 1u * 1024 * 1024;
         char tmp[8192];
+        std::string out;
         for (;;) {
-            const size_t want = sizeof(tmp) < kMaxReal - real.size()
-                                ? sizeof(tmp) : kMaxReal - real.size();
+            const size_t want = sizeof(tmp) < kMaxReal - out.size()
+                                ? sizeof(tmp) : kMaxReal - out.size();
             if (want == 0) break;
             ssize_t n = orig_read ? orig_read(fd, tmp, want)
                                   : ::read(fd, tmp, want);
             if (n <= 0) break;
-            real.append(tmp, static_cast<size_t>(n));
+            out.append(tmp, static_cast<size_t>(n));
             if (static_cast<size_t>(n) < want) break;   // short read = EOF
+        }
+        return out;
+    };
+
+    std::string real;
+    if (need_real) {
+        real = read_real();
+        if (real.empty()) {
+            // The kernel shares one file position across every user of an fd, and
+            // seq_file (/proc/meminfo, /proc/cpuinfo) returns 0 once that position
+            // has advanced. The seize path above deliberately permits a second
+            // builder when the first is unreasonably slow, and a reader of the app
+            // that we did not intercept can consume the position too - so a build
+            // can observe zero bytes for a file that provably has content
+            // (verified: 7 of 8 concurrent readers of one /proc/meminfo fd get 0).
+            // Rewind and retry before deciding anything; publishing an empty
+            // buffer would serve EOF for the life of this fd.
+            if (orig_lseek) (void)orig_lseek(fd, 0, SEEK_SET);
+            real = read_real();
         }
     }
 
     std::string content = synth_content(kind, real);
-    std::lock_guard<std::mutex> lk(g_synth_mu);
-    auto it = g_synth_fds.find(fd);
-    if (it != g_synth_fds.end()) { it->second.buf = std::move(content); it->second.off = 0; }
+    {
+        std::lock_guard<std::mutex> lk(g_synth_mu);
+        auto it = g_synth_fds.find(fd);
+        if (it != g_synth_fds.end()) {
+            // A `need_real` build that captured nothing and then produced nothing
+            // is a raced read, not the intentional fail-closed result of an
+            // incomplete identity (that case has real bytes to work with and still
+            // declines). Publishing it would freeze this fd on EOF; leaving the fd
+            // unbuilt makes the next read rebuild, and it converges once the
+            // concurrent readers drain. applog.xml is unaffected: an empty real
+            // there falls back to the fully synthetic map, which is non-empty.
+            if (need_real && real.empty() && content.empty()) {
+                it->second.building = false;
+                it->second.ready   = false;
+                LOGW("NATIVE_READ: fd %d (kind %d) terbaca kosong karena pembaca "
+                     "serentak dari fd yang sama - buffer tidak dipublikasikan, "
+                     "build akan dicoba ulang pada pembacaan berikutnya",
+                     fd, (int)kind);
+            } else {
+                it->second.buf = std::move(content);
+                it->second.off = 0;
+                it->second.ready = true;
+                it->second.building = false;
+            }
+        }
+    }
+    g_synth_cv.notify_all();
 }
 
 // Copies up to `count` synthetic bytes into `buf`. A fully-consumed buffer is
@@ -297,6 +412,8 @@ static ssize_t synth_serve(int fd, void* buf, size_t count) {
     auto it = g_synth_fds.find(fd);
     if (it == g_synth_fds.end()) return 0;    // closed concurrently
     SynthFd& s = it->second;
+    // `ready` now genuinely means "buf is populated", so this is a real EOF and
+    // not a build in progress (synth_build waits for those before we get here).
     if (!s.ready || s.off >= s.buf.size()) return 0;
     size_t avail = s.buf.size() - s.off;
     size_t cp = avail < count ? avail : count;
@@ -323,12 +440,23 @@ static ssize_t hook_read(int fd, void* buf, size_t count) {
     // Decide under the lock, act outside it: synth_serve takes the lock itself,
     // and a blocking real read must never hold it.
     bool need_build = false;
+    bool recycled = false;
     {
         std::lock_guard<std::mutex> lk(g_synth_mu);
         auto it = g_synth_fds.find(fd);
         if (it == g_synth_fds.end())
             return orig_read ? orig_read(fd, buf, count) : ::read(fd, buf, count);
-        need_build = !it->second.ready;
+        if (!synth_identity_ok_locked(fd, it->second)) {
+            g_synth_fds.erase(it);
+            recycled = true;
+        } else {
+            need_build = !it->second.ready;
+        }
+    }
+    if (recycled) {
+        LOGD("NATIVE_READ: fd %d ditutup tanpa hook_close dan dipakai ulang untuk "
+             "file lain - entry sintetis dibuang, read asli yang dilayani", fd);
+        return orig_read ? orig_read(fd, buf, count) : ::read(fd, buf, count);
     }
     if (need_build) synth_build(fd);
     return synth_serve(fd, buf, count);
@@ -337,13 +465,25 @@ static ssize_t hook_read(int fd, void* buf, size_t count) {
 static ssize_t hook_pread64(int fd, void* buf, size_t count, long long offset) {
     if (offset < 0) return -1;
     bool need_build = false;
+    bool recycled = false;
     {
         std::lock_guard<std::mutex> lk(g_synth_mu);
         auto it = g_synth_fds.find(fd);
         if (it == g_synth_fds.end())
             return orig_pread64 ? orig_pread64(fd, buf, count, offset)
                                 : ::syscall(__NR_pread64, fd, buf, count, offset);
-        need_build = !it->second.ready;
+        if (!synth_identity_ok_locked(fd, it->second)) {
+            g_synth_fds.erase(it);
+            recycled = true;
+        } else {
+            need_build = !it->second.ready;
+        }
+    }
+    if (recycled) {
+        LOGD("NATIVE_READ: fd %d didaur ulang ke file lain sebelum pread - "
+             "entry sintetis dibuang", fd);
+        return orig_pread64 ? orig_pread64(fd, buf, count, offset)
+                            : ::syscall(__NR_pread64, fd, buf, count, offset);
     }
     if (need_build) synth_build(fd);
     return synth_serve_at(fd, buf, count, static_cast<size_t>(offset));
@@ -403,42 +543,61 @@ static int hook_close(int fd) {
     return orig_close ? orig_close(fd) : ::close(fd);
 }
 
-// Re-arms the synthetic cursor: without it, an app that seeks back and re-reads
-// (Java RandomAccessFile.seek, or a C parser that rewinds) would be served the
-// synthetic bytes from the *old* offset, or — if the entry had been consumed —
-// the real file. `pos` is the real post-seek offset reported by the kernel, so
-// both SEEK_SET/SEEK_END/SEEK_CUR land in the right place, and a seek past the
-// synthetic end simply leaves the cursor at EOF, exactly like a real file.
-static void synth_seek(int fd, long long pos) {
-    if (pos < 0) return;    // failed seek, or a negative offset
+// Re-arms the synthetic cursor. `pos` is expressed in the SYNTHETIC file's
+// coordinate space: the replacement content may be shorter or longer than the
+// real file, so answering a seek with the kernel's real offset would make
+// length()/size() queries (the canonical lseek(fd, 0, SEEK_END)) disagree with
+// the bytes read() then returns. Callers that then size a buffer from the seek
+// result would allocate for one length and receive another.
+//
+// Returns the offset to report to the caller, or `real_result` unchanged when
+// the fd is not one we are spoofing (the real offset is then the truth).
+template <typename T>
+static T synth_seek(int fd, T real_result, T offset, int whence) {
+    if (real_result == static_cast<T>(-1)) return real_result;   // seek failed
     std::lock_guard<std::mutex> lk(g_synth_mu);
     auto it = g_synth_fds.find(fd);
-    if (it == g_synth_fds.end() || it->second.buf.empty()) return;
-    it->second.off = static_cast<size_t>(pos) > it->second.buf.size()
-                     ? it->second.buf.size()
-                     : static_cast<size_t>(pos);
+    if (it == g_synth_fds.end() || !it->second.ready || it->second.buf.empty())
+        return real_result;
+    if (!synth_identity_ok_locked(fd, it->second)) {
+        // The fd number now belongs to a different file. Its real offset is the
+        // only honest thing to report, and the entry must not outlive this call.
+        g_synth_fds.erase(it);
+        return real_result;
+    }
+    const size_t size = it->second.buf.size();
+    long long want;
+    switch (whence) {
+        case SEEK_SET: want = static_cast<long long>(offset); break;
+        case SEEK_CUR: want = static_cast<long long>(real_result) +
+                              static_cast<long long>(offset); break;
+        case SEEK_END: want = static_cast<long long>(size) +
+                              static_cast<long long>(offset); break;
+        default: return real_result;    // the kernel already validated/failed it
+    }
+    if (want < 0) { errno = EINVAL; return static_cast<T>(-1); }
+    it->second.off = static_cast<size_t>(want) > size
+                     ? size : static_cast<size_t>(want);
+    return static_cast<T>(it->second.off);
 }
 
 // off_t is 64-bit on arm64/x86_64; on the 32-bit ABIs the small files we
 // intercept never reach 2^32, so the truncated view is harmless. lseek64 uses
 // long long unconditionally for the same reason pread64 does.
-typedef off_t (*lseek_fn)(int, off_t, int);
-static lseek_fn orig_lseek = nullptr;
+// (orig_lseek is declared with the other originals near the top of this file.)
 typedef long long (*lseek64_fn)(int, long long, int);
 static lseek64_fn orig_lseek64 = nullptr;
 
 static off_t hook_lseek(int fd, off_t offset, int whence) {
     off_t r = orig_lseek ? orig_lseek(fd, offset, whence)
                          : ::lseek(fd, offset, whence);
-    synth_seek(fd, static_cast<long long>(r));
-    return r;
+    return synth_seek<off_t>(fd, r, offset, whence);
 }
 
 static long long hook_lseek64(int fd, long long offset, int whence) {
     long long r = orig_lseek64 ? orig_lseek64(fd, offset, whence)
                               : ::syscall(__NR_lseek, fd, offset, whence);
-    synth_seek(fd, r);
-    return r;
+    return synth_seek<long long>(fd, r, offset, whence);
 }
 
 // FORTIFY variants: code compiled with _FORTIFY_SOURCE and no O_CREAT calls
@@ -800,15 +959,25 @@ static void sbx_crash_handler(int sig, siginfo_t* info, void* ctx) {
     //    sees nothing at all - the crash looks unattributed even though this
     //    handler ran.
     //
-    // __android_log_write is NOT async-signal-safe: it takes liblog's internal
-    // lock, the same lock jni/companion.cpp deliberately avoids after fork.
-    // If the fault landed on a thread holding that lock, this call blocks, the
-    // signal is already delivered so nothing re-faults, and the process hangs
-    // without a tombstone - strictly worse than the silent discard it replaces.
-    // That is the accepted cost of attributing app crashes at all: liblog is
-    // the only write path an app process is permitted to use. The exposure is
-    // narrowed by never taking it on ART's resumable faults, and by warming
-    // liblog from normal context in install_crash_watchdog() below.
+    // __android_log_write is not async-signal-safe, but the specific hazard
+    // matters more than the general one:
+    //
+    //  - Modern liblog is lock-free (logd_writer.cpp: atomic_int sock_ with a
+    //    CAS, and a non-blocking socket for every log id except LOG_ID_SECURITY),
+    //    so the write itself cannot deadlock on liblog's own state.
+    //  - Bionic's __android_log_write_log_message() does take a lock for FATAL:
+    //        #if __BIONIC__
+    //          if (log_message->priority == ANDROID_LOG_FATAL)
+    //            android_set_abort_message(log_message->message);
+    //        #endif
+    //    android_set_abort_message() takes the process-global, non-recursive
+    //    abort_msg_lock. A fault on a thread already holding that lock would
+    //    then block here forever - hang, no tombstone.
+    // Logging the marker at ERROR instead of FATAL avoids android_set_abort_message
+    // entirely while still surfacing the marker, because sh/lifecycle/service.sh
+    // and summarize.sh match the marker TEXT ('SandboxID CRASH sig='), not the
+    // priority. The marker is diagnostic evidence, not an assertion, so FATAL
+    // was never the semantically right level for it.
     char line[192];
     size_t p = 0;
     // Every writer below stays inside [0, CAP]. The last two bytes of the
@@ -826,11 +995,14 @@ static void sbx_crash_handler(int sig, siginfo_t* info, void* ctx) {
     put(" addr=");
     p += sbx_fmt_hex(line + p, CAP - p,
                      reinterpret_cast<uintptr_t>(info ? info->si_addr : nullptr));
-    line[CAP] = '\n';
-    ssize_t rc = ::write(STDERR_FILENO, line, CAP + 1);
+    // Write and log exactly [0, p]. A previous revision always wrote/logged the
+    // full CAP-length buffer, appending whatever uninitialized stack bytes lay
+    // after the marker to both the stderr write and the logcat line.
+    line[p] = '\n';
+    ssize_t rc = ::write(STDERR_FILENO, line, p + 1);
     (void)rc;
-    line[CAP] = '\0';
-    __android_log_write(ANDROID_LOG_FATAL, LOG_TAG, line);
+    line[p] = '\0';
+    __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, line);
 
     // Hand the fault on so ART / debuggerd still see it and a tombstone is
     // produced. Reaching here implies no_prior when sig != SIGABRT.
@@ -855,10 +1027,14 @@ void install_crash_watchdog(const std::string& pkg) {
 
     // Warm liblog BEFORE the handlers are armed: __android_log_write connects
     // to logd and may allocate on first use, and doing either inside the
-    // handler is the deadlock the comment above warns about. LOGD is compiled
-    // out without SBX_DEBUG, so this warms it unconditionally.
-    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
-                        "crash watchdog armed for '%s'", pkg.c_str());
+    // handler is the allocation we are trying to avoid. This must actually run,
+    // so it uses LOGI rather than ANDROID_LOG_DEBUG: __android_log_buf_write()
+    // gates on __android_log_is_loggable() and returns -EPERM without ever
+    // touching the logger when log.tag.SandboxID is set above DEBUG, which would
+    // silently skip the warm-up and leave the connection to be made inside the
+    // handler. LOGI also keeps the arming marker visible in a release capture,
+    // where LOGD compiles out - summarize.sh counts this line.
+    LOGI("crash watchdog armed for '%s'", pkg.c_str());
 
     if (::sigaction(SIGSEGV, &sa, &old_segv) == 0) g_old_segv.store(&old_segv);
     if (::sigaction(SIGABRT, &sa, &old_abrt) == 0) g_old_abrt.store(&old_abrt);
@@ -868,20 +1044,23 @@ void install_crash_watchdog(const std::string& pkg) {
 // Sends CMD_DO_MOUNTS to the companion to bind-mount spoofed build.prop files
 // into this process's mount namespace.
 
-void request_companion_mounts(int fd) {
+// Returns true only when the full request/response round trip completed, so the
+// caller can avoid sending a second request onto a socket that is already dead.
+bool request_companion_mounts(int fd) {
     uint8_t cmd = sandboxid::CMD_DO_MOUNTS;
     uint32_t pid = static_cast<uint32_t>(getpid());
     if (!sandboxid::write_full(fd, &cmd, 1) ||
         !sandboxid::write_full(fd, &pid, sizeof(pid))) {
         LOGE("MOUNTS: failed to send request");
-        return;
+        return false;
     }
     uint32_t ok = 0;
     if (!sandboxid::read_full(fd, &ok, sizeof(ok))) {
         LOGE("MOUNTS: failed to read response");
-        return;
+        return false;
     }
     LOGD("MOUNTS: companion applied %u bind(s)", ok);
+    return true;
 }
 
 // ---------- request_companion_hide ----------

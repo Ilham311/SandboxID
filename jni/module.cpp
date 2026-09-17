@@ -1,4 +1,5 @@
 #include "module_impl.hpp"
+#include <sys/un.h>          // struct ucred, SO_PEERCRED
 #ifndef __NR_memfd_create
 # if defined(__aarch64__)
 #  define __NR_memfd_create 279
@@ -30,14 +31,41 @@ static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 // error it did not diagnose. UNKNOWN fails open - the round trip is attempted
 // and the real read/write error reports itself.
 enum class SocketState { OPEN, CLOSED, UNKNOWN };
-static SocketState companion_socket_state(int fd) {
-    if (fd < 0) return SocketState::UNKNOWN;
+
+// The zygote's sanitize_fds() runs between preAppSpecialize and postAppSpecialize
+// and closes every fd exemptFd() did not exempt. Once the companion socket is
+// reaped, its fd NUMBER is recycled by whatever is allocated next - most often
+// liblog's logd socket, which install_crash_watchdog()'s warm-up call opens in
+// exactly that window. A recycled socket is indistinguishable from a live
+// companion by behaviour alone: recv(MSG_PEEK) returns EAGAIN either way, and
+// write() of the 5-byte request header succeeds on both. SO_PEERCRED settles it
+// - a recycled fd has a different peer pid, or is not a socket at all and the
+// getsockopt fails. The credentials are snapshotted in preAppSpecialize, the
+// only point where the socket is provably ours.
+static bool fd_is_our_companion(int fd, const struct ucred& expected) {
+    if (fd < 0) return false;
+    struct ucred cr{};
+    socklen_t len = sizeof(cr);
+    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0) return false;
+    return cr.pid == expected.pid && cr.uid == expected.uid;
+}
+
+static SocketState companion_socket_state(int fd, const struct ucred& expected) {
+    if (fd < 0) return SocketState::CLOSED;
+    if (!fd_is_our_companion(fd, expected)) return SocketState::CLOSED;
     char c;
     ssize_t r = ::recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
     if (r == 1) return SocketState::OPEN;                  // reply already pending
     if (r == 0) return SocketState::CLOSED;                // EOF: socket reaped
     if (errno == EAGAIN || errno == EWOULDBLOCK) return SocketState::OPEN;
-    return SocketState::UNKNOWN;                           // transient, not dead
+    // EBADF / ENOTSOCK / ENOTCONN / EINVAL are permanent, not transient: the
+    // socket is gone. Only resource exhaustion could plausibly clear on retry,
+    // so that alone stays UNKNOWN. A previous revision classified every other
+    // errno as UNKNOWN, which routed the reaped-fd case (ENOTSOCK after reuse,
+    // EBADF before it) into a round trip that then logged a companion-blaming
+    // "MOUNTS: failed to send request" for a fd that was never a socket.
+    if (errno == ENOBUFS || errno == ENOMEM) return SocketState::UNKNOWN;
+    return SocketState::CLOSED;
 }
 
 std::map<std::string, std::string> g_identity;
@@ -66,6 +94,14 @@ public:
 
         ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
+
+        // Snapshot the peer NOW, while the socket is provably ours. This is the
+        // only guaranteed opportunity: sanitize_fds() runs after this returns,
+        // and once the fd number is recycled there is no way to tell a live
+        // companion socket from the socket that replaced it.
+        socklen_t peer_len = sizeof(comp_peer_);
+        if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &comp_peer_, &peer_len) == 0)
+            comp_peer_valid_ = true;
 
         // exemptFd() asks the zygote to keep the companion socket open across
         // specialize. Its bool return is NOT a reliable liveness signal:
@@ -141,30 +177,54 @@ public:
         if (comp_fd_ >= 0) {
             // Decide on the socket, not on exemptFd()'s return: on ReZygisk that
             // bool is garbage while the fd is fine, and on Magisk/ZygiskNext a
-            // genuine false leaves the socket reaped. This probe tells the two
-            // apart at the moment it actually matters.
-            const SocketState ss = companion_socket_state(comp_fd_);
+            // genuine false leaves the socket reaped. The peer-credential check
+            // inside the probe tells the two apart at the moment it actually
+            // matters, and also catches the fd number having been recycled.
+            const SocketState ss = companion_socket_state(comp_fd_, comp_peer_);
             if (ss != SocketState::CLOSED) {
-                request_companion_mounts(comp_fd_);
-                if (val("SBX_HIDE") == "1") request_companion_hide(comp_fd_);
+                // Re-apply the timeouts even though the probe just authenticated
+                // the fd: SO_SNDTIMEO/SO_RCVTIMEO belong to the socket object, so
+                // a socket whose fd number was somehow recycled carries none, and
+                // read_full() below has no deadline of its own. With this in
+                // place, a round trip that goes nowhere is bounded at 2s instead
+                // of parking this thread forever.
+                ::setsockopt(comp_fd_, SOL_SOCKET, SO_SNDTIMEO,
+                             &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
+                ::setsockopt(comp_fd_, SOL_SOCKET, SO_RCVTIMEO,
+                             &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
+
+                if (request_companion_mounts(comp_fd_)) {
+                    if (val("SBX_HIDE") == "1") request_companion_hide(comp_fd_);
+                } else {
+                    // The mounts round trip already failed on this fd; sending the
+                    // hide request behind it would only emit a second
+                    // companion-blaming error for the same dead socket.
+                }
             } else {
-                // recv() returned EOF, so the zygote really did close the socket
-                // during specialize and the mount round trip would only log a
-                // companion-blaming "MOUNTS: failed to send request". Say so
-                // accurately instead. In-process spoofing (Build.*,
-                // SystemProperties, L9 file reads) is unaffected; only direct
-                // on-disk build.prop readers inside the app see real values.
-                LOGW("layer-2 bind-mounts skipped for '%s': recv() on the "
-                     "companion socket returned EOF, so the zygote closed it "
-                     "during specialize (exemptFd() returned false in "
-                     "preAppSpecialize - on ReZygisk that return is unreliable, "
-                     "but EOF is not). In-process spoofing (Build.*, "
-                     "SystemProperties, L9 file reads) is intact; only direct "
-                     "on-disk build.prop readers see real values. summarize.sh "
-                     "reports a count.",
+                // The socket is gone - EOF, a permanent errno, or the fd number
+                // was recycled onto a socket with a different peer. The mount
+                // round trip would only log a companion-blaming "MOUNTS: failed
+                // to send request". Say so accurately instead. In-process
+                // spoofing (Build.*, SystemProperties, L9 file reads) is
+                // unaffected; only direct on-disk build.prop readers inside the
+                // app see real values.
+                LOGW("layer-2 bind-mounts skipped for '%s': the companion socket "
+                     "is not usable (probe saw EOF, a permanent errno, or a fd "
+                     "whose peer pid is no longer the companion) - the zygote "
+                     "closed it during specialize, which exemptFd() already "
+                     "predicted (on ReZygisk that return is unreliable; the peer "
+                     "credential check is what settles it). In-process spoofing "
+                     "(Build.*, SystemProperties, L9 file reads) is intact; only "
+                     "direct on-disk build.prop readers see real values. "
+                     "summarize.sh reports a count.",
                      pkg_.c_str());
             }
-            ::close(comp_fd_);
+            // Only close the fd if it is still the socket we opened. After a
+            // failed round trip the number may already have been recycled onto an
+            // unrelated file or pipe the app just opened, and closing that would
+            // corrupt the app's own state.
+            if (comp_peer_valid_ && fd_is_our_companion(comp_fd_, comp_peer_))
+                ::close(comp_fd_);
             comp_fd_ = -1;
         }
     }
@@ -178,6 +238,8 @@ private:
     bool active_ = false;
     bool fd_exempted_ = false;
     int comp_fd_ = -1;
+    struct ucred comp_peer_{};
+    bool comp_peer_valid_ = false;
     std::vector<uint8_t> blob_;
 
     void unload() {

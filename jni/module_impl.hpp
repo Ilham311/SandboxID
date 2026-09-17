@@ -25,6 +25,8 @@
 #include <signal.h>
 #include <ctime>
 #include <thread>
+#include <condition_variable>
+#include <chrono>
 #include <atomic>
 #include "zygisk.hpp"
 #include "config.hpp"
@@ -76,10 +78,14 @@ inline bool sbx_parse_longlong(const std::string& v, long long& out) {
 }
 
 inline bool sbx_should_suppress_key(const std::string& k) {
-    if (k.size() >= 11 + 5 &&
-        k.compare(0, 11, "log.looper.") == 0 &&
-        k.compare(k.size() - 5, 5, ".slow") == 0)
-        return true;
+    // NOTE: "log.looper.<uid>.<tid>.slow" was suppressed here for a while. It is
+    // NOT a device identifier - it is AOSP's per-process slow-dispatch threshold
+    // (set at runtime by LooperMonitor, present on every device regardless of
+    // persona), and the only thing suppression achieved was handing the caller
+    // its own default (-1 = "not configured"), which silently switched off the
+    // device's main jank diagnostic for any process we touched. The real value
+    // is now passed through untouched. The uid embedded in the name is not worth
+    // hiding either: an app can read its own uid directly.
     if (k.compare(0, 13, "debug.watson.") == 0)
         return true;
     return false;
@@ -92,5 +98,5 @@ void install_uptime_hook(Api* api, JNIEnv* env);
 void install_native_read_hooks(Api* api);
 void install_crash_watchdog(const std::string& pkg);
 void install_build_hook(JNIEnv* env);
-void request_companion_mounts(int fd);
+bool request_companion_mounts(int fd);
 void request_companion_hide(int fd);

@@ -41,7 +41,19 @@ void install_uptime_hook(Api* api, JNIEnv*) {
     // Rejects trailing garbage ("100abc") and out-of-range values, which a
     // bare strtoll would silently truncate into a wrong offset.
     if (!sbx_parse_longlong(us, secs) || secs <= 0) return;
-    g_boot_off_sec = (int64_t)secs;
+
+    // The persona claims it has already been up for `secs` seconds. A reader of
+    // CLOCK_BOOTTIME from this point on should see a value consistent with that
+    // age, so the offset has to solve  real_uptime + offset == persona_age,
+    // i.e.  offset = secs - real_uptime_now. An earlier revision added `secs`
+    // outright, which reports real_uptime + persona_age - never the persona's
+    // age, and wrong by the whole real uptime on a device that has been up for
+    // days. With the subtraction, the reader sees exactly `secs` now and ages at
+    // the same rate as real time, which is what elapsedRealtime() consumers
+    // (uptime displays, MIUI's looper monitor, ANR timing) expect.
+    struct timespec now{};
+    if (clock_gettime(CLOCK_BOOTTIME, &now) != 0) return;
+    g_boot_off_sec = (int64_t)secs - (int64_t)now.tv_sec;
 
     static const char* const kLibs[] = {
         "/libutils.so",
@@ -73,10 +85,20 @@ void install_uptime_hook(Api* api, JNIEnv*) {
         return;
     }
     if (orig_clock_gettime == nullptr) {
+        // Commit reported success but resolved no implementation: the hook would
+        // call clock_gettime() recursively through a null trampoline. Zeroing
+        // the offset makes the hook a no-op, but without this marker the layer
+        // looks healthy in every release capture.
         g_boot_off_sec = 0;
+        LOGW("UPTIME: pltHookCommit OK tapi orig_clock_gettime NULL — offset "
+             "dinolkan, hook no-op (pembaca jam lihat jam asli)");
         return;
     }
-    LOGD("UPTIME boottime PLT hook aktif (+%llds, %d/%zu lib mapped) orig=%p",
-         (long long)secs, registered, sizeof(kLibs) / sizeof(kLibs[0]),
+    // LOGD (not LOGI) is deliberate for the success path: a fresh persona has
+    // UPTIME_SECONDS unset, and this hook legitimately stays off for it, so a
+    // per-fork INFO line would be noise on every target spawn.
+    LOGD("UPTIME boottime PLT hook aktif (offset=%llds, persona=%llds, %d/%zu lib mapped) orig=%p",
+         (long long)g_boot_off_sec, (long long)secs,
+         registered, sizeof(kLibs) / sizeof(kLibs[0]),
          reinterpret_cast<void*>(orig_clock_gettime));
 }

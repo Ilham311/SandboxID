@@ -57,7 +57,18 @@ static jint hook_prop_get_int(JNIEnv* env, jclass clazz, jstring j_key, jint def
     std::string v;
     if (spoof_prop_value(k, v)) {
         long long n = 0;
-        if (sbx_parse_longlong(v, n)) { LOGD("TYPED SPI(id) '%s' -> %d", k.c_str(), (int)n); return (jint)n; }
+        // This overload can only return a jint. A persona value outside jint
+        // range (a milliseconds-scale epoch, for instance) would silently wrap
+        // to a negative number the real platform can never produce from this
+        // getter, and the app would act on it. Fall through to the unspoofed
+        // path instead of returning a truncated value.
+        if (sbx_parse_longlong(v, n) && n >= -2147483648LL && n <= 2147483647LL) {
+            LOGD("TYPED SPI(id) '%s' -> %d", k.c_str(), (int)n);
+            return (jint)n;
+        }
+        if (sbx_parse_longlong(v, n) && (n < -2147483648LL || n > 2147483647LL))
+            LOGW("TYPED SPI(id) '%s' = %lld di luar rentang jint — dilewatkan, "
+                 "nilai asli yang dipakai", k.c_str(), (long long)n);
     }
     const auto& m = sbx_int_spoof();
     auto it = m.find(k);

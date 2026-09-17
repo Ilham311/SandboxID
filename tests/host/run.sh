@@ -117,7 +117,7 @@ mkdir -p "$OUT"
 
 exit_code=0
 
-for suite in sbx_pure sbx_hook_sm; do
+for suite in sbx_pure sbx_hook_sm sbx_race_probe; do
     src="$REPO/tests/host/$suite.cpp"
     bin="$OUT/$suite"
 

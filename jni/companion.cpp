@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <poll.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -42,6 +43,19 @@
 #endif
 
 static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
+
+// The 2 s IO timeout is right for *mid-request* partial data: a client that sent
+// a command byte but never its payload is broken and must not pin a handler
+// thread. It is far too short for the wait *between* requests. After replying
+// with the identity the app returns to postAppSpecialize and installs six hook
+// systems before it can send CMD_DO_MOUNTS - on a slow or cold-booting device
+// that legitimately takes many seconds. With 2 s on that wait the companion
+// timed out, closed the socket, and the app's later mount request failed with a
+// companion-blaming "failed to send request": layer 2 silently dead for every
+// target that starts slowly enough. The session wait is generous instead; a
+// genuinely abandoned client still ends the session because the kernel reports
+// EOF once the app process (or its fd) is gone.
+static constexpr struct timeval SBX_SESSION_TIMEOUT = {30, 0};
 
 static void watch_target_death(uint32_t pid, int client_fd);
 
@@ -117,6 +131,40 @@ struct MountResult {
     int32_t  first_fail_errno= 0;
 };
 
+// The mount/hide children are forked helpers that do setns()/mount()/umount2()
+// against a target's namespace. Most of the time they finish in milliseconds,
+// but a helper can wedge: a stopped child, or one blocked in an uninterruptible
+// mount, never writes its result and never exits. A plain read_full() would then
+// park this companion handler thread forever, and every target that connects
+// afterwards pays for the stall (one handler thread per client). This bounds the
+// wait, and on timeout kills and reaps the child so the pipe and the thread are
+// both released. poll() and close() are async-signal-safe enough for the parent
+// (this runs in the multithreaded companion, not in a forked child).
+static bool timed_read_full(int fd, void* buf, size_t n, int timeout_ms) {
+    uint8_t* p = static_cast<uint8_t*>(buf);
+    size_t got = 0;
+    while (got < n) {
+        struct pollfd pfd{ fd, POLLIN, 0 };
+        const int pr = ::poll(&pfd, 1, timeout_ms);
+        if (pr <= 0) return false;              // timeout, or poll error
+        const ssize_t r = ::read(fd, p + got, n - got);
+        if (r > 0) { got += static_cast<size_t>(r); continue; }
+        if (r < 0 && errno == EINTR) continue;
+        return false;                           // EOF / error
+    }
+    return true;
+}
+
+// Kill and reap a wedged helper. SIGKILL first, then a blocking waitpid: the
+// child is already stuck, so there is nothing to lose by being unconditional.
+static void sbx_kill_and_reap(pid_t child) {
+    ::kill(child, SIGKILL);
+    for (int i = 0; i < 50; ++i) {              // bound, in case of a zombie race
+        if (::waitpid(child, nullptr, 0) == child) return;
+        if (errno != EINTR) break;
+    }
+}
+
 static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
     int pipefd[2];
     if (::pipe(pipefd) != 0) {
@@ -188,7 +236,14 @@ static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
 
     ::close(pipefd[1]);
     MountResult r;
-    bool got = sandboxid::read_full(pipefd[0], &r, sizeof(r));
+    bool got = timed_read_full(pipefd[0], &r, sizeof(r), 5000);
+    if (!got) {
+        LOGE("mount child for pid=%u stuck or silent for 5s — killing it",
+             target_pid);
+        sbx_kill_and_reap(child);
+        ::close(pipefd[0]);
+        return 0;
+    }
     ::close(pipefd[0]);
 
     int status = 0;
@@ -295,24 +350,40 @@ static bool sbx_hide_read_mountinfo(uint32_t target_pid, std::string& out,
 
     ::close(pipefd[1]);                       // ---- parent ----
     MiHdr h{};
-    bool got = sandboxid::read_full(pipefd[0], &h, sizeof(h));
+    bool got = timed_read_full(pipefd[0], &h, sizeof(h), 5000);
+    if (!got) {
+        LOGE("mountinfo child for pid=%u stuck or silent for 5s — killing it",
+             target_pid);
+        sbx_kill_and_reap(child);
+        ::close(pipefd[0]);
+        read_errno = EIO;
+        return false;
+    }
     out.clear();
     if (got && !h.ns_open_errno && !h.setns_errno && !h.read_errno) {
         for (;;) {
             uint32_t clen = 0;
-            if (!sandboxid::read_full(pipefd[0], &clen, sizeof(clen))) { got = false; break; }
+            // Each chunk is bounded: a wedged child that wrote the header and
+            // then stalled must not park this thread after the header already
+            // arrived.
+            if (!timed_read_full(pipefd[0], &clen, sizeof(clen), 5000)) { got = false; break; }
             if (clen == 0) break;                          // EOF marker
             out.append(clen, '\0');
-            if (!sandboxid::read_full(pipefd[0], &out[out.size() - clen], clen)) { got = false; break; }
+            if (!timed_read_full(pipefd[0], &out[out.size() - clen], clen, 5000)) { got = false; break; }
         }
     }
+    if (!got) sbx_kill_and_reap(child);      // timed out or hit EOF mid-stream
     ::close(pipefd[0]);
     ::waitpid(child, nullptr, 0);
 
     ns_open_errno = h.ns_open_errno;
     setns_errno   = h.setns_errno;
     read_errno    = h.read_errno;
-    if (!got) { if (!read_errno) read_errno = EIO; return false; }
+    // A genuinely empty pipe means the child died before writing anything, which
+    // is not an I/O error against /proc/self/mountinfo - reporting EIO here made
+    // the caller log an "mountinfo read failed errno=5" that never happened. Only
+    // set an errno when the child actually reported one.
+    if (!got) return false;
     if (h.ns_open_errno || h.setns_errno || h.read_errno) return false;
     return true;
 }
@@ -359,7 +430,14 @@ static bool sbx_hide_apply_umounts(uint32_t target_pid,
     }
 
     ::close(pipefd[1]);                        // ---- parent ----
-    bool got = sandboxid::read_full(pipefd[0], &r, sizeof(r));
+    bool got = timed_read_full(pipefd[0], &r, sizeof(r), 5000);
+    if (!got) {
+        LOGE("hide child for pid=%u stuck or silent for 5s — killing it",
+             target_pid);
+        sbx_kill_and_reap(child);
+        ::close(pipefd[0]);
+        return false;
+    }
     ::close(pipefd[0]);
     ::waitpid(child, nullptr, 0);
     return got;
@@ -422,7 +500,15 @@ static void watch_target_death(uint32_t pid, int client_fd) {
         return;
     }
 
-    if (::fork() > 0) ::_exit(0);
+    // Detach: the intermediate forks a grandchild and exits so the grandchild is
+    // reparented to init and the companion's waitpid(f1) above returns promptly.
+    // The second fork needs its own failure branch: on EAGAIN (thread/fd limit)
+    // it returns -1, and "-1 > 0" is false, so without this the intermediate
+    // would fall straight through into the 30-minute watcher loop below and the
+    // companion's waitpid(f1) would block for the whole ceiling.
+    pid_t f2 = ::fork();
+    if (f2 > 0) ::_exit(0);        // intermediate: grandchild is detached
+    if (f2 < 0) ::_exit(0);        // could not detach: no watcher, nothing reaps
 
     // Bug #1c: this detached grandchild was forked out of the multithreaded
     // companion, so it may only call async-signal-safe functions. Replace
@@ -431,7 +517,14 @@ static void watch_target_death(uint32_t pid, int client_fd) {
     // allocate), which would deadlock if another thread held it at fork time.
     // The watcher's sole job is to reap itself once the target exits; it does
     // that silently now.
-    ::close(client_fd);
+    //
+    // It inherits every fd the companion had open and needs none of them, so
+    // close them all: holding the listen socket and other clients' sockets for
+    // up to 30 minutes would keep deleted clients alive and pin fd numbers a
+    // live companion still needs. close(2) is async-signal-safe; opendir is not,
+    // so this scans a fixed range instead of /proc/self/fd.
+    for (int fd = 3; fd < 1024; ++fd) ::close(fd);
+    (void)client_fd;
 
     const struct timespec nap = { 0, 500L * 1000L * 1000L };  // 500 ms
     for (int i = 0; i < 3600; ++i) {                          // ~30 min ceiling
@@ -493,7 +586,7 @@ extern "C" void sandboxid_companion(int client) {
     LOGD("companion invoked: client=%d pid=%d [%s]", client, getpid(), SBX_VARIANT_TAG);
 
     ::setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
-    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &SBX_SESSION_TIMEOUT, sizeof(SBX_SESSION_TIMEOUT));
 
     struct ucred peer{};
     socklen_t peer_len = sizeof(peer);
@@ -505,9 +598,18 @@ extern "C" void sandboxid_companion(int client) {
         LOGD("peer creds pid=%d uid=%d gid=%d", peer.pid, peer.uid, peer.gid);
 
     while (true) {
+        // Waiting for the next request is generous: the app is off installing
+        // its hooks and may not come back for seconds (see SBX_SESSION_TIMEOUT).
+        ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                     &SBX_SESSION_TIMEOUT, sizeof(SBX_SESSION_TIMEOUT));
         uint8_t cmd = 0;
         if (!sandboxid::read_full(client, &cmd, 1)) break;
         LOGD("recv cmd=%u", cmd);
+        // A client that sent a command owes us its payload - tighten the wait
+        // for the duration of this request only, and let the loop top restore
+        // the generous one next time round.
+        ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                     &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
 
         if (cmd == sandboxid::CMD_GET_IDENTITY) {
             uint16_t plen = 0;
