@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SandboxID TT — LSPosed module variant (standalone APK, no root).
+
+  Self-contained: the app below IS the whole module. Its UI generates the
+  persona; the hooks in the target process read it back through XSharedPreferences.
+
+  LSPosed reads these meta-data entries (verified against
+  org/lsposed/lspd/manager/util/ModuleUtil.java and XSharedPreferences.java in
+  the LSPosed source):
+
+    xposedmodule        declares this is a module
+    xposedminversion    must be > 92 for the prefs-redirect path
+    xposedsharedprefs   opts the module into that redirect
+    xposedscope         packages we hook (array resource; a ";"-joined string
+                        is also accepted)
+
+  xposedsharedprefs is the one that matters here: with it, XSharedPreferences
+  in the target process resolves to LSPosed's /data/misc/<uuid>/prefs/<pkg>/
+  directory instead of the module's app data dir. That directory is created
+  mode rwx--x--x and chowned to THIS app's uid, so the module can write to it
+  normally and the target can read from it — no world-readable file, no root,
+  no cooperation from the Zygisk module.
+
+  Coverage vs the Zygisk module (verified limits — see ../README.md):
+
+    COVERED   Build.*, SystemProperties.get/getInt/getLong/getBoolean,
+              SystemClock.elapsedRealtime/Nanos, TelephonyManager identifiers,
+              MediaDrm Widevine id, WifiInfo/Bluetooth MACs,
+              Settings.Secure android_id, and the AppLog identifiers below.
+
+    NOT COVERED  /proc and /sys synthetic content, raw AppLog cache-file
+              reads (bd_setting/*), native __system_property_* reads from the
+              app's own .so, mount hiding. Xposed has no libc GOT-redirect
+              API, so anything reading those from native code sees the real
+              device.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission"
+        xmlns:tools="http://schemas.android.com/tools" />
+
+    <application
+        android:label="SandboxID TT"
+        android:supportsRtl="true">
+
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposedminversion" android:value="93" />
+        <meta-data android:name="xposedsharedprefs" android:value="true" />
+        <meta-data android:name="xposeddescription"
+            android:value="TikTok device-identifier research module (LSPosed variant). Generate a new device persona from the app's own screen." />
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+
+        <!-- The module's own UI. This is the "one click": it generates a new
+             persona and writes it to SharedPreferences, which the hooks read. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

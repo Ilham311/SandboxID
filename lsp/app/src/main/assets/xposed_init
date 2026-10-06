@@ -1,0 +1,4 @@
+# Xposed entry point. LSPosed resolves this asset to find the module's
+# IXposedHookLoadPackage implementation. Must be a single line: the fully
+# qualified class name.
+id.sandboxid.tt.SandboxIdTT
