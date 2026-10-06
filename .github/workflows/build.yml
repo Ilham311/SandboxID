@@ -49,6 +49,27 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
+      - name: LSPosed rewriter unit test
+        # The register-body rewriter is the load-bearing piece of the LSPosed
+        # variant — the wire form it patches is what makes TikTok's register
+        # endpoint mint a new did. It has no Android dependency, so it is
+        # pinned here on a plain JDK: a regression in it would otherwise reach
+        # a device with no test of any kind. See
+        # lsp/app/src/test/java/id/sandboxid/tt/RewriteTest3.java.
+        run: |
+          set -eu
+          mkdir -p out/id/sandboxid/tt
+          # android.util.Log is the only Android dependency; stub it so the
+          # test compiles without an SDK. The two stubbed lines are inert.
+          sed -e 's/import android.util.Log;/\/\/ stubbed/' \
+              -e 's/Log\.d(TAG, "register body patched");/\/\/ stubbed/' \
+              lsp/app/src/main/java/id/sandboxid/tt/Rewrite.java \
+              > out/id/sandboxid/tt/Rewrite.java
+          cp lsp/app/src/test/java/id/sandboxid/tt/RewriteTest3.java out/
+          javac -d out out/id/sandboxid/tt/Rewrite.java out/RewriteTest3.java
+          java -cp out id.sandboxid.tt.RewriteTest3 | tee test.log
+          grep -q 'ALL PASS' test.log
+
       - name: Shell lint (syntax + shellcheck)
         run: |
           set -eu
