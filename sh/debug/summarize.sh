@@ -6,9 +6,8 @@
 # the LOG[DIWE] call sites in jni/module_hooks.cpp, jni/prop_hooks.cpp and
 # jni/companion.cpp. A previous revision grepped for markers that the code
 # never writes ('CRASH [', 'DEATH target', 'L7 SPB ... [SPOOF]', 'bind OK:'),
-# so every section reported 0 and the two biggest layer failures in the field
-# (layer-2 bind-mounts dead, a pltHookCommit batch-false while the hooks were
-# live) were invisible.
+# so every section reported 0 and a real field failure (a pltHookCommit
+# batch-false while the hooks were live) was invisible.
 
 IN="$1"
 OUT="${2:-/proc/self/fd/1}"
@@ -169,48 +168,46 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     fi
     echo ""
 
-    # ------------------------------------------------ layer 2: companion mounts
-    echo "--- Layer 2: companion bind-mounts (on-disk build.prop) ---"
-    # Both branches are logged by jni/module.cpp (the true branch is LOGD, so
-    # it appears only in a debug capture). The old EXOK inverted this with
-    # grep -cv, which is provably 0: the only line matching 'exemptFd(fd=' was
-    # the failure branch, so every match also contained 'returned false'.
+    # -------------------------------------------- companion hide pass (traces)
+    echo "--- Companion hide pass (detach module mount traces) ---"
+    # The companion's only post-specialize job now is the optional trace-detach
+    # umount pass (enable_hide). Property/Build spoofing is entirely in-process
+    # (per-target); there is no bind-mount layer. exemptFd() now decides only
+    # whether the companion socket survives specialize so this pass can run.
+    # Both branches are logged by jni/module.cpp (true is LOGD, so it appears
+    # only in a debug capture).
     EXF=$(grep -E "${MOD}exemptFd\(fd=" "$IN" | grep -c 'returned false')
     EXOK=$(grep -E "${MOD}exemptFd\(fd=" "$IN" | grep -c 'returned true')
-    SKIP=$(count 'layer-2 bind-mounts skipped')
-    M_OK=$(count 'MOUNTS: companion applied')
-    M_FAIL=$(count 'MOUNTS: failed to')
+    SKIP=$(count 'hide pass skipped')
     H_OK=$(count 'HIDE: companion detached')
     H_FAIL=$(count 'HIDE: failed to')
     printf "  %-28s : %s\n" "exemptFd() returned false"   "$EXF"
     printf "  %-28s : %s\n" "exemptFd() returned true"    "$EXOK"
-    printf "  %-28s : %s\n" "socket EOF, mount skipped"    "$SKIP"
-    printf "  %-28s : %s\n" "mount request OK"            "$M_OK"
-    printf "  %-28s : %s\n" "mount request FAILED"        "$M_FAIL"
+    printf "  %-28s : %s\n" "hide skipped (socket dead)"  "$SKIP"
     printf "  %-28s : %s\n" "hide request OK"             "$H_OK"
     printf "  %-28s : %s\n" "hide request FAILED"         "$H_FAIL"
     echo ""
-    # 'mount pid=N: A ok, B fail, C skip' — the companion's per-target result.
-    grep -oE "${MOD}mount pid=[0-9]+: [0-9]+ ok, [0-9]+ fail, [0-9]+ skip" "$IN" \
+    # 'hide pid=N: A detached, B fail, C candidate(s)' — the companion's
+    # per-target umount result (LOGI).
+    grep -oE "${MOD}hide pid=[0-9]+: [0-9]+ detached, [0-9]+ fail, [0-9]+ candidate" "$IN" \
         | sed -E 's/^.*pid=([0-9]+): /pid \1: /' | head -15 | while IFS= read -r r; do
             printf "    %s\n" "$r"
         done
-    BIND_OK=$(grep -oE "${MOD}mount pid=[0-9]+: [0-9]+ ok" "$IN" \
-        | grep -oE '[0-9]+ ok' | grep -oE '^[0-9]+' | awk '{s+=$1} END{print s+0}')
+    DET_OK=$(grep -oE "${MOD}hide pid=[0-9]+: [0-9]+ detached" "$IN" \
+        | grep -oE '[0-9]+ detached' | grep -oE '^[0-9]+' | awk '{s+=$1} END{print s+0}')
     echo ""
-    printf "  %-28s : %s\n" "total bind-mounts applied"   "$BIND_OK"
+    printf "  %-28s : %s\n" "total mounts detached"       "$DET_OK"
     echo ""
-    if [ "$M_FAIL" -gt 0 ] && [ "$M_OK" -eq 0 ]; then
-        echo "  WARNING: layer 2 is DEAD - every mount request failed and zero"
-        echo "  bind-mounts were applied. On-disk build.prop readers inside the"
-        echo "  target see the REAL device. If exemptFd() also returned false, the"
-        echo "  zygote reaped the companion socket during app specialization; the"
-        echo "  zygisk provider either does not support exemptFd or (ReZygisk)"
-        echo "  declares it void so its bool return is garbage. In-process layers"
-        echo "  (Build.*, SystemProperties, L9 reads) are unaffected."
-    elif [ "$EXF" -gt 0 ] && [ "$M_OK" -gt 0 ]; then
+    if [ "$H_FAIL" -gt 0 ] && [ "$H_OK" -eq 0 ]; then
+        echo "  NOTE: every hide request failed. If exemptFd() also returned"
+        echo "  false, the zygote reaped the companion socket during app"
+        echo "  specialization (the provider either lacks exemptFd or, on"
+        echo "  ReZygisk, declares it void so its bool return is garbage). This"
+        echo "  affects ONLY trace-hiding; in-process spoofing (Build.*,"
+        echo "  SystemProperties, L9 reads) is unaffected."
+    elif [ "$EXF" -gt 0 ] && [ "$H_OK" -gt 0 ]; then
         echo "  NOTE: exemptFd() reported false but the companion socket survived"
-        echo "  and mounts were applied - the return is a false negative (ReZygisk"
+        echo "  and the hide pass ran - the return is a false negative (ReZygisk"
         echo "  declares the slot void; the socket probe is what mattered)."
     fi
     echo ""
@@ -226,8 +223,6 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     # had not armed (a rejected package), or in code that never returned here.
     OWN=$(count 'SandboxID CRASH sig=')
     printf "  %-28s : %s\n" "module-marked crashes"       "$OWN"
-    # The watcher (companion.cpp watch_target_death) deliberately logs nothing
-    # when a target dies - it only reaps - so there is no death event to count.
     echo ""
 
     # ------------------------------------------------ tombstones

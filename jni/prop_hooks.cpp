@@ -19,9 +19,9 @@ const std::string& val(const std::string& k) {
 jstring (*orig_native_get)(JNIEnv*, jclass, jstring, jstring) = nullptr;
 
 // Property-name -> identity-key map for the JAVA surface (in-app
-// SystemProperties.native_get). It is generated from sandboxid::NATIVE_PROPS —
-// the same table that drives the resetprop surface in native/sandboxid.cpp —
-// so the two surfaces can never drift apart (previously this was a hand-maintained
+// SystemProperties.native_get). It is generated from sandboxid::NATIVE_PROPS,
+// the canonical prop-name -> identity-key table, so this map can never drift
+// from it (previously this was a hand-maintained
 // ~160-entry copy that was missing ro.product.bootimage.build.fingerprint,
 // ro.product.vendor_dlkm.build.fingerprint and the *_for_attestation props while
 // listing gsm.sim.operator.iso-country twice).

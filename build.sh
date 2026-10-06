@@ -7,6 +7,14 @@ cd "$ROOT"
 : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to your NDK path (r26+)}"
 MIN_SDK="${MIN_SDK:-26}"
 VARIANT="${VARIANT:-both}"
+# Dimensi produk, terpisah dari VARIANT (yang release|debug): 'full' mempertahankan
+# target.txt kosong by-design (module idle sampai pengguna mengisi); 'tt' mengisi
+# preset TikTok + rebrand package. Lihat data/target.tt.example.
+FLAVOR="${FLAVOR:-full}"
+case "$FLAVOR" in
+  full|tt) ;;
+  *) echo "Invalid FLAVOR: $FLAVOR (expected: full|tt)" >&2; exit 1 ;;
+esac
 
 for _tool in cmake zip; do
   if ! command -v "$_tool" >/dev/null 2>&1; then
@@ -42,6 +50,7 @@ echo "==> SandboxID $VERSION"
 echo "==> NDK:        $ANDROID_NDK_HOME"
 echo "==> MIN_SDK:    $MIN_SDK"
 echo "==> Variant(s): $VARIANT"
+echo "==> Flavor:     $FLAVOR"
 
 ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
 ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
@@ -130,8 +139,35 @@ build_variant() {
   # Data referensi + konfigurasi pengguna
   [ -f data/personas.tsv ] && cp data/personas.tsv "$PKG/"
   [ -f data/devices.tsv ]  && cp data/devices.tsv  "$PKG/"
-  [ -f data/carriers.tsv ] && cp data/carriers.tsv "$PKG/"
+  # carriers.tsv hanya relevan untuk flavor full (layer carrier sudah di-retire di
+  # ce6c1ba; flavor TT tidak menyimpannya). customize.sh tetap mem-preserve
+  # carrier.conf lama bila ada, jadi update tidak menghilangkan konfigurasi user.
+  [ "$FLAVOR" = "full" ] && [ -f data/carriers.tsv ] && cp data/carriers.tsv "$PKG/"
   [ -f data/target.txt ]   && cp data/target.txt   "$PKG/"
+  [ -f data/target.tt.example ] && cp data/target.tt.example "$PKG/"
+
+  if [ "$FLAVOR" = "tt" ]; then
+    # Marker flavor: customize.sh membaca ini untuk tahu ini build TT (mis. untuk
+    # memilih pesan install). Ditulis di package, BUKAN di module.prop sumber,
+    # karena CI membaca version dari module.prop dan verify_packages.sh mengharuskan
+    # name= rilis bersih dari marker [DEBUG] — [TT] tidak bentrok dengan itu.
+    echo "flavor=tt" > "$PKG/sbx_flavor"
+
+    # Rebrand hanya di package yang dibangun. module.prop sumber tetap generik
+    # supaya pipeline rilis (version sync, update.json, verify_packages.sh) dan
+    # flavor 'full' tidak terpengaruh.
+    sed -i 's|^name=.*|name=SandboxID TT — TikTok device identifier research module|' "$PKG/module.prop"
+    sed -i 's|^description=.*|description=Per-app device identifier spoofing for TikTok research (ByteDance AppLog + Build/SystemProperties). Pre-zygote Zygisk module. Configure target.txt; press Action for a new device identity.|' "$PKG/module.prop"
+
+    # Preset target.txt: hanya bila sumbernya kosong (by-design). customize.sh
+    # mem-preserve target.txt live di reinstall, jadi preset ini hanya untuk
+    # pemasangan pertama — tidak pernah menimpa pilihan pengguna yang sudah ada.
+    if [ ! -s data/target.txt ]; then
+      printf '%s\n' "# Preset flavor TT — TikTok Global." \
+        "# Varian lain (Lite/Douyin) ada di target.tt.example; salin ke sini." \
+        "com.zhiliaoapp.musically" > "$PKG/target.txt"
+    fi
+  fi
 
   # WebUI (disalin utuh)
   [ -d webroot ] && cp -R webroot "$PKG/"

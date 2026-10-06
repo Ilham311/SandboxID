@@ -117,6 +117,16 @@ inline uint64_t applog_seed(const std::string& fingerprint,
 
 // AppLog snowflake epoch: the APPLOG_EPOCH identity key, falling back to the
 // shared constant when it is absent (identity.prop always sets it post-freshen).
+//
+// This value is a DETERMINISM SALT and a ROTATION KNOB, not a device-age signal.
+// It lands in the high bits of the fabricated did/iid/ssid snowflakes so that (a)
+// the CLI predictor and the L9 read hook mint the same IDs, and (b) one rotation
+// produces a fresh, mutually-consistent trio. It must NOT be backdated to make a
+// persona look older: ByteDance mints the real device_id server-side from the
+// submitted openudid/cdid (the /service/2/device_register/ response carries it
+// back), so device age is the server's record — no timestamp baked into a
+// locally-minted snowflake is ever read as trust. Backdating would be cosmetic
+// only. See README "Known limits" (AppLog device_id is not server-minted).
 inline uint64_t applog_epoch_or_default(const std::string& raw) {
     uint64_t e = std::strtoull(raw.c_str(), nullptr, 10);
     return e ? e : 1700000000000ULL;

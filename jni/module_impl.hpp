@@ -98,5 +98,4 @@ void install_uptime_hook(Api* api, JNIEnv* env);
 void install_native_read_hooks(Api* api);
 void install_crash_watchdog(const std::string& pkg);
 void install_build_hook(JNIEnv* env);
-bool request_companion_mounts(int fd);
 void request_companion_hide(int fd);

@@ -1,0 +1,16 @@
+# SandboxID TT — daftar paket ByteDance yang didukung
+#
+# Salin SATU (atau lebih) baris tanpa # ke target.txt. Hanya aplikasi di
+# target.txt yang di-spoof; yang lain membaca perangkat asli.
+#
+# TikTok (Global) — yang dipakai reference test; rekomendasi default.
+com.zhiliaoapp.musically
+
+# TikTok Lite (Global) — ringan, kadang dipakai untuk tes awal.
+# com.zhiliaoapp.musically.go
+
+# TikTok versi regional (Asia Tenggara / luar Play Store) — nama paket lama.
+# com.ss.android.ugc.trill
+
+# Douyin (TikTok Tiongkok) — server berbeda; hanya untuk risiko riset.
+# com.ss.android.ugc.aweme

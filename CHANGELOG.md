@@ -2,6 +2,211 @@
 
 ## Unreleased
 
+### Riset: "backdate umur device" ditolak — `device_id` itu server-minted, epoch bukan sinyal kepercayaan
+
+Gagasan "backdate `APPLOG_EPOCH` supaya `device_id` fabrikasi terlihat sebagai device
+mapan (skor risiko rendah)" diaudit dan **ditolak sebagai gimmick**.
+
+Versi pertama audit ini hanya mengutip writeup pihak ketiga — bukan bukti, dan
+argumen "openudid → device_id deterministik" sendiri **tidak membuktikan apa-apa**
+karena determinisme konsisten dengan kedua skenario (client menghitung MAUPUN server
+menghitung). Audit diulang sampai ke **data-flow level di tiga implementasi register
+yang benar-benar berjalan**:
+
+- `hqucsx/tiktok_mobile` — detail penentunya ada di *device model*, bukan di call
+  site: `api/domain/Device.py` mendeklarasikan `device_id = ""`/`install_id = ""`
+  dan `DeviceUtils.create_device()` **tidak pernah mengisi keduanya**, sehingga POST
+  register pertama membawa keduanya **kosong**, dan baru diisi dari response
+  (`api/device_register.py:40-41`, `response['device_id_str']`). Nilai yang kembali
+  tidak mungkin merupakan gema dari request.
+- `xtekky/Tiktok-Applog` — implementasi register independen yang menyusun payload +
+  query dari `openudid`/`clientudid`/`cdid` **tanpa `device_id`/`install_id` sama
+  sekali**, lalu membaca `a['device_id']`/`a['install_id']` dari response. Register
+  berhasil sambil menghilangkan id sepenuhnya — hanya mungkin kalau server yang
+  mencetaknya.
+- `shenydowa/deviceid-x-gorgon` — schema response: `{"server_time", "device_id",
+  "install_id", "device_id_str", "install_id_str", "new_user": 1}`. `server_time`
+  adalah jam server sendiri (bukan jam client) dan `new_user` adalah putusan
+  baru-vs-lama dari server — server yang memegang buku registrasinya.
+
+Konsekuensinya: device age adalah **catatan server**, bukan bit yang dikontrol client.
+Snowflake fabrikasi tidak punya record registrasi, dan bukan `device_id` yang akan
+diturunkan server dari `openudid` fabrikasi kita — backend risk-control melihat device
+asing, tidak akan pernah melihat device "hangat". Backdate timestamp di snowflake lokal
+= kosmetik murni.
+
+**Yang terbukti vs yang masih inferensi** (ditulis jujur di CREDITS): *terbukti*
+`device_id` server-minted. *Belum terbukti* bahwa risk backend mengabaikan bit timestamp
+di dalam snowflake yang dikirim client — itu hanya bisa dipastikan dengan A/B register
+live (epoch di-backdate vs segar) yang dibandingkan response risikonya, di luar scope
+module privasi on-device. Inferensinya bersifat arsitektural: sistem yang sengaja
+memindahkan pencetakan id ke server supaya id tidak bisa dipalsukan, lalu mencatat
+`server_time` dan menghitung `new_user` sendiri, tidak akan mempercayai timestamp yang
+bisa dipalsukan di dalam id yang baru saja ia kendalikan. Kedua cabang tetap berakhir
+pada kesimpulan yang sama: kalau server mencari id-nya, tidak ada yang ditemukan; kalau
+ia mempercayai bit-nya secara naif, pencetakan server-side-nya jadi sia-sia.
+
+**Tidak ada perilaku kode yang berubah** — fitur applog sudah benar untuk tujuannya
+(unlinkability: app membaca ID rotasi, tidak bisa menautkan install ini ke persona
+sebelumnya). Malahan riset lapangan menunjukkan device yang *baru diregister* lebih
+sering ditolak (error 31) ketimbang device_id asing — jadi behavior modul sekarang
+(fabrikasi device_id nir-register) berada di sisi yang kurang berisiko. Yang ditambahkan
+murni dokumentasi + penjaga anti-regresi, supaya ide backdating tidak diusulkan ulang:
+
+- `README.md` — bullet baru di "Known limits" (AppLog `device_id`/`install_id` are not
+  server-minted), dengan kedua referensi.
+- `native/include/native_read.hpp` — comment penjaga di `applog_epoch_or_default`: epoch
+  adalah salt determinisme + knob rotasi, BUKAN sinyal device-age; titik ini diambil
+  karena CLI (`sandboxid.cpp`) dan hook L9 (`module_hooks.cpp`) sama-sama baca helper ini.
+- `native/sandboxid.cpp` — back-reference singkat di blok `APPLOG_EPOCH` saat `freshen`.
+- `CREDITS.md` — ketiga referensi di atas sebagai *negative result*, dengan tingkat
+  pembuktian per-sumber dan batasan eksplisit apa yang belum terbukti.
+
+### Varian LSPosed diredesain ulang — sekarang benar-benar mandiri (tanpa root, tanpa modul Zygisk)
+
+Revisi pertama varian LSPosed **salah terhadap permintaan asli**. Ia membaca persona dari
+path yang **harus dipublikasikan oleh sisi root modul Zygisk** (`action.sh` menyalin
+`identity.prop` ke `/data/local/tmp/sandboxid/identity.prop`). Itu membuat varian ini
+cuma tambahan yang tak berdiri sendiri — dipasang tanpa modul Zygisk, ia tidak melakukan
+apa-apa. Permintaannya adalah modul LSPosed yang cukup sendiri.
+
+**Akar masalahnya adalah asumsi desain yang tidak pernah diverifikasi:** draf pertama
+mengasumsikan tidak ada cara bagi hook (UID app target) untuk membaca data milik module
+app lain tanpa root, lalu memilih world-readable path sebagai workaround. Setelah
+dicek ke source LSPosed sendiri, asumsi itu **salah**:
+
+- `XSharedPreferences` memakai meta-data **`xposedsharedprefs`** untuk resolve ke
+  `serviceClient.getPrefsPath()` → `ConfigManager.getPrefsPath()`
+  (`LSPosed/daemon/.../ConfigManager.java:1095`), yang membuat direktori
+  `/data/misc/<uuid>/prefs/<pkg>/` mode **`rwx--x--x`** lalu **`chown` ke UID app
+  module** (`:1101-1109`).
+- Jadi module menulis prefs-nya sendiri seperti app biasa, dan proses target membacanya
+  dengan UID module — **tidak perlu world-readable, tidak perlu root**.
+- `XSharedPreferences.edit()` sengaja melempar `UnsupportedOperationException` (read-only
+  di sisi target) — memang semestinya target tidak boleh mengubah persona.
+
+**Perubahan kode:**
+
+- `PersonaGenerator.java` (**baru**) — seluruh pipeline persona dipindah ke pure Java.
+  Sebelumnya **tidak ada satupun di `lsp/` yang menghasilkan persona**. Memakai
+  `devices.tsv` (40 device, 8 brand) yang dibundle sebagai asset, bukan dua pool
+  (`devices.tsv` + `personas.tsv`) dengan format kolom berbeda seperti sisi root —
+  itu duplikasi yang komentarnya sendiri memperingatkan drift (`autopif.sh:314-318`).
+  Setiap key yang rumusnya berbeda antara shell dan native, **sisi native yang dipakai**
+  karena hook runtime ditulis melawannya; terutama `VBMETA_DIGEST` tetap deterministik
+  (shell pakai random hex, yang memutuskan semua ID turunan dari seed).
+- `MainActivity.java` (**baru**) — UI launcher app: tombol "Generate new device persona".
+  Ini pengganti tombol Action manager yang tidak ada di LSPosed.
+- `IdentityStore.java` — **ditulis ulang**: baca via `XSharedPreferences`, bukan file
+  `/data/local/tmp`. `save()` tetap memakai `SharedPreferences` biasa dari UI sendiri.
+- `AppLogHook.java` (**baru**) — lapisan AppLog yang sebelumnya dinyatakan mustahil.
+  Modul Zygisk menang AppLog di syscall (PLT-hook `open`/`read`); Xposed tidak bisa.
+  Tapi SDK ByteDance membaca `shared_prefs/applog.xml` + `snssdk_openudid.xml` lewat
+  **SharedPreferences Java**, jadi hook `SharedPreferencesImpl.getString` menjangkau-nya.
+  Pencocokan key adalah port eksak `patch_applog_xml` (substring case-insensitive,
+  urutan prioritas `clientudid` sebelum `did`).
+- `SeedId.java` — ditambah `applogSeed()` (mengikut package — **bukan** `personaSeed()`,
+  kesalahan yang akan diam-diam menghasilkan ID salah), `applogIds()`, `snowflake()`,
+  `uuid()`, `fillBytes()`.
+- `AndroidManifest.xml` — tambah `xposedsharedprefs` + launcher Activity.
+- `assets/devices.tsv` — 40 baris device dibundle.
+
+**Verifikasi numerik** (bisa dilakukan tanpa toolchain, dengan menjalankan C++ asli
+sebagai referensi):
+
+| Yang dicek | Hasil |
+|---|---|
+| AppLog seed + 6 ID (did/iid/ssid/cdid/clientudid/openudid) | **cocok persis** dengan C++ referensi di input yang sama |
+| `build_utc_from_patch` (`2023-08-05` + `230817V2345`) | `1690688135` di kedua sisi |
+| Snowflake unsigned-64 | `Long.toUnsignedString` wajib — `v ≥ 2^63` untuk epoch ≥ 2208988800000 |
+| Round-trip konversi tanggal Hinnant (termasuk 2024-02-29) | OK |
+
+**Yang masih tidak terjangkau** (didokumentasikan, bukan disembunyikan): raw file
+`files/bd_setting/*` + `.cdid` (dibaca native `libbdtracker.so`), store MMKV, `/proc`
+`/sys`, hook `__system_property_*` native, mount-hide, dan `pm clear` otomatis (tanpa
+root, pengguna harus swipe app dari recent sendiri — UI menjelaskannya).
+
+**Timing tetap berbeda dari Zygisk:** `handleLoadPackage` jalan setelah class load, jadi
+`static final` sudah membekukan nilai asli. Modul Zygisk menambal di
+`postAppSpecialize` sebelum class-init. Celah pertama yang harus diuji per-target saat
+ada toolchain.
+
+**Yang BELUM diverifikasi:** kompilasi, perilaku runtime, dan apakah `XSharedPreferences`
+benar-benar resolve di konfigurasi ini. Semua butuh toolchain Android.
+
+### Flavor `tt` — build khusus TikTok, tanpa menghapus arsitektur generik
+
+Permintaan: "buat module khusus TikTok, hapus dukungan app lain". Yang ditemukan saat
+diaudit: **target system modul ini sudah fully generic**. `data/target.txt` sengaja
+**kosong 0 baris** (module idle sampai diisi — safety by design), gate ada di
+`jni/companion.cpp:106-112` (`is_target`) + `jni/module.cpp:65`, dan nama package
+hanya mencapai kode produksi di **satu titik**: `module.cpp:170-171` → `g_pkg` →
+`module_hooks.cpp:163` (`applog_seed`). **Tidak ada satu pun nama package hardcode
+di kode produksi** — TikTok hanya muncul di README, `tests/host/sbx_pure.cpp` (test),
+dan satu string WebUI. Jadi "TT-only" bukan penghapusan kode, melainkan **preset +
+rebrand**:
+
+- `build.sh` — dimensi baru `FLAVOR=full|tt` (terpisah dari `VARIANT`). Saat `FLAVOR=tt`:
+  menulis `$PKG/sbx_flavor`, menulis preset `target.txt` **hanya bila `data/target.txt`
+  kosong** (hormati konfigurasi live yang di-preserve `customize.sh` saat reinstall),
+  rebrand `name=`/`description=` di `$PKG/module.prop` saja — **bukan** `module.prop`
+  sumber, karena CI membaca version dari sana dan `tools/verify_packages.sh`
+  menolak marker `[DEBUG]` di nama release (flavor TT tidak mengganggu guard rail itu).
+- `data/target.tt.example` (file baru) — daftar blok ByteDance yang tersedia:
+  TikTok Global `com.zhiliaoapp.musically`, Lite `com.zhiliaoapp.musically.go`,
+  regional `com.ss.android.ugc.trill`, Douyin `com.ss.android.ugc.aweme`, dengan
+  komentar. Pengguna salin baris ke `target.txt`.
+- `sh/lifecycle/customize.sh` — deteksi `$MODPATH/sbx_flavor` untuk pesan install yang
+  sesuai flavor + `set_perm` file baru.
+
+### GAID rotator dihapus — serangan ke GMS, TikTok tidak memakainya
+
+`set_gaid_value` dihapus dari `rotate_ids.sh` (52 baris), beserta dispatch `gaid`,
+alias, baris usage, dan kemunculannya di `all`/`safe`. `all` sekarang
+SSAID + wlan MAC + BT MAC + nama + applog; `safe` BT MAC + nama + applog.
+Card GAID di WebUI (`webroot/app.js` ROT_CARDS + `index.html` rot-note) dihapus.
+
+Alasannya bukan scope "TT-only", melainkan serangan-permukaan: rotatornya menulis ke
+data dir `com.google.android.gms` dan `force_stop com.google.android.gms`
+(`rotate_ids.sh:53` lama) — mengganggu Play Services di seluruh perangkat, dan TikTok
+tidak mengambil GAID dari GMS.
+
+**Kontrak identitas tidak patah:** kunci `GOOGLE_AID` **tetap di-generate** di
+`native/sandboxid.cpp:468` (uuid_v4) agar `identity.prop` schema stabil untuk apa pun
+yang mem-parsenya; hanya **penerapannya** yang hilang, bukan kuncinya.
+
+### Carrier layer DIPERTAHANKAN setelah audit — ternyata fully live
+
+Rencana awal menghapus `carriers.tsv` (143 → 1) dan subcommand `carrier`, dengan asumsi
+komit `ce6c1ba` ("retire wireless and carrier identities") sudah memensiunkan layer itu.
+**Asumsi itu salah**, dan penghapusan dibatalkan setelah diverifikasi rantai pemakaiannya
+secara live:
+
+```
+native/sandboxid.cpp:616  merge_carrier
+   → native/include/carrier.hpp:55-58  kv["GSM_OPERATOR_NUMERIC/ALPHA/ISO"]
+   → native/include/prop_defs.hpp:176-183  gsm.operator.numeric / .alpha / .iso-country
+   → jni/prop_hooks.cpp  (di-hook)
+```
+
+`ce6c1ba` hanya **memindahkan** `sbx_carrier.hpp` → `native/include/carrier.hpp` dan
+menghapus test lama — tidak ada satu pun konsumen di atas yang ikut. `gsm.operator.*`
+adalah input utama fingerprinting **negara** TikTok. `carriers.tsv` 143 row, subcommand
+`carrier`, dan `carrier.conf` semuanya tetap utuh.
+
+### 1-klik = perangkat baru: flow sudah ada, sekarang didokumentasikan
+
+Flow 1-klik **sudah merge** sebagai `fe71567` (2026-09-10) dan tidak diubah di sini.
+`action.sh` = acak persona (`autopif.sh device` dari `devices.tsv`: 40 perangkat,
+8 merek) → `device.identity` → `identity.prop` → `sandboxid unlock/seed/lock` →
+`pm clear` per target → `rotate_ids.sh all` → status AppLog per target → ringkasan
+persona. Yang ditambahkan murni dokumentasi: diagram flow baru di README
+("One click = a new device") + catatan eksplisit apa yang flow ini **tidak** lakukan
+(lihat entry risiko di atas — `new_user:1` adalah sisi **berisiko**, jangan
+mengubah `applog` ke wipe-only).
+
+Satu string tersisa diperbaiki: `action.sh:116` masih menyebut "GAID" di daftar
+rotasi padahal `rotate_ids.sh all` sudah tidak memutarnya.
 
 ## v2.2.9 (2026-09-16)
 

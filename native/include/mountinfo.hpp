@@ -61,8 +61,6 @@ inline bool is_protected(const MountRow& r) {
     if (starts_with(mp, moddir))       return true;
     if (starts_with(r.source, moddir)) return true;
 
-    for (const auto& be : sandboxid::BIND_ENTRIES)
-        if (mp == be.dst) return true;
     return false;
 }
 

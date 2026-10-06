@@ -59,9 +59,9 @@ if [ -x "$BIN" ] && [ -s "$DEVICE_ID" ]; then
         chmod 0644 "$IDENTITY" 2>/dev/null
         "$BIN" unlock >/dev/null 2>&1 || true
         say ""
-        say "==> Menerapkan identitas (apply-boot)"
+        say "==> Menerapkan identitas (seed; spoofing per-target in-process)"
         APPLY_OUT="$MODDIR/debug/.apply.$$"
-        "$BIN" apply-boot </dev/null >"$APPLY_OUT" 2>&1; RC=$?
+        "$BIN" seed </dev/null >"$APPLY_OUT" 2>&1; RC=$?
         tee2 < "$APPLY_OUT"; rm -f "$APPLY_OUT" 2>/dev/null
         "$BIN" lock >/dev/null 2>&1 || true
         [ "$RC" = 0 ] && APPLIED="multibrand"
@@ -113,7 +113,7 @@ fi
 
 if [ -r "$ROTATE" ]; then
     say ""
-    say "==> Rotasi ID lain (SSAID, GAID, WiFi/BT MAC, nama, boot count, AppLog)"
+    say "==> Rotasi ID lain (SSAID, WiFi/BT MAC, nama, boot count, AppLog)"
     ROT_OUT="$MODDIR/debug/.rotate.$$"
     MODDIR="$MODDIR" LOGFILE="$LOGFILE" sh "$ROTATE" all </dev/null >"$ROT_OUT" 2>&1; RC_ROT=$?
     tee_action < "$ROT_OUT"; rm -f "$ROT_OUT" 2>/dev/null

@@ -37,60 +37,11 @@ wipe_ssaid() {
     return 0
 }
 
-set_gaid_value() {
-    newgaid="${1:-}"
-    [ -z "$newgaid" ] && newgaid="$(identity_get GOOGLE_AID 2>/dev/null || true)"
-    if [ -z "$newgaid" ]; then
-        newgaid="$(generate_uuid)"
-        identity_persist GOOGLE_AID "$newgaid"
-        log_info "GAID generated + persisted to identity.prop"
-    fi
-    log_step "Set GAID: $(mask_id "$newgaid")"
-
-    settings_put global advertising_id "$newgaid" || log_warn "settings put advertising_id failed"
-    settings_put global limit_ad_tracking 0       || :
-
-    force_stop com.google.android.gms
-    command -v am >/dev/null 2>&1 && am kill --user 0 com.google.android.gms </dev/null >/dev/null 2>&1
-    sleep 1
-
-    se_permissive
-    GMS_DIR=/data/data/com.google.android.gms
-    if [ ! -d "$GMS_DIR" ]; then
-        se_restore
-        log_warn "GMS not installed - value queued in Settings.Global only"
-        return 0
-    fi
-
-    ADID="$GMS_DIR/shared_prefs/adid_settings.xml"
-    [ -f "$ADID" ] && cp -f "$ADID" "$BACKUP_DIR_ROOT/adid_settings.$(date +%s).xml" 2>/dev/null
-    rm -f "$ADID" 2>/dev/null
-    rm -f "$GMS_DIR"/shared_prefs/adsidentity*.xml 2>/dev/null
-    rm -f "$GMS_DIR"/files/adid_cache.dat 2>/dev/null
-    rm -rf "$GMS_DIR"/no_backup/adid* 2>/dev/null
-
-    mkdir -p "$GMS_DIR/shared_prefs" 2>/dev/null
-    cat > "$ADID" <<XMLEOF
-<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
-<map>
-    <string name="adid_key">$newgaid</string>
-    <boolean name="enable_limit_ad_tracking" value="false" />
-    <long name="last_reset_time" value="$(date +%s)000" />
-</map>
-XMLEOF
-    gms_uid=$(stat -c '%u' "$GMS_DIR" 2>/dev/null)
-    [ -n "$gms_uid" ] && chown "${gms_uid}:${gms_uid}" "$ADID" 2>/dev/null
-    chmod 0660 "$ADID" 2>/dev/null
-    if command -v chcon >/dev/null 2>&1; then
-        parent_ctx=$(ls -Zd "$GMS_DIR/shared_prefs" 2>/dev/null | awk '{print $1}')
-        [ -n "$parent_ctx" ] && chcon "$parent_ctx" "$ADID" 2>/dev/null
-    fi
-    se_restore
-    backup_rotate "adid_settings." 10
-    log_ok "GAID written: $(mask_id "$newgaid")"
-    return 0
-}
-
+# GAID rotation was removed for the TT flavor: set_gaid_value wrote into
+# com.google.android.gms' data dir and force-stopped Play Services device-wide,
+# out of scope for a TikTok-only module and disruptive to the whole device.
+# The GOOGLE_AID key is still generated into identity.prop by `sandboxid
+# freshen` (native/sandboxid.cpp) — only its application is gone, not the key.
 randomize_wlan_mac() {
     newmac="${1:-}"
     [ -z "$newmac" ] && newmac="$(identity_get WIFI_MAC 2>/dev/null || true)"
@@ -433,7 +384,6 @@ log_step "rotate_ids.sh cmd=$cmd (module $MODVER)"
 case "$cmd" in
     all)
         wipe_ssaid                    || FAILURES=$((FAILURES + 1))
-        set_gaid_value "$@"           || FAILURES=$((FAILURES + 1))
         randomize_wlan_mac            || FAILURES=$((FAILURES + 1))
         rotate_bluetooth_mac          || FAILURES=$((FAILURES + 1))
         sync_device_name              || FAILURES=$((FAILURES + 1))
@@ -441,14 +391,12 @@ case "$cmd" in
         regen_applog                  || :
         ;;
     safe)
-        set_gaid_value "$@"           || FAILURES=$((FAILURES + 1))
         rotate_bluetooth_mac          || FAILURES=$((FAILURES + 1))
         sync_device_name              || :
         sync_boot_count               || :
         regen_applog                  || :
         ;;
     ssaid)                wipe_ssaid              || FAILURES=$((FAILURES + 1)) ;;
-    gaid)                 set_gaid_value "$@"     || FAILURES=$((FAILURES + 1)) ;;
     wlan-mac|mac)         randomize_wlan_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
     bt-mac|bluetooth-mac) rotate_bluetooth_mac "$@" || FAILURES=$((FAILURES + 1)) ;;
     device-name|name)     sync_device_name "$@"   || FAILURES=$((FAILURES + 1)) ;;
@@ -460,10 +408,9 @@ case "$cmd" in
     -h|--help|help)
         cat <<USAGE
 Usage: rotate_ids.sh <cmd> [args]
-  all                        - SSAID + GAID + wlan-MAC + BT-MAC + device-name + boot-count + applog (default)
-  safe                       - GAID + BT-MAC + device-name + boot-count + applog (no reboot, no wifi reset)
+  all                        - SSAID + wlan-MAC + BT-MAC + device-name + boot-count + applog (default)
+  safe                       - BT-MAC + device-name + boot-count + applog (no reboot, no wifi reset)
   ssaid                      - wipe settings_ssaid.xml (needs reboot)
-  gaid [uuid]                - set Google Advertising ID
   wlan-mac [xx:xx:..]        - set wlan0 MAC
   bt-mac [xx:xx:..]          - set Bluetooth adapter MAC
   device-name [name]         - sync device_name/BT to persona (identity.prop MODEL)

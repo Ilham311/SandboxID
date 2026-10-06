@@ -47,17 +47,14 @@ static constexpr struct timeval SBX_IO_TIMEOUT = {2, 0};
 // The 2 s IO timeout is right for *mid-request* partial data: a client that sent
 // a command byte but never its payload is broken and must not pin a handler
 // thread. It is far too short for the wait *between* requests. After replying
-// with the identity the app returns to postAppSpecialize and installs six hook
-// systems before it can send CMD_DO_MOUNTS - on a slow or cold-booting device
+// with the identity the app returns to postAppSpecialize and installs its hook
+// systems before it can send CMD_DO_HIDE - on a slow or cold-booting device
 // that legitimately takes many seconds. With 2 s on that wait the companion
-// timed out, closed the socket, and the app's later mount request failed with a
-// companion-blaming "failed to send request": layer 2 silently dead for every
-// target that starts slowly enough. The session wait is generous instead; a
-// genuinely abandoned client still ends the session because the kernel reports
-// EOF once the app process (or its fd) is gone.
+// timed out, closed the socket, and the app's later hide request failed with a
+// companion-blaming "failed to send request". The session wait is generous
+// instead; a genuinely abandoned client still ends the session because the
+// kernel reports EOF once the app process (or its fd) is gone.
 static constexpr struct timeval SBX_SESSION_TIMEOUT = {30, 0};
-
-static void watch_target_death(uint32_t pid, int client_fd);
 
 static std::vector<std::string> g_targets;
 static time_t                   g_targets_mtime_sec = 0;
@@ -122,17 +119,8 @@ static std::string read_file(const char* p) {
     return ss.str();
 }
 
-struct MountResult {
-    uint32_t ok = 0, fail = 0, skip = 0, skip_src = 0, skip_dst = 0;
-    int32_t  ns_open_errno   = 0;
-    int32_t  setns_errno     = 0;
-    int32_t  slave_errno     = 0;
-    int32_t  first_fail_idx  = -1;
-    int32_t  first_fail_errno= 0;
-};
-
-// The mount/hide children are forked helpers that do setns()/mount()/umount2()
-// against a target's namespace. Most of the time they finish in milliseconds,
+// The hide helpers are forked children that do setns()/umount2() against a
+// target's namespace. Most of the time they finish in milliseconds,
 // but a helper can wedge: a stopped child, or one blocked in an uninterruptible
 // mount, never writes its result and never exits. A plain read_full() would then
 // park this companion handler thread forever, and every target that connects
@@ -165,119 +153,6 @@ static void sbx_kill_and_reap(pid_t child) {
     }
 }
 
-static uint32_t do_mounts_via_fork(uint32_t target_pid, int client) {
-    int pipefd[2];
-    if (::pipe(pipefd) != 0) {
-        LOGE("pipe failed: errno=%d", errno);
-        return 0;
-    }
-
-    pid_t child = ::fork();
-    if (child < 0) {
-        LOGE("fork failed: errno=%d", errno);
-        ::close(pipefd[0]); ::close(pipefd[1]);
-        return 0;
-    }
-
-    if (child == 0) {
-
-        ::close(pipefd[0]);
-        MountResult r;
-
-        // NOTE: this runs in a fork()ed child of the multithreaded companion, so only
-        // async-signal-safe calls are permitted until _exit. snprintf()/open() are safe;
-        // std::string concatenation (heap alloc) is NOT — build the path on the stack.
-        std::array<int, sandboxid::BIND_ENTRIES_N> src_fds{};
-        for (size_t i = 0; i < sandboxid::BIND_ENTRIES_N; ++i) {
-            char src[512];
-            ::snprintf(src, sizeof(src), "%s/%s",
-                       sandboxid::MOUNTDIR, sandboxid::BIND_ENTRIES[i].src_rel);
-            src_fds[i] = ::open(src, O_RDONLY | O_CLOEXEC);
-        }
-
-        char path[64];
-        ::snprintf(path, sizeof(path), "/proc/%u/ns/mnt", target_pid);
-        int tgt_ns = ::open(path, O_RDONLY | O_CLOEXEC);
-        if (tgt_ns < 0) {
-            r.ns_open_errno = errno;
-        } else if (::setns(tgt_ns, CLONE_NEWNS) != 0) {
-            r.setns_errno = errno;
-            ::close(tgt_ns);
-        } else {
-
-            bool propagation_isolated =
-                (::mount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr) == 0);
-            if (!propagation_isolated) r.slave_errno = errno;
-
-            for (size_t i = 0; propagation_isolated && i < sandboxid::BIND_ENTRIES_N; ++i) {
-                const auto& e = sandboxid::BIND_ENTRIES[i];
-                if (src_fds[i] < 0) { r.skip_src++; r.skip++; continue; }
-                if (::access(e.dst, F_OK) != 0) { r.skip_dst++; r.skip++; continue; }
-
-                char proc_fd_path[32];
-                ::snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/self/fd/%d", src_fds[i]);
-                if (::mount(proc_fd_path, e.dst, nullptr, MS_BIND, nullptr) == 0) {
-                    r.ok++;
-                } else {
-                    if (r.first_fail_idx < 0) { r.first_fail_idx = (int)i; r.first_fail_errno = errno; }
-                    r.fail++;
-                }
-            }
-            ::close(tgt_ns);
-        }
-
-        for (size_t i = 0; i < sandboxid::BIND_ENTRIES_N; ++i)
-            if (src_fds[i] >= 0) ::close(src_fds[i]);
-
-        sandboxid::write_full(pipefd[1], &r, sizeof(r));
-        ::close(pipefd[1]);
-        ::_exit(0);
-    }
-
-    ::close(pipefd[1]);
-    MountResult r;
-    bool got = timed_read_full(pipefd[0], &r, sizeof(r), 5000);
-    if (!got) {
-        LOGE("mount child for pid=%u stuck or silent for 5s — killing it",
-             target_pid);
-        sbx_kill_and_reap(child);
-        ::close(pipefd[0]);
-        return 0;
-    }
-    ::close(pipefd[0]);
-
-    int status = 0;
-    ::waitpid(child, &status, 0);
-
-    if (!got) {
-        LOGE("mount child for pid=%u produced no result (crashed?)", target_pid);
-        return 0;
-    }
-    if (r.ns_open_errno) {
-        LOGE("mount pid=%u: open /proc/%u/ns/mnt failed errno=%d", target_pid, target_pid, r.ns_open_errno);
-        return 0;
-    }
-    if (r.setns_errno) {
-        LOGE("mount pid=%u: setns failed errno=%d", target_pid, r.setns_errno);
-        return 0;
-    }
-    if (r.slave_errno) {
-        LOGW("mount pid=%u: MS_SLAVE gagal errno=%d — child skipped all binds, aborting",
-             target_pid, r.slave_errno);
-        return 0;
-    }
-    if (r.fail && r.first_fail_idx >= 0 && r.first_fail_idx < (int)sandboxid::BIND_ENTRIES_N) {
-        LOGE("mount pid=%u: %u bind(s) FAILED (first: %s errno=%d) [%s]",
-             target_pid, r.fail, sandboxid::BIND_ENTRIES[r.first_fail_idx].dst,
-             r.first_fail_errno, SBX_VARIANT_TAG);
-    }
-    LOGI("mount pid=%u: %u ok, %u fail, %u skip (skip_src=%u skip_dst=%u) [%s]",
-         target_pid, r.ok, r.fail, r.skip, r.skip_src, r.skip_dst, SBX_VARIANT_TAG);
-
-    watch_target_death(target_pid, client);
-
-    return r.ok;
-}
 
 struct HideResult {
     uint32_t detached = 0, fail = 0, candidates = 0;
@@ -491,50 +366,6 @@ static uint32_t do_hide_via_fork(uint32_t target_pid) {
     return r.detached;
 }
 
-static void watch_target_death(uint32_t pid, int client_fd) {
-    pid_t f1 = ::fork();
-    if (f1 < 0) return;
-    if (f1 > 0) {
-
-        ::waitpid(f1, nullptr, 0);
-        return;
-    }
-
-    // Detach: the intermediate forks a grandchild and exits so the grandchild is
-    // reparented to init and the companion's waitpid(f1) above returns promptly.
-    // The second fork needs its own failure branch: on EAGAIN (thread/fd limit)
-    // it returns -1, and "-1 > 0" is false, so without this the intermediate
-    // would fall straight through into the 30-minute watcher loop below and the
-    // companion's waitpid(f1) would block for the whole ceiling.
-    pid_t f2 = ::fork();
-    if (f2 > 0) ::_exit(0);        // intermediate: grandchild is detached
-    if (f2 < 0) ::_exit(0);        // could not detach: no watcher, nothing reaps
-
-    // Bug #1c: this detached grandchild was forked out of the multithreaded
-    // companion, so it may only call async-signal-safe functions. Replace
-    // std::this_thread::sleep_for with ::nanosleep, and drop the android_log
-    // calls entirely — __android_log_print takes an internal lock (and may
-    // allocate), which would deadlock if another thread held it at fork time.
-    // The watcher's sole job is to reap itself once the target exits; it does
-    // that silently now.
-    //
-    // It inherits every fd the companion had open and needs none of them, so
-    // close them all: holding the listen socket and other clients' sockets for
-    // up to 30 minutes would keep deleted clients alive and pin fd numbers a
-    // live companion still needs. close(2) is async-signal-safe; opendir is not,
-    // so this scans a fixed range instead of /proc/self/fd.
-    for (int fd = 3; fd < 1024; ++fd) ::close(fd);
-    (void)client_fd;
-
-    const struct timespec nap = { 0, 500L * 1000L * 1000L };  // 500 ms
-    for (int i = 0; i < 3600; ++i) {                          // ~30 min ceiling
-        ::nanosleep(&nap, nullptr);
-        if (::kill((pid_t)pid, 0) == 0) continue;
-        if (errno != ESRCH) continue;
-        ::_exit(0);                                           // target gone: done
-    }
-    ::_exit(0);                                               // timed out
-}
 
 static bool try_seed_ondemand() {
     // All path building uses stack buffers — no heap allocation before fork.
@@ -687,28 +518,6 @@ extern "C" void sandboxid_companion(int client) {
             uint32_t l = (uint32_t)d.size();
             if (!sandboxid::write_full(client, &l, sizeof(l))) break;
             if (l && !sandboxid::write_full(client, d.data(), l)) break;
-
-        } else if (cmd == sandboxid::CMD_DO_MOUNTS) {
-            uint32_t pid = 0;
-            if (!sandboxid::read_full(client, &pid, sizeof(pid))) break;
-            if (pid == 0) {
-                uint32_t z = 0;
-                sandboxid::write_full(client, &z, sizeof(z));
-                break;
-            }
-
-            bool authorized = have_peer && peer.uid == 0 && (pid_t)pid == peer.pid;
-            if (!authorized) {
-                LOGE("DO_MOUNTS DITOLAK: have_peer=%d peer.uid=%d peer.pid=%d target pid=%u "
-                     "[SO_PEERCRED fail-closed]",
-                     (int)have_peer, have_peer ? peer.uid : -1,
-                     have_peer ? peer.pid : -1, pid);
-                uint32_t z = 0;
-                sandboxid::write_full(client, &z, sizeof(z));
-                break;
-            }
-            uint32_t ok = do_mounts_via_fork(pid, client);
-            if (!sandboxid::write_full(client, &ok, sizeof(ok))) break;
 
         } else if (cmd == sandboxid::CMD_DO_HIDE) {
             uint32_t pid = 0;

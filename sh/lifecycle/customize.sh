@@ -13,7 +13,7 @@ ui_print "-   peluang tiap brand sama rata."
 ui_print "- Spoof berjalan pre-zygote, sebelum aplikasi terbuka."
 ui_print "- Aman: hanya mengganti string identitas, tidak menyentuh HW/framework."
 ui_print "- Tombol Action (sekali tekan): acak perangkat, terapkan, rotasi ID"
-ui_print "-   (SSAID, GAID, WiFi/BT MAC, nama, boot count)"
+ui_print "-   (SSAID, WiFi/BT MAC, nama, boot count)"
 ui_print "- Aplikasi target diatur sendiri di target.txt (kosong = modul nonaktif)."
 ui_print "- WebUI: buka modul ini di manajer KernelSU/APatch."
 ui_print ""
@@ -22,6 +22,10 @@ LIVE_TARGET="/data/adb/modules/sandboxid/target.txt"
 if [ -s "$LIVE_TARGET" ]; then
     ui_print "- target.txt dari instalasi sebelumnya dipertahankan"
     cp -f "$LIVE_TARGET" "$MODPATH/target.txt"
+elif [ -f "$MODPATH/sbx_flavor" ]; then
+    # Flavor TT mengirim target.txt berpreset (TikTok Global); pengguna bebas
+    # mengeditnya setelahnya, dan reinstall berikutnya mem-preserve versi live-nya.
+    ui_print "- Preset flavor TT: TikTok (com.zhiliaoapp.musically) — lihat target.tt.example"
 else
     ui_print "- Menyiapkan target.txt (kosong dulu; isi nama paket aplikasi untuk mengaktifkan)"
 fi
@@ -67,6 +71,8 @@ set_perm $MODPATH/service.sh                0 0 0755
 [ -f $MODPATH/carriers.tsv ] && set_perm $MODPATH/carriers.tsv 0 0 0644
 [ -f $MODPATH/carrier.conf ] && set_perm $MODPATH/carrier.conf 0 0 0644
 [ -f $MODPATH/target.txt ] && set_perm $MODPATH/target.txt 0 0 0644
+[ -f $MODPATH/target.tt.example ] && set_perm $MODPATH/target.tt.example 0 0 0644
+[ -f $MODPATH/sbx_flavor ] && set_perm $MODPATH/sbx_flavor 0 0 0644
 
 mkdir -p "$MODPATH/backups"
 set_perm $MODPATH/backups 0 0 0700

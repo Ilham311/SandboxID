@@ -278,6 +278,57 @@ property name — none of AOSP's code is copied.
   verdict and re-reads its own `orig_*` trampoline pointers as ground truth,
   and why `exemptFd()`'s bool is probed on the socket instead.
 
+- **ByteDance `device_register` — why we do NOT fabricate device age** (negative
+  result, consulted for the AppLog snowflake epoch). This was verified at the
+  **data-flow level in three independent working register implementations**, not
+  taken from a writeup's prose:
+  - `hqucsx/tiktok_mobile` — the *decisive* detail is in the device model, not the
+    call site. `api/domain/Device.py` declares `device_id = ""` / `install_id = ""`
+    and `api/utils/DeviceUtils.py::create_device()` **never assigns either** (it sets
+    `imei`/`cdid`/`openudid`/`mc`, not the two ids). `device_register()` then POSTs
+    with those two still empty, and only afterwards does
+    `api/device_register.py:40-41` fill `install_id`/`device_id` **from the server's
+    JSON response** (`response['install_id_str']` / `response['device_id_str']`).
+    So the first register request necessarily carries `device_id` *empty* — the value
+    that comes back cannot have been echoed from the request:
+    <https://github.com/hqucsx/tiktok_mobile/blob/main/api/device_register.py>
+  - `xtekky/Tiktok-Applog` — a second, fully independent working register
+    (`applog.py`) that builds payload + query from `openudid` / `clientudid` /
+    `cdid` / `google_aid` / `serial_number` / `mc` with **no `device_id` or
+    `install_id` in either**, then reads `a['device_id']` / `a['install_id']` out of
+    the response. Registration succeeds while omitting the id entirely — which is
+    only possible if the server mints it:
+    <https://github.com/xtekky/Tiktok-Applog/blob/main/applog.py>
+  - `shenydowa/deviceid-x-gorgon` — records the register response schema, which is
+    what makes the *server-recorded* part concrete:
+    `{"server_time", "device_id", "install_id", "device_id_str", "install_id_str",
+    "new_user": 1}`. `server_time` is the server's own clock (not the client's) and
+    `new_user` is the server's new-vs-returning verdict — i.e. the server keeps the
+    registration book:
+    <https://github.com/shenydowa/deviceid-x-gorgon/blob/master/README.md>
+
+  What this proves, and what it does not. **Proven:** `device_id` /
+  `install_id` are server-minted — the client submits `openudid`/`cdid`/`udid` and
+  receives the ids back, empty or absent on the way out. Therefore an id this module
+  fabricates locally was never minted by the server for the fabricated `openudid`, so
+  it has **no registration record**, and it is not the id the server would derive
+  from that `openudid`. **Not proven (an inference, stated as one):** that the
+  risk backend *ignores* the timestamp bits inside a client-supplied snowflake. No
+  on-device inspection can settle that; a live A/B register (backdated epoch vs.
+  fresh) compared on risk response is the only test that could, and it is out of
+  scope for an on-device privacy module. The inference is architectural: a system
+  that moved id-minting server-side specifically so ids cannot be forged, and that
+  stamps its own `server_time` and computes `new_user` itself, does not then trust a
+  forgeable timestamp embedded in the very id it took control of. In either branch the
+  conclusion holds — if the server looks the id up, there is nothing to find; if it
+  naively trusted the bits, its server-side minting would be pointless.
+
+  Consequence: the timestamp this module bakes into a locally-fabricated snowflake
+  (`APPLOG_EPOCH`) is a **determinism salt and rotation knob only** — never a
+  device-age signal. Backdating it to fake an established device is worthless; device
+  age is the server's registration record, which the client cannot write. See
+  `native_read.hpp::applog_epoch_or_default` and README "Known limits".
+
 
 - **AOSP chokepoint libraries for `clock_gettime` PLT hook** (Apache-2.0):
   - `frameworks/native/libs/utils/SystemClock.cpp` — `libutils`.

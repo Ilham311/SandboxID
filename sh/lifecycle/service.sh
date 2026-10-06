@@ -2,20 +2,10 @@
 MODDIR="${0%/*}"
 until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 2; done
 sleep 5
-BIN="$MODDIR/bin/sandboxid"
-if [ ! -x "$BIN" ]; then
-    case "$(getprop ro.product.cpu.abi)" in
-        arm64-v8a)   BIN="$MODDIR/bin/sandboxid-arm64" ;;
-        armeabi-v7a) BIN="$MODDIR/bin/sandboxid-arm" ;;
-        x86_64)      BIN="$MODDIR/bin/sandboxid-x86_64" ;;
-        x86)         BIN="$MODDIR/bin/sandboxid-x86" ;;
-    esac
-fi
 
-if grep -qE '^[[:space:]]*[^[:space:]#]' "$MODDIR/target.txt" 2>/dev/null; then
-    [ -f "$MODDIR/identity.prop" ] && [ -x "$BIN" ] && \
-        "$BIN" apply-boot >> /cache/sandboxid-boot.log 2>&1
-fi
+# No global property application at boot: spoofing is per-target and in-process
+# now. identity.prop is ensured by post-fs-data.sh (seed) and, failing that, by
+# the companion on-demand at first target launch.
 
 if [ -f "$MODDIR/debug_variant" ]; then
     mkdir -p "$MODDIR/debug"

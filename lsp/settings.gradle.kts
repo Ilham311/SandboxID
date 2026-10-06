@@ -24,4 +24,5 @@ dependencyResolutionManagement {
 // at configuration time with "Unexpected plugin type" — the plugin marker
 // resolves to a type that cannot be applied from settings.
 rootProject.name = "sandboxid-tt-lsp"
+include(":api")
 include(":app")

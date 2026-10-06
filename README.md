@@ -41,9 +41,55 @@ to any application until you configure `target.txt`.
 
 ---
 
+## One click = a new device
+
+The module manager's **Action** button is the whole workflow. It runs
+`sh/lifecycle/action.sh`, which produces a complete, internally consistent new
+persona and makes the target see it:
+
+```
+Action button
+   │
+   ├─ 1. randomize a persona      autopif.sh device  →  device.identity
+   │      (from devices.tsv: 40 devices, 8 brands)
+   │
+   ├─ 2. derive identity.prop     sandboxid seed  (fallback: freshen)
+   │      Build.*, ANDROID_ID, SERIAL, operator, uptime, AppLog seed
+   │
+   ├─ 3. apply to the live device sandboxid unlock → seed → lock
+   │      (native props, in-process per-target — no global resetprop)
+   │
+   ├─ 4. clear the target app     pm clear <pkg>   (per target.txt line)
+   │      (so it re-reads the new persona on next launch)
+   │
+   ├─ 5. rotate shell identifiers rotate_ids.sh all
+   │      SSAID + wlan MAC + BT MAC + device name + AppLog epoch
+   │
+   ├─ 6. report AppLog status     per target: active / fresh / absent
+   │
+   └─ 7. print a persona summary  (never dumps AppLog values — privacy)
+```
+
+After it finishes, launch the target: it sees a different device. No reboot
+unless the command you ran changed SSAID (`pm clear` + a relaunch is enough
+otherwise).
+
+The same button works for both shipped flavors. `FLAVOR=tt` builds just preset
+`target.txt` with TikTok Global on first install and rebrand the package; the
+flow itself is flavor-independent. See `sh/lifecycle/action.sh`.
+
+**Important: what this does *not* do.** The AppLog `device_id`/`install_id`
+pair is **server-minted**, so the module fabricates unregistered values rather
+than warming a "trusted" fresh device. That is deliberate: devices registered
+as brand-new are observed to be challenged *more often* than ones carrying an
+unfamiliar device id, so aiming for `new_user:1` would be optimizing for the
+riskier side. Do not switch `applog` to wipe-only to force re-registration.
+
+---
+
 ## How it works
 
-SandboxID combines three cooperating layers:
+SandboxID combines four cooperating layers:
 
 1. **Pre-zygote property configuration** — a Zygisk module runs before
    application processes start. It reads a per-package identity blob from the
@@ -56,7 +102,7 @@ SandboxID combines three cooperating layers:
    namespace so file-based readers see consistent values.
 3. **CLI / shell layer** — a native `sandboxid` binary and `rotate_ids.sh`
    script regenerate the persona, apply native properties, and synchronize
-   shell-layer identifiers (SSAID, GAID, wlan/Bluetooth MAC, device name).
+   shell-layer identifiers (SSAID, wlan/Bluetooth MAC, device name).
 4. **In-process file-read spoofing (L9)** — the Zygisk module PLT-hooks
    `read`/`open`/`openat`/`pread64`/`lseek`/`close` (plus the `_FORTIFY_SOURCE`
    `__open_2`/`__openat_2` variants) and serves synthetic content for the
@@ -248,10 +294,9 @@ su -c 'sh /data/adb/modules/sandboxid/rotate_ids.sh <cmd>'
 
 | Command | Applies | Needs reboot? |
 |---------|---------|---------------|
-| `all` | SSAID + GAID + wlan MAC + BT MAC + device name + applog (default) | Yes (SSAID) |
-| `safe` | GAID + BT MAC + device name + applog (skips SSAID + wlan) | No |
+| `all` | SSAID + wlan MAC + BT MAC + device name + applog (default) | Yes (SSAID) |
+| `safe` | BT MAC + device name + applog (skips SSAID + wlan) | No |
 | `ssaid` | Delete `settings_ssaid.xml` per user | Yes |
-| `gaid [uuid]` | Set Google Advertising ID | No |
 | `wlan-mac [xx:xx:...]` | Set `wlan0` MAC + wipe `WifiConfigStore` | No |
 | `bt-mac [xx:xx:...]` | Set Bluetooth adapter MAC + `bt_config.conf` Address | No (toggle BT) |
 | `device-name [name]` | Sync device/BT name to `identity.prop` MODEL | No |
@@ -261,9 +306,10 @@ su -c 'sh /data/adb/modules/sandboxid/rotate_ids.sh <cmd>'
 | `help` | Print usage | — |
 
 **`applog` in detail.** Apps built on the ByteDance **AppLog / RangersAppLog**
-SDK (TikTok `com.ss.android.ugc.trill`, Douyin `com.ss.android.ugc.aweme`,
-TikTok Global `com.zhiliaoapp.musically`, CapCut, Lark, and any third-party app
-that ships `com.bytedance.applog`) cache a **server-issued** trio of identifiers
+SDK (TikTok and its official variants — TikTok Global
+`com.zhiliaoapp.musically`, TikTok Lite `com.zhiliaoapp.musically.go`, regional
+TikTok `com.ss.android.ugc.trill`, Douyin `com.ss.android.ugc.aweme`) cache a
+**server-issued** trio of identifiers
 alongside the hardware fingerprint the module already spoofs:
 
 - `device_id` (aka `did` / `bd_did`) — Snowflake 64-bit int (19 decimal
@@ -327,13 +373,20 @@ Written by `freshen`, read by native prop apply, Zygisk hooks, and
 | `SERIAL` | `freshen` | `Build.SERIAL`, `ro.serialno`, `ro.boot.serialno` |
 | `RADIO` | `freshen` | `Build.RADIO`, `gsm.version.baseband` |
 | `ANDROID_ID` | `freshen` | Persona seed and SSAID rotation input |
-| `GOOGLE_AID` | `freshen` | GAID |
+| `GOOGLE_AID` | `freshen` | Kept for the identity contract only. No longer applied anywhere — see the note below |
 | `WIFI_MAC` | `rotate_ids.sh` | Persisted wlan0 MAC |
 | `BLUETOOTH_ADDR` | `rotate_ids.sh` | Persisted BT adapter MAC |
 | `BLUETOOTH_NAME` | `rotate_ids.sh` | Optional override for device/BT name |
 
 Use `identity_get KEY` / `identity_persist KEY VALUE` from `helpers.sh` for
 programmatic access (atomic upsert via `awk` + rename).
+
+> **Note on `GOOGLE_AID`.** The key is still written so the schema above stays
+> stable for anything parsing `identity.prop`, but the GAID *rotator* was
+> removed: it wrote into `com.google.android.gms`'s data dir and
+> `force-stop`-ed Play Services, which perturbs the whole device, and TikTok
+> does not read the GAID from GMS. Removing the rotator does not break the
+> contract — the key is generated, just never consumed.
 
 ---
 
@@ -426,6 +479,27 @@ does not run in userspace.
   outcome; if the socket is genuinely reaped, on-disk `build.prop` readers see
   real values while every in-process layer keeps working. Run
   `sh/debug/summarize.sh` on a debug session log for a per-layer verdict.
+- **AppLog `device_id` / `install_id` are not server-minted.** The IDs this
+  module fabricates are snowflakes derived from the persona seed, with the right
+  *shape* (`(ms << 22) | random`, 19 digits). But ByteDance mints the real ones
+  server-side: the app posts `openudid` / `cdid` / `udid` to
+  `/service/2/device_register/` and the *response* carries back `device_id`,
+  `install_id` and `new_user` — verified at the data-flow level in three independent
+  working register implementations, including one whose device model leaves
+  `device_id` empty so the first request carries it blank and only fills it from the
+  response (see [hqucsx/tiktok_mobile](https://github.com/hqucsx/tiktok_mobile),
+  [xtekky/Tiktok-Applog](https://github.com/xtekky/Tiktok-Applog) and
+  [shenydowa/deviceid-x-gorgon](https://github.com/shenydowa/deviceid-x-gorgon);
+  evidence and the exact per-source proof level are in Credits).
+  A locally-fabricated `device_id` therefore has no registration record behind
+  it, and it is not the `device_id` the server would derive from the fabricated
+  `openudid` — a risk-control backend sees an unknown device, or an
+  `openudid` / `device_id` pair that was never registered together, never a warm
+  established one. Rotating these IDs still achieves what the feature is for
+  (the app can no longer link this install to a previous persona); what it cannot
+  do is make the new persona look *trusted*. In particular, backdating the
+  snowflake epoch to fake an older device is worthless — device age is the
+  server's record, not bits the client controls.
 
 ---
 

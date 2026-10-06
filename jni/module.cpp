@@ -175,49 +175,39 @@ public:
         install_crash_watchdog(pkg_);
 
         if (comp_fd_ >= 0) {
-            // Decide on the socket, not on exemptFd()'s return: on ReZygisk that
-            // bool is garbage while the fd is fine, and on Magisk/ZygiskNext a
-            // genuine false leaves the socket reaped. The peer-credential check
-            // inside the probe tells the two apart at the moment it actually
-            // matters, and also catches the fd number having been recycled.
-            const SocketState ss = companion_socket_state(comp_fd_, comp_peer_);
-            if (ss != SocketState::CLOSED) {
-                // Re-apply the timeouts even though the probe just authenticated
-                // the fd: SO_SNDTIMEO/SO_RCVTIMEO belong to the socket object, so
-                // a socket whose fd number was somehow recycled carries none, and
-                // read_full() below has no deadline of its own. With this in
-                // place, a round trip that goes nowhere is bounded at 2s instead
-                // of parking this thread forever.
-                ::setsockopt(comp_fd_, SOL_SOCKET, SO_SNDTIMEO,
-                             &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
-                ::setsockopt(comp_fd_, SOL_SOCKET, SO_RCVTIMEO,
-                             &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
-
-                if (request_companion_mounts(comp_fd_)) {
-                    if (val("SBX_HIDE") == "1") request_companion_hide(comp_fd_);
+            // The only post-specialize companion request left is the optional
+            // detach-traces hide pass. Property and Build spoofing are entirely
+            // in-process now (per-target): there is no global resetprop and no
+            // bind-mount layer, so a target that does not opt into hiding has
+            // nothing to ask the companion and just closes the socket.
+            if (val("SBX_HIDE") == "1") {
+                // Decide on the socket, not on exemptFd()'s return: on ReZygisk
+                // that bool is garbage while the fd is fine, and on
+                // Magisk/ZygiskNext a genuine false leaves the socket reaped. The
+                // peer-credential check inside the probe tells the two apart at
+                // the moment it matters, and also catches a recycled fd number.
+                const SocketState ss = companion_socket_state(comp_fd_, comp_peer_);
+                if (ss != SocketState::CLOSED) {
+                    // SO_SNDTIMEO/SO_RCVTIMEO live on the socket object, so a
+                    // recycled fd carries none and request_companion_hide() would
+                    // otherwise have no deadline. Bound the round trip at 2s.
+                    ::setsockopt(comp_fd_, SOL_SOCKET, SO_SNDTIMEO,
+                                 &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
+                    ::setsockopt(comp_fd_, SOL_SOCKET, SO_RCVTIMEO,
+                                 &SBX_IO_TIMEOUT, sizeof(SBX_IO_TIMEOUT));
+                    request_companion_hide(comp_fd_);
                 } else {
-                    // The mounts round trip already failed on this fd; sending the
-                    // hide request behind it would only emit a second
-                    // companion-blaming error for the same dead socket.
+                    // Socket gone - EOF, a permanent errno, or the fd number was
+                    // recycled onto a socket with a different peer. In-process
+                    // spoofing (Build.*, SystemProperties, L9 file reads) is
+                    // unaffected; only the optional trace-detach pass is lost.
+                    LOGW("hide pass skipped for '%s': companion socket not usable "
+                         "(probe saw EOF, a permanent errno, or a recycled fd "
+                         "whose peer pid is no longer the companion). In-process "
+                         "spoofing (Build.*, SystemProperties, L9 file reads) is "
+                         "intact; only the optional detach-traces pass is skipped. "
+                         "summarize.sh reports a count.", pkg_.c_str());
                 }
-            } else {
-                // The socket is gone - EOF, a permanent errno, or the fd number
-                // was recycled onto a socket with a different peer. The mount
-                // round trip would only log a companion-blaming "MOUNTS: failed
-                // to send request". Say so accurately instead. In-process
-                // spoofing (Build.*, SystemProperties, L9 file reads) is
-                // unaffected; only direct on-disk build.prop readers inside the
-                // app see real values.
-                LOGW("layer-2 bind-mounts skipped for '%s': the companion socket "
-                     "is not usable (probe saw EOF, a permanent errno, or a fd "
-                     "whose peer pid is no longer the companion) - the zygote "
-                     "closed it during specialize, which exemptFd() already "
-                     "predicted (on ReZygisk that return is unreliable; the peer "
-                     "credential check is what settles it). In-process spoofing "
-                     "(Build.*, SystemProperties, L9 file reads) is intact; only "
-                     "direct on-disk build.prop readers see real values. "
-                     "summarize.sh reports a count.",
-                     pkg_.c_str());
             }
             // Only close the fd if it is still the socket we opened. After a
             // failed round trip the number may already have been recycled onto an

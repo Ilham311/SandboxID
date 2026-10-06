@@ -51,6 +51,9 @@ void install_build_hook(JNIEnv* env) {
         {"HOST",         "HOST"},
         {"TAGS",         "TAGS"},
         {"TYPE",         "TYPE"},
+        {"USER",         "USER"},
+        {"SOC_MANUFACTURER", "SOC_MANUFACTURER"},
+        {"SOC_MODEL",    "SOC_MODEL"},
     };
     int set = 0;
     for (const auto& f : fields) {
@@ -82,11 +85,11 @@ void install_build_hook(JNIEnv* env) {
     }
 
     // Build.TIME is a `long` initialised once, inside the zygote, from
-    // ro.build.date.utc — long before apply-boot's resetprop rewrites that
-    // property. Unpatched it keeps the *real* image build date and contradicts
-    // the persona's own ro.build.date.utc (a vdinfos dev:build_time_utc
-    // MISMATCH: Build.TIME/1000 != ro.build.date.utc). ro.build.date.utc is in
-    // seconds while Build.TIME is in milliseconds, so scale here as well.
+    // ro.build.date.utc — before this hook runs. Unpatched it keeps the *real*
+    // image build date and contradicts the persona's own ro.build.date.utc (a
+    // vdinfos dev:build_time_utc MISMATCH: Build.TIME/1000 != ro.build.date.utc).
+    // ro.build.date.utc is in seconds while Build.TIME is in milliseconds, so
+    // scale here as well.
     const std::string& bt = val("BUILD_TIME_UTC");
     long long fields_set = set;
     if (!bt.empty()) {
@@ -775,7 +778,9 @@ void install_native_read_hooks(Api* api) {
     //    through none of the hooks below and reads real values, which is
     //    exactly the MISMATCH the report shows on gsm.sim.operator.*.
     //    (Libraries the app loads later, after postAppSpecialize, are still
-    //    outside this one-shot scan - see README "Layer 9 limits".)
+    //    outside this one-shot scan - see README "How it works", where the
+    //    prop-file / AppLog-cache side of that gap is documented as closed
+    //    from disk by the bind-mounted build.prop layer and rotate_ids.sh.)
     std::vector<std::string> targets;
     {
         FILE* f = fopen("/proc/self/maps", "re");
@@ -1038,29 +1043,6 @@ void install_crash_watchdog(const std::string& pkg) {
 
     if (::sigaction(SIGSEGV, &sa, &old_segv) == 0) g_old_segv.store(&old_segv);
     if (::sigaction(SIGABRT, &sa, &old_abrt) == 0) g_old_abrt.store(&old_abrt);
-}
-
-// ---------- request_companion_mounts ----------
-// Sends CMD_DO_MOUNTS to the companion to bind-mount spoofed build.prop files
-// into this process's mount namespace.
-
-// Returns true only when the full request/response round trip completed, so the
-// caller can avoid sending a second request onto a socket that is already dead.
-bool request_companion_mounts(int fd) {
-    uint8_t cmd = sandboxid::CMD_DO_MOUNTS;
-    uint32_t pid = static_cast<uint32_t>(getpid());
-    if (!sandboxid::write_full(fd, &cmd, 1) ||
-        !sandboxid::write_full(fd, &pid, sizeof(pid))) {
-        LOGE("MOUNTS: failed to send request");
-        return false;
-    }
-    uint32_t ok = 0;
-    if (!sandboxid::read_full(fd, &ok, sizeof(ok))) {
-        LOGE("MOUNTS: failed to read response");
-        return false;
-    }
-    LOGD("MOUNTS: companion applied %u bind(s)", ok);
-    return true;
 }
 
 // ---------- request_companion_hide ----------

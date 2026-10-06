@@ -9,7 +9,6 @@ namespace sandboxid {
 
 inline constexpr char MODDIR[]        = "/data/adb/modules/sandboxid";
 inline constexpr char IDENTITY_FILE[] = "/data/adb/modules/sandboxid/identity.prop";
-inline constexpr char MOUNTDIR[]      = "/data/adb/modules/sandboxid/mount";
 inline constexpr char TARGET_FILE[]   = "/data/adb/modules/sandboxid/target.txt";
 
 inline constexpr char PERSONAS_FILE[] = "/data/adb/modules/sandboxid/personas.tsv";
@@ -20,33 +19,15 @@ inline constexpr char IDENTITY_BAK[]  = "/data/adb/modules/sandboxid/identity.pr
 inline constexpr char MODE_FILE[]     = "/data/adb/modules/sandboxid/identity.mode";
 
 inline constexpr char CARRIER_CONF[]  = "/data/adb/modules/sandboxid/carrier.conf";
-inline constexpr char RESETPROP[]     = "/data/adb/modules/sandboxid/bin/resetprop-rs";
 
 inline constexpr char ENABLE_HIDE[]   = "/data/adb/modules/sandboxid/enable_hide";
 
 enum Cmd : uint8_t {
     CMD_GET_IDENTITY = 2,
-    CMD_DO_MOUNTS    = 3,
     CMD_DO_HIDE      = 4,
 };
 
 inline constexpr uint32_t MAX_IDENTITY_BLOB = 64u * 1024u;
-
-struct BindEntry { const char* src_rel; const char* dst; };
-
-inline constexpr BindEntry BIND_ENTRIES[] = {
-    {"system/build.prop",     "/system/build.prop"},
-    {"vendor/build.prop",     "/vendor/build.prop"},
-    {"odm/build.prop",        "/odm/etc/build.prop"},
-    {"odm/build.prop",        "/odm/build.prop"},
-    {"product/build.prop",    "/product/etc/build.prop"},
-    {"product/build.prop",    "/product/build.prop"},
-    {"system_ext/build.prop", "/system_ext/etc/build.prop"},
-    {"system_ext/build.prop", "/system_ext/build.prop"},
-
-    {"settings_secure.xml",   "/data/system/users/0/settings_secure.xml"},
-};
-inline constexpr size_t BIND_ENTRIES_N = sizeof(BIND_ENTRIES) / sizeof(BIND_ENTRIES[0]);
 
 struct KV { const char* k; const char* v; };
 

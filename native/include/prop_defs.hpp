@@ -186,34 +186,4 @@ inline constexpr NativePropEntry NATIVE_PROPS[] = {
 
 inline constexpr size_t NATIVE_PROPS_N = sizeof(NATIVE_PROPS) / sizeof(NATIVE_PROPS[0]);
 
-struct MountPartEntry {
-    const char* dir;
-    const char* prefix;
-};
-
-inline constexpr MountPartEntry MOUNT_PART_ENTRIES[] = {
-    {"system",     "ro.product.system."},
-    {"vendor",     "ro.product.vendor."},
-    {"odm",        "ro.product.odm."},
-    {"product",    "ro.product.product."},
-    {"system_ext", "ro.product.system_ext."},
-};
-
-inline constexpr size_t MOUNT_PART_ENTRIES_N = sizeof(MOUNT_PART_ENTRIES) / sizeof(MOUNT_PART_ENTRIES[0]);
-
-inline std::string generate_mount_part_props(const std::string& prefix,
-                                              const std::string& model,
-                                              const std::string& brand,
-                                              const std::string& manufacturer,
-                                              const std::string& device,
-                                              const std::string& product) {
-    std::string out;
-    if (!model.empty())        out += prefix + "model="        + model        + "\n";
-    if (!brand.empty())        out += prefix + "brand="        + brand        + "\n";
-    if (!manufacturer.empty()) out += prefix + "manufacturer=" + manufacturer + "\n";
-    if (!device.empty())       out += prefix + "device="       + device       + "\n";
-    if (!product.empty())      out += prefix + "name="         + product      + "\n";
-    return out;
-}
-
 }

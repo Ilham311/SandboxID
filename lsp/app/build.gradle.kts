@@ -56,7 +56,8 @@ android {
 }
 
 dependencies {
-    // The LSPosed/Xposed API is provided by the framework at runtime; the stub
-    // here only satisfies the compiler.
-    compileOnly("de.robv.android.xposed:api:82")
+    // The LSPosed/Xposed API is provided by the framework at runtime. dl.xposed.info
+    // is dead, so the stub lives in the local :api module rather than in a maven
+    // artifact that no longer exists.
+    compileOnly(project(":api"))
 }

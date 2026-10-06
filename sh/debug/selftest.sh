@@ -131,7 +131,7 @@ _vbs="$(gp ro.boot.verifiedbootstate)"
 case "$_vbs" in
     green)             emit vbmeta PASS "verifiedbootstate=green" ;;
     orange|yellow|red) emit vbmeta FAIL "verifiedbootstate=$_vbs (bootloader tidak terkunci/termodifikasi)" ;;
-    "")                emit vbmeta WARN "verifiedbootstate kosong — apply-boot belum jalan?" ;;
+    "")                emit vbmeta WARN "verifiedbootstate kosong (shell/global baca nilai asli — spoofing hanya per-target in-process)" ;;
     *)                 emit vbmeta WARN "verifiedbootstate=$_vbs (tak dikenal)" ;;
 esac
 
@@ -274,6 +274,6 @@ fi
 
 _nnr="nonaktif"; [ -f "$MODDIR/no_native_read" ] && _nnr="AKTIF (native-read dimatikan)"
 emit hooks INFO "redirect baca /proc,/sys (boot_id, MAC, /proc/version, meminfo, cpuinfo, enforce): kill-switch no_native_read=$_nnr"
-emit hooks INFO "hook properti L2/L9 + bind build.prop: hanya di app target — verifikasi dengan app detektor"
+emit hooks INFO "hook properti L2/L9 (Build.*, SystemProperties, baca /proc,/sys): hanya di app target — verifikasi dengan app detektor"
 
 printf 'SELFTEST SUMMARY pass=%d warn=%d fail=%d info=%d\n' "$PASS" "$WARN" "$FAIL" "$INFO"
