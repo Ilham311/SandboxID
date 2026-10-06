@@ -336,6 +336,12 @@ jobs:
           NC: ${{ steps.version.outputs.new_code }}
         run: |
           set -eu
+          # The identity is needed by `git tag -a` below. It is normally set by
+          # the "Commit synced files" step, but that step only runs on main, so
+          # a workflow_dispatch from a branch would reach this tag step with no
+          # identity configured and die with "Committer identity unknown".
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch --tags --force --prune
           if git rev-parse -q --verify "refs/tags/${NV}" >/dev/null; then
             echo "tag ${NV} already exists (race?), reusing"
