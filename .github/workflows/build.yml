@@ -413,16 +413,18 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
 
-      - name: Gradle wrapper
-        # The wrapper is intentionally not bundled in lsp/ (it would be a
-        # large binary blob in the tree). Generate it here from the installed
-        # Gradle, so the version is the runner's.
-        working-directory: lsp
-        run: gradle wrapper --gradle-version 8.5
+      - name: Set up Gradle
+        # The wrapper is intentionally not committed to lsp/ (it would add a
+        # binary jar to the tree). This action supplies the Gradle distribution
+        # and, unlike a bare `gradle wrapper` invocation, does not require a
+        # preinstalled Gradle.
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
 
       - name: Build release APK
         working-directory: lsp
-        run: ./gradlew assembleRelease --no-daemon
+        run: gradle assembleRelease --no-daemon --warning-mode all
 
       - name: Sign APK
         # Unsigned APKs cannot be installed. The release keystore is expected

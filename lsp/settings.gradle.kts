@@ -19,14 +19,9 @@ dependencyResolutionManagement {
     }
 }
 
-// The version of the Android Gradle Plugin. Without this block, a bare
-// `id("com.android.application")` in app/build.gradle.kts cannot be resolved
-// ("Plugin was not found in any of the following sources") and the whole
-// configuration fails before any task runs. Keep it in step with the AGP the
-// app is tested against.
-plugins {
-    id("com.android.application") version "8.2.2"
-}
-
+// NOTE: the AGP version is declared in app/build.gradle.kts, not here. Putting
+// `id("com.android.application")` in a settings plugins{} block makes AGP fail
+// at configuration time with "Unexpected plugin type" — the plugin marker
+// resolves to a type that cannot be applied from settings.
 rootProject.name = "sandboxid-tt-lsp"
 include(":app")

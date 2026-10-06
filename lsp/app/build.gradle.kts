@@ -25,7 +25,10 @@
 // xposedmodule meta-data and assets/xposed_init.
 
 plugins {
-    id("com.android.application")
+    // The version lives here rather than in settings.gradle.kts. Declaring it in
+    // a settings plugins{} block fails with "Unexpected plugin type"; declaring
+    // it nowhere fails with "Plugin ... was not found".
+    id("com.android.application") version "8.2.2"
 }
 
 android {
