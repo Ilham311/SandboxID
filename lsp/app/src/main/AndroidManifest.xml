@@ -18,7 +18,7 @@
   xposedsharedprefs is the one that matters here: with it, XSharedPreferences
   in the target process resolves to LSPosed's /data/misc/<uuid>/prefs/<pkg>/
   directory instead of the module's app data dir. That directory is created
-  mode rwx--x--x and chowned to THIS app's uid, so the module can write to it
+  mode rwx-x-x and chowned to THIS app's uid, so the module can write to it
   normally and the target can read from it — no world-readable file, no root,
   no cooperation from the Zygisk module.
 
