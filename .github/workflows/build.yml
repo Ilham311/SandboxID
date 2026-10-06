@@ -391,3 +391,94 @@ jobs:
             release_notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  lsp-apk:
+    # The standalone LSPosed variant. This is the APK a user installs without
+    # root. It has never been built before, so this job is also the first
+    # compile the variant has ever had — a failure here means a compile error
+    # in lsp/, not a packaging regression.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@3a4f6e1af5070f787245c0f48c5b299d6e10245b
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@078a1b6f0f9d5f9a4b2f4fc4c1e4c9a8b7d6e5f4
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+
+      - name: Gradle wrapper
+        # The wrapper is intentionally not bundled in lsp/ (it would be a
+        # large binary blob in the tree). Generate it here from the installed
+        # Gradle, so the version is the runner's.
+        working-directory: lsp
+        run: gradle wrapper --gradle-version 8.5
+
+      - name: Build release APK
+        working-directory: lsp
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Sign APK
+        # Unsigned APKs cannot be installed. The release keystore is expected
+        # as a repository secret; if it is absent the job falls back to a
+        # debug key so the artifact is still installable for testing, and says
+        # so loudly in the step name output.
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.LSP_RELEASE_KEYSTORE }}
+          RELEASE_KEYSTORE_PASS: ${{ secrets.LSP_RELEASE_KEYSTORE_PASS }}
+          RELEASE_KEY_ALIAS: ${{ secrets.LSP_KEY_ALIAS }}
+          RELEASE_KEY_PASS: ${{ secrets.LSP_KEY_PASS }}
+        working-directory: lsp
+        run: |
+          set -eu
+          APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          [ -f "$APK" ] || APK="app/build/outputs/apk/release/app-release.apk"
+          OUT="sandboxid-lsp-${{ github.run_id }}.apk"
+          if [ -n "$RELEASE_KEYSTORE" ]; then
+            echo "$RELEASE_KEYSTORE" | base64 -d > /tmp/release.keystore
+            $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
+              --ks /tmp/release.keystore --ks-pass "pass:$RELEASE_KEYSTORE_PASS" \
+              --ks-key-alias "$RELEASE_KEY_ALIAS" --key-pass "pass:$RELEASE_KEY_PASS" \
+              --out "$OUT" "$APK"
+            echo "signed with the release key"
+          else
+            echo "::warning::LSP_RELEASE_KEYSTORE is not set; signing with a generated debug key. This APK is for testing only."
+            keytool -genkeypair -keystore /tmp/debug.keystore -storepass android \
+              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=Android Debug,O=Android,C=US" >/dev/null
+            $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
+              --ks /tmp/debug.keystore --ks-pass pass:android \
+              --ks-key-alias androiddebugkey --key-pass pass:android \
+              --v1-signing-enabled true --v2-signing-enabled true \
+              --out "$OUT" "$APK"
+            echo "signed with a debug key"
+          fi
+          cp "$OUT" "$RUNNER_TEMP/"
+          ls -lh "$OUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandboxid-lsp-apk
+          path: lsp/sandboxid-lsp-*.apk
+          if-no-files-found: error
+
+      - name: Attach APK to release
+        # The version tag is resolved in the `build` job; this job does not know
+        # it. Attach to whatever the newest release is, which is the one this
+        # run created.
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: lsp
+        run: |
+          set -eu
+          LATEST=$(gh release list --limit 1 | awk '{print $3}' | head -1)
+          echo "attaching to release: $LATEST"
+          gh release upload "$LATEST" sandboxid-lsp-*.apk --clobber
