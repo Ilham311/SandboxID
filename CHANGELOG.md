@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.18 (2026-10-06)
+
 ### Riset: "backdate umur device" ditolak — `device_id` itu server-minted, epoch bukan sinyal kepercayaan
 
 Gagasan "backdate `APPLOG_EPOCH` supaya `device_id` fabrikasi terlihat sebagai device
