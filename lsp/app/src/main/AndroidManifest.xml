@@ -35,11 +35,11 @@
               API, so anything reading those from native code sees the real
               device.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="QueryAllPackagesPermission"
-        xmlns:tools="http://schemas.android.com/tools" />
+        tools:ignore="QueryAllPackagesPermission" />
 
     <application
         android:label="SandboxID TT"
