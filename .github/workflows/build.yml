@@ -418,7 +418,7 @@ jobs:
         # binary jar to the tree). This action supplies the Gradle distribution
         # and, unlike a bare `gradle wrapper` invocation, does not require a
         # preinstalled Gradle.
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.5'
 
