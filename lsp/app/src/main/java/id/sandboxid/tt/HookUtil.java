@@ -58,6 +58,7 @@ final class HookUtil {
         for (Method m : methods) {
             if (!m.getName().equals(methodName)) continue;
             if (m.getParameterTypes().length != arity) continue;
+            if (java.lang.reflect.Modifier.isAbstract(m.getModifiers())) continue;
             try {
                 m.setAccessible(true);
                 XposedBridge.hookMethod(m, cb);
@@ -90,6 +91,14 @@ final class HookUtil {
             for (Method m : methods) {
                 if (!m.getName().equals(methodName)) continue;
                 if (m.getParameterTypes().length != arity) continue;
+                // An interface or abstract declaration has no body, and
+                // XposedBridge.hookMethod throws IllegalArgumentException for
+                // it ("it has no body to hook"). Observed on
+                // java.net.CookieStore.get(URI), which is an interface method:
+                // the whole layer logged a stack trace and the concrete
+                // implementation was never reached. Skip the declaration and
+                // hook the override further down the chain instead.
+                if (java.lang.reflect.Modifier.isAbstract(m.getModifiers())) continue;
                 try {
                     m.setAccessible(true);
                     XposedBridge.hookMethod(m, cb);

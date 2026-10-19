@@ -126,8 +126,6 @@ public class SandboxIdTT implements IXposedHookLoadPackage {
     }
 
     /** Runs one hook layer, logging and swallowing anything it throws. */
-
-    /** Runs one hook layer, logging and swallowing anything it throws. */
     private static void layer(String name, Runnable r) {
         try {
             r.run();
