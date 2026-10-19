@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  TikTok-only scope. Only these packages are ever injected. Douyin/Lite can be
+  added here without touching Java — but each addition widens the hook surface,
+  so the default is the one package the module is built for.
+-->
+<resources>
+    <string-array name="xposed_scope">
+        <item>com.zhiliaoapp.musically</item>
+    </string-array>
+</resources>
