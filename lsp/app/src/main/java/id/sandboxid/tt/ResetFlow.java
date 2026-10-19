@@ -181,15 +181,13 @@ final class ResetFlow {
             String msg = "did baru: " + issued.deviceId
                     + "  install_id: " + issued.installId
                     + (issued.newUser == null ? "" : "  new_user:" + issued.newUser);
-            step.on(msg);
-            log.append(msg);
+            report(step, log, msg);
         } else {
             String msg = "did belum terlihat dalam 25 detik. Kemungkinan TikTok "
                     + "tidak sempat dibuka (Android memblokir pembukaan activity "
                     + "dari latar belakang). Jalankan dari layar modul, atau "
                     + "buka TikTok manual sekarang — persona baru tetap terpakai.";
-            step.on(msg);
-            log.append(msg);
+            report(step, log, msg);
         }
         return log.toString();
     }
@@ -358,6 +356,11 @@ final class ResetFlow {
     }
 
     private static void report(Step step, StringBuilder log, String line) {
+        // Both callers get the same trace. The service logs through its own
+        // Step, but the activity's Step only paints the screen — so logging
+        // here is what makes a reset started from the button diagnosable
+        // afterwards, which is the case a bug report comes from.
+        android.util.Log.i(TAG, "reset: " + line);
         log.append(line).append('\n');
         step.on(line);
     }
