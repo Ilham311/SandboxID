@@ -16,6 +16,17 @@ case "$FLAVOR" in
   *) echo "Invalid FLAVOR: $FLAVOR (expected: full|tt)" >&2; exit 1 ;;
 esac
 
+# L3 = Java-method hooks (LSPlant + Dobby, both compiled from source and linked
+# into libsandboxid.so). On by default: without it android_id / IMEI / MAC /
+# Widevine and the TikTok register path cannot be reached at all, because those
+# values never pass through a system property. Set L3=0 for a smaller build that
+# keeps only the property-based layers.
+L3="${L3:-1}"
+case "$L3" in
+  0|1) ;;
+  *) echo "Invalid L3: $L3 (expected: 0|1)" >&2; exit 1 ;;
+esac
+
 for _tool in cmake zip; do
   if ! command -v "$_tool" >/dev/null 2>&1; then
     echo "ERROR: required tool '$_tool' not found in PATH" >&2
@@ -51,6 +62,17 @@ echo "==> NDK:        $ANDROID_NDK_HOME"
 echo "==> MIN_SDK:    $MIN_SDK"
 echo "==> Variant(s): $VARIANT"
 echo "==> Flavor:     $FLAVOR"
+echo "==> L3 (Java):  $L3"
+
+L3_FLAG="-DSBX_ENABLE_LSPLANT=OFF"
+if [ "$L3" = "1" ]; then
+  L3_FLAG="-DSBX_ENABLE_LSPLANT=ON"
+  echo "==> Menyiapkan dependensi L3 (LSPlant v6.4 + Dobby, pinned)"
+  bash jni/fetch_lsplant_deps.sh
+  if [ ! -f jni/hook_dex.h ]; then
+    bash jni/tools/gen_hook_dex.sh
+  fi
+fi
 
 ZYGISK_HPP_COMMIT="8ce26128f81baaed0b969aaf7f52f886b61af4ab"
 ZYGISK_HPP_SHA256="f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28"
@@ -101,12 +123,18 @@ build_variant() {
     local BUILD="build/$V/$ABI"
     rm -rf "$BUILD"
     mkdir -p "$BUILD"
+    # c++_static is the NDK default, but state it: with L3=1 the module links
+    # LSPlant, Dobby and DexBuilder, all C++, and a libc++_shared.so NEEDED entry
+    # would have to resolve inside whatever app namespace Zygisk injected us
+    # into — where libc++_shared is not visible. Static keeps the module to the
+    # system libraries only.
     cmake -S native -B "$BUILD" \
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$ABI" \
       -DANDROID_PLATFORM="android-$MIN_SDK" \
+      -DANDROID_STL=c++_static \
       -DCMAKE_BUILD_TYPE=Release \
-      "$DBG_FLAG" >/dev/null
+      "$DBG_FLAG" "$L3_FLAG" >/dev/null
     cmake --build "$BUILD" -j
   done
 

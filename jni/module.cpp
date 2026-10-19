@@ -1,4 +1,5 @@
 #include "module_impl.hpp"
+#include "sbx_lsplant.hpp"
 #include <sys/un.h>          // struct ucred, SO_PEERCRED
 #ifndef __NR_memfd_create
 # if defined(__aarch64__)
@@ -169,6 +170,7 @@ public:
         install_uptime_hook(api_, env_);
         g_pkg = pkg_;
         install_native_read_hooks(api_);
+        install_java_hooks(env_);
 #ifdef SBX_DEBUG
         for (auto& kv : g_identity) LOGD("  [id] %s = %s", kv.first.c_str(), kv.second.c_str());
 #endif
@@ -231,6 +233,41 @@ private:
     struct ucred comp_peer_{};
     bool comp_peer_valid_ = false;
     std::vector<uint8_t> blob_;
+
+    // L3: the Java-layer hooks. Values come from two places and must agree with
+    // what the shell side already wrote to disk:
+    //   * the telephony/DRM identifiers are synthesized from a persona seed, and
+    //   * openudid/clientudid/cdid are the SAME AppLog ids that rotate_ids.sh
+    //     seeds into the app's SharedPreferences (sbxnr::make_applog_ids), so a
+    //     register body rewritten by the wire hook carries exactly the values the
+    //     SDK read out of its own cache.
+    // Fail-soft: without SBX_ENABLE_LSPLANT this compiles to a no-op, and on a
+    // device where LSPlant cannot init it logs once and returns.
+    void install_java_hooks(JNIEnv* env) {
+        sbxlsp::HookValues hv;
+        hv.android_id = val("ANDROID_ID");
+        hv.serial     = val("SERIAL");
+        hv.wifi_mac   = val("WIFI_MAC");
+        hv.op_num     = val("GSM_OPERATOR_NUMERIC");
+        hv.op_alpha   = val("GSM_OPERATOR_ALPHA");
+        hv.op_iso     = val("GSM_OPERATOR_ISO");
+        hv.seed       = sbxnr::applog_seed(val("FINGERPRINT"), hv.serial,
+                                           hv.android_id, pkg_);
+
+        const sbxnr::ApplogIds ids = sbxnr::make_applog_ids(
+            hv.seed, sbxnr::applog_epoch_or_default(val("APPLOG_EPOCH")));
+        hv.openudid   = ids.openudid;
+        hv.clientudid = ids.clientudid;
+        hv.cdid       = ids.cdid;
+        // GAID: a stable UUID per persona. Same derivation the L3 hooks would
+        // otherwise have to invent, kept here so it rotates with the seed.
+        hv.gaid       = sbxnr::uuid_from_seed(hv.seed ^ 0x47414944ULL);   // "GAID"
+
+        if (sbxlsp::install_all(env, hv))
+            LOGI("L3 java hooks active");
+        else
+            LOGD("L3 java hooks unavailable (L1/L2/L9 tetap jalan)");
+    }
 
     void unload() {
         if (api_) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);

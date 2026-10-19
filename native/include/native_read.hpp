@@ -127,6 +127,14 @@ inline uint64_t applog_seed(const std::string& fingerprint,
 // back), so device age is the server's record — no timestamp baked into a
 // locally-minted snowflake is ever read as trust. Backdating would be cosmetic
 // only. See README "Known limits" (AppLog device_id is not server-minted).
+//
+// ALL SIX ids in make_applog_ids() mix this value in, not just the three
+// snowflakes. The register server binds (openudid, install_id cookie) on first
+// sight and echoes that did forever, so an openudid that did not rotate with the
+// epoch would make `rotate_ids.sh applog` a silent no-op at the server: the
+// local files would show new ids while the register call still returned the old
+// did. Keep the epoch monotonic in the shell (helpers.sh applog_regen) — two
+// rotations inside the same millisecond would otherwise collide.
 inline uint64_t applog_epoch_or_default(const std::string& raw) {
     uint64_t e = std::strtoull(raw.c_str(), nullptr, 10);
     return e ? e : 1700000000000ULL;

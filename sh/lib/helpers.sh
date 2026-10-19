@@ -173,6 +173,88 @@ force_stop() {
     return "$_rc"
 }
 
+# Prints the package's currently-granted permissions, one per line.
+#
+# `pm clear` revokes every runtime permission along with the data, and the next
+# launch then opens the system permission screen instead of the app's own splash
+# — the app never reaches the code that registers, so a reset that looks clean
+# produces no did at all. The set is read from the device rather than hard-coded
+# so it stays correct across app releases (a new runtime permission appears in
+# dumpsys the moment the app declares it).
+#
+# The regex deliberately has no end anchor: since Android 12 the line carries
+# `, flags=[ USER_SENSITIVE_WHEN_GRANTED | ... ]` after `granted=true`, and an
+# anchored pattern (as in the LSPosed variant's ResetFlow) matches nothing there.
+# Non-runtime entries are included on purpose — `pm grant` rejects them, and
+# pkg_restore_permissions() counts only the ones that succeed.
+pkg_granted_permissions() {
+    _pkg="$1"
+    [ -n "$_pkg" ] || return 1
+    command -v dumpsys >/dev/null 2>&1 || return 1
+    dumpsys package "$_pkg" 2>/dev/null | sed -n \
+        's/^[[:space:]]*\([A-Za-z0-9_.]*\): granted=true.*/\1/p' | sort -u
+}
+
+# Re-grants a permission list captured by pkg_granted_permissions.
+#
+# Prints how many of the captured permissions are granted again afterwards, not
+# how many `pm grant` calls returned 0. The captured list also contains install
+# permissions (which `pm clear` never revokes and `pm grant` refuses), so a raw
+# success count would understate the result and look like a partial failure.
+# No retry loop: a permission `pm grant` refuses is one it will refuse again, and
+# a TikTok-sized list would otherwise spend a minute sleeping through failures.
+pkg_restore_permissions() {
+    _pkg="$1"; _list="$2"
+    [ -n "$_pkg" ] || return 1
+    command -v pm >/dev/null 2>&1 || { printf '0\n'; return 1; }
+    _old_ifs="$IFS"
+    IFS='
+'
+    for _perm in $_list; do
+        case "$_perm" in
+            *.*) : ;;
+            *)   continue ;;
+        esac
+        pm grant --user 0 "$_pkg" "$_perm" </dev/null >/dev/null 2>&1 || :
+    done
+    IFS="$_old_ifs"
+    # Both lists are already sorted -u, so the intersection is uniq -d.
+    _after="$(pkg_granted_permissions "$_pkg" 2>/dev/null)"
+    printf '%s\n%s\n' "$_list" "$_after" | sort | uniq -d | awk 'NF { n++ } END { print n + 0 }'
+}
+
+# Resolves the package's launcher activity ("pkg/.Activity"), or fails.
+pkg_launcher_activity() {
+    _pkg="$1"
+    [ -n "$_pkg" ] || return 1
+    command -v cmd >/dev/null 2>&1 || return 1
+    _act="$(cmd package resolve-activity --brief \
+                -c android.intent.category.LAUNCHER "$_pkg" 2>/dev/null | tail -n 1)"
+    case "$_act" in
+        */*) printf '%s\n' "$_act"; return 0 ;;
+    esac
+    return 1
+}
+
+# Launches the package's main activity from a root shell.
+#
+# A root shell is not subject to the Android 10+ background-activity-start ban
+# that makes the LSPosed variant's service path fail ("Abort background activity
+# starts"), so `am start` works here. monkey is the fallback for packages that
+# resolve no launcher through cmd.
+pkg_launch() {
+    _pkg="$1"
+    [ -n "$_pkg" ] || return 1
+    command -v am >/dev/null 2>&1 || return 1
+    _act="$(pkg_launcher_activity "$_pkg" 2>/dev/null)"
+    if [ -n "$_act" ]; then
+        _fw_run am start -a android.intent.action.MAIN \
+            -c android.intent.category.LAUNCHER -n "$_act" && return 0
+    fi
+    command -v monkey >/dev/null 2>&1 || return 1
+    _fw_run monkey -p "$_pkg" -c android.intent.category.LAUNCHER 1
+}
+
 identity_get() {
     key="$1"
     [ -f "$IDENTITY_FILE" ] || return 1
@@ -315,6 +397,74 @@ applog_wipe() {
     else
         log_info "$_pkg — no AppLog cache present (already clean)"
     fi
+    return 0
+}
+
+# Purge the register replay gate that ByteDance's SDK keeps in its device
+# parameter store. RE notes §4: LX/088c;->LJII compares three persisted values
+# against the request body, and when all three match it replays the cached
+# register response instead of contacting the server. Purging them is what makes
+# the next cold start perform a real /device_register/ round trip.
+#
+# The three keys and the two possible file names come from the same RE pass:
+#   dr_install_vc  (long)   — version code the cached response was minted for
+#   dr_channel     (string) — channel id
+#   dr_aid        (string) — app id
+#   file: shared_prefs/device_parameters_<aid>.dat, or shared_prefs/dp.dat
+#
+# Anything else in those files is left untouched: they also carry the persisted
+# ids, and rewriting those here would fight the AppLog seeding in applog_regen.
+applog_purge_gate() {
+    _pkg="${1:-}"
+    if [ -z "$_pkg" ]; then
+        _target="${TARGET_FILE:-$MODDIR/target.txt}"
+        [ -r "$_target" ] || return 1
+        _rc=0
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            _line=${_line%%#*}
+            _line=$(printf '%s' "$_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            [ -n "$_line" ] || continue
+            applog_purge_gate "$_line" || _rc=1
+        done < "$_target"
+        return "$_rc"
+    fi
+
+    _data_dir="$(pkg_data_dir "$_pkg")" || return 1
+    _sp_dir="$_data_dir/shared_prefs"
+    [ -d "$_sp_dir" ] || return 0
+
+    se_permissive
+    _hit=0
+    for _f in "$_sp_dir"/device_parameters_*.dat "$_sp_dir"/dp.dat \
+              "$_sp_dir"/device_parameters_*.xml "$_sp_dir"/dp.xml; do
+        [ -f "$_f" ] || continue
+        grep -qE 'name="(dr_install_vc|dr_channel|dr_aid)"' "$_f" 2>/dev/null || continue
+
+        _owner=$(stat -c '%u:%g' "$_f" 2>/dev/null)
+        _mode=$(stat -c '%a'  "$_f" 2>/dev/null)
+        _ctx=""
+        if command -v ls >/dev/null 2>&1; then
+            _ctx=$(ls -Z "$_f" 2>/dev/null | awk '{print $1}' | grep -v '^?' || true)
+        fi
+
+        _tmp="${_f}.sbx.$$"
+        if grep -vE 'name="(dr_install_vc|dr_channel|dr_aid)"' "$_f" > "$_tmp" 2>/dev/null \
+           && [ -s "$_tmp" ]; then
+            chown "$_owner" "$_tmp" 2>/dev/null || :
+            [ -n "$_mode" ] && chmod "$_mode" "$_tmp" 2>/dev/null
+            [ -n "$_ctx" ] && command -v chcon >/dev/null 2>&1 && chcon "$_ctx" "$_tmp" 2>/dev/null
+            if mv -f "$_tmp" "$_f" 2>/dev/null; then
+                _hit=$((_hit + 1))
+            else
+                rm -f "$_tmp" 2>/dev/null
+            fi
+        else
+            rm -f "$_tmp" 2>/dev/null
+        fi
+    done
+
+    [ "$_hit" -gt 0 ] && log_ok "$_pkg — replay gate dipurge ($_hit file)"
+    se_restore
     return 0
 }
 
@@ -479,7 +629,20 @@ applog_regen() {
 
     log_step "AppLog regen: $_pkg"
 
+    # APPLOG_EPOCH must STRICTLY increase on every rotation. It is the only
+    # input that separates one rotation's openudid/clientudid/cdid from the
+    # previous one (see make_applog_ids in native/native_read.cpp), and the
+    # register server binds an openudid permanently on first sight. A plain
+    # `date +%s`000 repeats within the same second, so two resets in one second
+    # — a scripted loop, or the Action button pressed twice — would mint the
+    # same six ids and the second reset would silently return the first one's
+    # did. Bump past the stored value instead of trusting the clock.
     _now_ms="$(date +%s 2>/dev/null || echo 1700000000)000"
+    _prev_ms="$(identity_get APPLOG_EPOCH 2>/dev/null)"
+    case "$_prev_ms" in
+        ''|*[!0-9]*) _prev_ms=0 ;;
+    esac
+    [ "$_now_ms" -le "$_prev_ms" ] 2>/dev/null && _now_ms=$((_prev_ms + 1000))
     identity_persist APPLOG_EPOCH "$_now_ms" || {
         log_warn "applog_regen: gagal bump APPLOG_EPOCH — ID lama dipakai lagi"
         return 1
@@ -487,6 +650,11 @@ applog_regen() {
 
     force_stop "$_pkg" >/dev/null 2>&1
     applog_wipe "$_pkg" || :
+    # The replay gate lives outside the AppLog cache files, so wiping those does
+    # not touch it. Purge it before seeding: with dr_install_vc/dr_channel/dr_aid
+    # still matching, the SDK would answer the register call from its cached
+    # response and the fresh openudid would never reach the server.
+    applog_purge_gate "$_pkg" || :
     if applog_seed "$_pkg"; then
         log_ok "$_pkg — epoch bumped + cache wiped + seed baru (ID aktif saat app dibuka)"
     else

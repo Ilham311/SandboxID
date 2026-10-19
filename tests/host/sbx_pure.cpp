@@ -60,6 +60,25 @@ int main() {
     CHECK(!a.did.empty() && !a.iid.empty() && !a.cdid.empty(), "applog ids non-empty");
     CHECK(applog_epoch_or_default("") == 1700000000000ULL, "epoch default when absent");
 
+    // ---- every AppLog id rotates with APPLOG_EPOCH -----------------------
+    // The register server binds (openudid, install_id cookie) permanently on
+    // first sight, so an id that does not change with the epoch turns
+    // `rotate_ids.sh applog` into a no-op at the server: the local files show
+    // new values while the register call keeps returning the old did. Pin all
+    // six, not just the three snowflakes that always rotated.
+    ApplogIds rot = make_applog_ids(seed, epoch + 1);
+    CHECK(a.did        != rot.did,        "did rotates with epoch");
+    CHECK(a.iid        != rot.iid,        "install_id rotates with epoch");
+    CHECK(a.ssid       != rot.ssid,       "ssid rotates with epoch");
+    CHECK(a.cdid       != rot.cdid,       "cdid rotates with epoch");
+    CHECK(a.clientudid != rot.clientudid, "clientudid rotates with epoch");
+    CHECK(a.openudid   != rot.openudid,   "openudid rotates with epoch");
+    // Distinctness matters as much as rotation: two ids derived from the same
+    // seed with the same constant would be identical values, which the server
+    // sees as one identifier reused across fields.
+    CHECK(a.cdid != a.clientudid, "cdid and clientudid are distinct");
+    CHECK(a.openudid.size() == 16, "openudid is 8 bytes of hex");
+
     // ---- patch_applog_xml round-trip -------------------------------------
     const std::string real_xml =
         "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"

@@ -20,6 +20,12 @@ command -v force_stop >/dev/null 2>&1 || force_stop() { am force-stop --user 0 "
 command -v identity_get >/dev/null 2>&1 || identity_get() {
     awk -F= -v k="$1" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$IDENTITY" 2>/dev/null
 }
+# Fallbacks so a missing helpers.sh degrades instead of aborting the reset: no
+# permission list means no grant pass (the app asks for permissions itself), and
+# no launch means the user opens the app by hand, which is the old behaviour.
+command -v pkg_granted_permissions  >/dev/null 2>&1 || pkg_granted_permissions()  { return 1; }
+command -v pkg_restore_permissions  >/dev/null 2>&1 || pkg_restore_permissions()  { printf '0\n'; return 1; }
+command -v pkg_launch               >/dev/null 2>&1 || pkg_launch()               { return 1; }
 
 if command -v sbx_bin >/dev/null 2>&1; then
     BIN="$(sbx_bin)"
@@ -93,13 +99,37 @@ if [ "$APPLIED" = "multibrand" ]; then
     say "==> Mereset aplikasi target (agar membaca identitas baru)"
     if [ -r "$MODDIR/target.txt" ] && command -v pm >/dev/null 2>&1; then
         _wiped=0
+        LAUNCH_LIST=""
         while IFS= read -r _line || [ -n "$_line" ]; do
             _line=${_line%%#*}
             _line=$(printf '%s' "$_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
             [ -n "$_line" ] || continue
             force_stop "$_line" >/dev/null 2>&1
+
+            # Capture the granted permissions BEFORE the wipe. `pm clear`
+            # revokes them all, and the next launch then opens the system
+            # permission screen instead of the app's splash — the app never
+            # reaches the code that registers, so a reset that reports success
+            # would mint nothing. Read from the device rather than hard-coded
+            # so it tracks the app's current permission set.
+            _perms="$(pkg_granted_permissions "$_line" 2>/dev/null)"
+            _nperm=$(printf '%s\n' "$_perms" | awk 'NF { n++ } END { print n + 0 }')
+
             if _fw_run pm clear --user 0 "$_line"; then
                 say "   - $_line — direset"
+                if [ "$_nperm" -gt 0 ]; then
+                    # The package manager is still finishing the clear; a grant
+                    # issued in the same breath is dropped.
+                    sleep 1
+                    _restored=$(pkg_restore_permissions "$_line" "$_perms" 2>/dev/null)
+                    case "$_restored" in ''|*[!0-9]*) _restored=0 ;; esac
+                    say "     izin aktif kembali: $_restored dari $_nperm"
+                fi
+                # Launched at the very end, after rotate_ids.sh has seeded the
+                # new AppLog files: starting the app first would have it read
+                # the previous identity and cache it.
+                LAUNCH_LIST="${LAUNCH_LIST}${_line}
+"
             else
                 say "   - $_line — dilewati (belum terpasang?)"
             fi
@@ -174,6 +204,27 @@ fi
 
 [ "$RC_ROT" != 0 ] && \
     say "  (catatan: rotasi ID rc=$RC_ROT — sebagian ID mungkin belum berganti; cek tab Log)"
+
+# Launch last, after the AppLog files have been seeded. Starting the app before
+# rotate_ids.sh runs would have it read the previous identity from disk and cache
+# it for the whole process, and hooks are installed once per process — so the
+# reset would be visible on disk and invisible to the app.
+if [ -n "${LAUNCH_LIST:-}" ]; then
+    say ""
+    say "==> Membuka aplikasi target"
+    _old_ifs="$IFS"
+    IFS='
+'
+    for _line in $LAUNCH_LIST; do
+        [ -n "$_line" ] || continue
+        if pkg_launch "$_line"; then
+            say "   - $_line — dibuka"
+        else
+            say "   - $_line — gagal dibuka, buka manual"
+        fi
+    done
+    IFS="$_old_ifs"
+fi
 
 if [ -f "$MODDIR/debug_variant" ] && [ -d "$MODDIR/debug" ]; then
     LATEST=$(ls -1t "$MODDIR/debug"/session-*.log 2>/dev/null | head -1)

@@ -89,12 +89,26 @@ std::string snowflake_from_seed(uint64_t seed, uint64_t epoch_ms) {
 
 ApplogIds make_applog_ids(uint64_t seed, uint64_t epoch_ms) {
     ApplogIds ids;
+    // EVERY field mixes in epoch_ms, including the three that used to be frozen.
+    //
+    // The register server binds the pair (openudid, install_id cookie) on first
+    // sight, permanently: an openudid it has already seen is answered with the
+    // did that was minted for it, forever. `rotate_ids.sh applog` bumps
+    // APPLOG_EPOCH without rotating the persona (that is its whole point), so if
+    // openudid/clientudid/cdid stayed a pure function of the persona seed, that
+    // command would rewrite did/iid/ssid and then immediately re-bind the new
+    // registration to the old did — silently, with no error anywhere. Verified
+    // against the live endpoint: a fresh openudid mints new_user:1, the same
+    // openudid with any install_id cookie returns the old did with new_user:0.
+    //
+    // Each id keeps its own constant so two ids can never collapse onto the same
+    // stream when the seed is shared (did and clientudid once did).
     ids.did        = snowflake_from_seed(seed ^ 0x9E3779B97F4A7C15ULL, epoch_ms);
     ids.iid        = snowflake_from_seed(seed ^ 0xBF58476D1CE4E5B9ULL, epoch_ms);
     ids.ssid       = snowflake_from_seed(seed ^ 0x94D049BB133111EBULL, epoch_ms);
-    ids.cdid       = uuid_from_seed(seed ^ 0x2545F4914F6CDD1DULL);
-    ids.clientudid = uuid_from_seed(seed ^ 0x9E3779B97F4A7C15ULL);
-    ids.openudid   = hex_from_seed(seed, 8);
+    ids.cdid       = uuid_from_seed(seed ^ 0x2545F4914F6CDD1DULL ^ epoch_ms);
+    ids.clientudid = uuid_from_seed(seed ^ 0x6A09E667F3BCC909ULL ^ epoch_ms);
+    ids.openudid   = hex_from_seed(seed ^ 0xBB67AE8584CAA73BULL ^ epoch_ms, 8);
     return ids;
 }
 

@@ -18,6 +18,12 @@ Thumbs.db
 
 jni/zygisk.hpp
 
+# Pinned third-party sources for the L3 layer (jni/fetch_lsplant_deps.sh) and
+# the DEX it generates from jni/SandboxIDHook.java (jni/tools/gen_hook_dex.sh).
+# Both are build products: fetching them is deterministic, committing them is not.
+jni/external/
+jni/hook_dex.h
+
 # Claude Code worktrees (ephemeral; never commit as embedded repos)
 .claude/worktrees/
 

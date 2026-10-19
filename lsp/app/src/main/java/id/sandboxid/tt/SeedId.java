@@ -53,7 +53,20 @@ final class SeedId {
         return h;
     }
 
-    /** SplitMix64. Exactly native_read.cpp:11-17. Mutates the state array slot. */
+    /**
+     * SplitMix64. Exactly native_read.cpp:11-17. Mutates the state array slot.
+     *
+     * <p><b>The output uses all 64 bits, so roughly half of all calls return a
+     * negative Java {@code long}.</b> C++ sees the same bit pattern as an
+     * {@code uint64_t} and every consumer below treats it as unsigned. Any Java
+     * consumer that must match the C++ value — an array index, a decimal digit,
+     * a modulo — has to go through {@link Long#remainderUnsigned}, or it gets a
+     * negative index ({@link ArrayIndexOutOfBoundsException}, crashing the hook)
+     * or a digit below {@code '0'} (garbage characters inside a synthesised
+     * IMEI/IMSI/ICCID). {@link #snowflake} and {@link #hexFromSeed} are immune:
+     * the former prints via {@link Long#toUnsignedString}, the latter masks
+     * whole bytes with {@code >>>}.
+     */
     static long splitmix64(long[] st, int slot) {
         st[slot] += 0x9E3779B97F4A7C15L;
         long z = st[slot];
@@ -107,7 +120,9 @@ final class SeedId {
                 "35692211", "35876554", "35291612", "35438110",
         };
         long[] st = {seed ^ 0x494D4549L};                     // "IMEI"
-        StringBuilder d = new StringBuilder(TAC[(int) (splitmix64(st, 0) % TAC.length)]);
+        int tac = (int) Long.remainderUnsigned(
+                splitmix64(st, 0), TAC.length);
+        StringBuilder d = new StringBuilder(TAC[tac]);
         appendDigits(d, st, 6);                               // SNR
         d.append(luhnCheck(d.toString()));                    // 15th digit
         return d.toString();
@@ -154,7 +169,8 @@ final class SeedId {
 
     private static void appendDigits(StringBuilder d, long[] st, int count) {
         for (int i = 0; i < count; i++) {
-            d.append((char) ('0' + (splitmix64(st, 0) % 10)));
+            d.append((char) ('0' + Long.remainderUnsigned(
+                    splitmix64(st, 0), 10)));
         }
     }
 
