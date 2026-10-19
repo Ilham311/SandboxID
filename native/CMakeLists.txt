@@ -1,7 +1,33 @@
 cmake_minimum_required(VERSION 3.18)
+
+# The whole flag set below is keyed on the RELEASE configuration, and so is the
+# save/restore around the third-party subdirectories further down. A bare
+# `cmake -S native -B build` otherwise picks RelWithDebInfo and builds with
+# neither: no --exclude-libs,ALL, so Dobby's asm object keeps a global reference
+# to common_closure_bridge_handler and the arm64 link dies with
+#   relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol ...
+#
+# This has to happen BEFORE project(): CMake 4 fills CMAKE_BUILD_TYPE in during
+# project() (RelWithDebInfo when the generator supports configurations), so a
+# check after it can no longer tell "unset" from "deliberately chosen".
+if(NOT DEFINED CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "")
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
 project(sandboxid LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
+
+# Reject anything but Release rather than produce a module that links
+# differently than the one CI ships. Verbose logging is SBX_DEBUG=ON, a
+# separate switch, so there is no reason to build another configuration.
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(FATAL_ERROR
+        "[sandboxid] CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} is not supported.\n"
+        "  Use -DCMAKE_BUILD_TYPE=Release (debug logging is SBX_DEBUG=ON, an\n"
+        "  independent switch), because the compiler/linker flags and the\n"
+        "  third-party flag isolation are both defined for RELEASE only.")
+endif()
 
 option(SBX_DEBUG "Enable verbose debug logging (LOGD)" OFF)
 option(SBX_ENABLE_LSPLANT

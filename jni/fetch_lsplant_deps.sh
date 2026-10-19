@@ -21,6 +21,10 @@ set -euo pipefail
 # those two lines with #if defined(__APPLE__) and emits the ELF form
 # (`adrp x17, sym` + `:lo12:sym`) everywhere else.
 #
+# One local patch is applied to the pinned Dobby tree, in
+# patch_dobby_include_order() below. It is an upstream include-order bug that
+# only shows up in NDK builds; the comment there explains it.
+#
 # The three submodules those two need are pinned by SHA as well, because a
 # submodule branch ("master") is not a pin: a fresh clone today and a fresh clone
 # next month would compile different code.
@@ -72,6 +76,70 @@ clone_at "$DOBBY_REPO"      "$DOBBY_REF"      "$EXT/dobby"
 clone_at "$DEXBUILDER_REPO" "$DEXBUILDER_REF" "$EXT/lsplant/lsplant/src/main/jni/external/dex_builder"
 clone_at "$PHMAP_REPO"      "$PHMAP_REF" \
   "$EXT/lsplant/lsplant/src/main/jni/external/dex_builder/external/parallel_hashmap"
+
+# --- Dobby: upstream include-order bug, patched locally ---------------------
+#
+# source/PlatformUnifiedInterface/platform.h starts with
+#     #include "dobby/common.h"
+# and only then declares OSMemory / MemoryPermission / kReadExecute. common.h
+# includes common/os_arch_features.h, whose Android-only body calls
+# OSMemory::PageSize(), OSMemory::SetPermission() and kReadExecute — none of
+# which exist yet at that point. On Darwin/Linux the body is compiled out and
+# nobody notices; on Android (where the NDK defines ANDROID) every TU that
+# reaches platform.h fails with:
+#     error: use of undeclared identifier 'OSMemory'
+#     error: use of undeclared identifier 'kReadExecute'
+# That is the entire arm64 NDK build of the pinned commit.
+#
+# The fix is to keep common.h at the END of platform.h, after the declarations
+# it depends on. The forward include becomes platform_features.h, which is the
+# part of common.h that platform.h actually needs (stdint/stdio/TINYSTL).
+# Verified with a full dobby_static build with -DANDROID on the host.
+#
+# Kept as a patch rather than a fork so the pin stays a real upstream SHA; the
+# check below fails loudly if upstream ever changes this file, instead of
+# silently building a different tree than the one that was tested.
+patch_dobby_include_order() {
+  local f="$EXT/dobby/source/PlatformUnifiedInterface/platform.h"
+  if [ ! -f "$f" ]; then
+    echo "ERROR: expected file missing after fetch: $f" >&2
+    exit 1
+  fi
+  if grep -q 'sbx: dobby include order' "$f"; then
+    echo "==> Dobby include-order patch already applied"
+    return 0
+  fi
+  if ! grep -qx '#include "dobby/common.h"' "$f"; then
+    echo "ERROR: Dobby platform.h does not match the pinned layout; refusing to patch." >&2
+    echo "  Upstream changed since the pin. Re-check the OSMemory include cycle by hand," >&2
+    echo "  then update this patch and the DOBBY_REF comment above." >&2
+    exit 1
+  fi
+  if ! awk '
+    /^#include "dobby\/common.h"$/ && !moved {
+      print "#include \"dobby/platform_features.h\""
+      moved = 1
+      next
+    }
+    { print }
+    END {
+      if (!moved) exit 3
+      print ""
+      print "// sbx: dobby include order — common.h pulls in common/os_arch_features.h,"
+      print "// which uses OSMemory and kReadExecute. It has to come after the"
+      print "// declarations below, or Android builds fail with \"undeclared identifier\"."
+      print "#include \"dobby/common.h\""
+    }
+  ' "$f" > "$f.sbx.tmp"; then
+    rm -f "$f.sbx.tmp"
+    echo "ERROR: failed to patch $f" >&2
+    exit 1
+  fi
+  mv "$f.sbx.tmp" "$f"
+  echo "==> patched Dobby include order ($f)"
+}
+
+patch_dobby_include_order
 
 LSP_JNI="$EXT/lsplant/lsplant/src/main/jni"
 for f in "$LSP_JNI/CMakeLists.txt" \

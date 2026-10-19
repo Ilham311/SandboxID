@@ -31,9 +31,9 @@ import java.util.Map;
  * file for every app on the device to read, and no dependency on the Zygisk
  * module at all.
  *
- * <p><b>Why read-only is fine.</b> {@link XSharedPreferences#edit()} throws by
- * design; the target process is not allowed to change the persona. Rotation
- * happens in the module's own UI, and this class re-reads on every load.
+ * <p><b>Why read-only is fine.</b> The persona is never written from the target
+ * process: rotation happens in the module's own UI, and this class re-reads on
+ * every load.
  */
 final class IdentityStore {
 
