@@ -12,8 +12,11 @@
 > reset: did baru: 7698230114438399540  install_id: 7698231974641862401  new_user:1
 > ```
 >
-> Jalur root (`pm clear` + `am force-stop`) dan jalur tanpa root (`PurgeHook` +
-> `SelfRestart`) keduanya teruji. Lihat [Satu klik](#satu-klik-new-device-persona).
+> Jalur **tanpa root** (`PurgeHook` + `SelfRestart`) yang teruji di perangkat:
+> uid modul tidak ada di `/data/adb/ksu/.allowlist`, sehingga `su` tidak
+> terlihat dari proses app dan `RootShell.available()` bernilai false. Jalur
+> **root** (`pm clear` + `am force-stop`) sudah ditulis tapi **belum pernah
+> dieksekusi di perangkat** — lihat [Satu klik](#satu-klik-new-device-persona).
 
 ## Apa ini
 
@@ -54,6 +57,10 @@ data. Ini jalur cadangan; did **tidak** akan berganti, dan UI mengatakannya.
 | 3 | Matikan proses TikTok | `am force-stop` | `SelfRestart` (receiver → `killProcess`) |
 | 4 | Buka TikTok | `startActivity` | sama |
 | 5 | Baca did yang diterbitkan | `awaitIssued` (baca `applog_stats.xml`) | `awaitBroadcast` (broadcast dari `RegisterHook`) |
+
+Jalur yang dipilih ditentukan oleh `RootShell.available()` — `su -c id` harus
+mengembalikan `uid=0`. Di perangkat uji hasilnya false (uid modul tidak ada di
+KernelSU allowlist), jadi yang berjalan adalah kolom kanan.
 
 **Kenapa harus dari activity, bukan service.** Android 10+ membatalkan
 pembukaan activity dari latar belakang. Percobaan lewat `PersonaService`
@@ -323,11 +330,12 @@ menjalankan C++ asli sebagai referensi:
 
 **Sudah terverifikasi di perangkat:** kompilasi, pemasangan, resolusi
 `XSharedPreferences` di proses target, seluruh hook terpasang, UI berfungsi, dan
-satu klik menghasilkan did baru (root maupun tanpa root).
+satu klik menghasilkan did baru lewat jalur tanpa root.
 
-**Belum terverifikasi:** perilaku di versi TikTok selain 47.1.4, dan perangkat
-dengan ROM yang tidak memblokir background activity start (jalur `PersonaService`
-mungkin berhasil di sana).
+**Belum terverifikasi:** jalur root (`RootShell` tidak pernah mendapat `su` di
+perangkat uji), perilaku di versi TikTok selain 47.1.4, dan perangkat dengan ROM
+yang tidak memblokir background activity start (jalur `PersonaService` mungkin
+berhasil di sana).
 
 ## Target: TikTok saja
 
