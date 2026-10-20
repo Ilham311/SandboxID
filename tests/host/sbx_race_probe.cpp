@@ -244,10 +244,74 @@ int main() {
         }
     }
 
+    // ---------- PROBE 6: an untracked blocking read must not hold g_synth_mu
+    //
+    // hook_read() used to `return orig_read(...)` from inside the lock_guard's
+    // scope. The return expression is evaluated while the guard is still alive,
+    // so the real read ran holding the mutex. On a device that is fatal: ART's
+    // FileObserver thread parks in read() on an inotify fd for the life of the
+    // process, so it took g_synth_mu permanently, every other thread of the app
+    // queued behind it, and handleBindApplication never returned - the app ANR'd
+    // as "failed to complete startup" and was SIGKILLed. All six configured
+    // targets died that way.
+    //
+    // A pipe is the host stand-in for the inotify fd: same blocking read(2), no
+    // device needed. If the mutex is still held while that read blocks, the
+    // second thread cannot take it and the join times out.
+    {
+        int pfd[2];
+        if (::pipe(pfd) != 0) {
+            printf("P6: SKIP - pipe() failed\n");
+        } else {
+            std::atomic<bool> reader_parked{false};
+            std::thread blocker([&] {
+                char c;
+                reader_parked = true;
+                // No writer yet: this read parks until the main thread writes.
+                ssize_t n = hook_read(pfd[0], &c, 1);
+                (void)n;
+            });
+            while (!reader_parked) std::this_thread::yield();
+            // Give the blocked thread time to actually enter read(2). Without the
+            // fix the mutex is held from before that point, so any delay works;
+            // with the fix this just makes the race deterministic.
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+            std::atomic<bool> got_lock{false};
+            std::thread other([&] {
+                // The cheapest real acquisition of the same mutex. If the blocked
+                // reader is holding it, this never returns.
+                std::lock_guard<std::mutex> lk(g_synth_mu);
+                got_lock = true;
+            });
+
+            auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(1000);
+            while (!got_lock && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            if (!got_lock) {
+                printf("P6: FAIL - a blocked read() on an untracked fd is holding "
+                       "g_synth_mu; every other thread of the process will queue "
+                       "behind it (this is the target-app startup ANR)\n");
+                ++failures;
+            } else {
+                printf("P6: untracked blocking read() does not hold g_synth_mu\n");
+            }
+
+            char w = 'x';
+            (void)::write(pfd[1], &w, 1);   // release the parked read
+            blocker.join();
+            other.join();
+            hook_close(pfd[0]);
+            hook_close(pfd[1]);
+        }
+    }
+
     if (failures) {
         printf("== sbx_race_probe: %d FAILURE(S) ==\n", failures);
         return 1;
     }
-    printf("== sbx_race_probe: all 5 probes correct ==\n");
+    printf("== sbx_race_probe: all 6 probes correct ==\n");
     return 0;
 }

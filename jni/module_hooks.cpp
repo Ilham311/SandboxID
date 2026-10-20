@@ -442,20 +442,33 @@ static ssize_t synth_serve_at(int fd, void* buf, size_t count, size_t offset) {
 static ssize_t hook_read(int fd, void* buf, size_t count) {
     // Decide under the lock, act outside it: synth_serve takes the lock itself,
     // and a blocking real read must never hold it.
+    //
+    // The untracked case used to `return orig_read(...)` from INSIDE the guard's
+    // scope. That is not "outside the lock": the return expression is evaluated
+    // while the guard is still alive, so the real read ran with g_synth_mu held.
+    // read() on a pipe, socket, inotify or eventfd blocks until data arrives -
+    // and FileObserver's thread parks in exactly that read() for the life of the
+    // process (android_os_fileobserver_observe -> read). One such thread took
+    // the mutex permanently, every other thread of the app queued behind it, and
+    // handleBindApplication never finished: the process ANR'd as "failed to
+    // complete startup" and was SIGKILLed. Every configured target hit this.
+    bool untracked = false;
     bool need_build = false;
     bool recycled = false;
     {
         std::lock_guard<std::mutex> lk(g_synth_mu);
         auto it = g_synth_fds.find(fd);
-        if (it == g_synth_fds.end())
-            return orig_read ? orig_read(fd, buf, count) : ::read(fd, buf, count);
-        if (!synth_identity_ok_locked(fd, it->second)) {
+        if (it == g_synth_fds.end()) {
+            untracked = true;
+        } else if (!synth_identity_ok_locked(fd, it->second)) {
             g_synth_fds.erase(it);
             recycled = true;
         } else {
             need_build = !it->second.ready;
         }
     }
+    if (untracked)
+        return orig_read ? orig_read(fd, buf, count) : ::read(fd, buf, count);
     if (recycled) {
         LOGD("NATIVE_READ: fd %d ditutup tanpa hook_close dan dipakai ulang untuk "
              "file lain - entry sintetis dibuang, read asli yang dilayani", fd);
@@ -467,21 +480,27 @@ static ssize_t hook_read(int fd, void* buf, size_t count) {
 
 static ssize_t hook_pread64(int fd, void* buf, size_t count, long long offset) {
     if (offset < 0) return -1;
+    // Same scope hazard as hook_read: the untracked path must not call the real
+    // pread from inside the guard. pread does not block on a pipe, but it does
+    // on a slow file, and the invariant is the same one.
+    bool untracked = false;
     bool need_build = false;
     bool recycled = false;
     {
         std::lock_guard<std::mutex> lk(g_synth_mu);
         auto it = g_synth_fds.find(fd);
-        if (it == g_synth_fds.end())
-            return orig_pread64 ? orig_pread64(fd, buf, count, offset)
-                                : ::syscall(__NR_pread64, fd, buf, count, offset);
-        if (!synth_identity_ok_locked(fd, it->second)) {
+        if (it == g_synth_fds.end()) {
+            untracked = true;
+        } else if (!synth_identity_ok_locked(fd, it->second)) {
             g_synth_fds.erase(it);
             recycled = true;
         } else {
             need_build = !it->second.ready;
         }
     }
+    if (untracked)
+        return orig_pread64 ? orig_pread64(fd, buf, count, offset)
+                            : ::syscall(__NR_pread64, fd, buf, count, offset);
     if (recycled) {
         LOGD("NATIVE_READ: fd %d didaur ulang ke file lain sebelum pread - "
              "entry sintetis dibuang", fd);
