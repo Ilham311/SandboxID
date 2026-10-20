@@ -27,6 +27,24 @@
 #include <vector>
 #include <cstdint>
 
+// The LSPlant headers MUST be included here, at global scope, and not inside
+// the sbxlsp namespace below. lsplant.hpp opens `namespace lsplant { inline
+// namespace v2 { ... } }`; including it inside another namespace nests those,
+// and every call then references sbxlsp::lsplant::v2::Init instead of
+// ::lsplant::v2::Init. The definition lives in lsplant.cc under the real name,
+// so the module links with three unresolved symbols:
+//   sbxlsp::lsplant::v2::Init / Hook / Deoptimize
+// A shared library may carry undefined symbols, so this only shows up as a hard
+// link error on some toolchains (the NDK build) and as a silent, guaranteed
+// runtime failure everywhere else — the hooks would never install.
+//
+// Guarded: an L3=0 build has no include path for either header, and must stay
+// compilable as the no-op stub below.
+#ifdef SBX_ENABLE_LSPLANT
+#include <dobby.h>
+#include <lsplant.hpp>
+#endif
+
 #ifndef SBX_LSP_TAG
 #define SBX_LSP_TAG "SandboxID-L3"
 #endif
@@ -86,8 +104,8 @@ inline bool install_all(JNIEnv*, const HookValues&)  { return false; }
 //
 // Dobby is still needed: LSPlant ships no inline hook engine and takes one
 // through InitInfo. It is pinned and built from source as `dobby_static`.
-#include <dobby.h>
-#include <lsplant.hpp>
+// (<dobby.h> and <lsplant.hpp> are included at the top of this file, outside
+// namespace sbxlsp — see the comment there.)
 #include "sbx_elf.hpp"           // in-tree libart.so symbol resolver
 #include "sbx_ident_synth.hpp"   // sbxid::synth_all + sbxnr:: primitives
 #if __has_include("hook_dex.h")
