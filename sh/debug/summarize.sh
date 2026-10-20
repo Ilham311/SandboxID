@@ -256,6 +256,35 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     fi
     echo ""
 
+    # ------------------------------------------------ layer 3: LSPlant
+    # SandboxID-L3 carries its own tag, so it does NOT match ${MOD}. The old
+    # capture filter did not subscribe to that tag at all, which is why a
+    # session could report "L3 java hooks unavailable" with zero explanation.
+    echo "--- Layer 3: LSPlant java hooks (tag SandboxID-L3) ---"
+    L3_LINES=$(grep -cE "SandboxID-L3: " "$IN")
+    if [ "$L3_LINES" -eq 0 ]; then
+        echo "  (no SandboxID-L3 lines captured - L3 never ran, or the tag was"
+        echo "   not subscribed; see the logcat -s filter in service.sh)"
+    else
+        grep -E "SandboxID-L3: " "$IN" \
+            | sed -E "s/^[0-9]{2}-[0-9]{2} [0-9:.]+ +[0-9]+ +[0-9]+ [A-Z] //" \
+            | sort | uniq -c | sort -rn | head -15 \
+            | awk '{n=$1; $1=""; sub(/^ /,""); printf "  %5dx  %s\n", n, $0}'
+    fi
+    # LSPlant logs its own Init failures under tag "LSPlant" (logging.hpp
+    # LOG_TAG), naming the exact ART symbol gate that rejected it. That line is
+    # the only place the cause appears, so show it here next to our summary line.
+    printf "  %-28s : %s\n" "lsplant::Init OK"   "$(grep -cE 'SandboxID-L3: .*lsplant::Init ok' "$IN")"
+    printf "  %-28s : %s\n" "lsplant::Init failed" "$(grep -cE 'SandboxID-L3: .*lsplant::Init failed' "$IN")"
+    LS=$(grep -cE '(E|W|I) LSPlant *: ' "$IN")
+    if [ "$LS" -gt 0 ]; then
+        echo "  LSPlant's own verdict (tag LSPlant):"
+        grep -E '(E|W|I) LSPlant *: ' "$IN" \
+            | sed -E "s/^.*LSPlant *: //" | sort | uniq -c | sort -rn | head -8 \
+            | awk '{n=$1; $1=""; sub(/^ /,""); printf "  %5dx  %s\n", n, $0}'
+    fi
+    echo ""
+
     # ------------------------------------------------ companion errors
     echo "--- All module ERROR lines ---"
     EN=$(grep -cE "^[0-9]{2}-[0-9]{2} [0-9:.]+ +[0-9]+ +[0-9]+ E (SandboxID|SandboxIDCompanion): " "$IN")

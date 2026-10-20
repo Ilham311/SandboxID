@@ -44,8 +44,15 @@ if [ -f "$MODDIR/debug_variant" ]; then
     (
         sleep 8
         logcat -b main -b crash -b system -c 2>/dev/null
+        # LSPlant is the tag LSPlant itself logs under (jni/external/lsplant/...
+        # logging.hpp LOG_TAG). Its LOGE is the ONLY line that names which ART
+        # symbol gate rejected Init ("Failed to find GetMethodShorty",
+        # "Failed to init art method"); without this tag subscribed, the session
+        # log shows just the module's generic "L3 java hooks unavailable" and the
+        # actual cause lives only in a separate LSPosed log.
         logcat -b main -b crash -b system -v threadtime \
-            -s SandboxID:V SandboxIDCompanion:V AndroidRuntime:E DEBUG:V libc:F \
+            -s SandboxID:V SandboxIDCompanion:V SandboxID-L3:V LSPlant:V \
+               AndroidRuntime:E DEBUG:V libc:F \
             >> "$LOGFILE" 2>&1
     ) &
     echo "$!" > "$MODDIR/debug/logcat.pid"
@@ -72,6 +79,7 @@ if [ -f "$MODDIR/debug_variant" ]; then
             index($0, ">>> ") ||
             index($0, "Build fingerprint:") ||
             index($0, " pc ") ||
+            index($0, "Abort message:") ||
             index($0, "FATAL EXCEPTION") { print; fflush() }
         ' >> "$CRASHFILE" 2>&1
     ) &

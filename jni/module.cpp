@@ -266,7 +266,12 @@ private:
         if (sbxlsp::install_all(env, hv))
             LOGI("L3 java hooks active");
         else
-            LOGD("L3 java hooks unavailable (L1/L2/L9 tetap jalan)");
+            // LOGW, not LOGD: in a release build LOGD compiles to nothing, so
+            // the one signal that Java-level spoofing is off (android_id, IMEI,
+            // MAC, Widevine, the TikTok register path) would vanish with it.
+            // This is the difference between "identity spoofed" and "only the
+            // property-based layers ran", and it must be visible in release.
+            LOGW("L3 java hooks unavailable (L1/L2/L9 tetap jalan)");
     }
 
     void unload() {

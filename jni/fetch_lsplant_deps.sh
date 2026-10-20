@@ -121,4 +121,93 @@ if find "$LSP_JNI" -name '*.ixx' -print -quit 2>/dev/null | grep -q .; then
   exit 1
 fi
 
+# ---- local patches: relaxed Init gates --------------------------------------
+#
+# jni/external/ is gitignored, so a patch applied by hand does not survive the
+# next fetch (and a fresh CI checkout never had it). Both edits mirror upstream
+# master, where the same two gates were relaxed; v6.4 predates that and treats
+# them as fatal, which disables L3 on exactly the stripped release ROMs it is
+# needed on.
+#
+# Idempotent: each step tests for its own marker and does nothing on a rerun.
+patch_once() {   # patch_once <file> <marker> <sed-expression>
+  local file="$1" marker="$2" expr="$3"
+  if [ ! -f "$file" ]; then
+    echo "ERROR: patch target missing: $file" >&2
+    exit 1
+  fi
+  if grep -q "$marker" "$file"; then
+    echo "==> already patched: $(basename "$file")"
+    return 0
+  fi
+  sed -i "$expr" "$file"
+  if ! grep -q "$marker" "$file"; then
+    echo "ERROR: patch did not apply to $file" >&2
+    echo "       LSPlant changed shape at $LSPLANT_REF; update the sed above." >&2
+    exit 1
+  fi
+  echo "==> patched: $(basename "$file")"
+}
+
+# 1. ClassLinker::Init — FixupStaticTrampolines may be inlined away by LTO.
+#    Absence must not fail Init (upstream master comment: "ART may inline these
+#    methods, so their absence is not an initialization failure").
+#
+#    HookSym, not HookSyms: HookSyms logs an LOGE ("Hook Fails: ...") when every
+#    name misses, which would make a legitimately-optional gate look like a hard
+#    failure in the capture. This gate is genuinely optional, so it is silent.
+patch_once "$LSP_JNI/art/runtime/class_linker.hpp" \
+  "so their absence is not an initialization" \
+  '/^        if (!HookSyms(handler, FixupStaticTrampolinesWithThread, FixupStaticTrampolines,$/,/^        }$/c\
+        // ART may inline these methods, so their absence is not an initialization\
+        // failure (upstream master relaxes this the same way). HookSym, not\
+        // HookSyms: HookSyms logs an LOGE when every name misses, and a gate\
+        // that is legitimately optional must not read as a failure in the log.\
+        (void)(HookSym(handler, FixupStaticTrampolinesWithThread) ||\
+               HookSym(handler, FixupStaticTrampolines) ||\
+               HookSym(handler, FixupStaticTrampolinesRaw));'
+
+# 2. JitCodeCache::Init — DoCollection is the newer ART name for the same job
+#    and is the only one still out-of-line on a stripped ROM. Hook whichever
+#    exists instead of failing when GarbageCollectCache is gone.
+#
+#    Inserted BEFORE the existing GarbageCollectCache stub (one-line anchor)
+#    rather than replacing it, so the original stub keeps its debug log and the
+#    edit cannot damage it.
+JIT_FILE="$LSP_JNI/art/runtime/jit/jit_code_cache.hpp"
+if grep -q "DoCollection, (JitCodeCache \* thiz, Thread \*self)" "$JIT_FILE" 2>/dev/null; then
+  echo "==> already patched: $(basename "$JIT_FILE")"
+else
+  DOCOLLECT=$(mktemp)
+  cat > "$DOCOLLECT" <<'STUB'
+    // DoCollection is the same job under the name newer ART builds use, and the
+    // only one still out-of-line on a stripped ROM. Upstream master hooks
+    // whichever of the two exists rather than failing when the other is gone.
+    CREATE_MEM_HOOK_STUB_ENTRY("_ZN3art3jit12JitCodeCache12DoCollectionEPNS_6ThreadE", void,
+                               DoCollection, (JitCodeCache * thiz, Thread *self), {
+                                   auto movements = GetJitMovements();
+                                   for (auto [target, backup] : movements) {
+                                       MoveObsoleteMethod(thiz, target, backup);
+                                   }
+                                   backup(thiz, self);
+                               });
+STUB
+  awk -v stub="$DOCOLLECT" '
+      /CREATE_MEM_HOOK_STUB_ENTRY\("_ZN3art3jit12JitCodeCache19GarbageCollectCache/ {
+          while ((getline line < stub) > 0) print line
+      }
+      { print }
+  ' "$JIT_FILE" > "$JIT_FILE.new" && mv -f "$JIT_FILE.new" "$JIT_FILE"
+  rm -f "$DOCOLLECT"
+  if ! grep -q "DoCollection, (JitCodeCache \* thiz, Thread \*self)" "$JIT_FILE"; then
+    echo "ERROR: DoCollection stub did not land in $JIT_FILE" >&2
+    exit 1
+  fi
+  echo "==> patched: $(basename "$JIT_FILE") (DoCollection stub)"
+fi
+
+patch_once "$LSP_JNI/art/runtime/jit/jit_code_cache.hpp" \
+  "HookSyms(handler, GarbageCollectCache, DoCollection)" \
+  's|HookSyms(handler, GarbageCollectCache)|HookSyms(handler, GarbageCollectCache, DoCollection)|'
+
 echo "==> L3 dependencies ready under $EXT"

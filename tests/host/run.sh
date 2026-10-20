@@ -15,6 +15,9 @@
 #   sbx_hook_sm    the per-fd state machine against this host's REAL /proc files:
 #                  open/read/EOF, lseek rewind, chunked reads, pread64, close,
 #                  relative openat, and fail-closed behaviour.
+#   sbx_elf_probe  jni/sbx_elf.hpp: the .gnu_debugdata mini-ELF parser and the
+#                  `.__uniq.<hash>` suffix tolerance L3 needs on a stripped
+#                  LTO ROM. Pure header test; no module TU, no device.
 #   console_check  the WebUI console module (webroot/console.js) under a stubbed
 #                  DOM: capture, badge semantics, stream guards, save transport.
 #                  Skipped unless node is on PATH.
@@ -117,12 +120,17 @@ mkdir -p "$OUT"
 
 exit_code=0
 
-for suite in sbx_pure sbx_hook_sm sbx_race_probe; do
+for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe; do
     src="$REPO/tests/host/$suite.cpp"
     bin="$OUT/$suite"
 
     echo "==> building $suite"
-    if ! "$CXX" "${FLAGS[@]}" "$src" "$REPO/native/native_read.cpp" -o "$bin"; then
+    # sbx_elf_probe exercises jni/sbx_elf.hpp on its own and takes no module TU;
+    # linking native_read.cpp in would pull the whole Zygisk surface into a test
+    # that has nothing to do with it.
+    extra=""
+    [ "$suite" = "sbx_elf_probe" ] || extra="$REPO/native/native_read.cpp"
+    if ! "$CXX" "${FLAGS[@]}" "$src" $extra -o "$bin"; then
         echo "FAIL: $suite did not compile"
         exit_code=1
         continue

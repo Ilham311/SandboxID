@@ -308,8 +308,13 @@ inline bool init(JNIEnv* env) {
     lsplant::InitInfo info{
         .inline_hooker   = sbx_inline_hooker,
         .inline_unhooker = sbx_inline_unhooker,
+        // getSymbAddressOrUniq, not getSymbAddress: a release ROM built with
+        // LTO appends `.__uniq.<hash>` to file-local names, so the exact name
+        // LSPlant asks for is not the name the ROM has. The prefix resolver
+        // below cannot cover this case because LSPlant's own prefix already
+        // carries a different trailing type signature.
         .art_symbol_resolver =
-            [](std::string_view s) -> void* { return art.getSymbAddress(s); },
+            [](std::string_view s) -> void* { return art.getSymbAddressOrUniq(s); },
         .art_symbol_prefix_resolver =
             [](std::string_view s) -> void* { return art.getSymbPrefixFirstAddress(s); },
     };
