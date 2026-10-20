@@ -414,6 +414,13 @@ jobs:
     # root. It has never been built before, so this job is also the first
     # compile the variant has ever had — a failure here means a compile error
     # in lsp/, not a packaging regression.
+    #
+    # needs: build — the last step attaches the APK to the release `build`
+    # creates. Without the dependency this job races it: on a run where the
+    # release did not exist yet, `gh release list` came back empty and the
+    # upload failed with a bare exit code 1 after the APK had built and signed
+    # fine.
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -490,14 +497,18 @@ jobs:
 
       - name: Attach APK to release
         # The version tag is resolved in the `build` job; this job does not know
-        # it. Attach to whatever the newest release is, which is the one this
-        # run created.
+        # it. Attach to the newest release, which is the one this run created.
+        #
+        # Tag read via --json, not `awk '{print $3}'`: the plain listing is
+        # "NAME<TAB>STATUS<TAB>TAG<TAB>DATE", so field 3 is the "Latest" badge,
+        # and `gh release upload Latest` then fails with a bare exit code 1.
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         working-directory: lsp
         run: |
           set -eu
-          LATEST=$(gh release list --limit 1 | awk '{print $3}' | head -1)
+          LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
+          [ -n "$LATEST" ] || { echo "no release to attach the APK to" >&2; exit 1; }
           echo "attaching to release: $LATEST"
           gh release upload "$LATEST" sandboxid-lsp-*.apk --clobber

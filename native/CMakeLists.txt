@@ -2,10 +2,10 @@ cmake_minimum_required(VERSION 3.18)
 
 # The whole flag set below is keyed on the RELEASE configuration, and so is the
 # save/restore around the third-party subdirectories further down. A bare
-# `cmake -S native -B build` otherwise picks RelWithDebInfo and builds with
-# neither: no --exclude-libs,ALL, so Dobby's asm object keeps a global reference
-# to common_closure_bridge_handler and the arm64 link dies with
-#   relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol ...
+# `cmake -S native -B build` otherwise picks RelWithDebInfo and builds with none
+# of it: no --exclude-libs,ALL, no --gc-sections, no LTO. The result links, but
+# it is not the module CI ships, and the difference stays invisible until
+# something depends on it.
 #
 # This has to happen BEFORE project(): CMake 4 fills CMAKE_BUILD_TYPE in during
 # project() (RelWithDebInfo when the generator supports configurations), so a
@@ -130,21 +130,11 @@ if(SBX_ENABLE_LSPLANT)
     set(CMAKE_C_FLAGS_RELEASE   "-O2")
 
     # ---- Dobby: the inline hook engine LSPlant drives ----
-    # Only the static target is linked. Its SHARED sibling would produce a
-    # second libdobby.so that nothing loads; upstream's defaults are kept
-    # otherwise so the build stays on the configuration Dobby tests.
+    # LSPosed's fork declares ONE target, `dobby`, whose type is chosen by
+    # DOBBY_GENERATE_SHARED. Static is what gets linked, and it also means there
+    # is no second libdobby.so to keep out of `all`.
+    set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
     add_subdirectory("${SBX_EXT}/dobby" "${CMAKE_CURRENT_BINARY_DIR}/dobby_build")
-
-    # Dobby always declares BOTH a SHARED and a STATIC target, and the SHARED
-    # one does not link on ELF: its arm64 closure bridge asm references
-    # common_closure_bridge_handler, which upstream declares `inline` in a
-    # header, so with -fvisibility=hidden the shared link leaves it undefined.
-    # Only dobby_static is linked into this module, so keep the SHARED sibling
-    # out of `all` — otherwise a plain `cmake --build` fails on a target nothing
-    # consumes.
-    if(TARGET dobby)
-        set_target_properties(dobby PROPERTIES EXCLUDE_FROM_ALL TRUE)
-    endif()
 
     # ---- LSPlant ----
     # LSPLANT_BUILD_SHARED=OFF keeps CMake from producing a liblsplant.so whose
@@ -160,7 +150,7 @@ if(SBX_ENABLE_LSPLANT)
     target_include_directories(sandboxid_module PRIVATE
         "${SBX_LSP_JNI}/include"
         "${SBX_EXT}/dobby/include")
-    target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby_static z)
+    target_link_libraries(sandboxid_module PRIVATE lsplant_static dobby z)
     target_compile_definitions(sandboxid_module PRIVATE SBX_ENABLE_LSPLANT=1)
 
     # LSPlant's public header builds its callbacks out of std::function, which

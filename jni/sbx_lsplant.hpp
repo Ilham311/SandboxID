@@ -117,7 +117,10 @@ inline bool available() { return true; }
 
 inline void* sbx_inline_hooker(void* target, void* hooker) {
     void* origin = nullptr;
-    if (DobbyHook(target, hooker, &origin) == 0) return origin;
+    // dobby_dummy_func_t is `void (*)()` — an untyped slot, the same convention
+    // upstream uses for DobbyHook's replace/origin pair.
+    if (DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(hooker),
+                  reinterpret_cast<dobby_dummy_func_t*>(&origin)) == 0) return origin;
     return nullptr;
 }
 inline bool sbx_inline_unhooker(void* func) { return DobbyDestroy(func) == 0; }
