@@ -174,10 +174,12 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     # umount pass (enable_hide). Property/Build spoofing is entirely in-process
     # (per-target); there is no bind-mount layer. exemptFd() now decides only
     # whether the companion socket survives specialize so this pass can run.
-    # Both branches are logged by jni/module.cpp (true is LOGD, so it appears
-    # only in a debug capture).
-    EXF=$(grep -E "${MOD}exemptFd\(fd=" "$IN" | grep -c 'returned false')
-    EXOK=$(grep -E "${MOD}exemptFd\(fd=" "$IN" | grep -c 'returned true')
+    # Both branches are logged only for a target (jni/module.cpp): every app the
+    # zygote forks calls exemptFd(), so an unconditional line would count ~750
+    # non-target processes per boot and tell you nothing about any of them.
+    # "returned" is the pre-2.2.22 wording, kept so older captures still tally.
+    EXF=$(grep -E "${MOD}exemptFd\(.*(-> false|returned false)" "$IN" | wc -l)
+    EXOK=$(grep -E "${MOD}exemptFd\(.*(-> true|returned true)" "$IN" | wc -l)
     SKIP=$(count 'hide pass skipped')
     H_OK=$(count 'HIDE: companion detached')
     H_FAIL=$(count 'HIDE: failed to')

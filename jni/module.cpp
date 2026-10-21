@@ -113,22 +113,15 @@ public:
         //     writes a return value, so on arm64 the module reads leftover
         //     garbage from w0 - false 100% of the time, even though the fd WAS
         //     exempted and survives.
-        // Acting on the bool alone would skip layer-2 bind-mounts on ReZygisk
-        // that would have worked. Record it for the log, but decide on the
-        // socket itself in postAppSpecialize (companion_socket_alive()).
+        // Acting on the bool alone would skip the hide pass on ReZygisk when
+        // the socket actually survived. Record it, but decide on the socket
+        // itself in postAppSpecialize (companion_socket_state()).
+        //
+        // Reported below only for a target: preAppSpecialize runs for every app
+        // the zygote forks, and a WARN on each of the ~750 non-target processes
+        // per boot drowns the capture. The bool says nothing about an app that
+        // never gets a blob.
         fd_exempted_ = api_->exemptFd(fd);
-        if (!fd_exempted_) {
-            LOGW("exemptFd(fd=%d) returned false - the zygote *may* close the "
-                 "companion socket (a known false negative on ReZygisk, whose "
-                 "v4 slot is declared void); re-tested in postAppSpecialize", fd);
-        } else {
-            // Paired with the false branch above so summarize.sh can count
-            // both outcomes. Without this there is no success marker anywhere
-            // in the tree, and its "exemptFd() returned true" row was
-            // provably zero on every device.
-            LOGD("exemptFd(fd=%d) returned true - the companion socket is "
-                 "exempted", fd);
-        }
 
         uint8_t cmd   = sandboxid::CMD_GET_IDENTITY;
         uint16_t plen = (uint16_t)pkg.size();
@@ -156,6 +149,17 @@ public:
 
         LOGI("target active (%u B) [%s]", len, SBX_VARIANT_TAG);
         LOGD("target pkg='%s'", pkg.c_str());
+        // Both outcomes are logged (LOGI, so release captures see them) because
+        // summarize.sh counts each row. LOGI, not LOGW on the false branch: on
+        // ReZygisk the slot is void and false is the normal answer, so a warning
+        // there would cry wolf on every target activation. The socket probe in
+        // postAppSpecialize is what actually decides; its failure is the WARN.
+        if (fd_exempted_)
+            LOGI("exemptFd() -> true, companion socket exempted");
+        else
+            LOGI("exemptFd() -> false, the zygote *may* close the companion "
+                 "socket (expected on ReZygisk, whose v4 slot is declared void); "
+                 "decided on the socket itself in postAppSpecialize");
     }
 
     void postAppSpecialize(const AppSpecializeArgs*) override {
