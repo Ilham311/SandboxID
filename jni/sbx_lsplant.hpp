@@ -115,13 +115,60 @@ inline bool install_all(JNIEnv*, const HookValues&)  { return false; }
 
 inline bool available() { return true; }
 
+// Resolved in init(); the address LSPlant passes as the target of its
+// Class::SetStatus hook. See the refusal in sbx_inline_hooker below.
+inline void* g_set_status = nullptr;
+
 inline void* sbx_inline_hooker(void* target, void* hooker) {
+    // LSPlant installs an inline hook on art::mirror::Class::SetStatus so it can
+    // back up the entry point of a static method when its class is initialized.
+    // On this ROM that hook leaves Class::replace branching to a null backup.
+    // replace ends with `br x3` (a tail branch, so no frame is pushed) and x3
+    // comes from the hooker's backup slot; when that slot is null the process
+    // spins at 100% CPU with a one-frame stack until ActivityManager kills it
+    // ("am_kill ... start timeout"). That is what made every target app fail to
+    // launch on v2.2.22 — the first version whose symbol resolver was good
+    // enough for lsplant::Init to succeed, and load_callback_class() triggers
+    // the first DefineClass, hence the first SetStatus call.
+    //
+    // Refusing this one hook is safe. HookSymNoHandle() treats any non-null
+    // target as success regardless of what the hooker returned, so LSPlant still
+    // initialises and all the other hooks install; this entry is simply never
+    // patched, so the bad backup cannot form. The cost is LSPlant's late-init
+    // backup: a static method hooked *before* its class is initialized can lose
+    // its entry point when that class is initialized later. Every framework
+    // class this module targets is already initialized long before
+    // postAppSpecialize, so the cost is narrow — and strictly better than an app
+    // that cannot start.
+    if (target && target == g_set_status) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            SBX_LSP_LOGE("L3: skipping the Class::SetStatus inline hook - on "
+                         "this ROM its backup slot stays null and Class::replace "
+                         "tail-branches into it. Other hooks install normally.");
+        }
+        return nullptr;
+    }
+
     void* origin = nullptr;
     // dobby_dummy_func_t is `void (*)()` — an untyped slot, the same convention
     // upstream uses for DobbyHook's replace/origin pair.
     if (DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(hooker),
-                  reinterpret_cast<dobby_dummy_func_t*>(&origin)) == 0) return origin;
-    return nullptr;
+                  reinterpret_cast<dobby_dummy_func_t*>(&origin)) != 0) return nullptr;
+    // Dobby returns RS_SUCCESS even when GenerateRelocatedCode() bailed out; in
+    // that case origin is null, the entry is already patched, and LSPlant would
+    // take the null as a valid backup and branch into it. Ask Dobby to undo the
+    // patch and report failure. The undo is best-effort: on the relocate-failed
+    // path origin_insn_size is 0, so the patch may survive — which is why the
+    // SetStatus refusal above, not this branch, is what keeps the process alive.
+    if (!origin) {
+        DobbyDestroy(target);
+        SBX_LSP_LOGE("L3: DobbyHook reported success but produced no trampoline "
+                     "for %p - hook refused", target);
+        return nullptr;
+    }
+    return origin;
 }
 inline bool sbx_inline_unhooker(void* func) { return DobbyDestroy(func) == 0; }
 
@@ -297,6 +344,12 @@ inline bool init(JNIEnv* env) {
         SBX_LSP_LOGE("libart.so not found in the link map - L3 disabled this process");
         return false;
     }
+
+    // The exact name LSPlant resolves for its Class::SetStatus hook (see
+    // sbx_inline_hooker). Resolved through the same resolver LSPlant uses, so
+    // the comparison there is against the identical pointer.
+    g_set_status = art.getSymbAddressOrUniq(
+        "_ZN3art6mirror5Class9SetStatusENS_6HandleIS1_EENS_11ClassStatusEPNS_6ThreadE");
 
     // Names chosen to blend into an ordinary androidx frame rather than advertise
     // a hook: this class name is what LSPlant bakes into the generated stub that
