@@ -204,13 +204,29 @@ public final class EnvCompatState {
             // caller sees the exception the framework intended to throw, not a
             // reflection artefact — a wrapped SecurityException would otherwise
             // change control flow in the app.
+            //
+            // The type must survive *exactly*, including checked exceptions:
+            // LoadedApk.rewriteRValues() probes for an obfuscated R class and
+            // catches ClassNotFoundException; wrapping that in a RuntimeException
+            // turns an expected miss into "Unable to instantiate application".
+            // A checked exception leaving a JNI-invoked callback is fine — ART
+            // propagates the pending exception regardless of the declared type.
             Throwable c = e.getCause();
-            if (c instanceof RuntimeException) throw (RuntimeException) c;
-            if (c instanceof Error) throw (Error) c;
-            throw new RuntimeException(c);
+            throw sneakyThrow(c != null ? c : e);
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
+    }
+
+    /**
+     * Rethrow {@code t} with its original type, bypassing javac's checked-exception
+     * check. Never returns; declared to return RuntimeException so the call site can
+     * write {@code throw sneakyThrow(t)} and javac sees a definite throw. ART only
+     * cares that the right throwable is pending when the JNI call returns.
+     */
+    @SuppressWarnings("unchecked")
+    private static <T extends Throwable> RuntimeException sneakyThrow(Throwable t) throws T {
+        throw (T) t;
     }
 
     // ------------------------------------------------------------------

@@ -143,6 +143,39 @@ for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe; do
     fi
 done
 
+# ---- EnvCompatStateCheck: the L3 callback's exception contract ------------
+# The L3 Java callback is compiled into DEX at build time from
+# jni/SandboxIDHook.java. A checked exception it lets escape with the wrong type
+# kills every target app at startup (LoadedApk.rewriteRValues catches only
+# ClassNotFoundException), and nothing else in CI compiles that source. Run it on
+# a plain JDK when one is present; skip otherwise, like console_check below.
+if command -v javac >/dev/null 2>&1 && command -v java >/dev/null 2>&1; then
+    echo "==> running EnvCompatStateCheck"
+    jout="$OUT/java"
+    rm -rf "$jout"; mkdir -p "$jout/src/androidx/core/os" "$jout/classes"
+    # javac requires the file name to match the public class it declares; the
+    # source keeps a repo-meaningful name, so compile a copy under the real one.
+    cp "$REPO/jni/SandboxIDHook.java" "$jout/src/androidx/core/os/EnvCompatState.java"
+    cp "$REPO/tests/host/EnvCompatStateCheck.java" "$jout/src/"
+    if javac --release 8 -d "$jout/classes" \
+            "$jout/src/androidx/core/os/EnvCompatState.java" \
+            "$jout/src/EnvCompatStateCheck.java" 2>"$jout/javac.log" \
+       || javac -source 1.8 -target 1.8 -d "$jout/classes" \
+            "$jout/src/androidx/core/os/EnvCompatState.java" \
+            "$jout/src/EnvCompatStateCheck.java" 2>>"$jout/javac.log"; then
+        if ! java -ea -cp "$jout/classes" EnvCompatStateCheck; then
+            echo "FAIL: EnvCompatStateCheck reported failures"
+            exit_code=1
+        fi
+    else
+        echo "FAIL: EnvCompatStateCheck did not compile"
+        cat "$jout/javac.log" >&2
+        exit_code=1
+    fi
+else
+    echo "==> skipping EnvCompatStateCheck (no JDK found)"
+fi
+
 # ---- console_check: webroot/console.js under a stubbed DOM -----------------
 # node is not a build requirement of this repo, so absent node is a skip, not
 # a failure — the C++ suites above are the ones that must always run.
