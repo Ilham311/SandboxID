@@ -258,17 +258,18 @@ private:
         hv.seed       = sbxnr::applog_seed(val("FINGERPRINT"), hv.serial,
                                            hv.android_id, pkg_);
 
-        // WebView UA rewrite. The real segment is read straight from the
-        // properties the provider itself reads, so the "from" half matches what
-        // this ROM actually emits; the "to" half is the persona's. Both halves
-        // empty out if the persona does not set MODEL/ID/RELEASE, which makes
-        // the hook a pass-through rather than a wrong rewrite.
+        // WebView UA rewrite. The real segment must be read from the values the
+        // ROM actually emits, so it comes through sbx_raw_prop_get: plain
+        // __system_property_get in this process returns the *persona's* value
+        // for every prop the module spoofs, which made from == to and turned
+        // the rewrite into a silent no-op (observed on device: the app kept
+        // re-persisting the real model and build id).
         {
             char rel[PROP_VALUE_MAX] = {0}, model[PROP_VALUE_MAX] = {0},
                  bid[PROP_VALUE_MAX] = {0};
-            __system_property_get("ro.build.version.release", rel);
-            __system_property_get("ro.product.model", model);
-            __system_property_get("ro.build.id", bid);
+            sbx_raw_prop_get("ro.build.version.release", rel);
+            sbx_raw_prop_get("ro.product.model", model);
+            sbx_raw_prop_get("ro.build.id", bid);
             if (rel[0] && model[0] && bid[0]) {
                 hv.ua_from = std::string("Android ") + rel + "; " + model +
                              " Build/" + bid;

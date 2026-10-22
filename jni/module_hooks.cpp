@@ -710,6 +710,15 @@ static const prop_info* hook_system_property_find(const char* name) {
 typedef int (*prop_get_fn)(const char*, char*);
 static prop_get_fn orig_prop_get = nullptr;
 
+// Read a property WITHOUT this module's spoofing. The UA hook needs the value
+// the ROM actually emits, because its "from" half has to match what the
+// WebView provider produces; __system_property_get() in this process returns
+// the persona's value for every prop this module spoofs, which would make
+// from == to and the rewrite a silent no-op.
+int sbx_raw_prop_get(const char* name, char* value) {
+    return orig_prop_get ? orig_prop_get(name, value) : 0;
+}
+
 static int hook_system_property_get(const char* name, char* value) {
     if (!name) return orig_prop_get ? orig_prop_get(name, value) : 0;
     if (sbx_prop_hidden(name)) {

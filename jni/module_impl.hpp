@@ -96,6 +96,9 @@ void install_prop_hook(Api* api, JNIEnv* env);
 void install_leak_sensors(Api* api, JNIEnv* env);
 void install_uptime_hook(Api* api, JNIEnv* env);
 void install_native_read_hooks(Api* api);
+// Reads a property without this module's spoofing (see module_hooks.cpp).
+// Returns 0 and an empty value when the native hooks are not installed.
+int sbx_raw_prop_get(const char* name, char* value);
 void install_crash_watchdog(const std::string& pkg);
 void install_build_hook(JNIEnv* env);
 void request_companion_hide(int fd);
