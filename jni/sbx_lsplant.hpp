@@ -119,6 +119,28 @@ inline bool available() { return true; }
 // Class::SetStatus hook. See the refusal in sbx_inline_hooker below.
 inline void* g_set_status = nullptr;
 
+// True when `p` starts with Dobby's arm64 absolute-branch veneer:
+//     ldr xN, #8      (0x58000000 | imm19=2 | N)
+//     br  xN          (0xD61F0000 | N<<5)
+//     .quad target
+// arm64 only: the other ABIs encode their veneers differently, and matching
+// these words against ARM32/x86 code would be meaningless.
+inline bool sbx_is_veneer(const void* p) {
+#if defined(__aarch64__)
+    const uint32_t* w = static_cast<const uint32_t*>(p);
+    // ldr (literal): opc=01 in bits 31:30, V=0 (bit 26), rt in bits 4:0.
+    if ((w[0] & 0xFF000000u) != 0x58000000u) return false;
+    if (((w[0] >> 5) & 0x7FFFFu) != 2u) return false;        // ... at pc+8
+    const uint32_t n = w[0] & 0x1Fu;
+    // br <xN>: everything except Rn (bits 9:5) must match the br base.
+    return (w[1] & 0xFFFFFC00u) == 0xD61F0000u &&
+           ((w[1] >> 5) & 0x1Fu) == n;
+#else
+    (void)p;
+    return false;
+#endif
+}
+
 inline void* sbx_inline_hooker(void* target, void* hooker) {
     // LSPlant installs an inline hook on art::mirror::Class::SetStatus so it can
     // back up the entry point of a static method when its class is initialized.
@@ -147,6 +169,40 @@ inline void* sbx_inline_hooker(void* target, void* hooker) {
             SBX_LSP_LOGE("L3: skipping the Class::SetStatus inline hook - on "
                          "this ROM its backup slot stays null and Class::replace "
                          "tail-branches into it. Other hooks install normally.");
+        }
+        return nullptr;
+    }
+
+    // Already carrying someone else's veneer: refuse.
+    //
+    // On this ROM art::ClassLinker::RegisterNative (and UnregisterNative) start
+    // with `nop; sub sp,#N`, but another module in this process has hooked them
+    // first, so the entry now reads `ldr x17,#8; br x17; .quad <their replace>`.
+    // DobbyHook does not notice — it finds no entry of its own and proceeds. It
+    // sizes the relocation block from the *trampoline buffer* (16 bytes), copies
+    // those 16 bytes as "the original prologue" into the new trampoline, and
+    // appends LiteralLdrBranch(entry + 16) — which lands in the middle of our
+    // new veneer's literal. Calling that trampoline then reloads the literal
+    // (now holding our replace), and replace ends in `br x4` (a tail branch, so
+    // no frame is pushed) back into the trampoline: replace -> backup -> replace
+    // for ever at 100% CPU, one frame deep, until "am_kill ... start timeout".
+    // That is what kept every target app from launching on v2.2.23, right after
+    // the Class::SetStatus refusal let lsplant::Init succeed for the first time
+    // and these RegisterNative hooks became reachable.
+    //
+    // Refusing is safe for the same reason as the SetStatus refusal above: the
+    // caller treats any non-null target as success, so the rest of LSPlant still
+    // installs. LSPlant only wants these hooks to propagate a backup entry point
+    // when ART re-registers a native method; leaving the other module's hook in
+    // place keeps ART working and simply skips that propagation for it.
+    if (sbx_is_veneer(target)) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            SBX_LSP_LOGE("L3: %p is already inline-hooked by another module - "
+                         "leaving it alone. Dobby would otherwise relocate the "
+                         "foreign veneer and build a trampoline that loops back "
+                         "into our replace.", target);
         }
         return nullptr;
     }
