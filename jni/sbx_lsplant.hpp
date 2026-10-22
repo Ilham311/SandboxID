@@ -72,6 +72,19 @@ struct HookValues {
     std::string openudid;   // persona openudid (same value rotate_ids.sh seeds)
     std::string clientudid; // persona clientudid
     std::string cdid;       // persona cdid
+    // WebView User-Agent rewrite, as one literal {from, to} pair. `ua_from` is
+    // the real "Android <release>; <model> Build/<id>" segment this device
+    // actually produces; `ua_to` is the persona's. Both are built at install
+    // time from the real props (reading them is not a leak - the module is the
+    // one reading) so the rewrite follows whatever persona is loaded and stays
+    // valid across WebView updates, which change the rest of the UA string.
+    std::string ua_from;
+    std::string ua_to;
+    // OEM detection classes to make Class.forName reject. Built from the
+    // persona's manufacturer: a Pixel persona must not be able to load
+    // miui.os.Build, because an OEM branch that loads is an OEM branch that
+    // reports. Empty on a persona that IS that OEM.
+    std::vector<std::string> deny_classes;
     uint64_t    seed = 0;   // fnv1a(FINGERPRINT|SERIAL|ANDROID_ID)
 };
 
@@ -242,6 +255,7 @@ enum Mode {
     M_REWRITE_BODY = 2,  // rewrite a byte[] request body, then call the original
     M_OBSERVE      = 3,  // call the original, then report the loaded Class here
     M_ZERO_NUMERIC = 4,  // call the original; return "0" for an all-digit long key
+    M_REWRITE_STRING = 5,// call the original, then replace device tells in its String
 };
 
 // ret_type: 0 String, 1 byte[]
@@ -273,7 +287,8 @@ struct State {
               f_sval = nullptr, f_bval = nullptr, f_backup = nullptr,
               f_forceIdx = nullptr, f_bodyIdx = nullptr, f_urlIdx = nullptr,
               f_urlMatch = nullptr, f_openudid = nullptr, f_clientudid = nullptr,
-              f_cdid = nullptr;
+              f_cdid = nullptr, f_rwFrom = nullptr, f_rwTo = nullptr,
+              f_deny = nullptr;
     std::vector<jobject> keep;   // global refs: GC anchor for hookers + backups
     HookValues vals;
     sbxid::SynthIds ids;
@@ -350,6 +365,9 @@ inline bool resolve_callback_members(JNIEnv* env) {
     g.f_openudid   = env->GetFieldID(g.cb_class, "openudid",     "Ljava/lang/String;");
     g.f_clientudid = env->GetFieldID(g.cb_class, "clientudid",   "Ljava/lang/String;");
     g.f_cdid       = env->GetFieldID(g.cb_class, "cdid",         "Ljava/lang/String;");
+    g.f_rwFrom     = env->GetFieldID(g.cb_class, "rwFrom",       "[Ljava/lang/String;");
+    g.f_rwTo       = env->GetFieldID(g.cb_class, "rwTo",         "[Ljava/lang/String;");
+    g.f_deny       = env->GetStaticFieldID(g.cb_class, "deny",    "[Ljava/lang/String;");
     if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
 
     static const JNINativeMethod NATIVE[] = {
@@ -381,10 +399,15 @@ inline bool resolve_callback_members(JNIEnv* env) {
     }
     if (env->ExceptionCheck()) env->ExceptionClear();
 
+    // Denied OEM classes: names the app must not be able to load, because an
+    // AOSP device does not ship them. Static, like `watch`: the forName hook is
+    // shared by every caller and the list is a property of the persona, not of
+    // one hooked method. install_all() fills it from HookValues once the class
+    // is available (resolve_callback_members runs before that).
     return g.f_mode && g.f_isStatic && g.f_keyIdx && g.f_keyMatch && g.f_keyContains &&
            g.f_retType && g.f_sval && g.f_bval && g.f_backup && g.f_forceIdx &&
            g.f_bodyIdx && g.f_urlIdx && g.f_urlMatch && g.f_openudid &&
-           g.f_clientudid && g.f_cdid;
+           g.f_clientudid && g.f_cdid && g.f_rwFrom && g.f_rwTo && g.f_deny;
 }
 
 inline bool init(JNIEnv* env) {
@@ -523,6 +546,27 @@ inline bool hook_one_class(JNIEnv* env, jclass cls, const HookSpec& sp) {
             set_str(g.f_clientudid, g.vals.clientudid);
             set_str(g.f_cdid, g.vals.cdid);
         }
+        if (sp.mode == M_REWRITE_STRING) {
+            // One pair, both halves required: a from-without-to (or the
+            // reverse) would make the Java side skip the substitution, which is
+            // the right outcome but only after a wasted hook.
+            if (!g.vals.ua_from.empty() && !g.vals.ua_to.empty()) {
+                jclass strCls = env->FindClass("java/lang/String");
+                if (strCls) {
+                    auto arr1 = [&](const std::string& s) -> jobjectArray {
+                        jobjectArray a = env->NewObjectArray(1, strCls, nullptr);
+                        if (!a) return nullptr;
+                        jstring js = env->NewStringUTF(s.c_str());
+                        if (js) env->SetObjectArrayElement(a, 0, js);
+                        return a;
+                    };
+                    jobjectArray from = arr1(g.vals.ua_from);
+                    jobjectArray to   = arr1(g.vals.ua_to);
+                    if (from) env->SetObjectField(hooker, g.f_rwFrom, from);
+                    if (to)   env->SetObjectField(hooker, g.f_rwTo, to);
+                }
+            }
+        }
         if (sp.mode == M_VALUE) {
             if (sp.ret_type == 1) {                     // byte[] target (Widevine)
                 if (g.ids.widevine_hex.size() >= 2) {
@@ -622,6 +666,38 @@ inline const HookSpec* hook_specs(size_t& n) {
         // ---- P3: class-load observer (feeds the TikTok table below) ----
         { "java/lang/ClassLoader", "loadClass", "(Ljava/lang/String;Z)Ljava/lang/Class;",
           false, M_OBSERVE, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+
+        // ---- P3b: OEM class deny + by-name load observer ----
+        //
+        // The 3-arg overload, not the 1-arg one: forName(String) is
+        // @CallerSensitive and resolves through Reflection.getCallerClass(),
+        // which from this hook would see EnvCompatState (loaded by the module's
+        // own InMemoryDexClassLoader) instead of the app - every by-name load
+        // would resolve against the wrong loader. The 3-arg overload takes the
+        // loader as an argument and passes it straight to classForName, so it
+        // is the one place a deny or an observation is free of that hazard.
+        // key_index 0 = the class name (the method is static).
+        { "java/lang/Class", "forName",
+          "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;",
+          true, M_OBSERVE, 0, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+
+        // ---- P4: WebView User-Agent ----
+        // libwebviewchromium.so composes the UA from ro.product.model /
+        // ro.build.id / ro.build.version.release, and on this ROM that library
+        // cannot be PLT-hooked at all: its read-only segments are mapped from
+        // /data/misc/shared_relro/libwebviewchromium64.relro (a relocation
+        // blob, not an ELF - no header at offset 0) and its executable segment
+        // from an uncompressed entry inside the WebView base.apk. Neither
+        // mapping starts with an ELF header, so neither LSPlt nor PLTI can
+        // derive a base and the GOT redirect never reaches it. The Java surface
+        // is therefore the only place the value can be rewritten.
+        //
+        // WebSettings.getDefaultUserAgent(Context) is the framework entry point
+        // the app calls for the "…; wv) … Version/4.0 …" form.
+        { "android/webkit/WebSettings", "getDefaultUserAgent",
+          "(Landroid/content/Context;)Ljava/lang/String;",
+          true, M_REWRITE_STRING, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+
     };
     n = sizeof(S) / sizeof(S[0]);
     return S;
@@ -710,6 +786,22 @@ inline const HookSpec* tt_specs(size_t& n) {
         { "X.02tJ", "getString",
           "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
           false, M_VALUE, 1, "cdid", false, 0, V_CDID, -1, -1, -1, nullptr },
+
+        // WebView UA, app-side cache. LX/04v0;->LIZ(String) is the ONLY method
+        // in the app that writes ad_user_agent_sp (verified by a const-string
+        // scan of all 15 DEX files: exactly one instruction site, in this
+        // method). Its flow is:
+        //   pref "ad_user_agent_sp" non-empty -> return it   (cached, real)
+        //   otherwise -> System.getProperty("http.agent")   (real, seeded by
+        //                RuntimeInit before this module's hooks would matter)
+        // so both branches hand back the real device UA. Rewriting the return
+        // value fixes the read path AND the value the app re-persists, which is
+        // what a read-path-only fix cannot do for an already-populated cache.
+        //
+        // Static, one String parameter. Obfuscated name -> suffix-matched and
+        // fail-soft like the rest of this table.
+        { "X.04v0", "LIZ", "(Ljava/lang/String;)Ljava/lang/String;",
+          true, M_REWRITE_STRING, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
     };
     n = sizeof(S) / sizeof(S[0]);
     return S;
@@ -748,6 +840,30 @@ inline void sbx_observe(JNIEnv* env, jclass, jstring name, jclass cls) {
     in_observe = false;
 }
 
+// Force Class.forName(String) to run interpreted.
+//
+// The 3-arg overload is the deny choke point, and it is reached through this
+// one: forName(String) resolves the caller's loader and then invoke-statics the
+// 3-arg. Two inlining facts decide whether that call still passes our patch:
+//   * forName(String) is @CallerSensitive, so dex2oat must not inline it into
+//     its callers - the caller's own class is the whole point of the overload.
+//   * Nothing stops dex2oat from inlining the 3-arg *into forName(String)*.
+//     If it did, the app's forName("miui.os.Build") would reach classForName
+//     directly and never touch the entry point we patched.
+// Deoptimizing the 1-arg makes it interpret again, and the interpreter's
+// invoke-static goes through that entry point. Harmless when it was never
+// inlined; it only costs one interpreted frame on a by-name load.
+inline void deopt_forname_1arg(JNIEnv* env) {
+    jclass cls = env->FindClass("java/lang/Class");
+    if (!cls || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    jmethodID mid = env->GetStaticMethodID(cls, "forName",
+                                           "(Ljava/lang/String;)Ljava/lang/Class;");
+    if (!mid || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    jobject m = env->ToReflectedMethod(cls, mid, JNI_TRUE);
+    if (m) (void)lsplant::Deoptimize(env, m);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
 inline bool install_all(JNIEnv* env, const HookValues& v) {
     if (!env) return false;
     if (!init(env)) return false;
@@ -768,11 +884,33 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
                                  : sbxnr::mac_from_seed(v.seed ^ 0x5749464931ULL);
     g.bt   = sbx_mac_upper(sbxnr::mac_from_seed(v.seed ^ 0x424C554554ULL));
 
+    // Denied OEM classes, as a static field on the callback class. Done here
+    // rather than per-hooker because the forName hook is process-wide and the
+    // list belongs to the persona, not to the hooked method.
+    if (!v.deny_classes.empty()) {
+        jclass strCls = env->FindClass("java/lang/String");
+        if (strCls) {
+            jobjectArray arr = env->NewObjectArray((jsize)v.deny_classes.size(),
+                                                   strCls, nullptr);
+            if (arr) {
+                for (size_t i = 0; i < v.deny_classes.size(); ++i) {
+                    jstring s = env->NewStringUTF(v.deny_classes[i].c_str());
+                    if (s) env->SetObjectArrayElement(arr, (jsize)i, s);
+                }
+                env->SetStaticObjectField(g.cb_class, g.f_deny, arr);
+            }
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+
     size_t n = 0;
     const HookSpec* specs = hook_specs(n);
     int good = 0;
     for (size_t i = 0; i < n; ++i)
         if (hook_one(env, specs[i])) ++good;
+
+    // Only meaningful once the 3-arg deny is actually installed.
+    if (!v.deny_classes.empty()) deopt_forname_1arg(env);
 
     SBX_LSP_LOGD("L3 install_all: %d/%zu targets hooked", good, n);
     if (good == 0) SBX_LSP_LOGE("L3: no targets hooked (continuing with L1/L2/L9)");

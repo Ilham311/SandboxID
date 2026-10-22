@@ -37,6 +37,37 @@ public final class EnvCompatState {
      * outranks every read-path override for the rest of the process.
      */
     public static final int M_ZERO_NUMERIC = 4;
+    /**
+     * Call the original, then rewrite the device-identifying parts of the
+     * returned String. Used for the WebView User-Agent.
+     *
+     * The UA cannot be fixed anywhere else: libwebviewchromium.so composes
+     * "Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) %s Safari/537.36"
+     * from ro.product.model / ro.build.id / ro.build.version.release, and on
+     * this ROM the library is mapped from two files at once - its read-only
+     * segments come from /data/misc/shared_relro/libwebviewchromium64.relro
+     * (not an ELF: a relocation blob) and its executable segment from an
+     * uncompressed entry inside the WebView base.apk. There is no (dev, inode)
+     * pair whose offset-0 mapping is the ELF header, so neither LSPlt nor PLTI
+     * can resolve its base and the GOT hook that spoofs every other native
+     * read never reaches it. The Java surface is where the app actually picks
+     * the value up, so that is where it is rewritten.
+     */
+    public static final int M_REWRITE_STRING = 5;
+
+    /**
+     * Replacement fragments for M_REWRITE_STRING, as parallel {from, to} pairs
+     * applied with String.replace(). Set from native before Hook().
+     *
+     * Substitution rather than a canned literal: the surrounding UA is built by
+     * the WebView provider and changes with its version ("Version/4.0
+     * Chrome/155.0.8059.43"), so only the two device-identifying slots - the
+     * "Linux; Android 15; MODEL Build/ID; wv" segment and the "Dalvik/…"
+     * prefix - are ours to rewrite. A canned string would go stale on the next
+     * WebView update and would silently stop matching.
+     */
+    public String[] rwFrom;
+    public String[] rwTo;
 
     // Populated from native (JNI) immediately after construction, before Hook().
     public int     mode;
@@ -76,6 +107,10 @@ public final class EnvCompatState {
             }
             return r;
         }
+
+        // Same shape as M_ZERO_NUMERIC: the original runs first and its result
+        // is rewritten, so this cannot fall through into the switch below.
+        if (mode == M_REWRITE_STRING) return rewriteString(args);
 
         try {
             switch (mode) {
@@ -126,13 +161,68 @@ public final class EnvCompatState {
      */
     public static String[] watch;
 
-    /** M_OBSERVE: let the class load normally, then hand the Class to native. */
+    /**
+     * Class names that must appear not to exist, for M_OBSERVE. Set from native
+     * before Hook().
+     *
+     * Why not hook {@code Class.forName(String)}: that overload is
+     * {@code @CallerSensitive} and resolves through
+     * {@code Reflection.getCallerClass()}. Called from this hook it would see
+     * EnvCompatState, loaded by the module's own InMemoryDexClassLoader, and
+     * resolve the app's classes against the wrong loader - every by-name load
+     * would break, not just the denied ones. The three-argument overload has no
+     * such call: it hands the loader it was given straight to classForName, so
+     * hooking it changes nothing about resolution. It is also where the
+     * one-argument overload ends up, after that overload has resolved the
+     * caller's own loader - which is exactly the loader a Pixel would use.
+     *
+     * Why deny at all: miui.os.Build ships in miui-framework.jar, so on a Pixel
+     * Class.forName("miui.os.Build") throws and the OEM branch behind it is
+     * dead. Here it loads, and that alone is the tell -
+     * LX/00kR;->p2() becomes "MIUI-" + INCREMENTAL (apm field "rom") and
+     * LX/0D0h;->LIZ() becomes "miui_" + get("ro.miui.ui.version.name") + "_" +
+     * INCREMENTAL ("rom_version"). Hiding ro.miui.* cannot fix it: both helpers
+     * fall back to Runtime.exec("getprop") when SystemProperties returns empty,
+     * and a subprocess inherits none of these hooks. Denying the class keeps
+     * the branch unreachable, which is what an AOSP device does.
+     *
+     * Every call site in both TikTok builds is invoke-static inside a try with
+     * an Exception or catch-all handler, so the ClassNotFoundException thrown
+     * here lands where a genuine AOSP miss would: p2() falls to
+     * catch-all -> 160 and appends the bare INCREMENTAL, LIZ() falls to
+     * Exception -> 457 and skips the miui_ branch. The other three targets
+     * contain no reference to this class at all, so the deny cannot reach them.
+     */
+    public static String[] deny;
+
+    /**
+     * M_OBSERVE: refuse a denied class name, otherwise let the class load
+     * normally and hand the Class to native.
+     *
+     * The class name is taken from {@link #keyArgIndex}, which each hook sets to
+     * its own argument position: 1 for ClassLoader.loadClass(String,boolean),
+     * 0 for Class.forName(String,boolean,ClassLoader).
+     */
     private Object observeAndPass(Object[] args) {
+        String want = null;
+        if (args != null && keyArgIndex >= 0 && keyArgIndex < args.length
+                && args[keyArgIndex] instanceof String) {
+            want = (String) args[keyArgIndex];
+        }
+        if (want != null) {
+            String[] d = deny;
+            if (d != null) {
+                for (int i = 0; i < d.length; i++) {
+                    if (want.equals(d[i])) {
+                        throw sneakyThrow(new ClassNotFoundException(want));
+                    }
+                }
+            }
+        }
         Object r = invokeOriginal(args);
         try {
-            if (r instanceof Class && args != null && args.length > 1
-                    && args[1] instanceof String) {
-                String n = (String) args[1];
+            if (r instanceof Class && want != null) {
+                String n = want;
                 String[] w = watch;
                 if (w != null) {
                     for (int i = 0; i < w.length; i++) {
@@ -151,8 +241,28 @@ public final class EnvCompatState {
         return r;
     }
 
-    private static boolean isAllDigits(String s) {
-        if (s == null || s.length() < 10) return false;
+    /**
+     * M_REWRITE_STRING: run the original, then apply every {rwFrom, rwTo} pair
+     * to the String it returned.
+     *
+     * A null/empty result and a non-String result pass through untouched: the
+     * UA producer (LX/04v0;->LIZ) returns "" when it has nothing, and a hook
+     * that turned that into a value would be inventing data.
+     */
+    private Object rewriteString(Object[] args) {
+        Object r = invokeOriginal(args);
+        if (!(r instanceof String)) return r;
+        String s = (String) r;
+        String[] from = rwFrom, to = rwTo;
+        if (from == null || to == null || from.length != to.length || s.isEmpty()) return r;
+        for (int i = 0; i < from.length; i++) {
+            if (from[i] == null || from[i].isEmpty() || to[i] == null) continue;
+            s = s.replace(from[i], to[i]);
+        }
+        return s;
+    }
+
+    private static boolean isAllDigits(String s) {        if (s == null || s.length() < 10) return false;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c < '0' || c > '9') return false;

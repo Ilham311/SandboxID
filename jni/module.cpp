@@ -258,6 +258,54 @@ private:
         hv.seed       = sbxnr::applog_seed(val("FINGERPRINT"), hv.serial,
                                            hv.android_id, pkg_);
 
+        // WebView UA rewrite. The real segment is read straight from the
+        // properties the provider itself reads, so the "from" half matches what
+        // this ROM actually emits; the "to" half is the persona's. Both halves
+        // empty out if the persona does not set MODEL/ID/RELEASE, which makes
+        // the hook a pass-through rather than a wrong rewrite.
+        {
+            char rel[PROP_VALUE_MAX] = {0}, model[PROP_VALUE_MAX] = {0},
+                 bid[PROP_VALUE_MAX] = {0};
+            __system_property_get("ro.build.version.release", rel);
+            __system_property_get("ro.product.model", model);
+            __system_property_get("ro.build.id", bid);
+            if (rel[0] && model[0] && bid[0]) {
+                hv.ua_from = std::string("Android ") + rel + "; " + model +
+                             " Build/" + bid;
+                const std::string& prel = val("RELEASE");
+                const std::string& pmodel = val("MODEL");
+                const std::string& pid = val("ID");
+                if (!prel.empty() && !pmodel.empty() && !pid.empty())
+                    hv.ua_to = "Android " + prel + "; " + pmodel + " Build/" + pid;
+            }
+        }
+
+        // OEM detection classes. A Pixel cannot load miui.os.Build, and the
+        // app's OEM branches key off exactly that: LX/00kR;->p2() turns
+        // "class loads" into the apm field "rom" = "MIUI-" + INCREMENTAL, and
+        // LX/0D0h;->LIZ() turns it into "rom_version". Hiding the ro.miui.*
+        // props does not close this - both helpers fall back to
+        // Runtime.exec("getprop") when SystemProperties comes back empty, and
+        // a subprocess inherits none of our hooks. Denying the class keeps the
+        // branch unreachable instead.
+        //
+        // Derived from the persona's own MANUFACTURER, not hardcoded: a real
+        // Xiaomi persona must keep miui.os.Build, or the module would make the
+        // device it is imitating look less like itself.
+        {
+            const std::string& man = val("MANUFACTURER");
+            const std::string& brd = val("BRAND");
+            auto is = [&](const char* s) {
+                return man == s || brd == s;
+            };
+            if (!is("Xiaomi") && !is("Redmi") && !is("POCO"))
+                hv.deny_classes.emplace_back("miui.os.Build");
+            if (!is("Meizu"))
+                hv.deny_classes.emplace_back("com.meizu.flyme.reflect.BuildProxy");
+            if (!is("OPPO") && !is("OnePlus") && !is("realme"))
+                hv.deny_classes.emplace_back("com.oplus.os.OplusBuild");
+        }
+
         const sbxnr::ApplogIds ids = sbxnr::make_applog_ids(
             hv.seed, sbxnr::applog_epoch_or_default(val("APPLOG_EPOCH")));
         hv.openudid   = ids.openudid;
