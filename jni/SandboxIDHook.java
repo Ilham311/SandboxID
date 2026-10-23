@@ -1,5 +1,7 @@
 package androidx.core.os;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
@@ -106,6 +108,85 @@ public final class EnvCompatState {
 
     private static volatile boolean appCreatedDone = false;
 
+    // Cached reflection handles for UI display metrics hot path
+    private static volatile boolean s_fieldsInit = false;
+    private static Constructor<?> s_dmCtor;
+    private static Method s_dmSetTo;
+    private static Field s_dmWidthPixels;
+    private static Field s_dmHeightPixels;
+    private static Field s_dmDensityDpi;
+    private static Field s_dmDensity;
+    private static Field s_dmScaledDensity;
+    private static Field s_dmXdpi;
+    private static Field s_dmYdpi;
+
+    private static Constructor<?> s_cfgCtor;
+    private static Field s_cfgOrientation;
+    private static Field s_cfgScreenWidthDp;
+    private static Field s_cfgScreenHeightDp;
+    private static Field s_cfgDensityDpi;
+    private static Field s_cfgSmallestScreenWidthDp;
+
+    private static Constructor<?> s_rectCtor;
+    private static Field s_rectLeft, s_rectTop, s_rectRight, s_rectBottom;
+
+    private static Field s_ptX, s_ptY;
+    private static Method s_displayGetRotation;
+
+    // Per-instance spoofed cache: avoids allocating throwaway copies on every
+    // call in hot UI paths (e.g. TypedValue.applyDimension during view inflation)
+    // and preserves in-place mutations made by screen-adaptation libraries.
+    private static final java.util.Map<Object, Object> s_dmCache =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, Object>());
+    private static final java.util.Map<Object, Object> s_cfgCache =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, Object>());
+
+    private static void initReflection() {
+        if (s_fieldsInit) return;
+        synchronized (EnvCompatState.class) {
+            if (s_fieldsInit) return;
+            try {
+                Class<?> dm = Class.forName("android.util.DisplayMetrics");
+                s_dmCtor = dm.getConstructor();
+                s_dmSetTo = dm.getMethod("setTo", dm);
+                s_dmWidthPixels = dm.getField("widthPixels");
+                s_dmHeightPixels = dm.getField("heightPixels");
+                s_dmDensityDpi = dm.getField("densityDpi");
+                s_dmDensity = dm.getField("density");
+                s_dmScaledDensity = dm.getField("scaledDensity");
+                s_dmXdpi = dm.getField("xdpi");
+                s_dmYdpi = dm.getField("ydpi");
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> cfg = Class.forName("android.content.res.Configuration");
+                s_cfgCtor = cfg.getConstructor(cfg);
+                s_cfgOrientation = cfg.getField("orientation");
+                s_cfgScreenWidthDp = cfg.getField("screenWidthDp");
+                s_cfgScreenHeightDp = cfg.getField("screenHeightDp");
+                s_cfgDensityDpi = cfg.getField("densityDpi");
+                s_cfgSmallestScreenWidthDp = cfg.getField("smallestScreenWidthDp");
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> rect = Class.forName("android.graphics.Rect");
+                s_rectCtor = rect.getConstructor(rect);
+                s_rectLeft = rect.getField("left");
+                s_rectTop = rect.getField("top");
+                s_rectRight = rect.getField("right");
+                s_rectBottom = rect.getField("bottom");
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> pt = Class.forName("android.graphics.Point");
+                s_ptX = pt.getField("x");
+                s_ptY = pt.getField("y");
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> disp = Class.forName("android.view.Display");
+                s_displayGetRotation = disp.getMethod("getRotation");
+            } catch (Throwable ignored) {}
+            s_fieldsInit = true;
+        }
+    }
+
     public EnvCompatState() {}
 
     public Object handle(Object[] args) {
@@ -132,11 +213,13 @@ public final class EnvCompatState {
                 boolean isLand = false;
                 if (args != null && args.length > 0 && args[0] != null) {
                     try {
-                        Method rotM = args[0].getClass().getMethod("getRotation");
-                        Object rotObj = rotM.invoke(args[0]);
-                        if (rotObj instanceof Integer) {
-                            int rot = ((Integer) rotObj).intValue();
-                            isLand = (rot == 1 || rot == 3);
+                        initReflection();
+                        if (s_displayGetRotation != null) {
+                            Object rotObj = s_displayGetRotation.invoke(args[0]);
+                            if (rotObj instanceof Integer) {
+                                int rot = ((Integer) rotObj).intValue();
+                                isLand = (rot == 1 || rot == 3);
+                            }
                         }
                     } catch (Throwable ignored) {}
                 }
@@ -151,28 +234,52 @@ public final class EnvCompatState {
             if (r != null) {
                 String cname = r.getClass().getName();
                 if (cname.endsWith("DisplayMetrics")) {
+                    Object cached = s_dmCache.get(r);
+                    if (cached != null) {
+                        return cached;
+                    }
                     try {
-                        Object copy = r.getClass().getConstructor().newInstance();
-                        Method setTo = r.getClass().getMethod("setTo", r.getClass());
-                        setTo.invoke(copy, r);
-                        applyDisplayMetrics(copy);
-                        r = copy;
+                        initReflection();
+                        if (s_dmCtor != null && s_dmSetTo != null) {
+                            Object copy = s_dmCtor.newInstance();
+                            s_dmSetTo.invoke(copy, r);
+                            applyDisplayMetrics(copy);
+                            s_dmCache.put(r, copy);
+                            r = copy;
+                        } else {
+                            applyDisplayMetrics(r);
+                        }
                     } catch (Throwable ignored) {
                         applyDisplayMetrics(r);
                     }
                 } else if (cname.endsWith("Configuration")) {
+                    Object cached = s_cfgCache.get(r);
+                    if (cached != null) {
+                        return cached;
+                    }
                     try {
-                        Object copy = r.getClass().getConstructor(r.getClass()).newInstance(r);
-                        applyConfiguration(copy);
-                        r = copy;
+                        initReflection();
+                        if (s_cfgCtor != null) {
+                            Object copy = s_cfgCtor.newInstance(r);
+                            applyConfiguration(copy);
+                            s_cfgCache.put(r, copy);
+                            r = copy;
+                        } else {
+                            applyConfiguration(r);
+                        }
                     } catch (Throwable ignored) {
                         applyConfiguration(r);
                     }
                 } else if (cname.endsWith("Rect")) {
                     try {
-                        Object copy = r.getClass().getConstructor(r.getClass()).newInstance(r);
-                        applyRect(copy);
-                        r = copy;
+                        initReflection();
+                        if (s_rectCtor != null) {
+                            Object copy = s_rectCtor.newInstance(r);
+                            applyRect(copy);
+                            r = copy;
+                        } else {
+                            applyRect(r);
+                        }
                     } catch (Throwable ignored) {
                         applyRect(r);
                     }
@@ -209,8 +316,9 @@ public final class EnvCompatState {
                         } catch (Throwable ignored) {}
                     }
                     if (cl != null) {
-                        appCreatedDone = true;
-                        onAppCreated(cl);
+                        if (onAppCreated(cl)) {
+                            appCreatedDone = true;
+                        }
                     }
                 } catch (Throwable ignored) {}
             }
@@ -490,75 +598,89 @@ public final class EnvCompatState {
     public static native void observe(String name, Class<?> cls);
 
     /** Implemented in native; receives the application's ClassLoader. */
-    public static native void onAppCreated(ClassLoader cl);
+    public static native boolean onAppCreated(ClassLoader cl);
 
     private void applyDisplayMetrics(Object dm) {
         if (dm == null || displayWidth <= 0 || displayHeight <= 0 || displayDensity <= 0) return;
         try {
+            initReflection();
             Class<?> c = dm.getClass();
-            int curW = c.getField("widthPixels").getInt(dm);
-            int curH = c.getField("heightPixels").getInt(dm);
+            int curW = s_dmWidthPixels != null ? s_dmWidthPixels.getInt(dm) : c.getField("widthPixels").getInt(dm);
+            int curH = s_dmHeightPixels != null ? s_dmHeightPixels.getInt(dm) : c.getField("heightPixels").getInt(dm);
             int tw = displayWidth, th = displayHeight;
             if (curW > curH && tw < th) {
                 tw = displayHeight;
                 th = displayWidth;
             }
-            setField(c, dm, "widthPixels", tw);
-            setField(c, dm, "heightPixels", th);
-            setField(c, dm, "densityDpi", displayDensity);
+            setField(s_dmWidthPixels, c, dm, "widthPixels", tw);
+            setField(s_dmHeightPixels, c, dm, "heightPixels", th);
+            setField(s_dmDensityDpi, c, dm, "densityDpi", displayDensity);
             float d = displayDensity / 160.0f;
-            setField(c, dm, "density", d);
-            setField(c, dm, "scaledDensity", d);
+            setField(s_dmDensity, c, dm, "density", d);
+            setField(s_dmScaledDensity, c, dm, "scaledDensity", d);
             float xd = displayXdpi > 0 ? displayXdpi : (float) displayDensity;
             float yd = displayYdpi > 0 ? displayYdpi : (float) displayDensity;
-            setField(c, dm, "xdpi", xd);
-            setField(c, dm, "ydpi", yd);
+            setField(s_dmXdpi, c, dm, "xdpi", xd);
+            setField(s_dmYdpi, c, dm, "ydpi", yd);
         } catch (Throwable ignored) {}
     }
 
     private void applyPoint(Object pt) {
         if (pt == null || displayWidth <= 0 || displayHeight <= 0) return;
         try {
+            initReflection();
             Class<?> c = pt.getClass();
-            int curX = c.getField("x").getInt(pt);
-            int curY = c.getField("y").getInt(pt);
+            int curX = s_ptX != null ? s_ptX.getInt(pt) : c.getField("x").getInt(pt);
+            int curY = s_ptY != null ? s_ptY.getInt(pt) : c.getField("y").getInt(pt);
             int tx = displayWidth, ty = displayHeight;
             if (curX > curY && tx < ty) {
                 tx = displayHeight;
                 ty = displayWidth;
             }
-            setField(c, pt, "x", tx);
-            setField(c, pt, "y", ty);
+            setField(s_ptX, c, pt, "x", tx);
+            setField(s_ptY, c, pt, "y", ty);
         } catch (Throwable ignored) {}
     }
 
     private void applyRect(Object rect) {
         if (rect == null || displayWidth <= 0 || displayHeight <= 0) return;
         try {
+            initReflection();
             Class<?> c = rect.getClass();
-            int curW = c.getField("right").getInt(rect) - c.getField("left").getInt(rect);
-            int curH = c.getField("bottom").getInt(rect) - c.getField("top").getInt(rect);
+            int left = s_rectLeft != null ? s_rectLeft.getInt(rect) : c.getField("left").getInt(rect);
+            int top = s_rectTop != null ? s_rectTop.getInt(rect) : c.getField("top").getInt(rect);
+            int right = s_rectRight != null ? s_rectRight.getInt(rect) : c.getField("right").getInt(rect);
+            int bottom = s_rectBottom != null ? s_rectBottom.getInt(rect) : c.getField("bottom").getInt(rect);
+            int curW = right - left;
+            int curH = bottom - top;
             int tw = displayWidth, th = displayHeight;
             if (curW > curH && tw < th) {
                 tw = displayHeight;
                 th = displayWidth;
             }
-            setField(c, rect, "left", 0);
-            setField(c, rect, "top", 0);
-            setField(c, rect, "right", tw);
-            setField(c, rect, "bottom", th);
+            setField(s_rectLeft, c, rect, "left", 0);
+            setField(s_rectTop, c, rect, "top", 0);
+            setField(s_rectRight, c, rect, "right", tw);
+            setField(s_rectBottom, c, rect, "bottom", th);
         } catch (Throwable ignored) {}
     }
 
     private void applyConfiguration(Object cfg) {
         if (cfg == null || displayDensity <= 0) return;
         try {
+            initReflection();
             Class<?> c = cfg.getClass();
             int orient = 0;
             int curSw = 0, curSh = 0;
-            try { orient = c.getField("orientation").getInt(cfg); } catch (Throwable ignored) {}
-            try { curSw = c.getField("screenWidthDp").getInt(cfg); } catch (Throwable ignored) {}
-            try { curSh = c.getField("screenHeightDp").getInt(cfg); } catch (Throwable ignored) {}
+            try {
+                orient = s_cfgOrientation != null ? s_cfgOrientation.getInt(cfg) : c.getField("orientation").getInt(cfg);
+            } catch (Throwable ignored) {}
+            try {
+                curSw = s_cfgScreenWidthDp != null ? s_cfgScreenWidthDp.getInt(cfg) : c.getField("screenWidthDp").getInt(cfg);
+            } catch (Throwable ignored) {}
+            try {
+                curSh = s_cfgScreenHeightDp != null ? s_cfgScreenHeightDp.getInt(cfg) : c.getField("screenHeightDp").getInt(cfg);
+            } catch (Throwable ignored) {}
 
             boolean isLand = (orient == 2) || (curSw > curSh && curSh > 0);
 
@@ -573,10 +695,10 @@ public final class EnvCompatState {
             int finalSwDp = isLand ? portShDp : portSwDp;
             int finalShDp = isLand ? portSwDp : portShDp;
 
-            setField(c, cfg, "densityDpi", displayDensity);
-            setField(c, cfg, "screenWidthDp", finalSwDp);
-            setField(c, cfg, "screenHeightDp", finalShDp);
-            setField(c, cfg, "smallestScreenWidthDp", portSwDp);
+            setField(s_cfgDensityDpi, c, cfg, "densityDpi", displayDensity);
+            setField(s_cfgScreenWidthDp, c, cfg, "screenWidthDp", finalSwDp);
+            setField(s_cfgScreenHeightDp, c, cfg, "screenHeightDp", finalShDp);
+            setField(s_cfgSmallestScreenWidthDp, c, cfg, "smallestScreenWidthDp", portSwDp);
         } catch (Throwable ignored) {}
     }
 
@@ -590,15 +712,17 @@ public final class EnvCompatState {
         return false;
     }
 
-    private static void setField(Class<?> c, Object obj, String name, int val) {
+    private static void setField(Field f, Class<?> c, Object obj, String name, int val) {
         try {
-            c.getField(name).setInt(obj, val);
+            if (f != null) { f.setInt(obj, val); return; }
+            if (c != null) c.getField(name).setInt(obj, val);
         } catch (Throwable ignored) {}
     }
 
-    private static void setField(Class<?> c, Object obj, String name, float val) {
+    private static void setField(Field f, Class<?> c, Object obj, String name, float val) {
         try {
-            c.getField(name).setFloat(obj, val);
+            if (f != null) { f.setFloat(obj, val); return; }
+            if (c != null) c.getField(name).setFloat(obj, val);
         } catch (Throwable ignored) {}
     }
 

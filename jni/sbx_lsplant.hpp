@@ -395,9 +395,9 @@ inline bool resolve_callback_members(JNIEnv* env) {
           (void*)+[](JNIEnv* e, jclass thiz, jstring n, jclass c) {
               sbx_observe(e, thiz, n, c);
           } },
-        { (char*)"onAppCreated", (char*)"(Ljava/lang/ClassLoader;)V",
-          (void*)+[](JNIEnv* e, jclass, jobject cl) {
-              sbx_on_app_created(e, cl);
+        { (char*)"onAppCreated", (char*)"(Ljava/lang/ClassLoader;)Z",
+          (void*)+[](JNIEnv* e, jclass, jobject cl) -> jboolean {
+              return (jboolean)(sbx_on_app_created(e, cl) ? JNI_TRUE : JNI_FALSE);
           } },
     };
     if (env->RegisterNatives(g.cb_class, NATIVE, 2) != 0) {
@@ -939,18 +939,18 @@ inline void sbx_observe(JNIEnv* env, jclass, jstring name, jclass cls) {
 
 // Invoked when an application creates its Context/Application instance.
 // Resolves application-layer classes directly through the app's ClassLoader.
-inline void sbx_on_app_created(JNIEnv* env, jobject clLoader) {
-    if (!env || !clLoader) return;
+inline bool sbx_on_app_created(JNIEnv* env, jobject clLoader) {
+    if (!env || !clLoader) return false;
 
     static std::atomic<bool> s_app_hooked{false};
-    if (s_app_hooked.exchange(true)) return;
+    if (s_app_hooked.load()) return true;
 
     jclass clClass = env->GetObjectClass(clLoader);
-    if (!clClass) return;
+    if (!clClass) return false;
     jmethodID loadClassMid = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
     if (!loadClassMid || env->ExceptionCheck()) {
         env->ExceptionClear();
-        return;
+        return false;
     }
 
     size_t n = 0;
@@ -977,7 +977,12 @@ inline void sbx_on_app_created(JNIEnv* env, jobject clLoader) {
             }
         }
     }
-    SBX_LSP_LOGD("L3: %d app target(s) hooked via onAppCreated", good);
+    if (good > 0) {
+        s_app_hooked.store(true);
+        SBX_LSP_LOGD("L3: %d app target(s) hooked via onAppCreated", good);
+        return true;
+    }
+    return false;
 }
 
 // Force Class.forName(String) to run interpreted.
