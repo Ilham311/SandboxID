@@ -784,17 +784,19 @@ inline const HookSpec* hook_specs(size_t& n) {
 // "com.bytedance.xxx" style names work.
 inline const HookSpec* tt_specs(size_t& n) {
     static const HookSpec S[] = {
-        // AppLog public SDK endpoints
+        // AppLog public SDK endpoints: spoof client IDs (openudid, clientudid).
+        // NOTE: getDid() and getIid() must NOT be hooked to V_ZERO here.
+        // Returning "0" causes application modules (including TikTok Shop / Lynx
+        // checkout and PIPO security SDK) to send device_id="0" on order submission,
+        // which triggers ecom_order_create_account_risk. Device registration
+        // zero-did is handled by AbsDeviceParamsProvider.getDeviceId() below.
         { "com.bytedance.applog.AppLog", "getOpenUdid", "()Ljava/lang/String;",
           true, M_VALUE, -1, nullptr, false, 0, V_OPENUDID, -1, -1, -1, nullptr },
         { "com.bytedance.applog.AppLog", "getClientUdid", "()Ljava/lang/String;",
           true, M_VALUE, -1, nullptr, false, 0, V_CLIENTUDID, -1, -1, -1, nullptr },
-        { "com.bytedance.applog.AppLog", "getDid", "()Ljava/lang/String;",
-          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
-        { "com.bytedance.applog.AppLog", "getIid", "()Ljava/lang/String;",
-          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
 
-        // DeviceRegisterManager public SDK endpoints
+        // DeviceRegisterManager public SDK endpoints: spoof client IDs.
+        // getDeviceId* and getInstallId* must return the server-minted IDs.
         { "com.ss.android.deviceregister.DeviceRegisterManager", "getOpenUdId", "()Ljava/lang/String;",
           true, M_VALUE, -1, nullptr, false, 0, V_OPENUDID, -1, -1, -1, nullptr },
         { "com.ss.android.deviceregister.DeviceRegisterManager", "getClientUDID", "()Ljava/lang/String;",
@@ -803,14 +805,6 @@ inline const HookSpec* tt_specs(size_t& n) {
           true, M_VALUE, -1, nullptr, false, 0, V_CLIENTUDID, -1, -1, -1, nullptr },
         { "com.ss.android.deviceregister.DeviceRegisterManager", "getCdid", "(Landroid/content/Context;)Ljava/lang/String;",
           true, M_VALUE, -1, nullptr, false, 0, V_CDID, -1, -1, -1, nullptr },
-        { "com.ss.android.deviceregister.DeviceRegisterManager", "getDeviceId", "()Ljava/lang/String;",
-          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
-        { "com.ss.android.deviceregister.DeviceRegisterManager", "getDeviceIdWithBackup", "()Ljava/lang/String;",
-          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
-        { "com.ss.android.deviceregister.DeviceRegisterManager", "getInstallId", "()Ljava/lang/String;",
-          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
-        { "com.ss.android.deviceregister.DeviceRegisterManager", "getInstallIdWithBackup", "()Ljava/lang/String;",
-          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
 
         // DeviceParams: never report a device id, so the server mints one.
         { "AbsDeviceParamsProvider", "getDeviceId", "()Ljava/lang/String;",
