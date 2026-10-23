@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <atomic>
 
 // The LSPlant headers MUST be included here, at global scope, and not inside
 // the sbxlsp namespace below. lsplant.hpp opens `namespace lsplant { inline
@@ -941,16 +942,14 @@ inline void sbx_observe(JNIEnv* env, jclass, jstring name, jclass cls) {
 inline void sbx_on_app_created(JNIEnv* env, jobject clLoader) {
     if (!env || !clLoader) return;
 
-    static thread_local bool in_app_created = false;
-    if (in_app_created) return;
-    in_app_created = true;
+    static std::atomic<bool> s_app_hooked{false};
+    if (s_app_hooked.exchange(true)) return;
 
     jclass clClass = env->GetObjectClass(clLoader);
-    if (!clClass) { in_app_created = false; return; }
+    if (!clClass) return;
     jmethodID loadClassMid = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
     if (!loadClassMid || env->ExceptionCheck()) {
         env->ExceptionClear();
-        in_app_created = false;
         return;
     }
 
@@ -958,6 +957,10 @@ inline void sbx_on_app_created(JNIEnv* env, jobject clLoader) {
     const HookSpec* specs = tt_specs(n);
     int good = 0;
     for (size_t i = 0; i < n; ++i) {
+        // Only load classes that have package identifiers (contain dot or slash).
+        // Suffix-only legacy specs cannot be loaded via ClassLoader.loadClass.
+        if (!strchr(specs[i].cls, '.') && !strchr(specs[i].cls, '/')) continue;
+
         std::string dot_name(specs[i].cls);
         for (char& c : dot_name) { if (c == '/') c = '.'; }
         jstring name = env->NewStringUTF(dot_name.c_str());
@@ -975,7 +978,6 @@ inline void sbx_on_app_created(JNIEnv* env, jobject clLoader) {
         }
     }
     SBX_LSP_LOGD("L3: %d app target(s) hooked via onAppCreated", good);
-    in_app_created = false;
 }
 
 // Force Class.forName(String) to run interpreted.

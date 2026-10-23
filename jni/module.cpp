@@ -339,6 +339,8 @@ private:
                 dw = 1080; dh = 2400; dd = 420; xd = 416.0f; yd = 416.0f;
             } else if (model.find("Pixel 6 Pro") != std::string::npos) {
                 dw = 1440; dh = 3120; dd = 560; xd = 512.0f; yd = 512.0f;
+            } else if (model.find("Pixel 6") != std::string::npos) {
+                dw = 1080; dh = 2400; dd = 420; xd = 411.0f; yd = 411.0f;
             } else {
                 dw = 1080; dh = 2400; dd = 420; xd = 420.0f; yd = 420.0f;
             }
@@ -353,6 +355,14 @@ private:
             if (!val("SCREEN_HEIGHT").empty()) {
                 int h = std::atoi(val("SCREEN_HEIGHT").c_str());
                 if (h > 0) dh = h;
+            }
+            if (!val("SCREEN_XDPI").empty()) {
+                float x = std::strtof(val("SCREEN_XDPI").c_str(), nullptr);
+                if (x > 0.0f) xd = x;
+            }
+            if (!val("SCREEN_YDPI").empty()) {
+                float y = std::strtof(val("SCREEN_YDPI").c_str(), nullptr);
+                if (y > 0.0f) yd = y;
             }
             hv.display_width   = dw;
             hv.display_height  = dh;

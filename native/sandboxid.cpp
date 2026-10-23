@@ -535,28 +535,38 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["PREVIEW_SDK_INT"]         = "0";
     id.kv["PREVIEW_SDK_FINGERPRINT"] = "REL";
 
-    auto display_for_model = [](const std::string& m, std::string& w, std::string& h, std::string& dpi) {
+    auto display_for_model = [](const std::string& m, std::string& w, std::string& h, std::string& dpi, std::string& xd, std::string& yd) {
         if (m.find("Pixel 9 Pro XL") != std::string::npos) {
-            w = "1344"; h = "2992"; dpi = "560";
+            w = "1344"; h = "2992"; dpi = "560"; xd = "486"; yd = "486";
+        } else if (m.find("Pixel 9 Pro Fold") != std::string::npos) {
+            w = "1080"; h = "2424"; dpi = "420"; xd = "422"; yd = "422";
         } else if (m.find("Pixel 9 Pro") != std::string::npos) {
-            w = "1280"; h = "2856"; dpi = "560";
+            w = "1280"; h = "2856"; dpi = "560"; xd = "495"; yd = "495";
         } else if (m.find("Pixel 9") != std::string::npos) {
-            w = "1080"; h = "2424"; dpi = "420";
+            w = "1080"; h = "2424"; dpi = "420"; xd = "422"; yd = "422";
         } else if (m.find("Pixel 8 Pro") != std::string::npos) {
-            w = "1344"; h = "2992"; dpi = "560";
+            w = "1344"; h = "2992"; dpi = "560"; xd = "489"; yd = "489";
         } else if (m.find("Pixel 8") != std::string::npos) {
-            w = "1080"; h = "2400"; dpi = "420";
+            w = "1080"; h = "2400"; dpi = "420"; xd = "428"; yd = "428";
         } else if (m.find("Pixel 7 Pro") != std::string::npos) {
-            w = "1440"; h = "3120"; dpi = "560";
+            w = "1440"; h = "3120"; dpi = "560"; xd = "512"; yd = "512";
+        } else if (m.find("Pixel 7") != std::string::npos) {
+            w = "1080"; h = "2400"; dpi = "420"; xd = "416"; yd = "416";
+        } else if (m.find("Pixel 6 Pro") != std::string::npos) {
+            w = "1440"; h = "3120"; dpi = "560"; xd = "512"; yd = "512";
+        } else if (m.find("Pixel 6") != std::string::npos) {
+            w = "1080"; h = "2400"; dpi = "420"; xd = "411"; yd = "411";
         } else {
-            w = "1080"; h = "2400"; dpi = "420";
+            w = "1080"; h = "2400"; dpi = "420"; xd = "420"; yd = "420";
         }
     };
-    std::string sw, sh, sdpi;
-    display_for_model(p.model, sw, sh, sdpi);
+    std::string sw, sh, sdpi, sxd, syd;
+    display_for_model(p.model, sw, sh, sdpi, sxd, syd);
     id.kv["LCD_DENSITY"]   = sdpi;
     id.kv["SCREEN_WIDTH"]  = sw;
     id.kv["SCREEN_HEIGHT"] = sh;
+    id.kv["SCREEN_XDPI"]   = sxd;
+    id.kv["SCREEN_YDPI"]   = syd;
 
     return id;
 }

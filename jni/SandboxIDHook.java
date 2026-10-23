@@ -104,6 +104,8 @@ public final class EnvCompatState {
     public float displayYdpi;
     public int   displayMetricType; // 0 = metrics/config/point/rect, 1 = width, 2 = height
 
+    private static volatile boolean appCreatedDone = false;
+
     public EnvCompatState() {}
 
     public Object handle(Object[] args) {
@@ -125,21 +127,55 @@ public final class EnvCompatState {
         if (mode == M_REWRITE_STRING) return rewriteString(args);
 
         if (mode == M_DISPLAY_METRICS) {
-            if (displayMetricType == 1) {
-                return Integer.valueOf(displayWidth > 0 ? displayWidth : 1080);
-            }
-            if (displayMetricType == 2) {
-                return Integer.valueOf(displayHeight > 0 ? displayHeight : 2400);
-            }
             Object r = invokeOriginal(args);
+            if (displayMetricType == 1 || displayMetricType == 2) {
+                boolean isLand = false;
+                if (args != null && args.length > 0 && args[0] != null) {
+                    try {
+                        Method rotM = args[0].getClass().getMethod("getRotation");
+                        Object rotObj = rotM.invoke(args[0]);
+                        if (rotObj instanceof Integer) {
+                            int rot = ((Integer) rotObj).intValue();
+                            isLand = (rot == 1 || rot == 3);
+                        }
+                    } catch (Throwable ignored) {}
+                }
+                int minDim = Math.min(displayWidth > 0 ? displayWidth : 1080,
+                                      displayHeight > 0 ? displayHeight : 2400);
+                int maxDim = Math.max(displayWidth > 0 ? displayWidth : 1080,
+                                      displayHeight > 0 ? displayHeight : 2400);
+                int w = isLand ? maxDim : minDim;
+                int h = isLand ? minDim : maxDim;
+                return Integer.valueOf(displayMetricType == 1 ? w : h);
+            }
             if (r != null) {
                 String cname = r.getClass().getName();
                 if (cname.endsWith("DisplayMetrics")) {
-                    applyDisplayMetrics(r);
+                    try {
+                        Object copy = r.getClass().getConstructor().newInstance();
+                        Method setTo = r.getClass().getMethod("setTo", r.getClass());
+                        setTo.invoke(copy, r);
+                        applyDisplayMetrics(copy);
+                        r = copy;
+                    } catch (Throwable ignored) {
+                        applyDisplayMetrics(r);
+                    }
                 } else if (cname.endsWith("Configuration")) {
-                    applyConfiguration(r);
+                    try {
+                        Object copy = r.getClass().getConstructor(r.getClass()).newInstance(r);
+                        applyConfiguration(copy);
+                        r = copy;
+                    } catch (Throwable ignored) {
+                        applyConfiguration(r);
+                    }
                 } else if (cname.endsWith("Rect")) {
-                    applyRect(r);
+                    try {
+                        Object copy = r.getClass().getConstructor(r.getClass()).newInstance(r);
+                        applyRect(copy);
+                        r = copy;
+                    } catch (Throwable ignored) {
+                        applyRect(r);
+                    }
                 }
             }
             if (args != null && args.length > 1 && args[1] != null) {
@@ -155,26 +191,29 @@ public final class EnvCompatState {
 
         if (mode == M_APP_ATTACH) {
             Object r = invokeOriginal(args);
-            try {
-                ClassLoader cl = null;
-                if (args != null && args.length > 0 && args[0] != null) {
-                    try {
-                        Method m = args[0].getClass().getMethod("getClassLoader");
-                        Object res = m.invoke(args[0]);
-                        if (res instanceof ClassLoader) cl = (ClassLoader) res;
-                    } catch (Throwable ignored) {}
-                }
-                if (cl == null && args != null && args.length > 1 && args[1] != null) {
-                    try {
-                        Method m = args[1].getClass().getMethod("getClassLoader");
-                        Object res = m.invoke(args[1]);
-                        if (res instanceof ClassLoader) cl = (ClassLoader) res;
-                    } catch (Throwable ignored) {}
-                }
-                if (cl != null) {
-                    onAppCreated(cl);
-                }
-            } catch (Throwable ignored) {}
+            if (!appCreatedDone) {
+                try {
+                    ClassLoader cl = null;
+                    if (args != null && args.length > 0 && isApplication(args[0])) {
+                        try {
+                            Method m = args[0].getClass().getMethod("getClassLoader");
+                            Object res = m.invoke(args[0]);
+                            if (res instanceof ClassLoader) cl = (ClassLoader) res;
+                        } catch (Throwable ignored) {}
+                    }
+                    if (cl == null && args != null && args.length > 1 && isApplication(args[1])) {
+                        try {
+                            Method m = args[1].getClass().getMethod("getClassLoader");
+                            Object res = m.invoke(args[1]);
+                            if (res instanceof ClassLoader) cl = (ClassLoader) res;
+                        } catch (Throwable ignored) {}
+                    }
+                    if (cl != null) {
+                        appCreatedDone = true;
+                        onAppCreated(cl);
+                    }
+                } catch (Throwable ignored) {}
+            }
             return r;
         }
 
@@ -515,13 +554,40 @@ public final class EnvCompatState {
         if (cfg == null || displayDensity <= 0) return;
         try {
             Class<?> c = cfg.getClass();
-            setField(c, cfg, "densityDpi", displayDensity);
+            int orient = 0;
+            int curSw = 0, curSh = 0;
+            try { orient = c.getField("orientation").getInt(cfg); } catch (Throwable ignored) {}
+            try { curSw = c.getField("screenWidthDp").getInt(cfg); } catch (Throwable ignored) {}
+            try { curSh = c.getField("screenHeightDp").getInt(cfg); } catch (Throwable ignored) {}
+
+            boolean isLand = (orient == 2) || (curSw > curSh && curSh > 0);
+
             float d = displayDensity / 160.0f;
-            int swDp = (int) (displayWidth / d);
-            int shDp = (int) (displayHeight / d);
-            setField(c, cfg, "screenWidthDp", swDp);
-            setField(c, cfg, "screenHeightDp", shDp);
+            int minDim = Math.min(displayWidth > 0 ? displayWidth : 1080,
+                                  displayHeight > 0 ? displayHeight : 2400);
+            int maxDim = Math.max(displayWidth > 0 ? displayWidth : 1080,
+                                  displayHeight > 0 ? displayHeight : 2400);
+            int portSwDp = (int) (minDim / d);
+            int portShDp = (int) (maxDim / d);
+
+            int finalSwDp = isLand ? portShDp : portSwDp;
+            int finalShDp = isLand ? portSwDp : portShDp;
+
+            setField(c, cfg, "densityDpi", displayDensity);
+            setField(c, cfg, "screenWidthDp", finalSwDp);
+            setField(c, cfg, "screenHeightDp", finalShDp);
+            setField(c, cfg, "smallestScreenWidthDp", portSwDp);
         } catch (Throwable ignored) {}
+    }
+
+    private static boolean isApplication(Object obj) {
+        if (obj == null) return false;
+        Class<?> c = obj.getClass();
+        while (c != null) {
+            if ("android.app.Application".equals(c.getName())) return true;
+            c = c.getSuperclass();
+        }
+        return false;
     }
 
     private static void setField(Class<?> c, Object obj, String name, int val) {

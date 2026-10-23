@@ -261,14 +261,18 @@ assemble_identity() {
   _uptime_emit=0
   { [ -f "$MODDIR/enable_uptime" ] && [ ! -f "$MODDIR/no_uptime" ]; } && _uptime_emit=$UPTIME_S
 
-  _disp_w=1080; _disp_h=2400; _disp_dpi=420
+  _disp_w=1080; _disp_h=2400; _disp_dpi=420; _disp_xdpi=420; _disp_ydpi=420
   case "$MODEL" in
-    *"Pixel 9 Pro XL"*) _disp_w=1344; _disp_h=2992; _disp_dpi=560 ;;
-    *"Pixel 9 Pro"*)    _disp_w=1280; _disp_h=2856; _disp_dpi=560 ;;
-    *"Pixel 9"*)        _disp_w=1080; _disp_h=2424; _disp_dpi=420 ;;
-    *"Pixel 8 Pro"*)    _disp_w=1344; _disp_h=2992; _disp_dpi=560 ;;
-    *"Pixel 8"*)        _disp_w=1080; _disp_h=2400; _disp_dpi=420 ;;
-    *"Pixel 7 Pro"*)    _disp_w=1440; _disp_h=3120; _disp_dpi=560 ;;
+    *"Pixel 9 Pro XL"*)   _disp_w=1344; _disp_h=2992; _disp_dpi=560; _disp_xdpi=486; _disp_ydpi=486 ;;
+    *"Pixel 9 Pro Fold"*) _disp_w=1080; _disp_h=2424; _disp_dpi=420; _disp_xdpi=422; _disp_ydpi=422 ;;
+    *"Pixel 9 Pro"*)      _disp_w=1280; _disp_h=2856; _disp_dpi=560; _disp_xdpi=495; _disp_ydpi=495 ;;
+    *"Pixel 9"*)          _disp_w=1080; _disp_h=2424; _disp_dpi=420; _disp_xdpi=422; _disp_ydpi=422 ;;
+    *"Pixel 8 Pro"*)      _disp_w=1344; _disp_h=2992; _disp_dpi=560; _disp_xdpi=489; _disp_ydpi=489 ;;
+    *"Pixel 8"*)          _disp_w=1080; _disp_h=2400; _disp_dpi=420; _disp_xdpi=428; _disp_ydpi=428 ;;
+    *"Pixel 7 Pro"*)      _disp_w=1440; _disp_h=3120; _disp_dpi=560; _disp_xdpi=512; _disp_ydpi=512 ;;
+    *"Pixel 7"*)          _disp_w=1080; _disp_h=2400; _disp_dpi=420; _disp_xdpi=416; _disp_ydpi=416 ;;
+    *"Pixel 6 Pro"*)      _disp_w=1440; _disp_h=3120; _disp_dpi=560; _disp_xdpi=512; _disp_ydpi=512 ;;
+    *"Pixel 6"*)          _disp_w=1080; _disp_h=2400; _disp_dpi=420; _disp_xdpi=411; _disp_ydpi=411 ;;
   esac
 
   IDENTITY_KV=$(cat <<EOF
@@ -314,6 +318,8 @@ FLAVOR=$FLAVOR_STR
 LCD_DENSITY=$_disp_dpi
 SCREEN_WIDTH=$_disp_w
 SCREEN_HEIGHT=$_disp_h
+SCREEN_XDPI=$_disp_xdpi
+SCREEN_YDPI=$_disp_ydpi
 EOF
 )
   if [ -n "$BUILD_UTC" ]; then
