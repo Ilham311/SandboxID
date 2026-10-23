@@ -75,6 +75,20 @@ public class EnvCompatStateCheck {
         public Object error(String n) {
             throw new StackOverflowError("err");
         }
+
+        public Object getPackageInfo(String name, int flags) throws android.content.pm.PackageManager.NameNotFoundException {
+            if ("not.found".equals(name)) throw new android.content.pm.PackageManager.NameNotFoundException(name);
+            return new android.content.pm.PackageInfo(name);
+        }
+
+        public Object getInstalledPackages(int flags) {
+            java.util.List<android.content.pm.PackageInfo> list = new java.util.ArrayList<android.content.pm.PackageInfo>();
+            list.add(new android.content.pm.PackageInfo("com.google.android.gms"));
+            list.add(new android.content.pm.PackageInfo("com.topjohnwu.magisk"));
+            list.add(new android.content.pm.PackageInfo("com.termux"));
+            list.add(new android.content.pm.PackageInfo("com.grabtaxi.passenger"));
+            return list;
+        }
     }
 
     static java.lang.reflect.Method m(String name) throws Exception {
@@ -271,6 +285,52 @@ public class EnvCompatStateCheck {
         check("empty deny list is a pass-through",
                 "class miui.os.Build".equals(d.handle(new Object[]{ t, "miui.os.Build" })));
         androidx.core.os.EnvCompatState.deny = null;
+
+        // M_FILTER_PACKAGES: hiding root & mod apps from PackageManager
+        androidx.core.os.EnvCompatState pmGet = new androidx.core.os.EnvCompatState();
+        pmGet.mode = androidx.core.os.EnvCompatState.M_FILTER_PACKAGES;
+        pmGet.isStatic = false;
+        pmGet.backup = Target.class.getDeclaredMethod("getPackageInfo", String.class, int.class);
+
+        // Legit package passes through
+        Object legit = pmGet.handle(new Object[]{ t, "com.grabtaxi.passenger", 0 });
+        check("legit package returns PackageInfo", legit instanceof android.content.pm.PackageInfo &&
+                "com.grabtaxi.passenger".equals(((android.content.pm.PackageInfo) legit).packageName));
+
+        // Magisk throws NameNotFoundException
+        try {
+            pmGet.handle(new Object[]{ t, "com.topjohnwu.magisk", 0 });
+            check("Magisk throws NameNotFoundException", false);
+        } catch (Throwable e) {
+            check("Magisk throws NameNotFoundException", e instanceof android.content.pm.PackageManager.NameNotFoundException);
+            check("NameNotFoundException carries package name", String.valueOf(e.getMessage()).contains("com.topjohnwu.magisk"));
+        }
+
+        // List filtering
+        androidx.core.os.EnvCompatState pmList = new androidx.core.os.EnvCompatState();
+        pmList.mode = androidx.core.os.EnvCompatState.M_FILTER_PACKAGES;
+        pmList.isStatic = false;
+        pmList.backup = Target.class.getDeclaredMethod("getInstalledPackages", int.class);
+
+        Object listObj = pmList.handle(new Object[]{ t, 0 });
+        check("getInstalledPackages returns list", listObj instanceof java.util.List);
+        if (listObj instanceof java.util.List) {
+            java.util.List<?> list = (java.util.List<?>) listObj;
+            boolean hasMagisk = false, hasTermux = false, hasGms = false, hasGrab = false;
+            for (Object o : list) {
+                if (o instanceof android.content.pm.PackageInfo) {
+                    String pn = ((android.content.pm.PackageInfo) o).packageName;
+                    if ("com.topjohnwu.magisk".equals(pn)) hasMagisk = true;
+                    if ("com.termux".equals(pn)) hasTermux = true;
+                    if ("com.google.android.gms".equals(pn)) hasGms = true;
+                    if ("com.grabtaxi.passenger".equals(pn)) hasGrab = true;
+                }
+            }
+            check("Magisk filtered out", !hasMagisk);
+            check("Termux filtered out", !hasTermux);
+            check("GMS kept", hasGms);
+            check("Grab kept", hasGrab);
+        }
 
         System.out.println(fails == 0 ? "ALL PASS" : fails + " FAILED");
         if (fails != 0) System.exit(1);

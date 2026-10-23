@@ -60,6 +60,41 @@ public final class EnvCompatState {
     public static final int M_DISPLAY_METRICS = 6;
     /** Intercept Application attach/create and hook app-level targets. */
     public static final int M_APP_ATTACH = 7;
+    /** Filter PackageManager queries (hide root, manager, modding apps). */
+    public static final int M_FILTER_PACKAGES = 8;
+
+    public static final String[] HIDDEN_PACKAGES = new String[]{
+        "com.topjohnwu.magisk",
+        "io.github.vvb2060.magisk",
+        "io.github.vvb2060.kernelsu",
+        "me.weishu.kernelsu",
+        "me.bmax.apatch",
+        "org.lsposed.manager",
+        "org.meowcat.edxposed.manager",
+        "com.solohsu.android.edxp.manager",
+        "de.robv.android.xposed.installer",
+        "com.tsng.hidemyapplist",
+        "com.termux",
+        "bin.mt.plus",
+        "ru.zdevs.zarchiver",
+        "ru.zdevs.zarchiver.pro",
+        "com.lexa.fakegps",
+        "com.rosteam.gpsemulator",
+        "com.incorporateapps.fakegps.fre",
+        "com.incorporateapps.fakegps",
+        "com.applisto.appcloner"
+    };
+
+    public static boolean isHiddenPackage(String pkgName) {
+        if (pkgName == null) return false;
+        String lower = pkgName.toLowerCase(java.util.Locale.US);
+        for (int i = 0; i < HIDDEN_PACKAGES.length; ++i) {
+            if (lower.equals(HIDDEN_PACKAGES[i]) || lower.startsWith(HIDDEN_PACKAGES[i] + ".")) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * Replacement fragments for M_REWRITE_STRING, as parallel {from, to} pairs
@@ -199,6 +234,7 @@ public final class EnvCompatState {
 
     public Object handle(Object[] args) {
         if (mode == M_OBSERVE) return observeAndPass(args);
+        if (mode == M_FILTER_PACKAGES) return filterPackages(args);
 
         // Handled before the try below: this mode has to call the original
         // itself, and falling through on an exception would call it twice.
@@ -484,6 +520,48 @@ public final class EnvCompatState {
             s = s.replace(from[i], to[i]);
         }
         return s;
+    }
+
+    private Object filterPackages(Object[] args) {
+        if (args != null && args.length > 1 && args[1] instanceof String) {
+            String pkg = (String) args[1];
+            if (isHiddenPackage(pkg)) {
+                try {
+                    Class<?> exCls = Class.forName("android.content.pm.PackageManager$NameNotFoundException");
+                    Constructor<?> ctor = exCls.getConstructor(String.class);
+                    Throwable t = (Throwable) ctor.newInstance(pkg);
+                    throw sneakyThrow(t);
+                } catch (ClassNotFoundException e) {
+                    throw sneakyThrow(new IllegalArgumentException("Package not found: " + pkg));
+                } catch (InvocationTargetException e) {
+                    throw sneakyThrow(e.getCause() != null ? e.getCause() : e);
+                } catch (Exception e) {
+                    throw sneakyThrow(e);
+                }
+            }
+        }
+
+        Object r = invokeOriginal(args);
+        if (r instanceof java.util.List) {
+            java.util.List<?> src = (java.util.List<?>) r;
+            java.util.List<Object> filtered = new java.util.ArrayList<Object>(src.size());
+            for (Object item : src) {
+                if (item == null) continue;
+                boolean hide = false;
+                try {
+                    Field f = item.getClass().getField("packageName");
+                    Object val = f.get(item);
+                    if (val instanceof String && isHiddenPackage((String) val)) {
+                        hide = true;
+                    }
+                } catch (Throwable ignored) {}
+                if (!hide) {
+                    filtered.add(item);
+                }
+            }
+            return filtered;
+        }
+        return r;
     }
 
     private static boolean isAllDigits(String s) {        if (s == null || s.length() < 10) return false;

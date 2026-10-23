@@ -264,6 +264,7 @@ enum Mode {
     M_REWRITE_STRING = 5,// call the original, then replace device tells in its String
     M_DISPLAY_METRICS = 6,// spoof DisplayMetrics, Configuration, Point, Rect, Display dimensions
     M_APP_ATTACH      = 7,// intercept Application attach/create and hook app-level targets
+    M_FILTER_PACKAGES = 8,// hide root apps & tools from PackageManager queries
 };
 
 // ret_type: 0 String, 1 byte[]
@@ -767,6 +768,33 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/app/Instrumentation", "callApplicationOnCreate",
           "(Landroid/app/Application;)V",
           false, M_APP_ATTACH, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+
+        // ---- P7: PackageManager root & mod cloaking ----
+        { "android/app/ApplicationPackageManager", "getInstalledPackages",
+          "(I)Ljava/util/List;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/app/ApplicationPackageManager", "getInstalledApplications",
+          "(I)Ljava/util/List;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/app/ApplicationPackageManager", "getPackageInfo",
+          "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/app/ApplicationPackageManager", "getApplicationInfo",
+          "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        // Android 13+ (API 33+) PackageInfoFlags / ApplicationInfoFlags overloads
+        { "android/app/ApplicationPackageManager", "getInstalledPackages",
+          "(Landroid/content/pm/PackageManager$PackageInfoFlags;)Ljava/util/List;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/app/ApplicationPackageManager", "getInstalledApplications",
+          "(Landroid/content/pm/PackageManager$ApplicationInfoFlags;)Ljava/util/List;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/app/ApplicationPackageManager", "getPackageInfo",
+          "(Ljava/lang/String;Landroid/content/pm/PackageManager$PackageInfoFlags;)Landroid/content/pm/PackageInfo;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/app/ApplicationPackageManager", "getApplicationInfo",
+          "(Ljava/lang/String;Landroid/content/pm/PackageManager$ApplicationInfoFlags;)Landroid/content/pm/ApplicationInfo;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
     };
     n = sizeof(S) / sizeof(S[0]);
     return S;
