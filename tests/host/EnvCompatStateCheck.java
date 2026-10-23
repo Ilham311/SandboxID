@@ -33,6 +33,18 @@ public class EnvCompatStateCheck {
 
     /** Stand-ins for the hooked framework methods. */
     public static class Target {
+        public final android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+        public final android.content.res.Configuration configuration =
+                new android.content.res.Configuration();
+
+        public Object metrics() {
+            return metrics;
+        }
+
+        public Object configuration() {
+            return configuration;
+        }
+
         public Object load(String n) throws ClassNotFoundException {
             throw new ClassNotFoundException("Didn't find class \"" + n + "\"");
         }
@@ -139,6 +151,60 @@ public class EnvCompatStateCheck {
         check("UA real build id gone", !got.contains("AQ3A.250226.002"));
         check("UA version suffix preserved", got.contains("Chrome/155.0.8059.43"));
         check("UA wv marker preserved", got.contains("; wv)"));
+
+        // A cached spoof copy is reused while its live source is unchanged, but
+        // a source orientation/configuration change must produce fresh spoofed data.
+        t.metrics.widthPixels = 1080;
+        t.metrics.heightPixels = 2400;
+        t.metrics.densityDpi = 440;
+        t.metrics.density = 2.75f;
+        t.metrics.scaledDensity = 2.75f;
+        t.metrics.xdpi = 440f;
+        t.metrics.ydpi = 440f;
+        androidx.core.os.EnvCompatState dm = new androidx.core.os.EnvCompatState();
+        dm.mode = androidx.core.os.EnvCompatState.M_DISPLAY_METRICS;
+        dm.backup = Target.class.getDeclaredMethod("metrics");
+        dm.displayWidth = 720;
+        dm.displayHeight = 1600;
+        dm.displayDensity = 320;
+        Object dmFirst = dm.handle(new Object[]{ t });
+        check("DisplayMetrics initially spoofed",
+                dmFirst instanceof android.util.DisplayMetrics
+                        && ((android.util.DisplayMetrics) dmFirst).widthPixels == 720
+                        && ((android.util.DisplayMetrics) dmFirst).heightPixels == 1600);
+        ((android.util.DisplayMetrics) dmFirst).widthPixels = 1234;
+        Object dmUnchanged = dm.handle(new Object[]{ t });
+        check("unchanged DisplayMetrics source reuses caller-mutated cache",
+                dmUnchanged == dmFirst
+                        && ((android.util.DisplayMetrics) dmUnchanged).widthPixels == 1234);
+        t.metrics.widthPixels = 2400;
+        t.metrics.heightPixels = 1080;
+        Object dmUpdated = dm.handle(new Object[]{ t });
+        check("changed DisplayMetrics orientation refreshes cached spoof",
+                dmUpdated != dmFirst
+                        && ((android.util.DisplayMetrics) dmUpdated).widthPixels == 1600
+                        && ((android.util.DisplayMetrics) dmUpdated).heightPixels == 720);
+
+        t.configuration.orientation = 1;
+        t.configuration.screenWidthDp = 400;
+        t.configuration.screenHeightDp = 800;
+        androidx.core.os.EnvCompatState cfg = new androidx.core.os.EnvCompatState();
+        cfg.mode = androidx.core.os.EnvCompatState.M_DISPLAY_METRICS;
+        cfg.backup = Target.class.getDeclaredMethod("configuration");
+        cfg.displayWidth = 720;
+        cfg.displayHeight = 1600;
+        cfg.displayDensity = 320;
+        Object cfgFirst = cfg.handle(new Object[]{ t });
+        check("Configuration initially spoofed",
+                cfgFirst instanceof android.content.res.Configuration
+                        && ((android.content.res.Configuration) cfgFirst).screenWidthDp == 360
+                        && ((android.content.res.Configuration) cfgFirst).screenHeightDp == 800);
+        t.configuration.orientation = 2;
+        Object cfgUpdated = cfg.handle(new Object[]{ t });
+        check("changed Configuration refreshes cached spoof",
+                cfgUpdated != cfgFirst
+                        && ((android.content.res.Configuration) cfgUpdated).screenWidthDp == 800
+                        && ((android.content.res.Configuration) cfgUpdated).screenHeightDp == 360);
 
         // Empty / null results pass through: a hook that invented a UA for a
         // provider that returned nothing would be fabricating data.

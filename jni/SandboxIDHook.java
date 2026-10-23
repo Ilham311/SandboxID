@@ -133,13 +133,21 @@ public final class EnvCompatState {
     private static Field s_ptX, s_ptY;
     private static Method s_displayGetRotation;
 
-    // Per-instance spoofed cache: avoids allocating throwaway copies on every
-    // call in hot UI paths (e.g. TypedValue.applyDimension during view inflation)
-    // and preserves in-place mutations made by screen-adaptation libraries.
-    private static final java.util.Map<Object, Object> s_dmCache =
-        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, Object>());
-    private static final java.util.Map<Object, Object> s_cfgCache =
-        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, Object>());
+    // Cache each spoofed copy alongside a snapshot of the live input. This avoids
+    // allocations on unchanged hot UI paths while allowing source changes to
+    // refresh the copy; caller mutations to the spoofed copy survive otherwise.
+    private static final class SpoofCacheEntry {
+        final Object sourceSnapshot;
+        final Object spoofed;
+        SpoofCacheEntry(Object sourceSnapshot, Object spoofed) {
+            this.sourceSnapshot = sourceSnapshot;
+            this.spoofed = spoofed;
+        }
+    }
+    private static final java.util.Map<Object, SpoofCacheEntry> s_dmCache =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, SpoofCacheEntry>());
+    private static final java.util.Map<Object, SpoofCacheEntry> s_cfgCache =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, SpoofCacheEntry>());
 
     private static void initReflection() {
         if (s_fieldsInit) return;
@@ -234,17 +242,19 @@ public final class EnvCompatState {
             if (r != null) {
                 String cname = r.getClass().getName();
                 if (cname.endsWith("DisplayMetrics")) {
-                    Object cached = s_dmCache.get(r);
-                    if (cached != null) {
-                        return cached;
-                    }
+                    SpoofCacheEntry cached = s_dmCache.get(r);
                     try {
                         initReflection();
                         if (s_dmCtor != null && s_dmSetTo != null) {
+                            if (cached != null && cached.sourceSnapshot.equals(r)) {
+                                return cached.spoofed;
+                            }
+                            Object snapshot = s_dmCtor.newInstance();
+                            s_dmSetTo.invoke(snapshot, r);
                             Object copy = s_dmCtor.newInstance();
                             s_dmSetTo.invoke(copy, r);
                             applyDisplayMetrics(copy);
-                            s_dmCache.put(r, copy);
+                            s_dmCache.put(r, new SpoofCacheEntry(snapshot, copy));
                             r = copy;
                         } else {
                             applyDisplayMetrics(r);
@@ -253,16 +263,17 @@ public final class EnvCompatState {
                         applyDisplayMetrics(r);
                     }
                 } else if (cname.endsWith("Configuration")) {
-                    Object cached = s_cfgCache.get(r);
-                    if (cached != null) {
-                        return cached;
-                    }
+                    SpoofCacheEntry cached = s_cfgCache.get(r);
                     try {
                         initReflection();
                         if (s_cfgCtor != null) {
+                            if (cached != null && cached.sourceSnapshot.equals(r)) {
+                                return cached.spoofed;
+                            }
+                            Object snapshot = s_cfgCtor.newInstance(r);
                             Object copy = s_cfgCtor.newInstance(r);
                             applyConfiguration(copy);
-                            s_cfgCache.put(r, copy);
+                            s_cfgCache.put(r, new SpoofCacheEntry(snapshot, copy));
                             r = copy;
                         } else {
                             applyConfiguration(r);
