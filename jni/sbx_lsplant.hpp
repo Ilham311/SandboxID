@@ -348,7 +348,7 @@ inline jclass load_callback_class(JNIEnv* env) {
 // Installed by resolve_callback_members(); called from the Java observer hook
 // with the class name the app asked for and the Class it got.
 inline void sbx_observe(JNIEnv* env, jclass, jstring name, jclass cls);
-inline void sbx_on_app_created(JNIEnv* env, jobject clLoader);
+inline bool sbx_on_app_created(JNIEnv* env, jobject clLoader);
 inline const HookSpec* tt_specs(size_t& n);
 
 inline bool resolve_callback_members(JNIEnv* env) {
