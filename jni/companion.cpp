@@ -103,11 +103,34 @@ static void reload_targets_if_changed() {
     g_targets_mtime_nsec = st.st_mtim.tv_nsec;
 }
 
+static std::string extract_base_pkg(const std::string& pkg) {
+    if (pkg.empty()) return "";
+    std::string base = pkg;
+    size_t colon = base.find(':');
+    if (colon != std::string::npos) {
+        base = base.substr(0, colon);
+    }
+    static const std::string kZygoteSuffix = "_zygote";
+    if (base.size() > kZygoteSuffix.size() &&
+        base.rfind(kZygoteSuffix) == (base.size() - kZygoteSuffix.size())) {
+        base = base.substr(0, base.size() - kZygoteSuffix.size());
+    }
+    return base;
+}
+
 static bool is_target(const std::string& pkg) {
     if (pkg.empty()) return false;
     std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     reload_targets_if_changed();
-    for (const auto& t : g_targets) if (t == pkg) return true;
+    for (const auto& t : g_targets) {
+        if (t == pkg) return true;
+    }
+    std::string base = extract_base_pkg(pkg);
+    if (!base.empty() && base != pkg) {
+        for (const auto& t : g_targets) {
+            if (t == base) return true;
+        }
+    }
     return false;
 }
 
@@ -513,7 +536,13 @@ extern "C" void sandboxid_companion(int client) {
                     LOGD("enable_hide aktif -> SBX_HIDE=1 utk '%s'", pkg.c_str());
                 }
             }
-            LOGD("ACCEPT pkg='%s' (%zu bytes)", pkg.c_str(), d.size());
+            std::string base = extract_base_pkg(pkg);
+            if (!base.empty() && base != pkg) {
+                LOGD("ACCEPT sub-process '%s' for target '%s' (%zu bytes)",
+                     pkg.c_str(), base.c_str(), d.size());
+            } else {
+                LOGD("ACCEPT pkg='%s' (%zu bytes)", pkg.c_str(), d.size());
+            }
 
             uint32_t l = (uint32_t)d.size();
             if (!sandboxid::write_full(client, &l, sizeof(l))) break;

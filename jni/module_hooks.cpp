@@ -1,6 +1,11 @@
 #include "module_impl.hpp"
 #include <climits>
 #include <algorithm>
+#include <cctype>
+
+#if defined(SBX_ENABLE_LSPLANT) && SBX_ENABLE_LSPLANT
+#include <dobby.h>
+#endif
 
 // ---------- install_build_hook ----------
 // Reflects into android.os.Build and overwrites identity-mapped fields via JNI.
@@ -741,6 +746,208 @@ static int hook_system_property_get(const char* name, char* value) {
     return orig_prop_get ? orig_prop_get(name, value) : 0;
 }
 
+typedef FILE* (*popen_fn)(const char*, const char*);
+static popen_fn orig_popen = nullptr;
+
+typedef int (*pclose_fn)(FILE*);
+static pclose_fn orig_pclose = nullptr;
+
+typedef int (*execve_fn)(const char*, char* const[], char* const[]);
+static execve_fn orig_execve = nullptr;
+
+static std::mutex g_popen_mu;
+static std::map<FILE*, int> g_synthetic_popens;
+
+static FILE* create_synthetic_pipe(const std::string& output, int exit_code) {
+    int pdes[2];
+    if (pipe2(pdes, O_CLOEXEC) != 0) {
+        LOGE("create_synthetic_pipe: pipe2 failed errno=%d", errno);
+        return nullptr;
+    }
+    if (!output.empty()) {
+        ssize_t written = 0;
+        size_t total = output.size();
+        const char* buf = output.data();
+        while (written < (ssize_t)total) {
+            ssize_t r = ::write(pdes[1], buf + written, total - written);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            written += r;
+        }
+    }
+    ::close(pdes[1]);
+
+    FILE* fp = fdopen(pdes[0], "r");
+    if (!fp) {
+        ::close(pdes[0]);
+        return nullptr;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_popen_mu);
+        g_synthetic_popens[fp] = exit_code;
+    }
+    return fp;
+}
+
+static FILE* hook_popen(const char* command, const char* type) {
+    if (!command) return orig_popen ? orig_popen(command, type) : ::popen(command, type);
+    std::string cmd(command);
+
+    // 1. Root & binary probing via shell
+    if (cmd.find("which su") != std::string::npos ||
+        cmd.find("which magisk") != std::string::npos ||
+        cmd.find("which busybox") != std::string::npos ||
+        cmd.find("which daemonsu") != std::string::npos ||
+        cmd.find("whereis su") != std::string::npos ||
+        cmd.find("whereis magisk") != std::string::npos) {
+        LOGD("NATIVE_POPEN BLOCKED root tool check: '%s'", command);
+        return create_synthetic_pipe("", 1);
+    }
+
+    // Direct root execution check: e.g. "su", "su -c ...", "/system/bin/su"
+    if (cmd == "su" || cmd.rfind("su ", 0) == 0 || cmd.find("/su") != std::string::npos ||
+        cmd == "magisk" || cmd.rfind("magisk ", 0) == 0 || cmd.find("/magisk") != std::string::npos ||
+        cmd.find("daemonsu") != std::string::npos) {
+        LOGD("NATIVE_POPEN BLOCKED root exec: '%s'", command);
+        std::string err = "/system/bin/sh: " + cmd.substr(0, cmd.find(' ')) + ": inaccessible or not found\n";
+        return create_synthetic_pipe(err, 127);
+    }
+
+    // 2. getprop queries via shell
+    size_t gp = cmd.find("getprop");
+    if (gp != std::string::npos) {
+        size_t prop_start = gp + 7;
+        while (prop_start < cmd.size() && isspace(static_cast<unsigned char>(cmd[prop_start]))) ++prop_start;
+        size_t prop_end = prop_start;
+        while (prop_end < cmd.size() && !isspace(static_cast<unsigned char>(cmd[prop_end])) &&
+               cmd[prop_end] != ';' && cmd[prop_end] != '&' && cmd[prop_end] != '|' && cmd[prop_end] != '>') {
+            ++prop_end;
+        }
+        if (prop_end > prop_start) {
+            std::string prop = cmd.substr(prop_start, prop_end - prop_start);
+            if (!prop.empty()) {
+                // Bootloader & AVB verified boot status
+                if (prop == "ro.boot.vbmeta.device_state") {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> locked", prop.c_str());
+                    return create_synthetic_pipe("locked\n", 0);
+                }
+                if (prop == "ro.boot.verifiedbootstate") {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> green", prop.c_str());
+                    return create_synthetic_pipe("green\n", 0);
+                }
+                if (prop == "ro.boot.flash.locked") {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> 1", prop.c_str());
+                    return create_synthetic_pipe("1\n", 0);
+                }
+                if (prop == "ro.secure") {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> 1", prop.c_str());
+                    return create_synthetic_pipe("1\n", 0);
+                }
+                if (prop == "ro.debuggable") {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> 0", prop.c_str());
+                    return create_synthetic_pipe("0\n", 0);
+                }
+                if (prop == "ro.boot.warranty_bit" || prop == "ro.warranty_bit") {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> 0", prop.c_str());
+                    return create_synthetic_pipe("0\n", 0);
+                }
+                if (prop == "ro.build.type") {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> user", prop.c_str());
+                    return create_synthetic_pipe("user\n", 0);
+                }
+                if (prop == "ro.build.tags") {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> release-keys", prop.c_str());
+                    return create_synthetic_pipe("release-keys\n", 0);
+                }
+                if (prop == "ro.boot.veritymode") {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> enforcing", prop.c_str());
+                    return create_synthetic_pipe("enforcing\n", 0);
+                }
+                if (sbx_prop_hidden(prop.c_str())) {
+                    LOGD("NATIVE_POPEN HIDE getprop '%s'", prop.c_str());
+                    return create_synthetic_pipe("\n", 0);
+                }
+                std::string spoofed;
+                if (spoof_prop_value(prop, spoofed)) {
+                    LOGD("NATIVE_POPEN SPOOF getprop '%s' -> '%s'", prop.c_str(), spoofed.c_str());
+                    return create_synthetic_pipe(spoofed + "\n", 0);
+                }
+            }
+        }
+    }
+
+    // 3. pm list packages via shell
+    if (cmd.find("pm list packages") != std::string::npos) {
+        FILE* real_fp = orig_popen ? orig_popen(command, type) : ::popen(command, type);
+        if (real_fp) {
+            std::string filtered;
+            char line[1024];
+            while (fgets(line, sizeof(line), real_fp)) {
+                bool hide = false;
+                static const char* const kHiddenApps[] = {
+                    "magisk", "kernelsu", "apatch", "lsposed", "xposed",
+                    "hidemyapplist", "termux", "bin.mt.plus", "zarchiver",
+                    "fakegps", "gpsemulator"
+                };
+                for (const char* h : kHiddenApps) {
+                    if (strcasestr(line, h)) { hide = true; break; }
+                }
+                if (!hide) filtered += line;
+            }
+            int rc = orig_pclose ? orig_pclose(real_fp) : ::pclose(real_fp);
+            int exit_code = (rc >> 8) & 0xff;
+            return create_synthetic_pipe(filtered, exit_code);
+        }
+    }
+
+    return orig_popen ? orig_popen(command, type) : ::popen(command, type);
+}
+
+static int hook_pclose(FILE* stream) {
+    if (!stream) return -1;
+    int exit_code = -1;
+    bool synthetic = false;
+    {
+        std::lock_guard<std::mutex> lock(g_popen_mu);
+        auto it = g_synthetic_popens.find(stream);
+        if (it != g_synthetic_popens.end()) {
+            exit_code = it->second;
+            g_synthetic_popens.erase(it);
+            synthetic = true;
+        }
+    }
+    if (synthetic) {
+        fclose(stream);
+        return (exit_code & 0xff) << 8;
+    }
+    return orig_pclose ? orig_pclose(stream) : ::pclose(stream);
+}
+
+static int hook_execve(const char* pathname, char* const argv[], char* const envp[]) {
+    if (pathname) {
+        std::string path(pathname);
+        if (path.find("/su") != std::string::npos ||
+            path.find("/magisk") != std::string::npos ||
+            path.find("daemonsu") != std::string::npos) {
+            LOGD("NATIVE_EXECVE BLOCKED '%s'", pathname);
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    if (argv && argv[0]) {
+        std::string arg0(argv[0]);
+        if (arg0 == "su" || arg0 == "magisk" || arg0 == "daemonsu") {
+            LOGD("NATIVE_EXECVE BLOCKED argv[0]='%s'", argv[0]);
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_execve ? orig_execve(pathname, argv, envp) : ::execve(pathname, argv, envp);
+}
+
 
 void install_native_read_hooks(Api* api) {
     const std::string& nr = val("SBX_NATIVE_READ");
@@ -795,6 +1002,12 @@ void install_native_read_hooks(Api* api) {
         {"__system_property_get",
                     reinterpret_cast<void*>(hook_system_property_get),
                     reinterpret_cast<void**>(&orig_prop_get)},
+        {"popen",   reinterpret_cast<void*>(hook_popen),
+                    reinterpret_cast<void**>(&orig_popen)},
+        {"pclose",  reinterpret_cast<void*>(hook_pclose),
+                    reinterpret_cast<void**>(&orig_pclose)},
+        {"execve",  reinterpret_cast<void*>(hook_execve),
+                    reinterpret_cast<void**>(&orig_execve)},
     };
 
     // Collect the libraries to hook, scanning /proc/self/maps once:
@@ -895,6 +1108,41 @@ void install_native_read_hooks(Api* api) {
     live += landed(reinterpret_cast<void*>(orig_prop_find));
     live += landed(reinterpret_cast<void*>(orig_prop_get));
     live += landed(reinterpret_cast<void*>(orig_prop_read_cb));
+    live += landed(reinterpret_cast<void*>(orig_popen));
+    live += landed(reinterpret_cast<void*>(orig_pclose));
+    live += landed(reinterpret_cast<void*>(orig_execve));
+
+#if defined(SBX_ENABLE_LSPLANT) && SBX_ENABLE_LSPLANT
+    // Inline hooking for popen, pclose, execve via Dobby
+    // Catches dynamically loaded security libraries (e.g. libpsec.so) that dlopen after postAppSpecialize
+    void* p_popen = reinterpret_cast<void*>(popen);
+    if (p_popen) {
+        void* orig = nullptr;
+        if (DobbyHook(p_popen, reinterpret_cast<dobby_dummy_func_t>(hook_popen),
+                      reinterpret_cast<dobby_dummy_func_t*>(&orig)) == 0 && orig) {
+            orig_popen = reinterpret_cast<popen_fn>(orig);
+            LOGI("NATIVE_READ: DobbyHook popen registered");
+        }
+    }
+    void* p_pclose = reinterpret_cast<void*>(pclose);
+    if (p_pclose) {
+        void* orig = nullptr;
+        if (DobbyHook(p_pclose, reinterpret_cast<dobby_dummy_func_t>(hook_pclose),
+                      reinterpret_cast<dobby_dummy_func_t*>(&orig)) == 0 && orig) {
+            orig_pclose = reinterpret_cast<pclose_fn>(orig);
+            LOGI("NATIVE_READ: DobbyHook pclose registered");
+        }
+    }
+    void* p_execve = reinterpret_cast<void*>(execve);
+    if (p_execve) {
+        void* orig = nullptr;
+        if (DobbyHook(p_execve, reinterpret_cast<dobby_dummy_func_t>(hook_execve),
+                      reinterpret_cast<dobby_dummy_func_t*>(&orig)) == 0 && orig) {
+            orig_execve = reinterpret_cast<execve_fn>(orig);
+            LOGI("NATIVE_READ: DobbyHook execve registered");
+        }
+    }
+#endif
 
     if (!committed && live == 0) {
         LOGW("NATIVE_READ: pltHookCommit failed and no trampolines landed "
@@ -913,7 +1161,7 @@ void install_native_read_hooks(Api* api) {
     LOGI("NATIVE_READ hooks installed (%d lib(s) incl. %d app-owned, "
          "%d registration(s), %d live trampoline(s)): "
          "open/openat/__open_2/__openat_2/read/pread64/lseek/lseek64/close + "
-         "__system_property_find/get/read_callback",
+         "__system_property_find/get/read_callback + popen/pclose/execve",
          registered, app_libs, symbols, live);
     (void)symbols;   // counted for the log only
 }

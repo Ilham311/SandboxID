@@ -350,7 +350,15 @@ applog_wipe() {
         snssdk_did.xml snssdk_did.xml.bak \
         bd_device_info.xml bd_device_info.xml.bak \
         header_custom.xml header_custom.xml.bak \
-        ug_install_settings_pref.xml ug_install_settings_pref.xml.bak
+        ug_install_settings_pref.xml ug_install_settings_pref.xml.bak \
+        Guardian_Sp.xml Guardian_Sp.xml.bak \
+        com.grabtaxi.passenger_preferences.xml com.grabtaxi.passenger_preferences.xml.bak \
+        grab_security.xml grab_security.xml.bak \
+        passenger_profile.xml passenger_profile.xml.bak \
+        sec_pref.xml sec_pref.xml.bak \
+        device_id.xml device_id.xml.bak \
+        threatmetrix.xml threatmetrix.xml.bak \
+        iovation.xml iovation.xml.bak
     do
         if [ -e "$_sp_dir/$_f" ]; then
             rm -f "$_sp_dir/$_f" 2>/dev/null && _removed=$((_removed + 1))
@@ -368,7 +376,13 @@ applog_wipe() {
             applog \
             applog_v2 \
             applog_v3 \
-            bd_tracker_n
+            bd_tracker_n \
+            psec \
+            psec_cache \
+            guardian \
+            grab_sec \
+            tmx \
+            iovation
         do
             [ -n "$_p" ] || continue
             _abs="$_files_dir/$_p"
@@ -384,7 +398,7 @@ applog_wipe() {
 
     _nb_dir="$_data_dir/no_backup"
     if [ -d "$_nb_dir" ]; then
-        for _p in applog_device_id.dat bd_device_id .cdid; do
+        for _p in applog_device_id.dat bd_device_id .cdid psec.dat guardian.dat; do
             [ -e "$_nb_dir/$_p" ] && rm -f "$_nb_dir/$_p" 2>/dev/null && _removed=$((_removed + 1))
         done
     fi

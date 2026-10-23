@@ -86,6 +86,15 @@ public:
             if (env_->ExceptionCheck()) env_->ExceptionClear();
             pkg = raw ? raw.c_str() : "";
         }
+        if (pkg.empty() && args && args->app_data_dir) {
+            JniString raw(env_, args->app_data_dir);
+            if (env_->ExceptionCheck()) env_->ExceptionClear();
+            std::string dir = raw ? raw.c_str() : "";
+            size_t last_slash = dir.rfind('/');
+            if (last_slash != std::string::npos && last_slash + 1 < dir.size()) {
+                pkg = dir.substr(last_slash + 1);
+            }
+        }
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
         if (pkg.empty()) { unload(); return; }
 
@@ -172,7 +181,16 @@ public:
         install_prop_hook(api_, env_);
         install_leak_sensors(api_, env_);
         install_uptime_hook(api_, env_);
-        g_pkg = pkg_;
+        // Canonical base package name for identity/applog derivation
+        std::string base_pkg = pkg_;
+        size_t colon = base_pkg.find(':');
+        if (colon != std::string::npos) base_pkg = base_pkg.substr(0, colon);
+        static const std::string kZygoteSuffix = "_zygote";
+        if (base_pkg.size() > kZygoteSuffix.size() &&
+            base_pkg.rfind(kZygoteSuffix) == (base_pkg.size() - kZygoteSuffix.size())) {
+            base_pkg = base_pkg.substr(0, base_pkg.size() - kZygoteSuffix.size());
+        }
+        g_pkg = base_pkg;
         install_native_read_hooks(api_);
         install_java_hooks(env_);
 #ifdef SBX_DEBUG
