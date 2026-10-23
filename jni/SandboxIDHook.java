@@ -1,5 +1,7 @@
 package androidx.core.os;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
@@ -54,6 +56,10 @@ public final class EnvCompatState {
      * the value up, so that is where it is rewritten.
      */
     public static final int M_REWRITE_STRING = 5;
+    /** Spoof DisplayMetrics, Configuration, Point, Rect, Display dimensions. */
+    public static final int M_DISPLAY_METRICS = 6;
+    /** Intercept Application attach/create and hook app-level targets. */
+    public static final int M_APP_ATTACH = 7;
 
     /**
      * Replacement fragments for M_REWRITE_STRING, as parallel {from, to} pairs
@@ -92,6 +98,103 @@ public final class EnvCompatState {
     public String  clientudid;
     public String  cdid;
 
+    // M_DISPLAY_METRICS
+    public int   displayWidth;
+    public int   displayHeight;
+    public int   displayDensity;
+    public float displayXdpi;
+    public float displayYdpi;
+    public int   displayMetricType; // 0 = metrics/config/point/rect, 1 = width, 2 = height
+
+    private static volatile boolean appCreatedDone = false;
+
+    // Cached reflection handles for UI display metrics hot path
+    private static volatile boolean s_fieldsInit = false;
+    private static Constructor<?> s_dmCtor;
+    private static Method s_dmSetTo;
+    private static Field s_dmWidthPixels;
+    private static Field s_dmHeightPixels;
+    private static Field s_dmDensityDpi;
+    private static Field s_dmDensity;
+    private static Field s_dmScaledDensity;
+    private static Field s_dmXdpi;
+    private static Field s_dmYdpi;
+
+    private static Constructor<?> s_cfgCtor;
+    private static Field s_cfgOrientation;
+    private static Field s_cfgScreenWidthDp;
+    private static Field s_cfgScreenHeightDp;
+    private static Field s_cfgDensityDpi;
+    private static Field s_cfgSmallestScreenWidthDp;
+
+    private static Constructor<?> s_rectCtor;
+    private static Field s_rectLeft, s_rectTop, s_rectRight, s_rectBottom;
+
+    private static Field s_ptX, s_ptY;
+    private static Method s_displayGetRotation;
+
+    // Cache each spoofed copy alongside a snapshot of the live input. This avoids
+    // allocations on unchanged hot UI paths while allowing source changes to
+    // refresh the copy; caller mutations to the spoofed copy survive otherwise.
+    private static final class SpoofCacheEntry {
+        final Object sourceSnapshot;
+        final Object spoofed;
+        SpoofCacheEntry(Object sourceSnapshot, Object spoofed) {
+            this.sourceSnapshot = sourceSnapshot;
+            this.spoofed = spoofed;
+        }
+    }
+    private static final java.util.Map<Object, SpoofCacheEntry> s_dmCache =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, SpoofCacheEntry>());
+    private static final java.util.Map<Object, SpoofCacheEntry> s_cfgCache =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, SpoofCacheEntry>());
+
+    private static void initReflection() {
+        if (s_fieldsInit) return;
+        synchronized (EnvCompatState.class) {
+            if (s_fieldsInit) return;
+            try {
+                Class<?> dm = Class.forName("android.util.DisplayMetrics");
+                s_dmCtor = dm.getConstructor();
+                s_dmSetTo = dm.getMethod("setTo", dm);
+                s_dmWidthPixels = dm.getField("widthPixels");
+                s_dmHeightPixels = dm.getField("heightPixels");
+                s_dmDensityDpi = dm.getField("densityDpi");
+                s_dmDensity = dm.getField("density");
+                s_dmScaledDensity = dm.getField("scaledDensity");
+                s_dmXdpi = dm.getField("xdpi");
+                s_dmYdpi = dm.getField("ydpi");
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> cfg = Class.forName("android.content.res.Configuration");
+                s_cfgCtor = cfg.getConstructor(cfg);
+                s_cfgOrientation = cfg.getField("orientation");
+                s_cfgScreenWidthDp = cfg.getField("screenWidthDp");
+                s_cfgScreenHeightDp = cfg.getField("screenHeightDp");
+                s_cfgDensityDpi = cfg.getField("densityDpi");
+                s_cfgSmallestScreenWidthDp = cfg.getField("smallestScreenWidthDp");
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> rect = Class.forName("android.graphics.Rect");
+                s_rectCtor = rect.getConstructor(rect);
+                s_rectLeft = rect.getField("left");
+                s_rectTop = rect.getField("top");
+                s_rectRight = rect.getField("right");
+                s_rectBottom = rect.getField("bottom");
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> pt = Class.forName("android.graphics.Point");
+                s_ptX = pt.getField("x");
+                s_ptY = pt.getField("y");
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> disp = Class.forName("android.view.Display");
+                s_displayGetRotation = disp.getMethod("getRotation");
+            } catch (Throwable ignored) {}
+            s_fieldsInit = true;
+        }
+    }
+
     public EnvCompatState() {}
 
     public Object handle(Object[] args) {
@@ -111,6 +214,127 @@ public final class EnvCompatState {
         // Same shape as M_ZERO_NUMERIC: the original runs first and its result
         // is rewritten, so this cannot fall through into the switch below.
         if (mode == M_REWRITE_STRING) return rewriteString(args);
+
+        if (mode == M_DISPLAY_METRICS) {
+            Object r = invokeOriginal(args);
+            if (displayMetricType == 1 || displayMetricType == 2) {
+                boolean isLand = false;
+                if (args != null && args.length > 0 && args[0] != null) {
+                    try {
+                        initReflection();
+                        if (s_displayGetRotation != null) {
+                            Object rotObj = s_displayGetRotation.invoke(args[0]);
+                            if (rotObj instanceof Integer) {
+                                int rot = ((Integer) rotObj).intValue();
+                                isLand = (rot == 1 || rot == 3);
+                            }
+                        }
+                    } catch (Throwable ignored) {}
+                }
+                int minDim = Math.min(displayWidth > 0 ? displayWidth : 1080,
+                                      displayHeight > 0 ? displayHeight : 2400);
+                int maxDim = Math.max(displayWidth > 0 ? displayWidth : 1080,
+                                      displayHeight > 0 ? displayHeight : 2400);
+                int w = isLand ? maxDim : minDim;
+                int h = isLand ? minDim : maxDim;
+                return Integer.valueOf(displayMetricType == 1 ? w : h);
+            }
+            if (r != null) {
+                String cname = r.getClass().getName();
+                if (cname.endsWith("DisplayMetrics")) {
+                    SpoofCacheEntry cached = s_dmCache.get(r);
+                    try {
+                        initReflection();
+                        if (s_dmCtor != null && s_dmSetTo != null) {
+                            if (cached != null && cached.sourceSnapshot.equals(r)) {
+                                return cached.spoofed;
+                            }
+                            Object snapshot = s_dmCtor.newInstance();
+                            s_dmSetTo.invoke(snapshot, r);
+                            Object copy = s_dmCtor.newInstance();
+                            s_dmSetTo.invoke(copy, r);
+                            applyDisplayMetrics(copy);
+                            s_dmCache.put(r, new SpoofCacheEntry(snapshot, copy));
+                            r = copy;
+                        } else {
+                            applyDisplayMetrics(r);
+                        }
+                    } catch (Throwable ignored) {
+                        applyDisplayMetrics(r);
+                    }
+                } else if (cname.endsWith("Configuration")) {
+                    SpoofCacheEntry cached = s_cfgCache.get(r);
+                    try {
+                        initReflection();
+                        if (s_cfgCtor != null) {
+                            if (cached != null && cached.sourceSnapshot.equals(r)) {
+                                return cached.spoofed;
+                            }
+                            Object snapshot = s_cfgCtor.newInstance(r);
+                            Object copy = s_cfgCtor.newInstance(r);
+                            applyConfiguration(copy);
+                            s_cfgCache.put(r, new SpoofCacheEntry(snapshot, copy));
+                            r = copy;
+                        } else {
+                            applyConfiguration(r);
+                        }
+                    } catch (Throwable ignored) {
+                        applyConfiguration(r);
+                    }
+                } else if (cname.endsWith("Rect")) {
+                    try {
+                        initReflection();
+                        if (s_rectCtor != null) {
+                            Object copy = s_rectCtor.newInstance(r);
+                            applyRect(copy);
+                            r = copy;
+                        } else {
+                            applyRect(r);
+                        }
+                    } catch (Throwable ignored) {
+                        applyRect(r);
+                    }
+                }
+            }
+            if (args != null && args.length > 1 && args[1] != null) {
+                String a1name = args[1].getClass().getName();
+                if (a1name.endsWith("DisplayMetrics")) {
+                    applyDisplayMetrics(args[1]);
+                } else if (a1name.endsWith("Point")) {
+                    applyPoint(args[1]);
+                }
+            }
+            return r;
+        }
+
+        if (mode == M_APP_ATTACH) {
+            Object r = invokeOriginal(args);
+            if (!appCreatedDone) {
+                try {
+                    ClassLoader cl = null;
+                    if (args != null && args.length > 0 && isApplication(args[0])) {
+                        try {
+                            Method m = args[0].getClass().getMethod("getClassLoader");
+                            Object res = m.invoke(args[0]);
+                            if (res instanceof ClassLoader) cl = (ClassLoader) res;
+                        } catch (Throwable ignored) {}
+                    }
+                    if (cl == null && args != null && args.length > 1 && isApplication(args[1])) {
+                        try {
+                            Method m = args[1].getClass().getMethod("getClassLoader");
+                            Object res = m.invoke(args[1]);
+                            if (res instanceof ClassLoader) cl = (ClassLoader) res;
+                        } catch (Throwable ignored) {}
+                    }
+                    if (cl != null) {
+                        if (onAppCreated(cl)) {
+                            appCreatedDone = true;
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+            return r;
+        }
 
         try {
             switch (mode) {
@@ -383,6 +607,135 @@ public final class EnvCompatState {
 
     /** Implemented in native; receives every Class the app loads. */
     public static native void observe(String name, Class<?> cls);
+
+    /** Implemented in native; receives the application's ClassLoader. */
+    public static native boolean onAppCreated(ClassLoader cl);
+
+    private void applyDisplayMetrics(Object dm) {
+        if (dm == null || displayWidth <= 0 || displayHeight <= 0 || displayDensity <= 0) return;
+        try {
+            initReflection();
+            Class<?> c = dm.getClass();
+            int curW = s_dmWidthPixels != null ? s_dmWidthPixels.getInt(dm) : c.getField("widthPixels").getInt(dm);
+            int curH = s_dmHeightPixels != null ? s_dmHeightPixels.getInt(dm) : c.getField("heightPixels").getInt(dm);
+            int tw = displayWidth, th = displayHeight;
+            if (curW > curH && tw < th) {
+                tw = displayHeight;
+                th = displayWidth;
+            }
+            setField(s_dmWidthPixels, c, dm, "widthPixels", tw);
+            setField(s_dmHeightPixels, c, dm, "heightPixels", th);
+            setField(s_dmDensityDpi, c, dm, "densityDpi", displayDensity);
+            float d = displayDensity / 160.0f;
+            setField(s_dmDensity, c, dm, "density", d);
+            setField(s_dmScaledDensity, c, dm, "scaledDensity", d);
+            float xd = displayXdpi > 0 ? displayXdpi : (float) displayDensity;
+            float yd = displayYdpi > 0 ? displayYdpi : (float) displayDensity;
+            setField(s_dmXdpi, c, dm, "xdpi", xd);
+            setField(s_dmYdpi, c, dm, "ydpi", yd);
+        } catch (Throwable ignored) {}
+    }
+
+    private void applyPoint(Object pt) {
+        if (pt == null || displayWidth <= 0 || displayHeight <= 0) return;
+        try {
+            initReflection();
+            Class<?> c = pt.getClass();
+            int curX = s_ptX != null ? s_ptX.getInt(pt) : c.getField("x").getInt(pt);
+            int curY = s_ptY != null ? s_ptY.getInt(pt) : c.getField("y").getInt(pt);
+            int tx = displayWidth, ty = displayHeight;
+            if (curX > curY && tx < ty) {
+                tx = displayHeight;
+                ty = displayWidth;
+            }
+            setField(s_ptX, c, pt, "x", tx);
+            setField(s_ptY, c, pt, "y", ty);
+        } catch (Throwable ignored) {}
+    }
+
+    private void applyRect(Object rect) {
+        if (rect == null || displayWidth <= 0 || displayHeight <= 0) return;
+        try {
+            initReflection();
+            Class<?> c = rect.getClass();
+            int left = s_rectLeft != null ? s_rectLeft.getInt(rect) : c.getField("left").getInt(rect);
+            int top = s_rectTop != null ? s_rectTop.getInt(rect) : c.getField("top").getInt(rect);
+            int right = s_rectRight != null ? s_rectRight.getInt(rect) : c.getField("right").getInt(rect);
+            int bottom = s_rectBottom != null ? s_rectBottom.getInt(rect) : c.getField("bottom").getInt(rect);
+            int curW = right - left;
+            int curH = bottom - top;
+            int tw = displayWidth, th = displayHeight;
+            if (curW > curH && tw < th) {
+                tw = displayHeight;
+                th = displayWidth;
+            }
+            setField(s_rectLeft, c, rect, "left", 0);
+            setField(s_rectTop, c, rect, "top", 0);
+            setField(s_rectRight, c, rect, "right", tw);
+            setField(s_rectBottom, c, rect, "bottom", th);
+        } catch (Throwable ignored) {}
+    }
+
+    private void applyConfiguration(Object cfg) {
+        if (cfg == null || displayDensity <= 0) return;
+        try {
+            initReflection();
+            Class<?> c = cfg.getClass();
+            int orient = 0;
+            int curSw = 0, curSh = 0;
+            try {
+                orient = s_cfgOrientation != null ? s_cfgOrientation.getInt(cfg) : c.getField("orientation").getInt(cfg);
+            } catch (Throwable ignored) {}
+            try {
+                curSw = s_cfgScreenWidthDp != null ? s_cfgScreenWidthDp.getInt(cfg) : c.getField("screenWidthDp").getInt(cfg);
+            } catch (Throwable ignored) {}
+            try {
+                curSh = s_cfgScreenHeightDp != null ? s_cfgScreenHeightDp.getInt(cfg) : c.getField("screenHeightDp").getInt(cfg);
+            } catch (Throwable ignored) {}
+
+            boolean isLand = (orient == 2) || (curSw > curSh && curSh > 0);
+
+            float d = displayDensity / 160.0f;
+            int minDim = Math.min(displayWidth > 0 ? displayWidth : 1080,
+                                  displayHeight > 0 ? displayHeight : 2400);
+            int maxDim = Math.max(displayWidth > 0 ? displayWidth : 1080,
+                                  displayHeight > 0 ? displayHeight : 2400);
+            int portSwDp = (int) (minDim / d);
+            int portShDp = (int) (maxDim / d);
+
+            int finalSwDp = isLand ? portShDp : portSwDp;
+            int finalShDp = isLand ? portSwDp : portShDp;
+
+            setField(s_cfgDensityDpi, c, cfg, "densityDpi", displayDensity);
+            setField(s_cfgScreenWidthDp, c, cfg, "screenWidthDp", finalSwDp);
+            setField(s_cfgScreenHeightDp, c, cfg, "screenHeightDp", finalShDp);
+            setField(s_cfgSmallestScreenWidthDp, c, cfg, "smallestScreenWidthDp", portSwDp);
+        } catch (Throwable ignored) {}
+    }
+
+    private static boolean isApplication(Object obj) {
+        if (obj == null) return false;
+        Class<?> c = obj.getClass();
+        while (c != null) {
+            if ("android.app.Application".equals(c.getName())) return true;
+            c = c.getSuperclass();
+        }
+        return false;
+    }
+
+    private static void setField(Field f, Class<?> c, Object obj, String name, int val) {
+        try {
+            if (f != null) { f.setInt(obj, val); return; }
+            if (c != null) c.getField(name).setInt(obj, val);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void setField(Field f, Class<?> c, Object obj, String name, float val) {
+        try {
+            if (f != null) { f.setFloat(obj, val); return; }
+            if (c != null) c.getField(name).setFloat(obj, val);
+        } catch (Throwable ignored) {}
+    }
 
     // ------------------------------------------------------------------
     // Register body rewrite (port of the LSPosed variant's Rewrite.java).

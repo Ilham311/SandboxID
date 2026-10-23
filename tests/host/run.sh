@@ -159,10 +159,14 @@ if command -v javac >/dev/null 2>&1 && command -v java >/dev/null 2>&1; then
     cp "$REPO/tests/host/EnvCompatStateCheck.java" "$jout/src/"
     if javac --release 8 -d "$jout/classes" \
             "$jout/src/androidx/core/os/EnvCompatState.java" \
-            "$jout/src/EnvCompatStateCheck.java" 2>"$jout/javac.log" \
+            "$jout/src/EnvCompatStateCheck.java" \
+            "$REPO/tests/host/DisplayMetrics.java" \
+            "$REPO/tests/host/Configuration.java" 2>"$jout/javac.log" \
        || javac -source 1.8 -target 1.8 -d "$jout/classes" \
             "$jout/src/androidx/core/os/EnvCompatState.java" \
-            "$jout/src/EnvCompatStateCheck.java" 2>>"$jout/javac.log"; then
+            "$jout/src/EnvCompatStateCheck.java" \
+            "$REPO/tests/host/DisplayMetrics.java" \
+            "$REPO/tests/host/Configuration.java" 2>>"$jout/javac.log"; then
         if ! java -ea -cp "$jout/classes" EnvCompatStateCheck; then
             echo "FAIL: EnvCompatStateCheck reported failures"
             exit_code=1
