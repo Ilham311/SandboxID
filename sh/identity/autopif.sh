@@ -261,6 +261,16 @@ assemble_identity() {
   _uptime_emit=0
   { [ -f "$MODDIR/enable_uptime" ] && [ ! -f "$MODDIR/no_uptime" ]; } && _uptime_emit=$UPTIME_S
 
+  _disp_w=1080; _disp_h=2400; _disp_dpi=420
+  case "$MODEL" in
+    *"Pixel 9 Pro XL"*) _disp_w=1344; _disp_h=2992; _disp_dpi=560 ;;
+    *"Pixel 9 Pro"*)    _disp_w=1280; _disp_h=2856; _disp_dpi=560 ;;
+    *"Pixel 9"*)        _disp_w=1080; _disp_h=2424; _disp_dpi=420 ;;
+    *"Pixel 8 Pro"*)    _disp_w=1344; _disp_h=2992; _disp_dpi=560 ;;
+    *"Pixel 8"*)        _disp_w=1080; _disp_h=2400; _disp_dpi=420 ;;
+    *"Pixel 7 Pro"*)    _disp_w=1440; _disp_h=3120; _disp_dpi=560 ;;
+  esac
+
   IDENTITY_KV=$(cat <<EOF
 BRAND=$BRAND
 MANUFACTURER=$MANUFACTURER
@@ -301,6 +311,9 @@ USAGE_PROFILE=$PROFILE
 FRESH=$FRESH
 VBMETA_DIGEST=$(rand_hex 32)
 FLAVOR=$FLAVOR_STR
+LCD_DENSITY=$_disp_dpi
+SCREEN_WIDTH=$_disp_w
+SCREEN_HEIGHT=$_disp_h
 EOF
 )
   if [ -n "$BUILD_UTC" ]; then

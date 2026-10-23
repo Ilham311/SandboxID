@@ -316,6 +316,51 @@ private:
         // otherwise have to invent, kept here so it rotates with the seed.
         hv.gaid       = sbxnr::uuid_from_seed(hv.seed ^ 0x47414944ULL);   // "GAID"
 
+        // Display metrics resolution based on persona model
+        {
+            int dw = 0, dh = 0, dd = 0;
+            float xd = 0.0f, yd = 0.0f;
+            const std::string& model = val("MODEL");
+            if (model.find("Pixel 9 Pro XL") != std::string::npos) {
+                dw = 1344; dh = 2992; dd = 560; xd = 486.0f; yd = 486.0f;
+            } else if (model.find("Pixel 9 Pro Fold") != std::string::npos) {
+                dw = 1080; dh = 2424; dd = 420; xd = 422.0f; yd = 422.0f;
+            } else if (model.find("Pixel 9 Pro") != std::string::npos) {
+                dw = 1280; dh = 2856; dd = 560; xd = 495.0f; yd = 495.0f;
+            } else if (model.find("Pixel 9") != std::string::npos) {
+                dw = 1080; dh = 2424; dd = 420; xd = 422.0f; yd = 422.0f;
+            } else if (model.find("Pixel 8 Pro") != std::string::npos) {
+                dw = 1344; dh = 2992; dd = 560; xd = 489.0f; yd = 489.0f;
+            } else if (model.find("Pixel 8") != std::string::npos) {
+                dw = 1080; dh = 2400; dd = 420; xd = 428.0f; yd = 428.0f;
+            } else if (model.find("Pixel 7 Pro") != std::string::npos) {
+                dw = 1440; dh = 3120; dd = 560; xd = 512.0f; yd = 512.0f;
+            } else if (model.find("Pixel 7") != std::string::npos) {
+                dw = 1080; dh = 2400; dd = 420; xd = 416.0f; yd = 416.0f;
+            } else if (model.find("Pixel 6 Pro") != std::string::npos) {
+                dw = 1440; dh = 3120; dd = 560; xd = 512.0f; yd = 512.0f;
+            } else {
+                dw = 1080; dh = 2400; dd = 420; xd = 420.0f; yd = 420.0f;
+            }
+            if (!val("LCD_DENSITY").empty()) {
+                int d = std::atoi(val("LCD_DENSITY").c_str());
+                if (d > 0) dd = d;
+            }
+            if (!val("SCREEN_WIDTH").empty()) {
+                int w = std::atoi(val("SCREEN_WIDTH").c_str());
+                if (w > 0) dw = w;
+            }
+            if (!val("SCREEN_HEIGHT").empty()) {
+                int h = std::atoi(val("SCREEN_HEIGHT").c_str());
+                if (h > 0) dh = h;
+            }
+            hv.display_width   = dw;
+            hv.display_height  = dh;
+            hv.display_density = dd;
+            hv.display_xdpi    = xd;
+            hv.display_ydpi    = yd;
+        }
+
         if (sbxlsp::install_all(env, hv))
             LOGI("L3 java hooks active");
         else

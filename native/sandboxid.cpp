@@ -535,6 +535,29 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["PREVIEW_SDK_INT"]         = "0";
     id.kv["PREVIEW_SDK_FINGERPRINT"] = "REL";
 
+    auto display_for_model = [](const std::string& m, std::string& w, std::string& h, std::string& dpi) {
+        if (m.find("Pixel 9 Pro XL") != std::string::npos) {
+            w = "1344"; h = "2992"; dpi = "560";
+        } else if (m.find("Pixel 9 Pro") != std::string::npos) {
+            w = "1280"; h = "2856"; dpi = "560";
+        } else if (m.find("Pixel 9") != std::string::npos) {
+            w = "1080"; h = "2424"; dpi = "420";
+        } else if (m.find("Pixel 8 Pro") != std::string::npos) {
+            w = "1344"; h = "2992"; dpi = "560";
+        } else if (m.find("Pixel 8") != std::string::npos) {
+            w = "1080"; h = "2400"; dpi = "420";
+        } else if (m.find("Pixel 7 Pro") != std::string::npos) {
+            w = "1440"; h = "3120"; dpi = "560";
+        } else {
+            w = "1080"; h = "2400"; dpi = "420";
+        }
+    };
+    std::string sw, sh, sdpi;
+    display_for_model(p.model, sw, sh, sdpi);
+    id.kv["LCD_DENSITY"]   = sdpi;
+    id.kv["SCREEN_WIDTH"]  = sw;
+    id.kv["SCREEN_HEIGHT"] = sh;
+
     return id;
 }
 

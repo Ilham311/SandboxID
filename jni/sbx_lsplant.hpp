@@ -86,6 +86,11 @@ struct HookValues {
     // reports. Empty on a persona that IS that OEM.
     std::vector<std::string> deny_classes;
     uint64_t    seed = 0;   // fnv1a(FINGERPRINT|SERIAL|ANDROID_ID)
+    int         display_width   = 0;
+    int         display_height  = 0;
+    int         display_density = 0;
+    float       display_xdpi    = 0.0f;
+    float       display_ydpi    = 0.0f;
 };
 
 #ifndef SBX_ENABLE_LSPLANT
@@ -256,6 +261,8 @@ enum Mode {
     M_OBSERVE      = 3,  // call the original, then report the loaded Class here
     M_ZERO_NUMERIC = 4,  // call the original; return "0" for an all-digit long key
     M_REWRITE_STRING = 5,// call the original, then replace device tells in its String
+    M_DISPLAY_METRICS = 6,// spoof DisplayMetrics, Configuration, Point, Rect, Display dimensions
+    M_APP_ATTACH      = 7,// intercept Application attach/create and hook app-level targets
 };
 
 // ret_type: 0 String, 1 byte[]
@@ -288,7 +295,10 @@ struct State {
               f_forceIdx = nullptr, f_bodyIdx = nullptr, f_urlIdx = nullptr,
               f_urlMatch = nullptr, f_openudid = nullptr, f_clientudid = nullptr,
               f_cdid = nullptr, f_rwFrom = nullptr, f_rwTo = nullptr,
-              f_deny = nullptr;
+              f_deny = nullptr,
+              f_dispW = nullptr, f_dispH = nullptr, f_dispDpi = nullptr,
+              f_dispXdpi = nullptr, f_dispYdpi = nullptr,
+              f_dispMetricType = nullptr;
     std::vector<jobject> keep;   // global refs: GC anchor for hookers + backups
     HookValues vals;
     sbxid::SynthIds ids;
@@ -337,6 +347,7 @@ inline jclass load_callback_class(JNIEnv* env) {
 // Installed by resolve_callback_members(); called from the Java observer hook
 // with the class name the app asked for and the Class it got.
 inline void sbx_observe(JNIEnv* env, jclass, jstring name, jclass cls);
+inline void sbx_on_app_created(JNIEnv* env, jobject clLoader);
 inline const HookSpec* tt_specs(size_t& n);
 
 inline bool resolve_callback_members(JNIEnv* env) {
@@ -368,6 +379,14 @@ inline bool resolve_callback_members(JNIEnv* env) {
     g.f_rwFrom     = env->GetFieldID(g.cb_class, "rwFrom",       "[Ljava/lang/String;");
     g.f_rwTo       = env->GetFieldID(g.cb_class, "rwTo",         "[Ljava/lang/String;");
     g.f_deny       = env->GetStaticFieldID(g.cb_class, "deny",    "[Ljava/lang/String;");
+
+    g.f_dispW          = env->GetFieldID(g.cb_class, "displayWidth",      "I");
+    g.f_dispH          = env->GetFieldID(g.cb_class, "displayHeight",     "I");
+    g.f_dispDpi        = env->GetFieldID(g.cb_class, "displayDensity",    "I");
+    g.f_dispXdpi       = env->GetFieldID(g.cb_class, "displayXdpi",       "F");
+    g.f_dispYdpi       = env->GetFieldID(g.cb_class, "displayYdpi",       "F");
+    g.f_dispMetricType = env->GetFieldID(g.cb_class, "displayMetricType", "I");
+
     if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
 
     static const JNINativeMethod NATIVE[] = {
@@ -375,10 +394,14 @@ inline bool resolve_callback_members(JNIEnv* env) {
           (void*)+[](JNIEnv* e, jclass thiz, jstring n, jclass c) {
               sbx_observe(e, thiz, n, c);
           } },
+        { (char*)"onAppCreated", (char*)"(Ljava/lang/ClassLoader;)V",
+          (void*)+[](JNIEnv* e, jclass, jobject cl) {
+              sbx_on_app_created(e, cl);
+          } },
     };
-    if (env->RegisterNatives(g.cb_class, NATIVE, 1) != 0) {
+    if (env->RegisterNatives(g.cb_class, NATIVE, 2) != 0) {
         env->ExceptionClear();
-        SBX_LSP_LOGD("L3: RegisterNatives(observe) gagal - jalur TikTok nonaktif");
+        SBX_LSP_LOGD("L3: RegisterNatives(observe, onAppCreated) gagal - jalur TikTok/app nonaktif");
     }
 
     // The observer filters on this list before making the JNI call; keep it in
@@ -407,7 +430,8 @@ inline bool resolve_callback_members(JNIEnv* env) {
     return g.f_mode && g.f_isStatic && g.f_keyIdx && g.f_keyMatch && g.f_keyContains &&
            g.f_retType && g.f_sval && g.f_bval && g.f_backup && g.f_forceIdx &&
            g.f_bodyIdx && g.f_urlIdx && g.f_urlMatch && g.f_openudid &&
-           g.f_clientudid && g.f_cdid && g.f_rwFrom && g.f_rwTo && g.f_deny;
+           g.f_clientudid && g.f_cdid && g.f_rwFrom && g.f_rwTo && g.f_deny &&
+           g.f_dispW && g.f_dispH && g.f_dispDpi && g.f_dispMetricType;
 }
 
 inline bool init(JNIEnv* env) {
@@ -567,6 +591,14 @@ inline bool hook_one_class(JNIEnv* env, jclass cls, const HookSpec& sp) {
                 }
             }
         }
+        if (sp.mode == M_DISPLAY_METRICS) {
+            if (g.f_dispW)          env->SetIntField(hooker, g.f_dispW, g.vals.display_width);
+            if (g.f_dispH)          env->SetIntField(hooker, g.f_dispH, g.vals.display_height);
+            if (g.f_dispDpi)        env->SetIntField(hooker, g.f_dispDpi, g.vals.display_density);
+            if (g.f_dispXdpi)       env->SetFloatField(hooker, g.f_dispXdpi, g.vals.display_xdpi);
+            if (g.f_dispYdpi)       env->SetFloatField(hooker, g.f_dispYdpi, g.vals.display_ydpi);
+            if (g.f_dispMetricType) env->SetIntField(hooker, g.f_dispMetricType, sp.key_index);
+        }
         if (sp.mode == M_VALUE) {
             if (sp.ret_type == 1) {                     // byte[] target (Widevine)
                 if (g.ids.widevine_hex.size() >= 2) {
@@ -698,6 +730,42 @@ inline const HookSpec* hook_specs(size_t& n) {
           "(Landroid/content/Context;)Ljava/lang/String;",
           true, M_REWRITE_STRING, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
 
+        // ---- P5: Display metrics & screen resolution ----
+        { "android/content/res/Resources", "getDisplayMetrics",
+          "()Landroid/util/DisplayMetrics;",
+          false, M_DISPLAY_METRICS, 0, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/Display", "getMetrics",
+          "(Landroid/util/DisplayMetrics;)V",
+          false, M_DISPLAY_METRICS, 0, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/Display", "getRealMetrics",
+          "(Landroid/util/DisplayMetrics;)V",
+          false, M_DISPLAY_METRICS, 0, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/Display", "getSize",
+          "(Landroid/graphics/Point;)V",
+          false, M_DISPLAY_METRICS, 0, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/Display", "getRealSize",
+          "(Landroid/graphics/Point;)V",
+          false, M_DISPLAY_METRICS, 0, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/Display", "getWidth",
+          "()I",
+          false, M_DISPLAY_METRICS, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/Display", "getHeight",
+          "()I",
+          false, M_DISPLAY_METRICS, 2, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/WindowMetrics", "getBounds",
+          "()Landroid/graphics/Rect;",
+          false, M_DISPLAY_METRICS, 0, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/content/res/Resources", "getConfiguration",
+          "()Landroid/content/res/Configuration;",
+          false, M_DISPLAY_METRICS, 0, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+
+        // ---- P6: App lifecycle / APK class loader entry point ----
+        { "android/app/Application", "attachBaseContext",
+          "(Landroid/content/Context;)V",
+          false, M_APP_ATTACH, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/app/Instrumentation", "callApplicationOnCreate",
+          "(Landroid/app/Application;)V",
+          false, M_APP_ATTACH, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
     };
     n = sizeof(S) / sizeof(S[0]);
     return S;
@@ -715,6 +783,34 @@ inline const HookSpec* hook_specs(size_t& n) {
 // "com.bytedance.xxx" style names work.
 inline const HookSpec* tt_specs(size_t& n) {
     static const HookSpec S[] = {
+        // AppLog public SDK endpoints
+        { "com.bytedance.applog.AppLog", "getOpenUdid", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_OPENUDID, -1, -1, -1, nullptr },
+        { "com.bytedance.applog.AppLog", "getClientUdid", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_CLIENTUDID, -1, -1, -1, nullptr },
+        { "com.bytedance.applog.AppLog", "getDid", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
+        { "com.bytedance.applog.AppLog", "getIid", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
+
+        // DeviceRegisterManager public SDK endpoints
+        { "com.ss.android.deviceregister.DeviceRegisterManager", "getOpenUdId", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_OPENUDID, -1, -1, -1, nullptr },
+        { "com.ss.android.deviceregister.DeviceRegisterManager", "getClientUDID", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_CLIENTUDID, -1, -1, -1, nullptr },
+        { "com.ss.android.deviceregister.DeviceRegisterManager", "getClientUDIDWithBackup", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_CLIENTUDID, -1, -1, -1, nullptr },
+        { "com.ss.android.deviceregister.DeviceRegisterManager", "getCdid", "(Landroid/content/Context;)Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_CDID, -1, -1, -1, nullptr },
+        { "com.ss.android.deviceregister.DeviceRegisterManager", "getDeviceId", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
+        { "com.ss.android.deviceregister.DeviceRegisterManager", "getDeviceIdWithBackup", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
+        { "com.ss.android.deviceregister.DeviceRegisterManager", "getInstallId", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
+        { "com.ss.android.deviceregister.DeviceRegisterManager", "getInstallIdWithBackup", "()Ljava/lang/String;",
+          true, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
+
         // DeviceParams: never report a device id, so the server mints one.
         { "AbsDeviceParamsProvider", "getDeviceId", "()Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
@@ -838,6 +934,48 @@ inline void sbx_observe(JNIEnv* env, jclass, jstring name, jclass cls) {
         env->ExceptionClear();
     }
     in_observe = false;
+}
+
+// Invoked when an application creates its Context/Application instance.
+// Resolves application-layer classes directly through the app's ClassLoader.
+inline void sbx_on_app_created(JNIEnv* env, jobject clLoader) {
+    if (!env || !clLoader) return;
+
+    static thread_local bool in_app_created = false;
+    if (in_app_created) return;
+    in_app_created = true;
+
+    jclass clClass = env->GetObjectClass(clLoader);
+    if (!clClass) { in_app_created = false; return; }
+    jmethodID loadClassMid = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    if (!loadClassMid || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        in_app_created = false;
+        return;
+    }
+
+    size_t n = 0;
+    const HookSpec* specs = tt_specs(n);
+    int good = 0;
+    for (size_t i = 0; i < n; ++i) {
+        std::string dot_name(specs[i].cls);
+        for (char& c : dot_name) { if (c == '/') c = '.'; }
+        jstring name = env->NewStringUTF(dot_name.c_str());
+        if (!name) continue;
+        jobject clsObj = env->CallObjectMethod(clLoader, loadClassMid, name);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            continue;
+        }
+        if (clsObj) {
+            jclass cls = (jclass)clsObj;
+            if (hook_one_class(env, cls, specs[i])) {
+                ++good;
+            }
+        }
+    }
+    SBX_LSP_LOGD("L3: %d app target(s) hooked via onAppCreated", good);
+    in_app_created = false;
 }
 
 // Force Class.forName(String) to run interpreted.

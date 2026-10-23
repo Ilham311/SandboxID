@@ -54,6 +54,10 @@ public final class EnvCompatState {
      * the value up, so that is where it is rewritten.
      */
     public static final int M_REWRITE_STRING = 5;
+    /** Spoof DisplayMetrics, Configuration, Point, Rect, Display dimensions. */
+    public static final int M_DISPLAY_METRICS = 6;
+    /** Intercept Application attach/create and hook app-level targets. */
+    public static final int M_APP_ATTACH = 7;
 
     /**
      * Replacement fragments for M_REWRITE_STRING, as parallel {from, to} pairs
@@ -92,6 +96,14 @@ public final class EnvCompatState {
     public String  clientudid;
     public String  cdid;
 
+    // M_DISPLAY_METRICS
+    public int   displayWidth;
+    public int   displayHeight;
+    public int   displayDensity;
+    public float displayXdpi;
+    public float displayYdpi;
+    public int   displayMetricType; // 0 = metrics/config/point/rect, 1 = width, 2 = height
+
     public EnvCompatState() {}
 
     public Object handle(Object[] args) {
@@ -111,6 +123,60 @@ public final class EnvCompatState {
         // Same shape as M_ZERO_NUMERIC: the original runs first and its result
         // is rewritten, so this cannot fall through into the switch below.
         if (mode == M_REWRITE_STRING) return rewriteString(args);
+
+        if (mode == M_DISPLAY_METRICS) {
+            if (displayMetricType == 1) {
+                return Integer.valueOf(displayWidth > 0 ? displayWidth : 1080);
+            }
+            if (displayMetricType == 2) {
+                return Integer.valueOf(displayHeight > 0 ? displayHeight : 2400);
+            }
+            Object r = invokeOriginal(args);
+            if (r != null) {
+                String cname = r.getClass().getName();
+                if (cname.endsWith("DisplayMetrics")) {
+                    applyDisplayMetrics(r);
+                } else if (cname.endsWith("Configuration")) {
+                    applyConfiguration(r);
+                } else if (cname.endsWith("Rect")) {
+                    applyRect(r);
+                }
+            }
+            if (args != null && args.length > 1 && args[1] != null) {
+                String a1name = args[1].getClass().getName();
+                if (a1name.endsWith("DisplayMetrics")) {
+                    applyDisplayMetrics(args[1]);
+                } else if (a1name.endsWith("Point")) {
+                    applyPoint(args[1]);
+                }
+            }
+            return r;
+        }
+
+        if (mode == M_APP_ATTACH) {
+            Object r = invokeOriginal(args);
+            try {
+                ClassLoader cl = null;
+                if (args != null && args.length > 0 && args[0] != null) {
+                    try {
+                        Method m = args[0].getClass().getMethod("getClassLoader");
+                        Object res = m.invoke(args[0]);
+                        if (res instanceof ClassLoader) cl = (ClassLoader) res;
+                    } catch (Throwable ignored) {}
+                }
+                if (cl == null && args != null && args.length > 1 && args[1] != null) {
+                    try {
+                        Method m = args[1].getClass().getMethod("getClassLoader");
+                        Object res = m.invoke(args[1]);
+                        if (res instanceof ClassLoader) cl = (ClassLoader) res;
+                    } catch (Throwable ignored) {}
+                }
+                if (cl != null) {
+                    onAppCreated(cl);
+                }
+            } catch (Throwable ignored) {}
+            return r;
+        }
 
         try {
             switch (mode) {
@@ -383,6 +449,92 @@ public final class EnvCompatState {
 
     /** Implemented in native; receives every Class the app loads. */
     public static native void observe(String name, Class<?> cls);
+
+    /** Implemented in native; receives the application's ClassLoader. */
+    public static native void onAppCreated(ClassLoader cl);
+
+    private void applyDisplayMetrics(Object dm) {
+        if (dm == null || displayWidth <= 0 || displayHeight <= 0 || displayDensity <= 0) return;
+        try {
+            Class<?> c = dm.getClass();
+            int curW = c.getField("widthPixels").getInt(dm);
+            int curH = c.getField("heightPixels").getInt(dm);
+            int tw = displayWidth, th = displayHeight;
+            if (curW > curH && tw < th) {
+                tw = displayHeight;
+                th = displayWidth;
+            }
+            setField(c, dm, "widthPixels", tw);
+            setField(c, dm, "heightPixels", th);
+            setField(c, dm, "densityDpi", displayDensity);
+            float d = displayDensity / 160.0f;
+            setField(c, dm, "density", d);
+            setField(c, dm, "scaledDensity", d);
+            float xd = displayXdpi > 0 ? displayXdpi : (float) displayDensity;
+            float yd = displayYdpi > 0 ? displayYdpi : (float) displayDensity;
+            setField(c, dm, "xdpi", xd);
+            setField(c, dm, "ydpi", yd);
+        } catch (Throwable ignored) {}
+    }
+
+    private void applyPoint(Object pt) {
+        if (pt == null || displayWidth <= 0 || displayHeight <= 0) return;
+        try {
+            Class<?> c = pt.getClass();
+            int curX = c.getField("x").getInt(pt);
+            int curY = c.getField("y").getInt(pt);
+            int tx = displayWidth, ty = displayHeight;
+            if (curX > curY && tx < ty) {
+                tx = displayHeight;
+                ty = displayWidth;
+            }
+            setField(c, pt, "x", tx);
+            setField(c, pt, "y", ty);
+        } catch (Throwable ignored) {}
+    }
+
+    private void applyRect(Object rect) {
+        if (rect == null || displayWidth <= 0 || displayHeight <= 0) return;
+        try {
+            Class<?> c = rect.getClass();
+            int curW = c.getField("right").getInt(rect) - c.getField("left").getInt(rect);
+            int curH = c.getField("bottom").getInt(rect) - c.getField("top").getInt(rect);
+            int tw = displayWidth, th = displayHeight;
+            if (curW > curH && tw < th) {
+                tw = displayHeight;
+                th = displayWidth;
+            }
+            setField(c, rect, "left", 0);
+            setField(c, rect, "top", 0);
+            setField(c, rect, "right", tw);
+            setField(c, rect, "bottom", th);
+        } catch (Throwable ignored) {}
+    }
+
+    private void applyConfiguration(Object cfg) {
+        if (cfg == null || displayDensity <= 0) return;
+        try {
+            Class<?> c = cfg.getClass();
+            setField(c, cfg, "densityDpi", displayDensity);
+            float d = displayDensity / 160.0f;
+            int swDp = (int) (displayWidth / d);
+            int shDp = (int) (displayHeight / d);
+            setField(c, cfg, "screenWidthDp", swDp);
+            setField(c, cfg, "screenHeightDp", shDp);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void setField(Class<?> c, Object obj, String name, int val) {
+        try {
+            c.getField(name).setInt(obj, val);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void setField(Class<?> c, Object obj, String name, float val) {
+        try {
+            c.getField(name).setFloat(obj, val);
+        } catch (Throwable ignored) {}
+    }
 
     // ------------------------------------------------------------------
     // Register body rewrite (port of the LSPosed variant's Rewrite.java).
