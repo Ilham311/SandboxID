@@ -60,6 +60,11 @@ inline constexpr NativePropEntry NATIVE_PROPS[] = {
     {"ro.soc.manufacturer",                nullptr, "SOC_MANUFACTURER", false},
     {"ro.soc.model",                       nullptr, "SOC_MODEL", false},
     {"ro.product.marketname",              nullptr, "MARKETNAME", false},
+    {"ro.product.system.marketname",       nullptr, "MARKETNAME", false},
+    {"ro.product.vendor.marketname",       nullptr, "MARKETNAME", false},
+    {"ro.product.odm.marketname",          nullptr, "MARKETNAME", false},
+    {"ro.product.product.marketname",      nullptr, "MARKETNAME", false},
+    {"ro.product.system_ext.marketname",   nullptr, "MARKETNAME", false},
     // Device-codename / OEM descriptors that a Build.* mapping does not reach.
     // Before these were covered, all three vdinfos lenses reported the real
     // device here (alioth_global / Xiaomi / android-xiaomi / "POCO F3") while

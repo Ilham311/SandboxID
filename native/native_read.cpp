@@ -592,6 +592,10 @@ bool is_vendor_rom_prop(const char* name) {
     static const char* const exact[] = {
         "persist.sys.hardcoder.name",
         "ro.com.miui.rsa",
+        "ro.boot.cert",
+        "ro.product.cert",
+        "ro.product.odm.cert",
+        "ro.product.vendor.cert",
     };
     for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
     if (std::strncmp(name, "ro.miui.", 8) == 0)          return true;
