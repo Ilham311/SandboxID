@@ -273,8 +273,15 @@ private:
         hv.op_num     = val("GSM_OPERATOR_NUMERIC");
         hv.op_alpha   = val("GSM_OPERATOR_ALPHA");
         hv.op_iso     = val("GSM_OPERATOR_ISO");
+        // g_pkg, not pkg_: the canonical base package. sbx_applog_ids() in
+        // module_hooks.cpp seeds from g_pkg, and rotate_ids.sh seeds the app's
+        // on-disk AppLog cache from the same base name, so all three must agree.
+        // Using the raw pkg_ here made L3 diverge from L9 and from disk for
+        // every sub-process (":push", ":isolated") and AppZygote ("_zygote")
+        // — the hook would hand the SDK an openudid the SDK's own cache and
+        // the native read path never produced.
         hv.seed       = sbxnr::applog_seed(val("FINGERPRINT"), hv.serial,
-                                           hv.android_id, pkg_);
+                                           hv.android_id, g_pkg);
 
         // WebView UA rewrite. The real segment must be read from the values the
         // ROM actually emits, so it comes through sbx_raw_prop_get: plain

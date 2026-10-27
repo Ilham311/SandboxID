@@ -2,6 +2,7 @@
 #include <climits>
 #include <algorithm>
 #include <cctype>
+#include <spawn.h>
 
 #if defined(SBX_ENABLE_LSPLANT) && SBX_ENABLE_LSPLANT
 #include <dobby.h>
@@ -755,26 +756,88 @@ static pclose_fn orig_pclose = nullptr;
 typedef int (*execve_fn)(const char*, char* const[], char* const[]);
 static execve_fn orig_execve = nullptr;
 
+typedef int (*fclose_fn)(FILE*);
+static fclose_fn orig_fclose = nullptr;
+
 static std::mutex g_popen_mu;
 static std::map<FILE*, int> g_synthetic_popens;
 
+// Number of synthetic popen streams currently outstanding. Read lock-free by
+// hook_fclose so the hot path costs one relaxed load; see hook_fclose.
+static std::atomic<int> g_synth_live{0};
+
+// Returns a readable FILE* holding `output`, to be handed back to the app as
+// the result of a popen() this module intercepted.
+//
+// The stream must be able to hold output larger than a pipe buffer, and the
+// whole payload has to be in place BEFORE the caller gets the FILE* — the app
+// only starts reading after popen() returns, so there is no reader to drain a
+// pipe while we fill it. Writing a payload larger than the pipe capacity into
+// a readerless pipe blocks forever in ::write(), wedging the calling app
+// thread. That is not hypothetical here: the intercepted `pm list packages`
+// path re-emits the package listing, and on the test device
+// `pm list packages -f -i -u --show-versioncode` is 61752 bytes against a
+// 65536-byte pipe buffer — within ~4KB of a hard hang, and any ROM with a few
+// more packages crosses it.
+//
+// So the payload goes to an anonymous in-memory file (memfd), which is
+// seekable and unbounded; the pipe is only a fallback for a kernel without
+// memfd_create (Linux < 3.17), and there the write is non-blocking and
+// truncates rather than deadlocking.
 static FILE* create_synthetic_pipe(const std::string& output, int exit_code) {
-    int pdes[2];
-    if (pipe2(pdes, O_CLOEXEC) != 0) {
-        LOGE("create_synthetic_pipe: pipe2 failed errno=%d", errno);
-        return nullptr;
-    }
-    if (!output.empty()) {
-        ssize_t written = 0;
-        size_t total = output.size();
-        const char* buf = output.data();
-        while (written < (ssize_t)total) {
-            ssize_t r = ::write(pdes[1], buf + written, total - written);
-            if (r < 0) {
+#if defined(__NR_memfd_create)
+    int fd = static_cast<int>(syscall(__NR_memfd_create, "sbx_popen", 0x0001 /* MFD_CLOEXEC */));
+#else
+    int fd = -1;
+#endif
+    if (fd >= 0) {
+        size_t off = 0;
+        while (off < output.size()) {
+            ssize_t w = ::write(fd, output.data() + off, output.size() - off);
+            if (w < 0) {
                 if (errno == EINTR) continue;
                 break;
             }
-            written += r;
+            off += static_cast<size_t>(w);
+        }
+        if (lseek(fd, 0, SEEK_SET) == (off_t)-1) {
+            ::close(fd);
+            return nullptr;
+        }
+        FILE* fp = fdopen(fd, "r");
+        if (!fp) {
+            ::close(fd);
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lock(g_popen_mu);
+        g_synthetic_popens[fp] = exit_code;
+        g_synth_live.fetch_add(1, std::memory_order_relaxed);
+        return fp;
+    }
+
+    int pdes[2];
+    if (pipe2(pdes, O_CLOEXEC) != 0) {
+        LOGE("create_synthetic_pipe: memfd_create and pipe2 both failed errno=%d", errno);
+        return nullptr;
+    }
+    if (!output.empty()) {
+        // Non-blocking: on this fallback path a payload larger than the pipe
+        // buffer is truncated instead of hanging the caller. Losing tail lines
+        // of a package listing is recoverable; a wedged app thread is not.
+        int fl = fcntl(pdes[1], F_GETFL, 0);
+        if (fl != -1) fcntl(pdes[1], F_SETFL, fl | O_NONBLOCK);
+        size_t off = 0;
+        while (off < output.size()) {
+            ssize_t w = ::write(pdes[1], output.data() + off, output.size() - off);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    LOGW("create_synthetic_pipe: pipe fallback truncated at %zu/%zu bytes",
+                         off, output.size());
+                }
+                break;
+            }
+            off += static_cast<size_t>(w);
         }
     }
     ::close(pdes[1]);
@@ -788,8 +851,80 @@ static FILE* create_synthetic_pipe(const std::string& output, int exit_code) {
     {
         std::lock_guard<std::mutex> lock(g_popen_mu);
         g_synthetic_popens[fp] = exit_code;
+        g_synth_live.fetch_add(1, std::memory_order_relaxed);
     }
     return fp;
+}
+
+// True when `path` names one of the root/superuser binaries this module hides.
+//
+// Matches the BASENAME exactly. The previous test was a substring search —
+// find("/su"), find("/magisk") — which flagged any path that merely contained
+// those bytes: /data/user/0/<pkg>/..., /storage/emulated/0/..., /sdcard/...,
+// or an app's own file called "su-something". A false positive here denies a
+// legitimate exec, which is a visible app bug; a false negative only leaks one
+// probe result. The daemon names are matched by prefix because they ship
+// versioned (daemonsu / daemonsu64 / daemonsud).
+static bool sbx_is_root_binary(const char* path) {
+    if (!path || !*path) return false;
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    if (!*base) return false;
+    if (strcmp(base, "su") == 0 || strcmp(base, "magisk") == 0 ||
+        strcmp(base, "magiskpolicy") == 0 || strcmp(base, "supolicy") == 0 ||
+        strcmp(base, "ksud") == 0 || strcmp(base, "apd") == 0)
+        return true;
+    return strncmp(base, "daemonsu", 8) == 0;
+}
+
+// Scan a shell command line for any token naming a root binary, whether as the
+// command itself ("su -c id", "/system/bin/su -c id") or as the argument of a
+// probe ("which su", "command -v magisk", "ls /system/xbin/su"). Tokens are
+// split on whitespace and on the shell metacharacters that can separate two
+// commands, so `echo ok; su -c id` is caught too.
+//
+// `busybox` is deliberately NOT a root binary: apps legitimately ship and exec
+// their own. Only the *probe* for it is a tell, and that is handled by
+// sbx_cmd_probes_busybox below.
+static bool sbx_cmd_probes_root(const std::string& cmd) {
+    static const char kSeps[] = " \t\r\n;|&<>()$`\"'\\";
+    size_t i = 0;
+    while (i < cmd.size()) {
+        while (i < cmd.size() && strchr(kSeps, cmd[i])) ++i;
+        size_t start = i;
+        while (i < cmd.size() && !strchr(kSeps, cmd[i])) ++i;
+        if (i > start) {
+            std::string tok = cmd.substr(start, i - start);
+            if (sbx_is_root_binary(tok.c_str())) return true;
+        }
+    }
+    return false;
+}
+
+// `which busybox` / `whereis busybox` / `command -v busybox`: the probe is the
+// tell (a stock device has no busybox in PATH), not the binary.
+static bool sbx_cmd_probes_busybox(const std::string& cmd) {
+    static const char* const kProbes[] = {"which", "whereis", "command", "type"};
+    static const char kSeps[] = " \t\r\n;|&<>()$`\"'\\";
+    size_t i = 0;
+    std::string first;
+    while (i < cmd.size()) {
+        while (i < cmd.size() && strchr(kSeps, cmd[i])) ++i;
+        size_t start = i;
+        while (i < cmd.size() && !strchr(kSeps, cmd[i])) ++i;
+        if (i > start) {
+            std::string tok = cmd.substr(start, i - start);
+            if (first.empty()) {
+                first = tok;
+                bool is_probe = false;
+                for (const char* p : kProbes) if (first == p) { is_probe = true; break; }
+                if (!is_probe) return false;
+            } else if (tok == "busybox") {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 static FILE* hook_popen(const char* command, const char* type) {
@@ -797,23 +932,16 @@ static FILE* hook_popen(const char* command, const char* type) {
     std::string cmd(command);
 
     // 1. Root & binary probing via shell
-    if (cmd.find("which su") != std::string::npos ||
-        cmd.find("which magisk") != std::string::npos ||
-        cmd.find("which busybox") != std::string::npos ||
-        cmd.find("which daemonsu") != std::string::npos ||
-        cmd.find("whereis su") != std::string::npos ||
-        cmd.find("whereis magisk") != std::string::npos) {
+    if (sbx_cmd_probes_root(cmd) || sbx_cmd_probes_busybox(cmd)) {
         LOGD("NATIVE_POPEN BLOCKED root tool check: '%s'", command);
-        return create_synthetic_pipe("", 1);
-    }
-
-    // Direct root execution check: e.g. "su", "su -c ...", "/system/bin/su"
-    if (cmd == "su" || cmd.rfind("su ", 0) == 0 || cmd.find("/su") != std::string::npos ||
-        cmd == "magisk" || cmd.rfind("magisk ", 0) == 0 || cmd.find("/magisk") != std::string::npos ||
-        cmd.find("daemonsu") != std::string::npos) {
-        LOGD("NATIVE_POPEN BLOCKED root exec: '%s'", command);
-        std::string err = "/system/bin/sh: " + cmd.substr(0, cmd.find(' ')) + ": inaccessible or not found\n";
-        return create_synthetic_pipe(err, 127);
+        // The shell's own wording for a command it cannot find, and the exit
+        // status it uses for one (127). Returning the empty string with status
+        // 1 here would be a different, equally detectable answer.
+        std::string first = cmd.substr(0, cmd.find_first_of(" \t"));
+        const char* slash = strrchr(first.c_str(), '/');
+        std::string name = slash ? slash + 1 : first;
+        return create_synthetic_pipe(
+            "/system/bin/sh: " + name + ": inaccessible or not found\n", 127);
     }
 
     // 2. getprop queries via shell
@@ -920,32 +1048,168 @@ static int hook_pclose(FILE* stream) {
         }
     }
     if (synthetic) {
+        g_synth_live.fetch_sub(1, std::memory_order_relaxed);
         fclose(stream);
         return (exit_code & 0xff) << 8;
     }
     return orig_pclose ? orig_pclose(stream) : ::pclose(stream);
 }
 
+// ---------- exec-family guard ----------
+//
+// Every entry point of the exec family has to be guarded, not just execve.
+// On bionic, `execve` is an 8-byte thunk (`bti c; b __execve`) and the rest of
+// the family branches STRAIGHT to the internal `__execve`, bypassing it:
+//
+//   execv   0x63c98: bti c; ...; b   __execve
+//   execve  0x63cac: bti c; b       __execve
+//   execvp  0x63cb4: bti c; ...; b   execvpe@plt
+//   execvpe 0x63cc8: ...; bl __execve   (two call sites)
+//   fexecve 0x64084: ...; bl __execve
+//
+// So hooking the public `execve` symbol — which is what this module did —
+// catches only callers that name execve. libjavacore.so, which is where
+// java.lang.ProcessImpl / Runtime.exec lands, imports and calls BOTH:
+//
+//   $ readelf --dyn-syms libjavacore.so | grep execv
+//   71: UND execv@LIBC
+//   72: UND execve@LIBC
+//   $ llvm-objdump -d libjavacore.so | grep 'bl.*execv'
+//   1f758: bl 0x35ea0 <execv@plt>
+//   1f90c: bl 0x35eb0 <execve@plt>
+//
+// i.e. half of Java's process-spawn surface ran unguarded. posix_spawn/p are
+// guarded too: they are not on any path observed on the test device, but they
+// are the modern spawn API and a native library can reach them directly.
+typedef int  (*execv_fn)(const char*, char* const[]);
+typedef int  (*execvp_fn)(const char*, char* const[]);
+typedef int  (*execvpe_fn)(const char*, char* const[], char* const[]);
+typedef int  (*fexecve_fn)(int, char* const[], char* const[]);
+typedef int  (*posix_spawn_fn)(pid_t*, const char*, const posix_spawn_file_actions_t*,
+                               const posix_spawnattr_t*, char* const[], char* const[]);
+
+static execv_fn        orig_execv = nullptr;
+static execvp_fn       orig_execvp = nullptr;
+static execvpe_fn      orig_execvpe = nullptr;
+static fexecve_fn      orig_fexecve = nullptr;
+static posix_spawn_fn  orig_posix_spawn = nullptr;
+static posix_spawn_fn  orig_posix_spawnp = nullptr;
+
+// `sh -c "<something>"` hides the real command inside argv[2], where a
+// pathname/argv[0] check cannot see it: Runtime.exec(new String[]{"sh","-c",
+// "su -c id"}) would otherwise sail through. Both -c and --command are
+// accepted, and the string is scanned with the same tokenizer popen uses.
+static bool sbx_shell_c_denied(char* const argv[]) {
+    if (!argv || !argv[0]) return false;
+    const char* b = strrchr(argv[0], '/');
+    b = b ? b + 1 : argv[0];
+    if (strcmp(b, "sh") != 0 && strcmp(b, "ash") != 0) return false;
+    for (int i = 1; argv[i]; ++i) {
+        if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--command") == 0) {
+            if (argv[i + 1] && sbx_cmd_probes_root(argv[i + 1])) return true;
+            return false;
+        }
+    }
+    return false;
+}
+
+// Single decision point for the whole exec family. Returns true to deny.
+static bool sbx_exec_denied(const char* pathname, char* const argv[],
+                            const char* tag, const char* what) {
+    if (pathname && sbx_is_root_binary(pathname)) {
+        LOGD("NATIVE_%s BLOCKED %s='%s'", tag, what, pathname);
+        return true;
+    }
+    if (argv && argv[0] && sbx_is_root_binary(argv[0])) {
+        LOGD("NATIVE_%s BLOCKED argv[0]='%s'", tag, argv[0]);
+        return true;
+    }
+    if (sbx_shell_c_denied(argv)) {
+        LOGD("NATIVE_%s BLOCKED shell -c root command", tag);
+        return true;
+    }
+    return false;
+}
+
 static int hook_execve(const char* pathname, char* const argv[], char* const envp[]) {
-    if (pathname) {
-        std::string path(pathname);
-        if (path.find("/su") != std::string::npos ||
-            path.find("/magisk") != std::string::npos ||
-            path.find("daemonsu") != std::string::npos) {
-            LOGD("NATIVE_EXECVE BLOCKED '%s'", pathname);
-            errno = ENOENT;
-            return -1;
-        }
-    }
-    if (argv && argv[0]) {
-        std::string arg0(argv[0]);
-        if (arg0 == "su" || arg0 == "magisk" || arg0 == "daemonsu") {
-            LOGD("NATIVE_EXECVE BLOCKED argv[0]='%s'", argv[0]);
-            errno = ENOENT;
-            return -1;
-        }
-    }
+    if (sbx_exec_denied(pathname, argv, "EXECVE", "path")) { errno = ENOENT; return -1; }
     return orig_execve ? orig_execve(pathname, argv, envp) : ::execve(pathname, argv, envp);
+}
+
+static int hook_execv(const char* pathname, char* const argv[]) {
+    if (sbx_exec_denied(pathname, argv, "EXECV", "path")) { errno = ENOENT; return -1; }
+    return orig_execv ? orig_execv(pathname, argv) : ::execv(pathname, argv);
+}
+
+static int hook_execvp(const char* file, char* const argv[]) {
+    if (sbx_exec_denied(file, argv, "EXECVP", "file")) { errno = ENOENT; return -1; }
+    return orig_execvp ? orig_execvp(file, argv) : ::execvp(file, argv);
+}
+
+static int hook_execvpe(const char* file, char* const argv[], char* const envp[]) {
+    if (sbx_exec_denied(file, argv, "EXECVPE", "file")) { errno = ENOENT; return -1; }
+    return orig_execvpe ? orig_execvpe(file, argv, envp) : ::execvpe(file, argv, envp);
+}
+
+static int hook_fexecve(int fd, char* const argv[], char* const envp[]) {
+    // No pathname to inspect: the decision has to come from the fd. Reading it
+    // back through /proc/self/fd also covers a caller that unlinked the file
+    // after opening it, which is exactly how a root tool would try to hide.
+    char link[64];
+    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+    char target[PATH_MAX];
+    ssize_t n = readlink(link, target, sizeof(target) - 1);
+    if (n > 0) {
+        target[n] = '\0';
+        if (sbx_exec_denied(target, argv, "FEXECVE", "fd target")) { errno = ENOENT; return -1; }
+    } else if (sbx_exec_denied(nullptr, argv, "FEXECVE", "fd")) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_fexecve ? orig_fexecve(fd, argv, envp) : ::fexecve(fd, argv, envp);
+}
+
+static int hook_posix_spawn(pid_t* pid, const char* path,
+                            const posix_spawn_file_actions_t* fa,
+                            const posix_spawnattr_t* attr,
+                            char* const argv[], char* const envp[]) {
+    if (sbx_exec_denied(path, argv, "POSIX_SPAWN", "path")) return ENOENT;
+    return orig_posix_spawn ? orig_posix_spawn(pid, path, fa, attr, argv, envp)
+                            : ::posix_spawn(pid, path, fa, attr, argv, envp);
+}
+
+static int hook_posix_spawnp(pid_t* pid, const char* file,
+                             const posix_spawn_file_actions_t* fa,
+                             const posix_spawnattr_t* attr,
+                             char* const argv[], char* const envp[]) {
+    if (sbx_exec_denied(file, argv, "POSIX_SPAWNP", "file")) return ENOENT;
+    return orig_posix_spawnp ? orig_posix_spawnp(pid, file, fa, attr, argv, envp)
+                             : ::posix_spawnp(pid, file, fa, attr, argv, envp);
+}
+
+// fclose on a synthetic stream: without this, an app that closes a popen()
+// result with fclose() instead of pclose() leaves its entry in
+// g_synthetic_popens forever. The map is keyed by FILE*, so a later stream
+// allocated at the same address would inherit the stale exit code, and every
+// leaked entry is unfreeable memory.
+//
+// fclose is extremely hot, so the hook is a single relaxed atomic load on the
+// common path and only takes the lock when a synthetic stream is actually
+// outstanding.
+static int hook_fclose(FILE* stream) {
+    if (stream && g_synth_live.load(std::memory_order_relaxed) > 0) {
+        bool synthetic = false;
+        {
+            std::lock_guard<std::mutex> lock(g_popen_mu);
+            auto it = g_synthetic_popens.find(stream);
+            if (it != g_synthetic_popens.end()) {
+                g_synthetic_popens.erase(it);
+                synthetic = true;
+            }
+        }
+        if (synthetic) g_synth_live.fetch_sub(1, std::memory_order_relaxed);
+    }
+    return orig_fclose ? orig_fclose(stream) : ::fclose(stream);
 }
 
 
@@ -1006,8 +1270,25 @@ void install_native_read_hooks(Api* api) {
                     reinterpret_cast<void**>(&orig_popen)},
         {"pclose",  reinterpret_cast<void*>(hook_pclose),
                     reinterpret_cast<void**>(&orig_pclose)},
+        {"fclose",  reinterpret_cast<void*>(hook_fclose),
+                    reinterpret_cast<void**>(&orig_fclose)},
+        // The whole exec family, not just execve: on bionic every other member
+        // branches straight to the internal __execve and never touches the
+        // public thunk. See the exec-family guard comment above.
         {"execve",  reinterpret_cast<void*>(hook_execve),
                     reinterpret_cast<void**>(&orig_execve)},
+        {"execv",   reinterpret_cast<void*>(hook_execv),
+                    reinterpret_cast<void**>(&orig_execv)},
+        {"execvp",  reinterpret_cast<void*>(hook_execvp),
+                    reinterpret_cast<void**>(&orig_execvp)},
+        {"execvpe", reinterpret_cast<void*>(hook_execvpe),
+                    reinterpret_cast<void**>(&orig_execvpe)},
+        {"fexecve", reinterpret_cast<void*>(hook_fexecve),
+                    reinterpret_cast<void**>(&orig_fexecve)},
+        {"posix_spawn",  reinterpret_cast<void*>(hook_posix_spawn),
+                    reinterpret_cast<void**>(&orig_posix_spawn)},
+        {"posix_spawnp", reinterpret_cast<void*>(hook_posix_spawnp),
+                    reinterpret_cast<void**>(&orig_posix_spawnp)},
     };
 
     // Collect the libraries to hook, scanning /proc/self/maps once:
@@ -1113,35 +1394,46 @@ void install_native_read_hooks(Api* api) {
     live += landed(reinterpret_cast<void*>(orig_execve));
 
 #if defined(SBX_ENABLE_LSPLANT) && SBX_ENABLE_LSPLANT
-    // Inline hooking for popen, pclose, execve via Dobby
-    // Catches dynamically loaded security libraries (e.g. libpsec.so) that dlopen after postAppSpecialize
-    void* p_popen = reinterpret_cast<void*>(popen);
-    if (p_popen) {
+    // Inline hooking for the shell-guard layer via Dobby. The PLT pass above
+    // only redirects the GOT slots of libraries already mapped at
+    // postAppSpecialize; a security library that dlopens later (libpsec.so and
+    // friends) resolves these symbols after that scan and would otherwise see
+    // the real functions. Dobby patches the function bodies themselves, so
+    // late loaders inherit the guard too.
+    //
+    // The guard has to cover the whole exec family: on bionic only `execve` is
+    // ever named by a caller, and `execv`/`execvpe`/`fexecve` branch straight
+    // to the internal `__execve` past the public thunk. See the exec-family
+    // guard comment above for the disassembly.
+    int dobby_hooked = 0;
+    struct DobbyReg { const char* name; void* target; void* hook; void** orig; };
+    const DobbyReg dobby_regs[] = {
+        {"popen",        reinterpret_cast<void*>(popen),        reinterpret_cast<void*>(hook_popen),        reinterpret_cast<void**>(&orig_popen)},
+        {"pclose",       reinterpret_cast<void*>(pclose),       reinterpret_cast<void*>(hook_pclose),       reinterpret_cast<void**>(&orig_pclose)},
+        {"fclose",       reinterpret_cast<void*>(fclose),       reinterpret_cast<void*>(hook_fclose),       reinterpret_cast<void**>(&orig_fclose)},
+        {"execve",       reinterpret_cast<void*>(execve),       reinterpret_cast<void*>(hook_execve),       reinterpret_cast<void**>(&orig_execve)},
+        {"execv",        reinterpret_cast<void*>(execv),        reinterpret_cast<void*>(hook_execv),        reinterpret_cast<void**>(&orig_execv)},
+        {"execvp",       reinterpret_cast<void*>(execvp),       reinterpret_cast<void*>(hook_execvp),       reinterpret_cast<void**>(&orig_execvp)},
+        {"execvpe",      reinterpret_cast<void*>(execvpe),      reinterpret_cast<void*>(hook_execvpe),      reinterpret_cast<void**>(&orig_execvpe)},
+        {"fexecve",      reinterpret_cast<void*>(fexecve),      reinterpret_cast<void*>(hook_fexecve),      reinterpret_cast<void**>(&orig_fexecve)},
+        {"posix_spawn",  reinterpret_cast<void*>(posix_spawn),  reinterpret_cast<void*>(hook_posix_spawn),  reinterpret_cast<void**>(&orig_posix_spawn)},
+        {"posix_spawnp", reinterpret_cast<void*>(posix_spawnp), reinterpret_cast<void*>(hook_posix_spawnp), reinterpret_cast<void**>(&orig_posix_spawnp)},
+    };
+    for (const DobbyReg& d : dobby_regs) {
+        if (!d.target) continue;
         void* orig = nullptr;
-        if (DobbyHook(p_popen, reinterpret_cast<dobby_dummy_func_t>(hook_popen),
+        if (DobbyHook(d.target, reinterpret_cast<dobby_dummy_func_t>(d.hook),
                       reinterpret_cast<dobby_dummy_func_t*>(&orig)) == 0 && orig) {
-            orig_popen = reinterpret_cast<popen_fn>(orig);
-            LOGI("NATIVE_READ: DobbyHook popen registered");
+            *d.orig = orig;
+            ++dobby_hooked;
+            LOGI("NATIVE_READ: DobbyHook %s registered", d.name);
+        } else {
+            LOGW("NATIVE_READ: DobbyHook %s FAILED - that entry point is "
+                 "unguarded for late-dlopened libraries", d.name);
         }
     }
-    void* p_pclose = reinterpret_cast<void*>(pclose);
-    if (p_pclose) {
-        void* orig = nullptr;
-        if (DobbyHook(p_pclose, reinterpret_cast<dobby_dummy_func_t>(hook_pclose),
-                      reinterpret_cast<dobby_dummy_func_t*>(&orig)) == 0 && orig) {
-            orig_pclose = reinterpret_cast<pclose_fn>(orig);
-            LOGI("NATIVE_READ: DobbyHook pclose registered");
-        }
-    }
-    void* p_execve = reinterpret_cast<void*>(execve);
-    if (p_execve) {
-        void* orig = nullptr;
-        if (DobbyHook(p_execve, reinterpret_cast<dobby_dummy_func_t>(hook_execve),
-                      reinterpret_cast<dobby_dummy_func_t*>(&orig)) == 0 && orig) {
-            orig_execve = reinterpret_cast<execve_fn>(orig);
-            LOGI("NATIVE_READ: DobbyHook execve registered");
-        }
-    }
+    LOGI("NATIVE_READ: DobbyHook %d/%zu shell-guard entry point(s) inline-hooked",
+         dobby_hooked, sizeof(dobby_regs) / sizeof(dobby_regs[0]));
 #endif
 
     if (!committed && live == 0) {
@@ -1161,7 +1453,9 @@ void install_native_read_hooks(Api* api) {
     LOGI("NATIVE_READ hooks installed (%d lib(s) incl. %d app-owned, "
          "%d registration(s), %d live trampoline(s)): "
          "open/openat/__open_2/__openat_2/read/pread64/lseek/lseek64/close + "
-         "__system_property_find/get/read_callback + popen/pclose/execve",
+         "__system_property_find/get/read_callback + "
+         "popen/pclose/fclose + execve/execv/execvp/execvpe/fexecve + "
+         "posix_spawn/posix_spawnp",
          registered, app_libs, symbols, live);
     (void)symbols;   // counted for the log only
 }

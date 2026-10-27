@@ -25,6 +25,8 @@
 #include <android/log.h>
 #include <string>
 #include <vector>
+#include <set>
+#include <mutex>
 #include <cstdint>
 #include <atomic>
 
@@ -265,6 +267,7 @@ enum Mode {
     M_DISPLAY_METRICS = 6,// spoof DisplayMetrics, Configuration, Point, Rect, Display dimensions
     M_APP_ATTACH      = 7,// intercept Application attach/create and hook app-level targets
     M_FILTER_PACKAGES = 8,// hide root apps & tools from PackageManager queries
+    M_VALUE_MULTI     = 9,// return the spoof value for the gated key, from a key->value table
 };
 
 // ret_type: 0 String, 1 byte[]
@@ -283,6 +286,12 @@ struct HookSpec {
     int         body_index;  // M_REWRITE_BODY
     int         url_index;   // M_REWRITE_BODY
     const char* url_match;   // M_REWRITE_BODY
+    // M_VALUE_MULTI: parallel key/value tables, multi_count entries each.
+    // Declared last so every existing positional initialiser in the spec
+    // tables stays valid (the extra members default to null/0).
+    const char* const* multi_keys = nullptr;
+    const int*         multi_vals = nullptr;
+    int                multi_count = 0;
 };
 
 // Per-process resolved state, shared by every hook in this process.
@@ -298,15 +307,76 @@ struct State {
               f_urlMatch = nullptr, f_openudid = nullptr, f_clientudid = nullptr,
               f_cdid = nullptr, f_rwFrom = nullptr, f_rwTo = nullptr,
               f_deny = nullptr,
+              f_multiKeys = nullptr, f_multiVals = nullptr,
               f_dispW = nullptr, f_dispH = nullptr, f_dispDpi = nullptr,
               f_dispXdpi = nullptr, f_dispYdpi = nullptr,
               f_dispMetricType = nullptr;
+    // The app's own ClassLoader, learned at Application.attachBaseContext (or
+    // from the first observed class load). Needed because FindClass can only
+    // ever see the boot class path - see sbx_find_class().
+    jobject   app_loader = nullptr;   // global ref, owned here
     std::vector<jobject> keep;   // global refs: GC anchor for hookers + backups
     HookValues vals;
     sbxid::SynthIds ids;
     std::string wifi, bt;
 };
 inline State g;
+
+// Set while a class resolution is in flight. Resolving a class through the
+// app's ClassLoader runs the app's own loadClass, which is one of our hooked
+// methods, so without this the observer would re-enter and try to hook the very
+// spec the resolution is already installing.
+inline thread_local bool g_in_resolve = false;
+
+// Framework specs that failed their first install, kept so they can be retried
+// once the app's ClassLoader is known. Only the failures are kept: re-running
+// an already-installed spec would be refused by LSPlant (its backup would be
+// the previous hooker) and logged as a miss, which is exactly the noise this
+// list exists to avoid.
+inline std::vector<const HookSpec*>& sbx_pending() {
+    static std::vector<const HookSpec*> v;
+    return v;
+}
+
+// Specs already installed in this process, keyed "cls|name|sig".
+//
+// Two independent paths can install the same tt_specs entry: the class-load
+// observer (a class the app asks for by name) and the app-attach loop (a class
+// the loop asks for itself). Both can reach the same class - the loop's own
+// loadClass goes through the observer unless it is suppressed - and LSPlant
+// refuses the second hook on an already-hooked ArtMethod, so without this the
+// loser of the race logged "L3 MISS ... lsplant::Hook refused" for a method
+// that was in fact hooked. That is worse than noise: it is a false negative in
+// the one log line meant to name real misses.
+//
+// Guarded by a mutex because loadClass can run on any thread.
+inline std::mutex& sbx_hooked_mu() {
+    static std::mutex m;
+    return m;
+}
+inline std::set<std::string>& sbx_hooked_set() {
+    static std::set<std::string> s;
+    return s;
+}
+
+// Returns false if this spec is already installed, so the caller skips it
+// instead of provoking an LSPlant refusal.
+inline bool sbx_claim_spec(const HookSpec& sp) {
+    std::string key(sp.cls);
+    key += '|'; key += sp.name;
+    key += '|'; key += sp.sig;
+    std::lock_guard<std::mutex> lk(sbx_hooked_mu());
+    return sbx_hooked_set().insert(std::move(key)).second;
+}
+
+// Give the claim back when the install failed, so a later retry can try again.
+inline void sbx_release_spec(const HookSpec& sp) {
+    std::string key(sp.cls);
+    key += '|'; key += sp.name;
+    key += '|'; key += sp.sig;
+    std::lock_guard<std::mutex> lk(sbx_hooked_mu());
+    sbx_hooked_set().erase(key);
+}
 
 // ---- callback class (androidx.core.os.EnvCompatState) loaded from embedded DEX ----
 inline jclass load_callback_class(JNIEnv* env) {
@@ -380,6 +450,8 @@ inline bool resolve_callback_members(JNIEnv* env) {
     g.f_cdid       = env->GetFieldID(g.cb_class, "cdid",         "Ljava/lang/String;");
     g.f_rwFrom     = env->GetFieldID(g.cb_class, "rwFrom",       "[Ljava/lang/String;");
     g.f_rwTo       = env->GetFieldID(g.cb_class, "rwTo",         "[Ljava/lang/String;");
+    g.f_multiKeys  = env->GetFieldID(g.cb_class, "multiKeys",    "[Ljava/lang/String;");
+    g.f_multiVals  = env->GetFieldID(g.cb_class, "multiVals",    "[Ljava/lang/String;");
     g.f_deny       = env->GetStaticFieldID(g.cb_class, "deny",    "[Ljava/lang/String;");
 
     g.f_dispW          = env->GetFieldID(g.cb_class, "displayWidth",      "I");
@@ -433,6 +505,7 @@ inline bool resolve_callback_members(JNIEnv* env) {
            g.f_retType && g.f_sval && g.f_bval && g.f_backup && g.f_forceIdx &&
            g.f_bodyIdx && g.f_urlIdx && g.f_urlMatch && g.f_openudid &&
            g.f_clientudid && g.f_cdid && g.f_rwFrom && g.f_rwTo && g.f_deny &&
+           g.f_multiKeys && g.f_multiVals &&
            g.f_dispW && g.f_dispH && g.f_dispDpi && g.f_dispMetricType;
 }
 
@@ -531,21 +604,88 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
     }
 }
 
+// Resolve a spec's class, preferring the app's own ClassLoader.
+//
+// FindClass alone is not enough, and the failure is structural rather than a
+// naming mistake. FindClass resolves against the *boot* class path (the JNI
+// spec pins it to the caller's loader, and a Zygisk companion's caller is the
+// system one), so it can only ever see android.*, java.* and anything on
+// BOOTCLASSPATH. A class that lives in the app's APK is invisible to it even
+// though the app itself is already using the class - and the class-load
+// observer cannot cover for it either, because a class reached through a *type
+// reference* (a parameter or return type) is resolved by the runtime's own
+// linker, never through ClassLoader.loadClass(String), so the Java hook is
+// never called for it.
+//
+// The one spec that hits this is
+// com/google/android/gms/ads/identifier/AdvertisingIdClient$Info: both TikTok
+// builds BUNDLE the Play-services advertising-id stub in their own classes*.dex
+// (classes6.dex in trill 47.0.3 and musically 47.1.4), and reference it as a
+// return type from AdvertisingIdClient.getAdvertisingIdInfo(Context) in 17
+// places. It therefore never reached the observer, FindClass never saw it, and
+// the spec silently failed in every session - the "41/42" count with no line
+// naming the miss.
+//
+// Order matters: FindClass first (cheap, and correct for every framework spec),
+// then the app loader. The loader is only known once the app has attached, so
+// before that this degrades exactly to the old behaviour.
+inline jclass sbx_find_class(JNIEnv* env, const char* cls) {
+    jclass c = env->FindClass(cls);
+    if (c && !env->ExceptionCheck()) return c;
+    env->ExceptionClear();
+
+    if (!g.app_loader) return nullptr;
+    if (g_in_resolve) return nullptr;          // re-entrancy: see g_in_resolve
+
+    // JNI wants a dotted binary name; the table stores slashed descriptors.
+    std::string dot(cls);
+    for (char& ch : dot) { if (ch == '/') ch = '.'; }
+
+    jclass clCls = env->FindClass("java/lang/ClassLoader");
+    if (!clCls || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    jmethodID loadClass = env->GetMethodID(clCls, "loadClass",
+                                           "(Ljava/lang/String;)Ljava/lang/Class;");
+    if (!loadClass || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+
+    jstring name = env->NewStringUTF(dot.c_str());
+    if (!name) return nullptr;
+    g_in_resolve = true;
+    jobject o = env->CallObjectMethod(g.app_loader, loadClass, name);
+    g_in_resolve = false;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    return (jclass)o;
+}
+
 // Hook one spec against an already-resolved class. Used both for the framework
 // targets (FindClass by name) and for the TikTok targets (handed over by the
 // class-load observer). Fail-soft: any miss returns false and is skipped.
 inline bool hook_one_class(JNIEnv* env, jclass cls, const HookSpec& sp) {
     if (!cls) return false;
-    if (env->PushLocalFrame(24) != 0) { env->ExceptionClear(); return false; }
+    // Already installed by the other path (observer vs attach loop). Skipping
+    // silently is correct: the method IS hooked, and reporting a miss here
+    // would be the false negative this guard exists to prevent.
+    if (!sbx_claim_spec(sp)) return true;
+    if (env->PushLocalFrame(24) != 0) {
+        env->ExceptionClear();
+        sbx_release_spec(sp);
+        return false;
+    }
+    // Why a spec did not install. A silent miss is indistinguishable from a
+    // spec that was never in the table: the installed TikTok build drifted
+    // (classes present, signatures changed) and GAID never resolved, and both
+    // only showed up as the "41/42" count with no way to tell which spec and
+    // which of the six failure points it was. The reason is logged at DEBUG so
+    // a normal session stays quiet while a debug session names every miss.
+    const char* why = nullptr;
     bool ok = [&]() -> bool {
         jmethodID mid = sp.is_static ? env->GetStaticMethodID(cls, sp.name, sp.sig)
                                      : env->GetMethodID(cls, sp.name, sp.sig);
-        if (!mid || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        if (!mid || env->ExceptionCheck()) { env->ExceptionClear(); why = "method not found (signature drift?)"; return false; }
         jobject target = env->ToReflectedMethod(cls, mid, sp.is_static ? JNI_TRUE : JNI_FALSE);
-        if (!target || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        if (!target || env->ExceptionCheck()) { env->ExceptionClear(); why = "ToReflectedMethod failed"; return false; }
 
         jobject hooker = env->NewObject(g.cb_class, g.cb_ctor);
-        if (!hooker || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        if (!hooker || env->ExceptionCheck()) { env->ExceptionClear(); why = "callback ctor failed"; return false; }
         env->SetIntField(hooker, g.f_mode, sp.mode);
         env->SetBooleanField(hooker, g.f_isStatic, sp.is_static ? JNI_TRUE : JNI_FALSE);
         env->SetIntField(hooker, g.f_keyIdx, sp.key_index);
@@ -601,6 +741,31 @@ inline bool hook_one_class(JNIEnv* env, jclass cls, const HookSpec& sp) {
             if (g.f_dispYdpi)       env->SetFloatField(hooker, g.f_dispYdpi, g.vals.display_ydpi);
             if (g.f_dispMetricType) env->SetIntField(hooker, g.f_dispMetricType, sp.key_index);
         }
+        if (sp.mode == M_VALUE_MULTI) {
+            // One hook answering several keys of the same method. The keys and
+            // their spoofed values are built from the spec's multi list, and
+            // the values come from the same sbx_value_for() the single-key path
+            // uses, so the two cannot drift apart.
+            jclass strCls = env->FindClass("java/lang/String");
+            if (strCls && sp.multi_keys && sp.multi_vals && sp.multi_count > 0) {
+                jobjectArray keys = env->NewObjectArray(sp.multi_count, strCls, nullptr);
+                jobjectArray vals = env->NewObjectArray(sp.multi_count, strCls, nullptr);
+                if (keys && vals) {
+                    for (int i = 0; i < sp.multi_count; ++i) {
+                        jstring k = env->NewStringUTF(sp.multi_keys[i]);
+                        if (k) env->SetObjectArrayElement(keys, i, k);
+                        std::string v = sbx_value_for(sp.multi_vals[i], g.vals, g.ids,
+                                                      g.wifi, g.bt);
+                        if (!v.empty()) {
+                            jstring jv = env->NewStringUTF(v.c_str());
+                            if (jv) env->SetObjectArrayElement(vals, i, jv);
+                        }
+                    }
+                    env->SetObjectField(hooker, g.f_multiKeys, keys);
+                    env->SetObjectField(hooker, g.f_multiVals, vals);
+                }
+            }
+        }
         if (sp.mode == M_VALUE) {
             if (sp.ret_type == 1) {                     // byte[] target (Widevine)
                 if (g.ids.widevine_hex.size() >= 2) {
@@ -617,7 +782,7 @@ inline bool hook_one_class(JNIEnv* env, jclass cls, const HookSpec& sp) {
         }
 
         jobject backup = lsplant::Hook(env, target, hooker, g.cb_reflected);
-        if (!backup || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        if (!backup || env->ExceptionCheck()) { env->ExceptionClear(); why = "lsplant::Hook refused"; return false; }
         env->SetObjectField(hooker, g.f_backup, backup);
 
         g.keep.push_back(env->NewGlobalRef(hooker));
@@ -630,16 +795,26 @@ inline bool hook_one_class(JNIEnv* env, jclass cls, const HookSpec& sp) {
         return true;
     }();
     env->PopLocalFrame(nullptr);
-    if (ok) SBX_LSP_LOGD("L3 hooked %s.%s%s", sp.cls, sp.name, sp.sig);
+    if (ok) {
+        SBX_LSP_LOGD("L3 hooked %s.%s%s", sp.cls, sp.name, sp.sig);
+    } else {
+        // Hand the claim back: the method is not hooked, so a later retry (the
+        // app-attach pass, once the loader is known) must be allowed to try.
+        sbx_release_spec(sp);
+        SBX_LSP_LOGD("L3 MISS %s.%s%s - %s", sp.cls, sp.name, sp.sig,
+                     why ? why : "unknown");
+    }
     return ok;
 }
 
 inline bool hook_one(JNIEnv* env, const HookSpec& sp) {
     if (env->PushLocalFrame(8) != 0) { env->ExceptionClear(); return false; }
-    jclass cls = env->FindClass(sp.cls);
+    jclass cls = sbx_find_class(env, sp.cls);
     bool found = cls && !env->ExceptionCheck();
     if (!found) env->ExceptionClear();
     bool ok = found ? hook_one_class(env, cls, sp) : false;
+    if (!found)
+        SBX_LSP_LOGD("L3 MISS %s.%s%s - class not found", sp.cls, sp.name, sp.sig);
     env->PopLocalFrame(nullptr);
     return ok;
 }
@@ -805,11 +980,33 @@ inline const HookSpec* hook_specs(size_t& n) {
 // Obfuscated names are per-release. Everything below is resolved by class name
 // plus method name/arity at the moment the class is loaded; a release that
 // renames a class simply misses that one hook and logs it, instead of failing
-// the whole install. The verified map for 47.1.4 is in
-// AI-LOCAL/RE-NOTES-TT-47.1.4-HOOKS.md §1-§6.
+// the whole install.
+//
+// The table was verified against BOTH installed builds by reading their DEX
+// directly (jni/tools has no DEX reader; the check was a standalone parser over
+// the extracted classes*.dex):
+//
+//   trill      47.0.3  com.ss.android.ugc.trill
+//   musically  47.1.4  com.zhiliaoapp.musically
+//
+// That check is what found the drift this comment used to get wrong: the names
+// below are NOT all shared between the two builds, and the class-load observer
+// cannot detect the difference when a class exists under the same name with a
+// different method signature. See the per-spec notes.
 //
 // `cls` is matched as a suffix of the loaded class name, so both "X.088K" and
 // "com.bytedance.xxx" style names work.
+// The Keva keys whose stored values are AppLog identity, and which of our
+// values each one must return. Shared by both Keva adapters in tt_specs().
+//
+// These are the key names the SDK itself uses; verified present in the
+// installed trill 47.0.3 DEX string tables (openudid: 6 DEX, clientudid: 4,
+// cdid: 6). "bd_openudid" and "client_udid" do NOT exist in this build and
+// were deliberately not added.
+static const char* const kKevaKeys[] = { "openudid", "clientudid", "cdid" };
+static const int kKevaVals[] = { V_OPENUDID, V_CLIENTUDID, V_CDID };
+static const int kKevaKeyCount = 3;
+
 inline const HookSpec* tt_specs(size_t& n) {
     static const HookSpec S[] = {
         // AppLog public SDK endpoints: spoof client IDs (openudid, clientudid).
@@ -835,10 +1032,27 @@ inline const HookSpec* tt_specs(size_t& n) {
           true, M_VALUE, -1, nullptr, false, 0, V_CDID, -1, -1, -1, nullptr },
 
         // DeviceParams: never report a device id, so the server mints one.
-        { "AbsDeviceParamsProvider", "getDeviceId", "()Ljava/lang/String;",
+        //
+        // The FULL class name, not the bare "AbsDeviceParamsProvider" the spec
+        // used to carry. A name with no dot or slash cannot be resolved by
+        // sbx_on_app_created (it skips those, having nothing to pass to
+        // ClassLoader.loadClass), so the only way this spec could ever install
+        // was the class-load observer seeing the app ask for that exact name -
+        // and the app never does. Verified on device: no session contains a
+        // single line mentioning bdinstall or AbsDeviceParams, and the
+        // onAppCreated path never ran at all. The class exists in both builds
+        // at Lcom/bytedance/bdinstall/storage/AbsDeviceParamsProvider; with
+        // getDeviceId()String and getOpenUdid()String, so naming it in full
+        // makes it resolvable.
+        //
+        // The suffix match in sbx_observe still accepts the short form, so
+        // this is strictly more reachable than before, not differently matched.
+        { "com.bytedance.bdinstall.storage.AbsDeviceParamsProvider", "getDeviceId",
+          "()Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_ZERO, -1, -1, -1, nullptr },
         // ... and report the persona's openudid, which is what the server binds.
-        { "AbsDeviceParamsProvider", "getOpenUdid", "()Ljava/lang/String;",
+        { "com.bytedance.bdinstall.storage.AbsDeviceParamsProvider", "getOpenUdid",
+          "()Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_OPENUDID, -1, -1, -1, nullptr },
 
         // Write-back merge (X.088K;->LIZIZ(String key, String value)). The
@@ -851,65 +1065,115 @@ inline const HookSpec* tt_specs(size_t& n) {
         // args[0] is the receiver. Testing index 0 would stringify the object,
         // never match an all-digit key, and leave the write-back untouched —
         // exactly the failure the LSPosed variant's Xposed args[0] did not have.
+        //
+        // The class name is per-build. Both were confirmed by DEX read, and the
+        // pairing is not a guess: the two classes have byte-identical method
+        // sets, differing only in the names of the types they mention.
+        //
+        //   musically 47.1.4 : LX/088K;  LIZIZ(String,String)String
+        //   trill     47.0.3 : LX/07Wv;  LIZIZ(String,String)String
+        //
+        //   musically: <init>()V LIZ(String)String LIZIZ(String,String)String
+        //              LIZJ(String,String)V LIZLLL(List)V
+        //   trill    : <init>()V LIZ(String)String LIZIZ(String,String)String
+        //              LIZJ(String,String)V LIZLLL(List)V
         { "X.088K", "LIZIZ", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
           false, M_ZERO_NUMERIC, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "X.07Wv", "LIZIZ", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+          false, M_ZERO_NUMERIC, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
 
-        // Register replay gate: LX/088c;->LJII(LX/085A;ZZ)V -> force p2 = false
+        // Register replay gate: LJII(LX/085A;ZZ)V -> force p2 = false
         // so the client performs a real round trip instead of replaying the
         // cached response bound to the old did. args[0]=this, [1]=params,
         // [2]=boolean.
+        //
+        // Same per-build rename. The pairing is again structural: both classes
+        // carry the same 12 methods, including the LJII(L*;ZZ)V +
+        // LIZIZ(L*;Z)Z pair that no other class in either build has.
+        //
+        //   musically 47.1.4 : LX/088c;  LJII(LX/085A;ZZ)V
+        //   trill     47.0.3 : LX/07XI;  LJII(LX/07TX;ZZ)V
         { "X.088c", "LJII", "(LX/085A;ZZ)V",
+          false, M_FORCE_FALSE, -1, nullptr, false, 0, V_NONE, 2, -1, -1, nullptr },
+        { "X.07XI", "LJII", "(LX/07TX;ZZ)V",
           false, M_FORCE_FALSE, -1, nullptr, false, 0, V_NONE, 2, -1, -1, nullptr },
 
         // Wire rewrite: post(String url, Map, byte[] body).
         //
-        // The return type is String, not void — verified against the 47.1.4
-        // smali (X/087U.smali:15112, X/085T.smali:8441). Declaring it void
-        // makes GetMethodID fail and the hook silently never installs, which
-        // would leave the register body unrewritten with only a debug line to
-        // show for it.
+        // The return type is String, not void. Declaring it void makes
+        // GetMethodID fail and the hook silently never installs, which would
+        // leave the register body unrewritten with only a debug line to show
+        // for it. Confirmed by DEX read on BOTH builds: X.087U.post and
+        // X.085T.post both declare (String,Map,byte[])String.
         //
         // Arg indices are LSPlant's, i.e. they include the receiver: [0]=this,
         // [1]=url, [2]=headers Map, [3]=body byte[].
+        //
+        // Both class names are per-build. The pairing is structural, not
+        // guessed: each pair has an identical method set, differing only in the
+        // names of the types mentioned.
+        //
+        //   musically 47.1.4 : LX/087U; (6 methods)  LX/085T; (4 methods)
+        //   trill     47.0.3 : LX/07WK; (6 methods)  LX/07Tq; (4 methods)
+        //
+        // The 6-method one is the base client with the LIZIZ/LIZJ helpers; the
+        // 4-method one is the plain variant. Both declare post as
+        // (String,Map,byte[])String in both builds.
         { "X.087U", "post", "(Ljava/lang/String;Ljava/util/Map;[B)Ljava/lang/String;",
           false, M_REWRITE_BODY, -1, nullptr, false, 0, V_NONE, -1, 3, 1,
           "/device_register/" },
         { "X.085T", "post", "(Ljava/lang/String;Ljava/util/Map;[B)Ljava/lang/String;",
           false, M_REWRITE_BODY, -1, nullptr, false, 0, V_NONE, -1, 3, 1,
           "/device_register/" },
+        { "X.07WK", "post", "(Ljava/lang/String;Ljava/util/Map;[B)Ljava/lang/String;",
+          false, M_REWRITE_BODY, -1, nullptr, false, 0, V_NONE, -1, 3, 1,
+          "/device_register/" },
+        { "X.07Tq", "post", "(Ljava/lang/String;Ljava/util/Map;[B)Ljava/lang/String;",
+          false, M_REWRITE_BODY, -1, nullptr, false, 0, V_NONE, -1, 3, 1,
+          "/device_register/" },
 
         // Keva: the SDK's own key/value cache, which is where the persisted
         // openudid/clientudid/cdid are read back from on a warm start.
+        //
+        // ONE spec per class, not three. LSPlant refuses a second hook on an
+        // already-hooked ArtMethod, so three specs on this single getString
+        // installed only the first and left clientudid and cdid leaking —
+        // verified on device: three specs produced exactly one DoHook line.
+        // M_VALUE_MULTI answers all three keys from one hook.
+        //
         // getString is an INSTANCE method, so keyArgIndex is 1 (args[0] is the
         // adapter itself). Index 0 would test the receiver, never match, and
         // leave the stored value in place.
         { "com.bytedance.keva.adapter.KevaSpFastAdapter", "getString",
           "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-          false, M_VALUE, 1, "openudid", false, 0, V_OPENUDID, -1, -1, -1, nullptr },
-        { "com.bytedance.keva.adapter.KevaSpFastAdapter", "getString",
-          "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-          false, M_VALUE, 1, "clientudid", false, 0, V_CLIENTUDID, -1, -1, -1, nullptr },
-        { "com.bytedance.keva.adapter.KevaSpFastAdapter", "getString",
-          "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-          false, M_VALUE, 1, "cdid", false, 0, V_CDID, -1, -1, -1, nullptr },
+          false, M_VALUE_MULTI, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr,
+          kKevaKeys, kKevaVals, kKevaKeyCount },
         // The obfuscated sibling adapter. The LSPosed variant hooks both and
         // records that patching only one left identity fields leaking, so the
-        // same two are hooked here. X.02tJ renames per release: a miss costs
-        // this one adapter and is logged, not fatal.
+        // same two are hooked here.
+        //
+        // The name is per-build, and the two builds' classes are NOT the same
+        // thing under a different name — in trill 47.0.3, X.02tJ is a five-
+        // method enum and has no getString at all. The real twin is X.02t3:
+        //
+        //   musically 47.1.4 : LX/02tJ;  18 methods (full SharedPreferences)
+        //   trill     47.0.3 : LX/02t3;  18 methods (full SharedPreferences)
+        //
+        // Verified by comparing the two method sets: identical except for three
+        // parameter types that were renamed with everything else
+        // (LX/03a2;->LX/03ax;, LX/05ZB;->LX/05Vg;, LX/05ZU;->LX/05Vz;).
         { "X.02tJ", "getString",
           "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-          false, M_VALUE, 1, "openudid", false, 0, V_OPENUDID, -1, -1, -1, nullptr },
-        { "X.02tJ", "getString",
+          false, M_VALUE_MULTI, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr,
+          kKevaKeys, kKevaVals, kKevaKeyCount },
+        { "X.02t3", "getString",
           "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-          false, M_VALUE, 1, "clientudid", false, 0, V_CLIENTUDID, -1, -1, -1, nullptr },
-        { "X.02tJ", "getString",
-          "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-          false, M_VALUE, 1, "cdid", false, 0, V_CDID, -1, -1, -1, nullptr },
+          false, M_VALUE_MULTI, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr,
+          kKevaKeys, kKevaVals, kKevaKeyCount },
 
-        // WebView UA, app-side cache. LX/04v0;->LIZ(String) is the ONLY method
-        // in the app that writes ad_user_agent_sp (verified by a const-string
-        // scan of all 15 DEX files: exactly one instruction site, in this
-        // method). Its flow is:
+        // WebView UA, app-side cache. The class that writes ad_user_agent_sp is
+        // the ONLY one in the app that does (verified by a const-string scan of
+        // all 15 DEX files: exactly one instruction site). Its flow is:
         //   pref "ad_user_agent_sp" non-empty -> return it   (cached, real)
         //   otherwise -> System.getProperty("http.agent")   (real, seeded by
         //                RuntimeInit before this module's hooks would matter)
@@ -917,9 +1181,22 @@ inline const HookSpec* tt_specs(size_t& n) {
         // value fixes the read path AND the value the app re-persists, which is
         // what a read-path-only fix cannot do for an already-populated cache.
         //
-        // Static, one String parameter. Obfuscated name -> suffix-matched and
-        // fail-soft like the rest of this table.
+        // The class NAME is not stable across the two installed builds, and the
+        // old comment claiming "X.04v0" was verified against "47.1.4" had it
+        // backwards — it is the 47.0.3 name:
+        //
+        //   trill 47.0.3     : LX/04v0;->LIZ(String)String   <- the writer
+        //   musically 47.1.4 : LX/04vW;->LIZ(String)String   <- the writer
+        //                      LX/04v0;->LIZ(Context)V       <- unrelated
+        //
+        // So the single spec below installed on trill and MISSED on musically,
+        // where X.04v0 exists but with a different signature — the one shape of
+        // drift that a class-load observer cannot notice, because the class is
+        // present and only the method is wrong. Both names are listed; the
+        // signature does the discriminating.
         { "X.04v0", "LIZ", "(Ljava/lang/String;)Ljava/lang/String;",
+          true, M_REWRITE_STRING, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "X.04vW", "LIZ", "(Ljava/lang/String;)Ljava/lang/String;",
           true, M_REWRITE_STRING, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
     };
     n = sizeof(S) / sizeof(S[0]);
@@ -936,6 +1213,12 @@ inline void sbx_observe(JNIEnv* env, jclass, jstring name, jclass cls) {
     // and recurse without bound.
     static thread_local bool in_observe = false;
     if (in_observe) return;
+    // sbx_find_class resolves through the app's loadClass, which is itself one
+    // of our hooked methods, so a resolution in flight re-enters here. The
+    // in_observe flag does not cover that: the re-entry arrives on the same
+    // thread but through a different frame, and hooking a class the resolution
+    // is already installing would be refused by LSPlant and logged as a miss.
+    if (g_in_resolve) return;
     in_observe = true;
 
     const char* raw = env->GetStringUTFChars(name, nullptr);
@@ -967,6 +1250,12 @@ inline bool sbx_on_app_created(JNIEnv* env, jobject clLoader) {
     static std::atomic<bool> s_app_hooked{false};
     if (s_app_hooked.load()) return true;
 
+    // Record the app's loader before anything else. This is what makes an
+    // app-bundled class resolvable at all (sbx_find_class), and it is the only
+    // moment the loader is handed to us directly rather than guessed from a
+    // Context.
+    if (!g.app_loader) g.app_loader = env->NewGlobalRef(clLoader);
+
     jclass clClass = env->GetObjectClass(clLoader);
     if (!clClass) return false;
     jmethodID loadClassMid = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
@@ -975,6 +1264,39 @@ inline bool sbx_on_app_created(JNIEnv* env, jobject clLoader) {
         return false;
     }
 
+    // Retry the framework specs that failed at postAppSpecialize, now that
+    // sbx_find_class has a loader to fall back to. This is the path that
+    // installs com/google/android/gms/ads/identifier/AdvertisingIdClient$Info,
+    // which is bundled in the app's own DEX and therefore invisible to
+    // FindClass and to the class-load observer alike. Successful entries are
+    // dropped; the rest stay queued for a later attach.
+    int retried = 0;
+    {
+        auto& pend = sbx_pending();
+        for (size_t i = 0; i < pend.size();) {
+            if (hook_one(env, *pend[i])) {
+                pend.erase(pend.begin() + (long)i);
+                ++retried;
+            } else {
+                ++i;
+            }
+        }
+    }
+    if (retried > 0)
+        SBX_LSP_LOGD("L3: %d framework target(s) hooked on app attach", retried);
+
+    // This loop is the ONLY place a tt_specs entry is installed from here.
+    //
+    // It must not also be done by the class-load observer on the way through.
+    // ClassLoader.loadClass(String) delegates to loadClass(String,boolean),
+    // which is one of our hooked methods, so every load below re-enters
+    // observeAndPass -> sbx_observe, and the observer would hook the spec for
+    // the class this loop is about to hook. LSPlant refuses the second hook on
+    // an already-hooked ArtMethod, so the loop's own call would fail and the
+    // "N app target(s) hooked via onAppCreated" line could never be printed -
+    // which is exactly what every session showed before this. g_in_resolve
+    // makes the observer a no-op for the duration of the load, leaving this
+    // loop as the one owner of the hook.
     size_t n = 0;
     const HookSpec* specs = tt_specs(n);
     int good = 0;
@@ -987,7 +1309,9 @@ inline bool sbx_on_app_created(JNIEnv* env, jobject clLoader) {
         for (char& c : dot_name) { if (c == '/') c = '.'; }
         jstring name = env->NewStringUTF(dot_name.c_str());
         if (!name) continue;
+        g_in_resolve = true;
         jobject clsObj = env->CallObjectMethod(clLoader, loadClassMid, name);
+        g_in_resolve = false;
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
             continue;
@@ -999,9 +1323,14 @@ inline bool sbx_on_app_created(JNIEnv* env, jobject clLoader) {
             }
         }
     }
-    if (good > 0) {
+    // Latch on either kind of success. Testing only `good` would leave the
+    // latch open when the retry pass was the one that landed something, and
+    // the attach hook would then re-enter on every attachBaseContext - each
+    // pass re-running a full tt_specs resolution for nothing.
+    if (good > 0 || retried > 0) {
         s_app_hooked.store(true);
-        SBX_LSP_LOGD("L3: %d app target(s) hooked via onAppCreated", good);
+        if (good > 0)
+            SBX_LSP_LOGD("L3: %d app target(s) hooked via onAppCreated", good);
         return true;
     }
     return false;
@@ -1073,8 +1402,11 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
     size_t n = 0;
     const HookSpec* specs = hook_specs(n);
     int good = 0;
-    for (size_t i = 0; i < n; ++i)
+    sbx_pending().clear();
+    for (size_t i = 0; i < n; ++i) {
         if (hook_one(env, specs[i])) ++good;
+        else sbx_pending().push_back(&specs[i]);
+    }
 
     // Only meaningful once the 3-arg deny is actually installed.
     if (!v.deny_classes.empty()) deopt_forname_1arg(env);
