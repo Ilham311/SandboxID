@@ -18,6 +18,11 @@
 #   sbx_elf_probe  jni/sbx_elf.hpp: the .gnu_debugdata mini-ELF parser and the
 #                  `.__uniq.<hash>` suffix tolerance L3 needs on a stripped
 #                  LTO ROM. Pure header test; no module TU, no device.
+#   sbx_process_name  jni/sbx_process_name.hpp: the app/sub-process/AppZygote
+#                  naming rules that decide whether a process may be
+#                  specialized at all. Pure header test; no module TU, no
+#                  device. An AppZygote that slips through aborts on its next
+#                  fork (AOSP ForkCommon -> FileDescriptorTable::Restat).
 #   console_check  the WebUI console module (webroot/console.js) under a stubbed
 #                  DOM: capture, badge semantics, stream guards, save transport.
 #                  Skipped unless node is on PATH.
@@ -120,16 +125,19 @@ mkdir -p "$OUT"
 
 exit_code=0
 
-for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe; do
+for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe sbx_process_name; do
     src="$REPO/tests/host/$suite.cpp"
     bin="$OUT/$suite"
 
     echo "==> building $suite"
-    # sbx_elf_probe exercises jni/sbx_elf.hpp on its own and takes no module TU;
-    # linking native_read.cpp in would pull the whole Zygisk surface into a test
-    # that has nothing to do with it.
+    # sbx_elf_probe and sbx_process_name exercise a header on its own and take no
+    # module TU; linking native_read.cpp in would pull the whole Zygisk surface
+    # into a test that has nothing to do with it.
     extra=""
-    [ "$suite" = "sbx_elf_probe" ] || extra="$REPO/native/native_read.cpp"
+    case "$suite" in
+        sbx_elf_probe|sbx_process_name) ;;
+        *) extra="$REPO/native/native_read.cpp" ;;
+    esac
     if ! "$CXX" "${FLAGS[@]}" "$src" $extra -o "$bin"; then
         echo "FAIL: $suite did not compile"
         exit_code=1

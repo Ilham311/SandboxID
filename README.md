@@ -468,6 +468,17 @@ does not run in userspace.
   processes, `system_server`, the RIL itself, and a shell `getprop`. That is a
   mismatch, not a leak of anything else, and the two cannot be reconciled from
   userspace without hooking the RIL process.
+- **A child process is not the target process.** The shell guard covers
+  `popen()` in-process — including `popen("getprop")`, whose output is filtered
+  key by key — and it denies the whole exec family when the command names a
+  root binary. It does not filter the output of a child the app spawns any
+  other way. `Runtime.exec()` and `system()` both end at `posix_spawn`/`execve`
+  in a *new* process, which Zygisk does not inject (fork+exec from an app does
+  not pass through zygote), so once that child has exec'd `getprop` it reads
+  the real property table. The guard's job there is to deny the root probes it
+  can see, not to rewrite an unrelated program's stdout — and it cannot, since
+  the bytes never pass through this process. A probe that runs `getprop`
+  through `popen` sees the persona; one that runs it as a subprocess does not.
 - **Bootloader/kernel build identity.** `/proc/version` and the `Build.TIME`
   field are patched in-process, but a reader that shells out (`uname -r`) reads
   the running kernel, which is whatever the device actually boots.

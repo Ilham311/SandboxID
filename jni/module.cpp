@@ -1,5 +1,6 @@
 #include "module_impl.hpp"
 #include "sbx_lsplant.hpp"
+#include "sbx_process_name.hpp"
 #include <sys/un.h>          // struct ucred, SO_PEERCRED
 #ifndef __NR_memfd_create
 # if defined(__aarch64__)
@@ -98,6 +99,40 @@ public:
         LOGD("preAppSpecialize pkg='%s' pid=%d", pkg.c_str(), getpid());
         if (pkg.empty()) { unload(); return; }
 
+        // Refuse child zygotes (AppZygote, "<pkg>_zygote") outright.
+        //
+        // An AppZygote is a zygote, not an app: the app's real process is forked
+        // from it later and gets its own pre/postAppSpecialize under the plain
+        // package name, so nothing is lost by skipping this one. Specializing it
+        // is actively fatal - every fork the AppZygote then performs runs
+        // ForkCommon -> FileDescriptorTable::Restat, which fstat()s every open fd
+        // and aborts the process via ZygoteFailure on failure. The per-fork
+        // fds_to_ignore list cannot contain a companion socket we opened here, so
+        // the AppZygote dies on its next fork:
+        //
+        //   Abort message: 'JNI FatalError called: (zygote) Unable to stat 120'
+        //   Cmdline: com.shopee.id_zygote
+        //   FileDescriptorInfo::CreateFromFd <- RestatInternal <- Restat
+        //     <- zygote::ForkCommon <- zygote::forkApp
+        //
+        // 120 was the fd connectCompanion() had just handed back in that pid.
+        //
+        // is_child_zygote is an *optional* AppSpecializeArgs field, so it is read
+        // only when the provider supplied it; the name convention is the
+        // fallback. Both Magisk and ReZygisk populate it from the real JNI
+        // parameter, so on those providers the flag is authoritative. See
+        // jni/sbx_process_name.hpp for the full reasoning.
+        const bool have_flag = args && args->is_child_zygote != nullptr;
+        const bool flag_value = have_flag && *args->is_child_zygote == JNI_TRUE;
+        if (sbxproc::is_child_zygote(have_flag, flag_value, pkg)) {
+            LOGI("skipping child zygote '%s' (flag=%s) - not an app process; "
+                 "specializing it would abort it on its next fork",
+                 pkg.c_str(), have_flag ? (flag_value ? "true" : "false")
+                                        : "absent, matched by name");
+            unload();
+            return;
+        }
+
         int fd = api_->connectCompanion();
         LOGD("connectCompanion() -> fd=%d", fd);
         if (fd < 0) { unload(); return; }
@@ -181,16 +216,11 @@ public:
         install_prop_hook(api_, env_);
         install_leak_sensors(api_, env_);
         install_uptime_hook(api_, env_);
-        // Canonical base package name for identity/applog derivation
-        std::string base_pkg = pkg_;
-        size_t colon = base_pkg.find(':');
-        if (colon != std::string::npos) base_pkg = base_pkg.substr(0, colon);
-        static const std::string kZygoteSuffix = "_zygote";
-        if (base_pkg.size() > kZygoteSuffix.size() &&
-            base_pkg.rfind(kZygoteSuffix) == (base_pkg.size() - kZygoteSuffix.size())) {
-            base_pkg = base_pkg.substr(0, base_pkg.size() - kZygoteSuffix.size());
-        }
-        g_pkg = base_pkg;
+        // Canonical base package name for identity/applog derivation. A child
+        // zygote never reaches here (refused in preAppSpecialize), but a
+        // sub-process (":push", ":isolated") does, and g_pkg must be the plain
+        // package so L3, L9 and rotate_ids.sh all seed from one string.
+        g_pkg = sbxproc::canonical_pkg(pkg_);
         install_native_read_hooks(api_);
         install_java_hooks(env_);
 #ifdef SBX_DEBUG
@@ -277,9 +307,10 @@ private:
         // module_hooks.cpp seeds from g_pkg, and rotate_ids.sh seeds the app's
         // on-disk AppLog cache from the same base name, so all three must agree.
         // Using the raw pkg_ here made L3 diverge from L9 and from disk for
-        // every sub-process (":push", ":isolated") and AppZygote ("_zygote")
-        // — the hook would hand the SDK an openudid the SDK's own cache and
-        // the native read path never produced.
+        // every sub-process (":push", ":isolated") - the hook would hand the SDK
+        // an openudid the SDK's own cache and the native read path never
+        // produced. (AppZygotes never get this far: preAppSpecialize refuses
+        // them, so the "_zygote" case this comment once described cannot arise.)
         hv.seed       = sbxnr::applog_seed(val("FINGERPRINT"), hv.serial,
                                            hv.android_id, g_pkg);
 

@@ -28,6 +28,7 @@
 #include <android/log.h>
 #include "config.hpp"
 #include "mountinfo.hpp"
+#include "sbx_process_name.hpp"
 
 #define LOG_TAG "SandboxIDCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -103,23 +104,20 @@ static void reload_targets_if_changed() {
     g_targets_mtime_nsec = st.st_mtim.tv_nsec;
 }
 
+// Canonical package for a process name: sub-process and AppZygote markers
+// removed. Shared with the module (jni/sbx_process_name.hpp) so the two cannot
+// drift - the module derives g_pkg with the same function, and L3, L9 and
+// rotate_ids.sh all have to seed from one string.
 static std::string extract_base_pkg(const std::string& pkg) {
     if (pkg.empty()) return "";
-    std::string base = pkg;
-    size_t colon = base.find(':');
-    if (colon != std::string::npos) {
-        base = base.substr(0, colon);
-    }
-    static const std::string kZygoteSuffix = "_zygote";
-    if (base.size() > kZygoteSuffix.size() &&
-        base.rfind(kZygoteSuffix) == (base.size() - kZygoteSuffix.size())) {
-        base = base.substr(0, base.size() - kZygoteSuffix.size());
-    }
-    return base;
+    return sbxproc::canonical_pkg(pkg);
 }
 
 static bool is_target(const std::string& pkg) {
     if (pkg.empty()) return false;
+    // Child zygotes are rejected by the module before it requests an identity.
+    // Do not duplicate that decision here: the module's framework flag is
+    // authoritative when present, and the name is only a fallback when absent.
     std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     reload_targets_if_changed();
     for (const auto& t : g_targets) {

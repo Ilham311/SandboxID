@@ -113,6 +113,42 @@ int main() {
     std::string junk;
     CHECK(!patch_applog_xml(std::string("not xml at all"), a, junk), "patch rejects non-map input");
 
+    // A map-shaped file whose keys are ALL unrecognised must also be refused,
+    // not copied through. It used to return true with the input unchanged, and
+    // the caller serves `patched` on true - so the real device blob reached the
+    // app. Reachable: classify() routes /shared_prefs/bd_device_info.xml here,
+    // and that file is deliberately not seeded (its key scheme differs), so it
+    // is exactly this shape.
+    std::string foreign =
+        "<map><string name=\"bd_device_info\">REAL-BLOB-xyz</string></map>";
+    std::string fout;
+    CHECK(!patch_applog_xml(foreign, a, fout),
+          "patch declines a map-shaped file with no recognised key");
+    CHECK(fout.find("REAL-BLOB-xyz") == std::string::npos ||
+          fout.empty(),
+          "declined patch does not carry the real blob into the fallback path");
+
+    // A self-closing element has no value to replace. Searching for the next
+    // "</string>" from its end used to land on the FOLLOWING element's closing
+    // tag, so the output became `<string name="did"/>VALUE</string>` and the
+    // sibling element was swallowed - its real value destroyed and the XML left
+    // malformed.
+    std::string selfclose =
+        "<map><string name=\"did\"/><string name=\"ssid\">REALSSID</string></map>";
+    std::string sc;
+    CHECK(patch_applog_xml(selfclose, a, sc), "patch handles a self-closing element");
+    CHECK(sc.find("REALSSID") == std::string::npos, "self-closing case still spoofs the sibling");
+    CHECK(sc.find(a.ssid) != std::string::npos, "self-closing case inserts the sibling value");
+    CHECK(sc.find("<string name=\"did\"/>") != std::string::npos,
+          "self-closing element is passed through intact");
+    // The tag must appear exactly once - appending before the check emitted it twice.
+    {
+        const std::string tag = "<string name=\"did\"/>";
+        size_t first = sc.find(tag);
+        CHECK(first != std::string::npos && sc.find(tag, first + 1) == std::string::npos,
+              "self-closing element is emitted exactly once");
+    }
+
     // ---- patch_meminfo ----------------------------------------------------
     const std::string mi =
         "MemTotal:        5918048 kB\n"
@@ -143,6 +179,33 @@ int main() {
     CHECK(patch_meminfo(std::string("garbage\nno memtotal here\n"), 0) ==
           std::string("garbage\nno memtotal here\n"),
           "meminfo with no MemTotal line is left alone");
+
+    // Totals above the largest marketing tier should round up to the next real
+    // size instead of becoming a non-marketing value like 31 GB.
+    {
+        const std::string large = "MemTotal:        32505856 kB\nMemFree: 1 kB\n";
+        std::string h = patch_meminfo(large, 0);
+        uint64_t expect = 32ULL * 1024 * 1024 * 955 / 1000;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "MemTotal:       %llu kB", (unsigned long long)expect);
+        CHECK(h.find(buf) == 0, "31 GiB MemTotal rounds up to marketing 32 GB");
+    }
+
+    // A hostile MemTotal must not produce a truncated or wrapped value. The
+    // rounding add (`real_kb + 1048575`) can wrap near UINT64_MAX and send the
+    // value through the int cast out of range. /proc can be FUSE-mounted, so
+    // the kernel is not the only writer. Values above 1 TiB are bounded there.
+    {
+        const std::string hostile =
+            "MemTotal:        18446744073709551615 kB\nMemFree: 1 kB\n";
+        std::string h = patch_meminfo(hostile, 0);
+        uint64_t expect = 1024ULL * 1024 * 1024 * 955 / 1000;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "MemTotal:       %llu kB", (unsigned long long)expect);
+        CHECK(h.find(buf) == 0, "hostile MemTotal clamps to 1 TiB, not a wrapped value");
+        CHECK(h.find("18446744073709551615") == std::string::npos,
+              "hostile MemTotal does not leak through");
+    }
 
     // ---- patch_cpuinfo ----------------------------------------------------
     const std::string ci_qcom =
@@ -220,6 +283,27 @@ int main() {
     // an unparseable file must not be guessed at
     CHECK(cpuinfo_synth("zumapro", std::string("garbage\nno cores\n"), 1).empty(),
           "cpuinfo synth refuses to invent a core count");
+    // The core count must come from counting blocks, not from parsing the index.
+    // A long digit run used to overflow `n = n * 10 + digit` (signed overflow,
+    // UB) and the parsed index was discarded anyway. Reachable the same way as
+    // the meminfo case: /proc is not necessarily the kernel's.
+    {
+        std::string hostile_ci;
+        for (int i = 0; i < 8; ++i)
+            hostile_ci += "processor\t: 99999999999999999999999\n"
+                          "BogoMIPS\t: 38.40\n"
+                          "Features\t: fp asimd evtstrm\n"
+                          "CPU implementer\t: 0x41\n"
+                          "CPU architecture: 8\n"
+                          "CPU variant\t: 0x1\n"
+                          "CPU part\t: 0xd0d\n"
+                          "CPU revision\t: 0\n\n";
+        std::string hs = cpuinfo_synth("zumapro", hostile_ci, fnv1a("serial"));
+        CHECK(!hs.empty(), "cpuinfo synth survives an absurd processor index");
+        size_t p = 0, n = 0;
+        while ((p = hs.find("processor\t:", p)) != std::string::npos) { ++n; p += 11; }
+        CHECK(n == 8, "cpuinfo synth counts blocks, not the index value");
+    }
     // Determinism, and the property that actually depends on it: two installs
     // must not collide on the derived variant/revision bytes, or every device
     // would ship an identical synthetic cpuinfo. Comparing the function to

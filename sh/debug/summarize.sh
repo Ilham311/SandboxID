@@ -58,6 +58,15 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     printf "  %-28s : %s\n" "zygote forks seen"      "$(count 'preAppSpecialize pkg=' )"
     printf "  %-28s : %s\n" "companion handshakes"   "$(count 'companion invoked:')"
     printf "  %-28s : %s\n" "REJECT (not in target)" "$(count 'REJECT pkg=')"
+    # Child zygotes (AppZygote, "<pkg>_zygote") are refused on purpose: they are
+    # zygotes, not apps, and specializing one makes it abort on its next fork
+    # (AOSP ForkCommon -> FileDescriptorTable::Restat). Two lines, one per side:
+    # the module skips it in preAppSpecialize, and the companion refuses to mint
+    # an identity for it. Both should be 0 on a healthy session; a nonzero
+    # "module skips" is expected whenever an app with android:zygotePreloadName
+    # starts, and is the fix working, not a fault.
+    printf "  %-28s : %s\n" "child zygote skipped (module)" "$(count 'skipping child zygote')"
+    printf "  %-28s : %s\n" "child zygote refused (companion)" "$(count 'refusing identity for child zygote')"
     # Two literals: the companion logs "ACCEPT pkg='X'" for a whole-app target
     # and "ACCEPT sub-process 'X' for target 'Y'" for a child process, so a
     # grep for the first alone undercounts every session with a :push or
@@ -187,7 +196,11 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     printf "  %-28s : %s\n" "  ...blocked as root"      "$(count 'NATIVE_POPEN BLOCKED')"
     printf "  %-28s : %s\n" "  ...getprop spoofed"      "$(count 'NATIVE_POPEN SPOOF')"
     printf "  %-28s : %s\n" "  ...getprop hidden"       "$(count 'NATIVE_POPEN HIDE')"
-    printf "  %-28s : %s\n" "exec family intercepted"   "$(count 'NATIVE_(EXECVE|EXECV|EXECVP|EXECVPE|FEXECVE|POSIX_SPAWN|POSIX_SPAWNP) ')"
+    # The dump-all filter. `getprop` with no key prints the whole real property
+    # table, so this row is the one that shows the leak was closed rather than
+    # merely that the single-key spoof ran.
+    printf "  %-28s : %s\n" "  ...getprop dump filtered" "$(count 'NATIVE_POPEN getprop dump filtered')"
+    printf "  %-28s : %s\n" "exec family intercepted"   "$(count 'NATIVE_(EXECVE|EXECV|EXECVP|EXECVPE|EXECL|EXECLP|EXECLE|FEXECVE|POSIX_SPAWN|POSIX_SPAWNP) ')"
     printf "  %-28s : %s\n" "synthetic pipe truncated"  "$(count 'create_synthetic_pipe: pipe fallback truncated')"
     echo ""
     # A DobbyHook failure is the one shell-guard fault that is silent about its
