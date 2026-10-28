@@ -97,9 +97,11 @@ SandboxID combines four cooperating layers:
    reads the app would otherwise observe, so the first spawn already sees the
    configured values.
 2. **Per-application identifier customization** — a root-side companion process
-   serves identity blobs over the Zygisk socket, hot-reloads the target list,
-   and bind-mounts a synthetic `build.prop` tree into the target's mount
-   namespace so file-based readers see consistent values.
+   serves identity blobs over the Zygisk socket and hot-reloads the target list.
+   (An earlier revision also bind-mounted a synthetic `build.prop` tree into the
+   target's mount namespace. That layer was removed deliberately — see the
+   per-target-only note below — so file-based readers are covered by layer 4
+   instead, which reaches them in-process.)
 3. **CLI / shell layer** — a native `sandboxid` binary and `rotate_ids.sh`
    script regenerate the persona, apply native properties, and synchronize
    shell-layer identifiers (SSAID, wlan/Bluetooth MAC, device name).
@@ -138,15 +140,29 @@ SandboxID combines four cooperating layers:
    that cross a library boundary, so the hooks are registered against the
    system libraries above **and** the app's own already-loaded libraries — a
    native probe that calls `__system_property_read_callback` from its own `.so`
-   would otherwise bypass every hook and read real values. Libraries the app
-   loads *after* `postAppSpecialize` are still outside that one-shot scan. For
-   the prop files and the AppLog cache that gap is closed from disk: layer 3
-   has already bind-mounted spoofed `build.prop` files into the process's mount
-   namespace, and `rotate_ids.sh applog` writes the same derived values into the
-   cache files in place, so a late library reading those files still sees the
-   persona. The `/proc` and `/sys` paths above have no on-disk form to
-   pre-warm, so a library loaded after specialize reading one of those *does*
-   see real bytes — the one residual gap in this layer.
+   would otherwise bypass every hook and read real values.
+
+   Libraries the app loads *after* `postAppSpecialize` are outside that one-shot
+   scan, and that gap is closed in two steps. The property and file entry points
+   are also **inline-hooked** (Dobby), which patches the function bodies rather
+   than the GOT slots, so a library that resolves them later still lands on the
+   guard. `rotate_ids.sh applog` additionally writes the same derived values
+   into the AppLog cache files in place, so a late library reading those files
+   still sees the persona.
+
+   The same layer covers **file metadata**, which is a different question from
+   file contents: a library that only asks whether a path exists never calls
+   `open()`. `stat`/`lstat`/`fstatat`/`access`/`readlink` are hooked and report
+   `ENOENT` for the root-binary basenames the module already refuses to exec.
+   This is the shape of the root check in Grab's `libsafexEx.so`
+   (`SafeXNative.isSUExist`, eight `stat()` calls over a hardcoded path list),
+   and on a device where `/system/bin/su` exists as a hardlink to
+   `/system/bin/sh` every one of those calls would otherwise succeed.
+
+   `uname` is hooked for the same reason: `/proc/version` is synthesized from
+   the persona, but `uname(2)` is a separate syscall wrapper, so leaving it
+   alone made the two lenses contradict each other in one process. Both now
+   derive from the same persona inputs.
 
 The architecture is deliberately split so the Zygisk hook layer and the shell
 layer report the same values for a given persona. Repository sources are grouped
@@ -479,17 +495,17 @@ does not run in userspace.
   can see, not to rewrite an unrelated program's stdout — and it cannot, since
   the bytes never pass through this process. A probe that runs `getprop`
   through `popen` sees the persona; one that runs it as a subprocess does not.
-- **Bootloader/kernel build identity.** `/proc/version` and the `Build.TIME`
-  field are patched in-process, but a reader that shells out (`uname -r`) reads
-  the running kernel, which is whatever the device actually boots.
-- **Layer-2 bind-mounts need a Zygisk provider that honours `exemptFd()`.**
-  ReZygisk declares the v4 `exempt_fd` slot as `void (*)(int)` where Magisk and
-  ZygiskNext declare `bool (*)(int)`, so the return value is garbage on that
-  provider while the socket usually survives anyway. The module therefore
-  probes the socket itself rather than trusting the boolean, and logs the
-  outcome; if the socket is genuinely reaped, on-disk `build.prop` readers see
-  real values while every in-process layer keeps working. Run
-  `sh/debug/summarize.sh` on a debug session log for a per-layer verdict.
+- **Bootloader/kernel build identity.** `/proc/version`, `uname(2)` and the
+  `Build.TIME` field are patched in-process, but a reader that shells out
+  (`uname -r` as a subprocess) reads the running kernel, which is whatever the
+  device actually boots. The in-process `uname` hook covers a security library
+  that calls the syscall itself; it cannot cover a child process.
+- **Zygisk provider capability probing.** The v4 `exempt_fd` slot is declared
+  `void (*)(int)` by ReZygisk and `bool (*)(int)` by Magisk and ZygiskNext, so
+  the return value is garbage on ReZygisk while the socket usually survives
+  anyway. The module therefore probes the socket itself rather than trusting
+  the boolean, and logs the outcome. Run `sh/debug/summarize.sh` on a debug
+  session log for a per-layer verdict.
 - **AppLog `device_id` / `install_id` are not server-minted.** The IDs this
   module fabricates are snowflakes derived from the persona seed, with the right
   *shape* (`(ms << 22) | random`, 19 digits). But ByteDance mints the real ones

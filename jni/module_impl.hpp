@@ -13,6 +13,7 @@
 #include <sys/system_properties.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <dlfcn.h>

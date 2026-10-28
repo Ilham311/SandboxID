@@ -223,6 +223,28 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     fi
     echo ""
 
+    echo "--- File metadata + kernel identity: stat family, uname ---"
+    # A library that only asks whether a path EXISTS never calls open(), so none
+    # of the read hooks above fire for it. That is the shape of SafeX's root
+    # check (isSUExist = eight stat() calls), and on a device where
+    # /system/bin/su exists every one of them succeeds unless this layer is
+    # live. Counted separately from the shell guard above so a dead metadata
+    # layer cannot hide behind a healthy exec guard.
+    MD_DOB=$(count 'NATIVE_READ: DobbyHook [0-9]+/[0-9]+ late-loader')
+    MD_FAIL=$(count 'NATIVE_READ: DobbyHook late .* FAILED')
+    printf "  %-28s : %s\n" "late-loader install lines"  "$MD_DOB"
+    printf "  %-28s : %s\n" "late-loader failures"       "$MD_FAIL"
+    printf "  %-28s : %s\n" "stat family hidden"         "$(count 'NATIVE_META HIDE')"
+    printf "  %-28s : %s\n" "uname rewritten"            "$(count 'NATIVE_UNAME SPOOF')"
+    echo ""
+    if [ "$MD_FAIL" -gt 0 ]; then
+        echo "  WARNING: $MD_FAIL late-loader entry point(s) FAILED to inline-hook."
+        echo "  A security library that dlopens after postAppSpecialize reads the"
+        echo "  real value for those entry points - for stat that means its root"
+        echo "  check sees the real /system/bin/su."
+    fi
+    echo ""
+
     echo "--- Companion hide pass (detach module mount traces) ---"
     # The companion's only post-specialize job now is the optional trace-detach
     # umount pass (enable_hide). Property/Build spoofing is entirely in-process

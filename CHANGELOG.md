@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+### Fix: pemeriksaan root lewat `stat()` tidak pernah di-hook — Grab membaca `/system/bin/su` yang asli
+
+**Gejala.** Promo di aplikasi target ditolak dengan pesan
+"Promo yang kamu pilih nggak bisa digunakan. Klik di sini untuk melihat detail
+selengkapnya." — padahal persona sudah aktif dan hook properti berjalan.
+
+**Akar masalah.** Seluruh lapisan file yang ada hanya meng-hook jalur **isi**
+(`open`/`openat`/`read`/`pread64`/`lseek`/`close`). Sebuah library yang hanya
+menanyakan apakah sebuah path **ada** tidak pernah memanggil `open()`, sehingga
+tidak satu pun hook itu menyala untuknya.
+
+Itu persis bentuk pemeriksaan root yang dikirim Grab. `libsafexEx.so`
+(Neutralbase **SafeX**) mengekspor
+`Java_com_neutralbase_lib_safex_SafeXNative_isSUExist`; membongkar badan
+196-byte-nya menunjukkan **delapan** `bl <stat@plt>` dan tidak ada yang lain, dan
+delapan literal string yang dimuatnya adalah `/sbin/su`, `/system/bin/su`,
+`/system/xbin/su`, `/data/local/xbin/su`, `/data/local/bin/su`,
+`/system/sd/xbin/su`, `/system/bin/failsafe/su`, `/data/local/su`.
+
+Di perangkat referensi `/system/bin/su` **ada**: hardlink ke `/system/bin/sh`
+(inode 544, mode `0755 root:shell`, label `u:object_r:system_file:s0` —
+world-traversable, jadi `stat()` dari uid app berhasil). Kedelapan panggilan itu
+mengembalikan sukses dan modul tidak pernah melihatnya.
+
+**Bukti.** `readelf -sW --dyn-syms` pada keempat library keamanan Grab
+(`libpsec.so`, `libsafexEx.so`, `libCredolabNative.so`, `libcore-lib.so`)
+menunjukkan `stat`/`lstat`/`access`/`readlink`/`uname` diimpor tetapi tidak ada
+satu pun di `kPltRegs` (saat itu 25 simbol, semuanya keluarga
+file/properti/exec). `libpsec.so` juga mengimpor `uname` dan memanggilnya
+(`bl <uname@plt>` di `0x1be454`).
+
+**Perbaikan.** `stat`, `lstat`, `fstatat`, `access` dan `readlink` di-hook di
+kedua jalur (PLT dan inline/Dobby) dan melaporkan `ENOENT` untuk basename biner
+root yang sudah ditolak `sbx_is_root_binary()` — satu definisi, sehingga penjaga
+exec dan penjaga stat tidak bisa berbeda pendapat. Sengaja sempit: hanya
+basename root yang di-hide, bukan seluruh path, karena memblokir semua `stat`
+akan merusak akses file app sendiri.
+
+`uname` juga di-hook: `/proc/version` sudah disintesis dari persona, tetapi
+`uname(2)` adalah pembungkus syscall terpisah, sehingga keduanya saling
+bertentangan di dalam satu proses (persona CPH2521/taro: `/proc/version` =
+`6.1.x-android15`, `uname()` = `4.19.337-FakeDreamer-1.9-Universe` — kernel yang
+tidak pernah dijalankan CPH2521 mana pun, dan string build yang menyebut ROM-nya).
+Keduanya sekarang diturunkan dari input persona yang sama.
+
+**Regresi tertutup.** `tests/host/sbx_hook_sm.cpp` §15 memaku kedua arah:
+kedelapan path SafeX (plus `daemonsu`/`magisk`/`ksud`) harus di-hide, dan path
+biasa (`/system/bin/sh`, `/proc/self/maps`, file app sendiri, path yang hanya
+* mengandung* "su") **tidak** boleh. Uji mutasi mengonfirmasi kedua arah bergigi:
+meng-hide semua path menggagalkan 6 check, meng-hide nol path menggagalkan 11.
+
+§16 memaku `uname` terhadap `/proc/version`: `release` harus sama persis dengan
+token pertama baris yang disintesis, dan `version` harus berupa **prefiks** dari
+sisanya yang dipotong tepat di batas field 64 karakter. Kesamaan penuh tidak
+mungkin dan tidak benar — `utsname.version` hanya 65 byte sedangkan sisa baris
+`/proc/version` lebih panjang, sehingga kernel sungguhan pun memotong dengan cara
+yang sama. Tiga mutasi membuktikan uji ini bergigi: memecah di spasi terakhir
+menggagalkan 3 check, memotong di 32 karakter menggagalkan 1, dan menjadikan hook
+no-op menggagalkan 5.
+
+Total suite host: **238 check, 0 gagal**.
+
 ### Fix: AppZygote (`<pkg>_zygote`) di-specialize → prosesnya SIGABRT saat fork berikutnya
 
 **Gejala.** `com.shopee.id_zygote` mati dengan `SIGABRT` sesaat setelah modul

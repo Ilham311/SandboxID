@@ -8,6 +8,7 @@
 // shows up as a failed string check.
 #include "module_hooks.cpp"
 
+#include <algorithm>
 #include <vector>
 #include <string>
 #include <cstring>
@@ -458,6 +459,203 @@ int main() {
             CHECK(rc == 'x', "write-mode stream accepts a write (not a read-only synth)");
             hook_pclose(wfp);
         }
+    }
+
+    // ---- 14. late-loader coverage: the PLT scan cannot reach these --------
+    // The PLT pass walks /proc/self/maps ONCE, in postAppSpecialize, and only
+    // registers GOT slots of libraries already mapped at that moment. A target
+    // app whose security stack is dlopened later - Grab's is, from
+    // Application.onCreate - resolves the real symbols and reads real values.
+    // Measured: the PLT pass logged "11 lib(s) incl. 0 app-owned" for
+    // com.grabtaxi.passenger, and libpsec.so / libCredolabNative.so /
+    // libcore-lib.so each import __system_property_get directly.
+    //
+    // The fix is the second Dobby array, which patches function BODIES so a
+    // late loader inherits the guard. These checks pin the two properties that
+    // make it work and that are easy to lose in a refactor:
+    //
+    //   (a) every property/file entry point the PLT pass registers must also
+    //       appear in the inline (late-loader) set - a name in one and not the
+    //       other is a hole that no test on a stock device would show, because
+    //       the PLT half keeps working;
+    //   (b) the inline set must be resolved by NAME, not by taking the address
+    //       of a libc function. A direct reference binds to this module's own
+    //       PLT stub, and Dobby would relocate the stub rather than the body.
+    {
+        // The PLT registrations, as (name) strings, from kPltRegs. Kept as a
+        // literal list rather than read from the table so that a symbol dropped
+        // from kPltRegs fails here instead of silently shrinking both sets.
+        static const char* const plt_expected[] = {
+            "read", "open", "openat", "pread64", "close", "lseek", "lseek64",
+            "__open_2", "__openat_2",
+            "__system_property_read_callback",
+            "__system_property_find",
+            "__system_property_get",
+            // Metadata + kernel identity. SafeX's root check is a bare
+            // stat("/system/bin/su") loop - it never opens anything, so none of
+            // the read hooks above can see it.
+            "stat", "lstat", "fstatat", "access", "readlink", "uname",
+        };
+        for (const char* n : plt_expected) {
+            bool in_plt = false;
+            for (const HookReg& r : kPltRegs)
+                if (std::strcmp(r.name, n) == 0) { in_plt = true; break; }
+            CHECK(in_plt, (std::string("PLT pass registers ") + n).c_str());
+        }
+
+        // The inline set, from the production table the installer walks. It is
+        // declared outside the SBX_ENABLE_LSPLANT guard for exactly this
+        // reason: the host suites build with LSPLANT off, so this is the only
+        // place the coverage invariant can be checked at all.
+        //
+        // Set equality, both directions, and neither direction is redundant:
+        //   - PLT name missing from the inline set  -> a late loader reads the
+        //     real value while an early one reads the persona. The early half
+        //     keeps working, so on a stock device the app looks guarded.
+        //   - inline name missing from the PLT set -> the GOT slot is never
+        //     redirected, so a library mapped at specialize time is unguarded
+        //     until Dobby's pass runs, and Dobby is a no-op there because the
+        //     PLT pass already claimed the symbol (the `if (*d.orig)` skip).
+        for (const char* n : plt_expected) {
+            bool in_late = false;
+            for (size_t i = 0; i < kLateRegsN; ++i)
+                if (std::strcmp(kLateRegs[i].name, n) == 0) { in_late = true; break; }
+            CHECK(in_late, (std::string("inline late-loader set covers ") + n).c_str());
+        }
+        for (size_t i = 0; i < kLateRegsN; ++i) {
+            bool in_plt = false;
+            for (const HookReg& r : kPltRegs)
+                if (std::strcmp(r.name, kLateRegs[i].name) == 0) { in_plt = true; break; }
+            CHECK(in_plt, (std::string("PLT pass covers inline name ")
+                           + kLateRegs[i].name).c_str());
+        }
+
+        // Every entry must name a hook and a trampoline slot. A row with a null
+        // hook would install a trampoline that jumps to address 0, and a row
+        // with a null orig would make the installer's "already live" test
+        // dereference null on the first pass.
+        for (size_t i = 0; i < kLateRegsN; ++i) {
+            CHECK(kLateRegs[i].hook != nullptr,
+                  (std::string("late-loader row has a hook: ") + kLateRegs[i].name).c_str());
+            CHECK(kLateRegs[i].orig != nullptr,
+                  (std::string("late-loader row has a trampoline slot: ")
+                   + kLateRegs[i].name).c_str());
+        }
+
+        // The three property entry points are the ones Grab's libraries call.
+        // They are the reason the table exists, so name them explicitly rather
+        // than trusting the loop above to have noticed their absence.
+        for (const char* p : {"__system_property_get",
+                              "__system_property_find",
+                              "__system_property_read_callback"}) {
+            bool found = false;
+            for (size_t i = 0; i < kLateRegsN; ++i)
+                if (std::strcmp(kLateRegs[i].name, p) == 0) { found = true; break; }
+            CHECK(found, (std::string("late-loader set carries the property entry ")
+                          + p).c_str());
+        }
+    }
+
+    // ---- 15. metadata hooks hide the root binaries, and nothing else ------
+    // SafeX's isSUExist is eight stat() calls over a hardcoded path list; on
+    // this device /system/bin/su exists as a hardlink to /system/bin/sh, so
+    // every one of them succeeds unless stat is hooked. These checks pin the
+    // two halves that make the hide correct: the root basenames are reported
+    // absent, and an ordinary path is NOT (a stat hook that denies everything
+    // would break the app's own file access, which is a worse bug than the
+    // leak it plugs).
+    {
+        // The exact list disassembled out of libsafexEx.so's isSUExist.
+        static const char* const safeX_paths[] = {
+            "/sbin/su", "/system/bin/su", "/system/xbin/su",
+            "/data/local/xbin/su", "/data/local/bin/su", "/system/sd/xbin/su",
+            "/system/bin/failsafe/su", "/data/local/su",
+        };
+        for (const char* p : safeX_paths)
+            CHECK(sbx_meta_hidden(p),
+                  (std::string("metadata hook hides ") + p).c_str());
+
+        // The daemon spellings the exec guard already refuses; the stat guard
+        // shares sbx_is_root_binary so the two can never disagree.
+        CHECK(sbx_meta_hidden("/system/xbin/daemonsu"), "hides daemonsu");
+        CHECK(sbx_meta_hidden("/system/bin/magisk"), "hides magisk");
+        CHECK(sbx_meta_hidden("/data/adb/ksud"), "hides ksud");
+
+        // Not root binaries: these must pass through untouched.
+        CHECK(!sbx_meta_hidden("/system/bin/sh"), "does NOT hide /system/bin/sh");
+        CHECK(!sbx_meta_hidden("/system/bin/abb"), "does NOT hide an ordinary binary");
+        CHECK(!sbx_meta_hidden("/proc/self/maps"), "does NOT hide /proc/self/maps");
+        CHECK(!sbx_meta_hidden("/data/data/com.grabtaxi.passenger/files/x"),
+              "does NOT hide the app's own files");
+        // A path that merely CONTAINS "su" is not a root binary. The exec guard
+        // was once substring-based and denied legitimate execs; the metadata
+        // guard must not repeat that.
+        CHECK(!sbx_meta_hidden("/data/user/0/com.example/su-something"),
+              "does NOT hide a path that merely contains 'su'");
+        CHECK(!sbx_meta_hidden("/storage/emulated/0/sunset.jpg"),
+              "does NOT hide an ordinary file containing 'su'");
+        CHECK(!sbx_meta_hidden(nullptr), "null path is not hidden");
+        CHECK(!sbx_meta_hidden(""), "empty path is not hidden");
+    }
+
+    // ---- 16. uname agrees with /proc/version ------------------------------
+    // The whole point of the uname hook is that the two lenses stop
+    // contradicting each other. That is a property of the SPLIT, not of the
+    // synthesis: synth_proc_version returns a whole "Linux version <rel> (...)"
+    // line, and utsname wants <rel> in .release and the remainder in .version.
+    // A refactor that re-derives the release instead of splitting it would let
+    // the two drift again while every other check still passed.
+    {
+        g_identity["RELEASE"]        = "15";
+        g_identity["INCREMENTAL"]    = "T.R4T3.1c82702-2-1";
+        g_identity["BOARD_PLATFORM"] = "taro";
+        g_identity["HOST"]           = "oppo-build-936";
+        g_identity["SERIAL"]         = "717f35a1af136526";
+
+        struct utsname u{};
+        std::snprintf(u.release, sizeof(u.release), "%s", "4.19.337-FakeDreamer-1.9-Universe");
+        std::snprintf(u.version, sizeof(u.version), "%s", "#1 SMP PREEMPT Wed Sep 24 2025");
+
+        int rc = hook_uname(&u);
+        CHECK(rc == 0, "uname hook returns the syscall's success");
+
+        // The real kernel string names the ROM and is a kernel no CPH2521 ran.
+        CHECK(std::string(u.release) != "4.19.337-FakeDreamer-1.9-Universe",
+              "uname hook does not serve the REAL kernel release");
+        CHECK(std::string(u.release).find("FakeDreamer") == std::string::npos,
+              "uname release does not leak the ROM name");
+
+        // Must agree with what /proc/version would be served.
+        std::string want = sbxnr::synth_proc_version(
+            "15", "T.R4T3.1c82702-2-1", "taro", "oppo-build-936",
+            sbxnr::fnv1a("717f35a1af136526"));
+        static const char kPfx[] = "Linux version ";
+        CHECK(want.compare(0, sizeof(kPfx) - 1, kPfx) == 0,
+              "synth_proc_version still returns a full /proc/version line");
+        std::string body = want.substr(sizeof(kPfx) - 1);
+        size_t sp = body.find(' ');
+        CHECK(sp != std::string::npos, "synthesized line has a release token");
+        CHECK(std::string(u.release) == body.substr(0, sp),
+              "uname.release equals the release /proc/version would serve");
+
+        // .version is 65 bytes (__NEW_UTS_LEN is 64, +1 for NUL), and the
+        // remainder of a /proc/version line is longer than that - so the kernel
+        // itself would truncate, and so must we. Asserting equality here would
+        // be asserting a lie; the contract is "a prefix of the remainder, cut
+        // at the field boundary", which is exactly what a real kernel returns.
+        std::string rest = body.substr(sp + 1);
+        std::string got_ver(u.version);
+        CHECK(sizeof(u.version) == 65, "utsname.version is 65 bytes");
+        CHECK(got_ver.size() <= 64, "uname.version respects the 64-char field limit");
+        CHECK(rest.compare(0, got_ver.size(), got_ver) == 0,
+              "uname.version is a prefix of the remainder /proc/version would serve");
+        CHECK(got_ver.size() == std::min<size_t>(64, rest.size()),
+              "uname.version is truncated exactly at the field limit, not shorter");
+
+        // sysname/nodename/machine must be left alone: the persona does not
+        // describe a different OS or architecture, and rewriting them would be
+        // a new lie rather than the removal of one.
+        CHECK(std::string(u.sysname) == "Linux", "uname.sysname is untouched");
     }
 
     printf("\n%d checks, %d failures\n", checks, fails);
