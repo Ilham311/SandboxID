@@ -313,13 +313,11 @@ uint64_t ram_gb_to_memtotal_kb(int gb) {
 
 uint64_t round_up_marketing_gb(uint64_t real_kb) {
     static const int tiers[] = {2, 3, 4, 6, 8, 12, 16, 18, 24};
-    // Clamp before the rounding add. `real_kb + 1048575ULL` wraps for a
-    // real_kb within ~1 MiB of UINT64_MAX, which turned a hostile
-    // `MemTotal: 18446744073709551615 kB` into tier 2 - a 2 GB persona, not the
-    // 0 the truncating cast below would have produced. Clamping first removes
-    // the wrap and the out-of-range cast together: the largest tier is 24, so
-    // any input at or above 24 GiB is the same answer anyway.
-    constexpr uint64_t kMaxKb = 24ULL * 1024ULL * 1024ULL;   // the largest tier
+    // Clamp only pathological values before the rounding add. `real_kb +
+    // 1048575ULL` can wrap near UINT64_MAX, and the eventual int cast must stay
+    // in range. 1 TiB is not real hardware, while values above 24 GiB remain
+    // represented instead of being collapsed to the largest marketing tier.
+    constexpr uint64_t kMaxKb = 1024ULL * 1024ULL * 1024ULL;   // 1 TiB in kB
     if (real_kb > kMaxKb) real_kb = kMaxKb;
     uint64_t gib = (real_kb + 1048575ULL) / 1048576ULL;
     for (int t : tiers) if (static_cast<uint64_t>(t) >= gib) return static_cast<uint64_t>(t);
@@ -345,13 +343,10 @@ std::string patch_meminfo(const std::string& real, int target_gb) {
         while (*p && (*p < '0' || *p > '9')) ++p;
         real_kb = std::strtoull(p, nullptr, 10);
         if (real_kb == 0) return real;
-        // round_up_marketing_gb clamps to its largest tier (24), so the cast
-        // here is always in range and needs no guard of its own. It used to be
-        // reachable out of range: a hostile MemTotal (a modified kernel, or a
-        // FUSE-mounted /proc) skipped every tier and hit the int cast
-        // truncated. The clamp belongs in that function, next to the add that
-        // wraps - not here, where it would be a second, separately-wrong copy
-        // of the same bound.
+        // round_up_marketing_gb bounds the value at 1 TiB before the cast,
+        // keeping it in int range while preserving realistic totals above 24
+        // GiB. Keep the bound next to its rounding add rather than duplicating
+        // it here.
         target_kb = ram_gb_to_memtotal_kb(
             static_cast<int>(round_up_marketing_gb(real_kb)));
     }

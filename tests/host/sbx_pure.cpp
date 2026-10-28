@@ -180,20 +180,29 @@ int main() {
           std::string("garbage\nno memtotal here\n"),
           "meminfo with no MemTotal line is left alone");
 
+    // Real totals above the largest marketing tier should not be collapsed to
+    // 24 GB. Keep a 32 GiB value represented as 32 GB.
+    {
+        const std::string large = "MemTotal:        33554432 kB\nMemFree: 1 kB\n";
+        std::string h = patch_meminfo(large, 0);
+        uint64_t expect = 32ULL * 1024 * 1024 * 955 / 1000;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "MemTotal:       %llu kB", (unsigned long long)expect);
+        CHECK(h.find(buf) == 0, "32 GiB MemTotal remains represented as 32 GB");
+    }
+
     // A hostile MemTotal must not produce a truncated or wrapped value. The
-    // rounding add (`real_kb + 1048575`) wrapped for a real_kb within ~1 MiB of
-    // UINT64_MAX, which skipped every tier and pushed an out-of-range value
-    // through the int cast - a 2 GB persona out of a nonsense input, or 0.
-    // Reachable: /proc can be FUSE-mounted, and the kernel is not the only
-    // writer. The largest tier is 24 GB, so anything at or above it is 24 GB.
+    // rounding add (`real_kb + 1048575`) can wrap near UINT64_MAX and send the
+    // value through the int cast out of range. /proc can be FUSE-mounted, so
+    // the kernel is not the only writer. Values above 1 TiB are bounded there.
     {
         const std::string hostile =
             "MemTotal:        18446744073709551615 kB\nMemFree: 1 kB\n";
         std::string h = patch_meminfo(hostile, 0);
-        uint64_t expect = 24ULL * 1024 * 1024 * 955 / 1000;
+        uint64_t expect = 1024ULL * 1024 * 1024 * 955 / 1000;
         char buf[64];
         snprintf(buf, sizeof(buf), "MemTotal:       %llu kB", (unsigned long long)expect);
-        CHECK(h.find(buf) == 0, "hostile MemTotal clamps to the largest tier, not a wrapped one");
+        CHECK(h.find(buf) == 0, "hostile MemTotal clamps to 1 TiB, not a wrapped value");
         CHECK(h.find("18446744073709551615") == std::string::npos,
               "hostile MemTotal does not leak through");
     }
