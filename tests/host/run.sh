@@ -157,6 +157,23 @@ for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe sbx_process_name 
     fi
 done
 
+# ---- sbx_abi32: module_hooks.cpp must also compile as a 32-bit bionic target --
+# The suites above all compile module_hooks.cpp against the host's 64-bit glibc
+# headers. The release builds four ABIs, and bionic's 32-bit headers name the
+# fstatat syscall __NR_fstatat64 rather than __NR_newfstatat. A host-only
+# spelling therefore passes every test here and still breaks armeabi-v7a — which
+# is precisely how it shipped once. Compile the TU a second time with the 32-bit
+# preprocessor state forced, so the fallback branch is exercised locally.
+echo "==> building sbx_abi32 (32-bit bionic preprocessor state)"
+if ! "$CXX" "${FLAGS[@]}" -fsyntax-only \
+        -include "$REPO/tests/host/abi32_bionic.h" \
+        "$REPO/tests/host/sbx_abi32.cpp"; then
+    echo "FAIL: sbx_abi32 did not compile for a 32-bit bionic target"
+    exit_code=1
+else
+    echo "ok   sbx_abi32 compiles with __NR_fstatat64 only"
+fi
+
 # ---- EnvCompatStateCheck: the L3 callback's exception contract ------------
 # The L3 Java callback is compiled into DEX at build time from
 # jni/SandboxIDHook.java. A checked exception it lets escape with the wrong type

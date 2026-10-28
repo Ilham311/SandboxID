@@ -692,6 +692,30 @@ static int hook_openat_2(int dirfd, const char* path, int flags) {
 // Deliberately narrow: only the root-binary basenames the module already
 // refuses to exec (sbx_is_root_binary) are reported absent. Hiding every path
 // would break the app's own file access and is not what the check asks about.
+// bionic names the fstatat syscall differently per word size: the 64-bit ABIs
+// expose __NR_newfstatat, while the 32-bit ABIs this module also ships
+// (armeabi-v7a, x86) define only __NR_fstatat64. This is a rename, not a
+// different ABI, and that matters because the fallback below pairs the number
+// with a plain `struct stat*`:
+//
+//   On 32-bit bionic `stat` and `stat64` are the SAME function. In the device's
+//   /apex/com.android.runtime/lib/bionic/libc.so both symbols resolve to
+//   0x495c8, whose body sets r0 = AT_FDCWD and branches to fstatat64. So the
+//   syscall that backs `stat` on a 32-bit process is 327 (__NR_fstatat64), and
+//   the struct it fills is the 64-bit-off_t layout that bionic's `struct stat`
+//   already is. Passing `struct stat*` to it is exactly what libc does.
+//
+// Without this, the build dies on armeabi-v7a with "use of undeclared
+// identifier '__NR_newfstatat'". The #error keeps a future ABI from silently
+// compiling a hook that cannot fall back.
+#if defined(__NR_newfstatat)
+#  define SBX_NR_FSTATAT __NR_newfstatat
+#elif defined(__NR_fstatat64)
+#  define SBX_NR_FSTATAT __NR_fstatat64
+#else
+#  error "no fstatat syscall number for this ABI"
+#endif
+
 typedef int (*stat_fn)(const char*, struct stat*);
 typedef int (*lstat_fn)(const char*, struct stat*);
 typedef int (*fstatat_fn)(int, const char*, struct stat*, int);
@@ -731,13 +755,13 @@ static bool sbx_meta_hidden(const char* path) {
 static int hook_stat(const char* path, struct stat* buf) {
     if (sbx_meta_hidden(path)) { errno = ENOENT; return -1; }
     return orig_stat ? orig_stat(path, buf)
-                     : ::syscall(__NR_newfstatat, AT_FDCWD, path, buf, 0);
+                     : ::syscall(SBX_NR_FSTATAT, AT_FDCWD, path, buf, 0);
 }
 
 static int hook_lstat(const char* path, struct stat* buf) {
     if (sbx_meta_hidden(path)) { errno = ENOENT; return -1; }
     return orig_lstat ? orig_lstat(path, buf)
-                      : ::syscall(__NR_newfstatat, AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW);
+                      : ::syscall(SBX_NR_FSTATAT, AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW);
 }
 
 static int hook_fstatat(int dirfd, const char* path, struct stat* buf, int flags) {
@@ -764,7 +788,7 @@ static int hook_fstatat(int dirfd, const char* path, struct stat* buf, int flags
         return -1;
     }
     return orig_fstatat ? orig_fstatat(dirfd, path, buf, flags)
-                        : ::syscall(__NR_newfstatat, dirfd, path, buf, flags);
+                        : ::syscall(SBX_NR_FSTATAT, dirfd, path, buf, flags);
 }
 
 static int hook_access(const char* path, int mode) {
