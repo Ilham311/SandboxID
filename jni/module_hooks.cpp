@@ -1940,12 +1940,6 @@ void install_native_read_hooks(Api* api) {
     for (const LateReg& d : kLateRegs) {
         void* target = sbx_libc_sym(d.name);
         if (!target) continue;
-        // Already redirected by the PLT pass above when the library was mapped
-        // at specialize time. DobbyHook on an already-hooked body is the one
-        // case worth refusing rather than retrying: it would relocate our own
-        // trampoline and build a loop back into the hook. The trampoline
-        // back-pointer is the ground truth for "already live".
-        if (*d.orig) { ++dobby_late; continue; }
         void* orig = nullptr;
         if (DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(d.hook),
                       reinterpret_cast<dobby_dummy_func_t*>(&orig)) == 0 && orig) {
