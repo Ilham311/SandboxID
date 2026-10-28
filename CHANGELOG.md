@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Fix: daftar accessibility service membocorkan paket yang sudah disembunyikan
+
+**Gejala.** Grab mencatat `bin.mt.plus.canary/l.ۖۢۖ` di daftar accessibility
+service pada setiap scan, padahal modul sudah menyembunyikan `bin.mt.plus` dari
+`getInstalledPackages`/`getPackageInfo`.
+
+**Akar masalah.** `M_FILTER_PACKAGES` hanya membaca field `packageName`, yang
+dimiliki `PackageInfo`/`ApplicationInfo`. `AccessibilityServiceInfo` tidak punya
+field itu — pemiliknya hanya bisa dibaca dari `getId()`, berformat
+`pkg/.Service`. Akibatnya filter bekerja untuk satu API dan tidak untuk yang
+lain, sehingga dalam satu proses aplikasi diberi tahu bahwa sebuah paket tidak
+ada, lalu tetap melihat service milik paket itu.
+
+**Bukti.** `dexdump -d` pada `classes.dex` Grab menunjukkan
+`AccessibilityManager.getInstalledAccessibilityServiceList` dipanggil di
+`c.g.joy1.b`, yang membangun daftar `AccessibilityServiceItemData(serviceId,
+isAccessibilityTool, serviceEnabled, isSystemApp, isSideloaded)` (label field
+dibaca dari `toString()` kelas `c.g.lhy1`). Hasil scan Grab memuat id service
+tersebut apa adanya.
+
+**Perbaikan.** `filterPackages` memakai `isHiddenItem()`, yang mencoba
+`packageName` lebih dulu lalu jatuh ke `getId()` dan memotong di `/`. Kedua
+entri `AccessibilityManager` (`getInstalledAccessibilityServiceList`,
+`getEnabledAccessibilityServiceList`) memakai mode `M_FILTER_PACKAGES` yang
+sama, sehingga himpunan tersembunyi hanya punya satu definisi.
+
+**Regresi tertutup.** `tests/host/EnvCompatStateCheck.java` menguji kedua arah:
+service MT Manager harus hilang dari kedua API, sedangkan TalkBack, SystemUI dan
+Katrina (yang memang **tidak** ada di `HIDDEN_PACKAGES`) harus tetap muncul —
+filter yang diam-diam melebar ke "apa pun yang sideloaded" adalah kebijakan lain
+yang tidak diminta. Uji mutasi: membuang jalur `getId()` menggagalkan 2 check,
+menyembunyikan semua item menggagalkan 5.
+
 ### Fix: pemeriksaan root lewat `stat()` tidak pernah di-hook — Grab membaca `/system/bin/su` yang asli
 
 **Gejala.** Promo di aplikasi target ditolak dengan pesan

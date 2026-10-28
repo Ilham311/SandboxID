@@ -591,21 +591,43 @@ public final class EnvCompatState {
             java.util.List<Object> filtered = new java.util.ArrayList<Object>(src.size());
             for (Object item : src) {
                 if (item == null) continue;
-                boolean hide = false;
-                try {
-                    Field f = item.getClass().getField("packageName");
-                    Object val = f.get(item);
-                    if (val instanceof String && isHiddenPackage((String) val)) {
-                        hide = true;
-                    }
-                } catch (Throwable ignored) {}
-                if (!hide) {
-                    filtered.add(item);
-                }
+                if (isHiddenItem(item)) continue;
+                filtered.add(item);
             }
             return filtered;
         }
         return r;
+    }
+
+    /**
+     * True when a PackageManager list item belongs to a hidden package.
+     *
+     * Two shapes reach this: PackageInfo/ApplicationInfo carry a public
+     * `packageName` field, while AccessibilityServiceInfo does not - it names
+     * its owner only through getId(), which is "pkg/.Service" or
+     * "pkg/full.Class.Name". Without the second shape, hiding bin.mt.plus from
+     * getInstalledPackages left its accessibility service fully visible in
+     * getInstalledAccessibilityServiceList, so the app saw a service whose
+     * package it had just been told does not exist. Grab reads exactly that
+     * list (AccessibilityManager.getInstalledAccessibilityServiceList, via
+     * c.g.joy1.b in classes.dex) and records every id in its scan result.
+     */
+    private static boolean isHiddenItem(Object item) {
+        try {
+            Field f = item.getClass().getField("packageName");
+            Object val = f.get(item);
+            if (val instanceof String && isHiddenPackage((String) val)) return true;
+        } catch (Throwable ignored) {}
+        try {
+            Method m = item.getClass().getMethod("getId");
+            Object val = m.invoke(item);
+            if (val instanceof String) {
+                String id = (String) val;
+                int cut = id.indexOf('/');
+                if (cut > 0 && isHiddenPackage(id.substring(0, cut))) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     private static boolean isAllDigits(String s) {        if (s == null || s.length() < 10) return false;

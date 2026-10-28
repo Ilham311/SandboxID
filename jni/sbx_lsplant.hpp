@@ -970,6 +970,21 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/app/ApplicationPackageManager", "getApplicationInfo",
           "(Ljava/lang/String;Landroid/content/pm/PackageManager$ApplicationInfoFlags;)Landroid/content/pm/ApplicationInfo;",
           false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+
+        // The same hidden set has to cover the accessibility list, or the app
+        // sees a service whose package it was just told does not exist. Grab
+        // reads this list (AccessibilityManager.getInstalledAccessibilityServiceList,
+        // reached through c.g.joy1.b in classes.dex) and records every service
+        // id in its scan result, so a hidden modding tool still showed up as
+        // "bin.mt.plus.canary/l.ۖۢۖ" while getInstalledPackages denied it.
+        // AccessibilityServiceInfo has no packageName field; the filter reads
+        // getId() ("pkg/.Service") instead - see isHiddenItem().
+        { "android/view/accessibility/AccessibilityManager", "getInstalledAccessibilityServiceList",
+          "()Ljava/util/List;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/accessibility/AccessibilityManager", "getEnabledAccessibilityServiceList",
+          "(I)Ljava/util/List;",
+          false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
     };
     n = sizeof(S) / sizeof(S[0]);
     return S;

@@ -89,6 +89,32 @@ public class EnvCompatStateCheck {
             list.add(new android.content.pm.PackageInfo("com.grabtaxi.passenger"));
             return list;
         }
+
+        /**
+         * AccessibilityServiceInfo has no packageName field - the owner is
+         * encoded in getId() as "pkg/.Service". Deliberately a plain class with
+         * only getId(), so the test fails if the filter ever starts assuming a
+         * packageName field it does not have.
+         */
+        public Object getInstalledAccessibilityServiceList() {
+            java.util.List<Object> list = new java.util.ArrayList<Object>();
+            list.add(new AccService("com.google.android.marvin.talkback/.TalkBackService"));
+            list.add(new AccService("bin.mt.plus.canary/l.ۖۢۖ"));
+            list.add(new AccService("com.fufufu.katrina.backup/.KatrinaIslandService"));
+            list.add(new AccService("com.android.systemui.accessibility.accessibilitymenu/.AccessibilityMenuService"));
+            return list;
+        }
+
+        public Object getEnabledAccessibilityServiceList(int feedbackType) {
+            return getInstalledAccessibilityServiceList();
+        }
+    }
+
+    /** Minimal stand-in for android.accessibilityservice.AccessibilityServiceInfo. */
+    public static class AccService {
+        private final String id;
+        AccService(String id) { this.id = id; }
+        public String getId() { return id; }
     }
 
     static java.lang.reflect.Method m(String name) throws Exception {
@@ -331,6 +357,54 @@ public class EnvCompatStateCheck {
             check("GMS kept", hasGms);
             check("Grab kept", hasGrab);
         }
+
+        // The accessibility list is the same hidden set seen through a different
+        // API. AccessibilityServiceInfo carries no packageName field, so before
+        // isHiddenItem() learned to read getId() the modding tools stayed fully
+        // visible here while getInstalledPackages denied they existed - a
+        // contradiction inside one process, and Grab records every id.
+        androidx.core.os.EnvCompatState accList = new androidx.core.os.EnvCompatState();
+        accList.mode = androidx.core.os.EnvCompatState.M_FILTER_PACKAGES;
+        accList.isStatic = false;
+        accList.backup = Target.class.getDeclaredMethod("getInstalledAccessibilityServiceList");
+
+        Object accObj = accList.handle(new Object[]{ t });
+        check("accessibility list returns list", accObj instanceof java.util.List);
+        if (accObj instanceof java.util.List) {
+            java.util.List<?> list = (java.util.List<?>) accObj;
+            boolean hasMt = false, hasKatrina = false, hasTalkback = false, hasSysui = false;
+            for (Object o : list) {
+                if (!(o instanceof AccService)) continue;
+                String id = ((AccService) o).getId();
+                if (id.startsWith("bin.mt.plus.canary/")) hasMt = true;
+                if (id.startsWith("com.fufufu.katrina.backup/")) hasKatrina = true;
+                if (id.startsWith("com.google.android.marvin.talkback/")) hasTalkback = true;
+                if (id.startsWith("com.android.systemui.")) hasSysui = true;
+            }
+            check("MT Manager accessibility service filtered out", !hasMt);
+            // Katrina is NOT in HIDDEN_PACKAGES, so it must survive: the filter
+            // hides exactly the configured set, and a list filter that quietly
+            // widened itself to "anything sideloaded" would be a different
+            // (and unrequested) policy. Whether to add it is a separate call.
+            check("Katrina accessibility service kept (not in the hidden set)", hasKatrina);
+            check("TalkBack accessibility service kept", hasTalkback);
+            check("SystemUI accessibility service kept", hasSysui);
+        }
+
+        // Same filter, the other entry point.
+        androidx.core.os.EnvCompatState accEnabled = new androidx.core.os.EnvCompatState();
+        accEnabled.mode = androidx.core.os.EnvCompatState.M_FILTER_PACKAGES;
+        accEnabled.isStatic = false;
+        accEnabled.backup = Target.class.getDeclaredMethod("getEnabledAccessibilityServiceList", int.class);
+        Object enObj = accEnabled.handle(new Object[]{ t, -1 });
+        boolean enHasMt = false;
+        if (enObj instanceof java.util.List) {
+            for (Object o : (java.util.List<?>) enObj) {
+                if (o instanceof AccService
+                        && ((AccService) o).getId().startsWith("bin.mt.plus.canary/")) enHasMt = true;
+            }
+        }
+        check("getEnabledAccessibilityServiceList also filters MT Manager", !enHasMt);
 
         System.out.println(fails == 0 ? "ALL PASS" : fails + " FAILED");
         if (fails != 0) System.exit(1);
