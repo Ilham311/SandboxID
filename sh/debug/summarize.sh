@@ -187,7 +187,11 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     printf "  %-28s : %s\n" "  ...blocked as root"      "$(count 'NATIVE_POPEN BLOCKED')"
     printf "  %-28s : %s\n" "  ...getprop spoofed"      "$(count 'NATIVE_POPEN SPOOF')"
     printf "  %-28s : %s\n" "  ...getprop hidden"       "$(count 'NATIVE_POPEN HIDE')"
-    printf "  %-28s : %s\n" "exec family intercepted"   "$(count 'NATIVE_(EXECVE|EXECV|EXECVP|EXECVPE|FEXECVE|POSIX_SPAWN|POSIX_SPAWNP) ')"
+    # The dump-all filter. `getprop` with no key prints the whole real property
+    # table, so this row is the one that shows the leak was closed rather than
+    # merely that the single-key spoof ran.
+    printf "  %-28s : %s\n" "  ...getprop dump filtered" "$(count 'NATIVE_POPEN getprop dump filtered')"
+    printf "  %-28s : %s\n" "exec family intercepted"   "$(count 'NATIVE_(EXECVE|EXECV|EXECVP|EXECVPE|EXECL|EXECLP|EXECLE|FEXECVE|POSIX_SPAWN|POSIX_SPAWNP) ')"
     printf "  %-28s : %s\n" "synthetic pipe truncated"  "$(count 'create_synthetic_pipe: pipe fallback truncated')"
     echo ""
     # A DobbyHook failure is the one shell-guard fault that is silent about its

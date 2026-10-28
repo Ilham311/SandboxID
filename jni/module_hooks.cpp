@@ -933,6 +933,68 @@ static bool sbx_cmd_probes_busybox(const std::string& cmd) {
     return false;
 }
 
+// Rewrite one line of `getprop` output in place. `getprop` prints
+// `[key]: [value]`, one property per line.
+//
+// Returns false when the line must be dropped entirely: a hidden property must
+// not appear in an enumeration at all, or its absence is itself the tell.
+// Otherwise returns true, with `*rewritten` set when the value was replaced.
+static bool sbx_filter_getprop_line(std::string& line, bool* rewritten) {
+    *rewritten = false;
+    size_t lb = line.find('[');
+    if (lb == std::string::npos) return true;
+    size_t rb = line.find(']', lb);
+    if (rb == std::string::npos || rb == lb + 1) return true;
+    std::string key = line.substr(lb + 1, rb - lb - 1);
+    if (sbx_prop_hidden(key.c_str())) return false;
+    std::string v;
+    if (!spoof_prop_value(key, v)) return true;
+    size_t vb = line.find('[', rb);
+    if (vb == std::string::npos) return true;
+    // The closing bracket is the LAST one on the line, not the first after the
+    // value: a value that itself contains ']' would otherwise be cut short and
+    // the tail left as stray text.
+    size_t ve = line.rfind(']');
+    if (ve == std::string::npos || ve <= vb) return true;
+    line = line.substr(0, vb + 1) + v + line.substr(ve);
+    *rewritten = true;
+    return true;
+}
+
+// Run the real command and filter its `getprop` output.
+//
+// This is the path for every getprop form the single-key fast path cannot
+// answer: a bare `getprop` (dump all), `getprop | grep ...`,
+// `getprop; getprop <key>`, an option form, or a key no table knows. All of
+// those used to fall through to the unfiltered real popen, so `getprop` on its
+// own - which is exactly how a root or emulator probe enumerates a device -
+// returned the REAL property table, real model, serial, fingerprint and MIUI
+// tells included. That is the one command the single-key spoof cannot cover and
+// the one a probe reaches for first.
+static FILE* sbx_getprop_filtered(const char* command, const char* type) {
+    FILE* real_fp = orig_popen ? orig_popen(command, type) : ::popen(command, type);
+    if (!real_fp) return nullptr;
+    std::string filtered;
+    int dropped = 0, rewritten = 0;
+    char line[4096];
+    while (fgets(line, sizeof(line), real_fp)) {
+        std::string l(line);
+        bool rw = false;
+        if (sbx_filter_getprop_line(l, &rw)) {
+            if (rw) ++rewritten;
+            filtered += l;
+        } else {
+            ++dropped;
+        }
+    }
+    int rc = orig_pclose ? orig_pclose(real_fp) : ::pclose(real_fp);
+    // LOGI, not LOGD: this is the path that closes the leak, and in a release
+    // build LOGD is compiled out.
+    LOGI("NATIVE_POPEN getprop dump filtered (%d rewritten, %d hidden) from '%s'",
+         rewritten, dropped, command);
+    return create_synthetic_pipe(filtered, (rc >> 8) & 0xff);
+}
+
 static FILE* hook_popen(const char* command, const char* type) {
     if (!command) return orig_popen ? orig_popen(command, type) : ::popen(command, type);
     std::string cmd(command);
@@ -1039,6 +1101,17 @@ static FILE* hook_popen(const char* command, const char* type) {
         }
     }
 
+    // 4. Any other getprop form: dump-all, a pipeline, a compound command, or a
+    // key no table recognises. The single-key branch above answered 'getprop
+    // <known key>' and left everything else to the real popen - including bare
+    // `getprop`, which prints the entire real property table. Reachable by
+    // anything that can run a shell command, and the first thing a root or
+    // emulator probe runs.
+    if (cmd.find("getprop") != std::string::npos) {
+        FILE* fp = sbx_getprop_filtered(command, type);
+        if (fp) return fp;
+    }
+
     return orig_popen ? orig_popen(command, type) : ::popen(command, type);
 }
 
@@ -1119,6 +1192,12 @@ static execvpe_fn      orig_execvpe = nullptr;
 static fexecve_fn      orig_fexecve = nullptr;
 static posix_spawn_fn  orig_posix_spawn = nullptr;
 static posix_spawn_fn  orig_posix_spawnp = nullptr;
+// The varargs spellings never call their own original - their bodies are
+// rebuilt on the hooked execv/execvp above - but the hook tables still need a
+// slot to receive the trampoline, so the pointers exist and stay unused.
+static void*           orig_execl = nullptr;
+static void*           orig_execlp = nullptr;
+static void*           orig_execle = nullptr;
 
 // `sh -c "<something>"` hides the real command inside argv[2], where a
 // pathname/argv[0] check cannot see it: Runtime.exec(new String[]{"sh","-c",
@@ -1180,6 +1259,71 @@ static int hook_execvp(const char* file, char* const argv[]) {
 static int hook_execvpe(const char* file, char* const argv[], char* const envp[]) {
     if (sbx_exec_denied(file, argv, "EXECVPE", "file")) { errno = ENOENT; return -1; }
     return orig_execvpe ? orig_execvpe(file, argv, envp) : ::execvpe(file, argv, envp);
+}
+
+// `execl` / `execle` / `execlp` are the varargs spellings, and on bionic they do
+// not go through any symbol the table above names:
+//
+//   $ llvm-objdump -d libc.so | sed -n '/<execl>:/,+40p'
+//   bl 0x63700 <__execl<0>>      ; execl, execle
+//   bl 0x63b30 <__execl<2>>      ; execlp
+//   ... and inside those:  bl 0xc3d60 <__execve>
+//
+// `__execve` is the internal entry point and is NOT exported (readelf --dyn-syms
+// shows no __execve), so it cannot be PLT-hooked, and Dobby can only reach it
+// through a caller's own PLT stub. The public `execve` thunk is bypassed
+// entirely, so a caller using execl() reached the kernel unguarded while the
+// comment above claimed the whole family was covered.
+//
+// So the varargs forms are hooked too, and their bodies are rebuilt on top of
+// execv/execvp/execve/execvpe - which are the hooked entry points. The argv is
+// read off the va_list and handed to that same single decision point, so no
+// second copy of the deny policy exists here.
+// The va_list is taken BY POINTER, and that is load-bearing on aarch64: there
+// va_list is a struct passed by value, so a helper taking it by value walks its
+// own copy and leaves the caller's list still pointing at the FIRST vararg. The
+// caller's next va_arg then re-reads that first argument, so execle handed
+// execve the last argv entry as its environment - observed as a segfault, since
+// the string was dereferenced as a char* array.
+static void sbx_collect_argv(va_list* ap, const char* arg0,
+                             std::vector<char*>& argv) {
+    argv.clear();
+    argv.push_back(const_cast<char*>(arg0));
+    for (;;) {
+        const char* a = va_arg(*ap, const char*);
+        if (!a) break;
+        argv.push_back(const_cast<char*>(a));
+    }
+    argv.push_back(nullptr);
+}
+
+static int hook_execl(const char* path, const char* arg0, ...) {
+    va_list ap; va_start(ap, arg0);
+    std::vector<char*> argv;
+    sbx_collect_argv(&ap, arg0, argv);
+    va_end(ap);
+    return hook_execv(path, argv.data());
+}
+
+static int hook_execlp(const char* file, const char* arg0, ...) {
+    va_list ap; va_start(ap, arg0);
+    std::vector<char*> argv;
+    sbx_collect_argv(&ap, arg0, argv);
+    va_end(ap);
+    return hook_execvp(file, argv.data());
+}
+
+static int hook_execle(const char* path, const char* arg0, ...) {
+    // execle's envp is the pointer AFTER the terminating null, so the collector
+    // has to leave the list consumed past that null before it is read. Reading
+    // it one slot early would hand execve the last argv entry as the
+    // environment.
+    va_list ap; va_start(ap, arg0);
+    std::vector<char*> argv;
+    sbx_collect_argv(&ap, arg0, argv);
+    char* const* envp = va_arg(ap, char* const*);
+    va_end(ap);
+    return hook_execve(path, argv.data(), const_cast<char* const*>(envp));
 }
 
 static int hook_fexecve(int fd, char* const argv[], char* const envp[]) {
@@ -1254,6 +1398,75 @@ static int hook_fclose(FILE* stream) {
 }
 
 
+// The PLT registration table, at file scope so tests/host/sbx_hook_sm.cpp can
+// assert that every guarded entry point is actually listed. A hook body that
+// exists but is never registered here is dead code, and that is precisely how
+// execl/execlp/execle went unguarded while a comment claimed the whole exec
+// family was covered: the bodies did not exist to be forgotten.
+struct HookReg { const char* name; void* fn; void** orig; };
+static const HookReg kPltRegs[] = {
+    {"read",    reinterpret_cast<void*>(hook_read),
+                reinterpret_cast<void**>(&orig_read)},
+    {"open",    reinterpret_cast<void*>(hook_open),
+                reinterpret_cast<void**>(&orig_open)},
+    {"openat",  reinterpret_cast<void*>(hook_openat),
+                reinterpret_cast<void**>(&orig_openat)},
+    {"pread64", reinterpret_cast<void*>(hook_pread64),
+                reinterpret_cast<void**>(&orig_pread64)},
+    {"close",   reinterpret_cast<void*>(hook_close),
+                reinterpret_cast<void**>(&orig_close)},
+    {"lseek",   reinterpret_cast<void*>(hook_lseek),
+                reinterpret_cast<void**>(&orig_lseek)},
+    {"lseek64", reinterpret_cast<void*>(hook_lseek64),
+                reinterpret_cast<void**>(&orig_lseek64)},
+    {"__open_2",   reinterpret_cast<void*>(hook_open_2),
+                   reinterpret_cast<void**>(&orig_open_2)},
+    {"__openat_2", reinterpret_cast<void*>(hook_openat_2),
+                   reinterpret_cast<void**>(&orig_openat_2)},
+    {"__system_property_read_callback",
+                reinterpret_cast<void*>(hook_system_property_read_callback),
+                reinterpret_cast<void**>(&orig_prop_read_cb)},
+    {"__system_property_find",
+                reinterpret_cast<void*>(hook_system_property_find),
+                reinterpret_cast<void**>(&orig_prop_find)},
+    {"__system_property_get",
+                reinterpret_cast<void*>(hook_system_property_get),
+                reinterpret_cast<void**>(&orig_prop_get)},
+    {"popen",   reinterpret_cast<void*>(hook_popen),
+                reinterpret_cast<void**>(&orig_popen)},
+    {"pclose",  reinterpret_cast<void*>(hook_pclose),
+                reinterpret_cast<void**>(&orig_pclose)},
+    {"fclose",  reinterpret_cast<void*>(hook_fclose),
+                reinterpret_cast<void**>(&orig_fclose)},
+    // The whole exec family, not just execve: on bionic every other member
+    // branches straight to the internal __execve and never touches the
+    // public thunk. See the exec-family guard comment above.
+    //
+    // The varargs spellings (execl/execle/execlp) are covered here too, but
+    // through their own bodies rather than through __execve: that symbol is
+    // not exported, so no PLT registration can reach it. See hook_execl.
+    {"execve",  reinterpret_cast<void*>(hook_execve),
+                reinterpret_cast<void**>(&orig_execve)},
+    {"execv",   reinterpret_cast<void*>(hook_execv),
+                reinterpret_cast<void**>(&orig_execv)},
+    {"execvp",  reinterpret_cast<void*>(hook_execvp),
+                reinterpret_cast<void**>(&orig_execvp)},
+    {"execvpe", reinterpret_cast<void*>(hook_execvpe),
+                reinterpret_cast<void**>(&orig_execvpe)},
+    {"execl",   reinterpret_cast<void*>(hook_execl),
+                reinterpret_cast<void**>(&orig_execl)},
+    {"execlp",  reinterpret_cast<void*>(hook_execlp),
+                reinterpret_cast<void**>(&orig_execlp)},
+    {"execle",  reinterpret_cast<void*>(hook_execle),
+                reinterpret_cast<void**>(&orig_execle)},
+    {"fexecve", reinterpret_cast<void*>(hook_fexecve),
+                reinterpret_cast<void**>(&orig_fexecve)},
+    {"posix_spawn",  reinterpret_cast<void*>(hook_posix_spawn),
+                reinterpret_cast<void**>(&orig_posix_spawn)},
+    {"posix_spawnp", reinterpret_cast<void*>(hook_posix_spawnp),
+                reinterpret_cast<void**>(&orig_posix_spawnp)},
+};
+
 void install_native_read_hooks(Api* api) {
     const std::string& nr = val("SBX_NATIVE_READ");
     if (nr == "0") {
@@ -1277,59 +1490,6 @@ void install_native_read_hooks(Api* api) {
         // Hosts android.os.SystemProperties natives (native_get etc.) — the
         // third identity surface, see prop_hooks.cpp.
         "/libandroid_runtime.so",
-    };
-    struct HookReg { const char* name; void* fn; void** orig; };
-    static const HookReg regs[] = {
-        {"read",    reinterpret_cast<void*>(hook_read),
-                    reinterpret_cast<void**>(&orig_read)},
-        {"open",    reinterpret_cast<void*>(hook_open),
-                    reinterpret_cast<void**>(&orig_open)},
-        {"openat",  reinterpret_cast<void*>(hook_openat),
-                    reinterpret_cast<void**>(&orig_openat)},
-        {"pread64", reinterpret_cast<void*>(hook_pread64),
-                    reinterpret_cast<void**>(&orig_pread64)},
-        {"close",   reinterpret_cast<void*>(hook_close),
-                    reinterpret_cast<void**>(&orig_close)},
-        {"lseek",   reinterpret_cast<void*>(hook_lseek),
-                    reinterpret_cast<void**>(&orig_lseek)},
-        {"lseek64", reinterpret_cast<void*>(hook_lseek64),
-                    reinterpret_cast<void**>(&orig_lseek64)},
-        {"__open_2",   reinterpret_cast<void*>(hook_open_2),
-                       reinterpret_cast<void**>(&orig_open_2)},
-        {"__openat_2", reinterpret_cast<void*>(hook_openat_2),
-                       reinterpret_cast<void**>(&orig_openat_2)},
-        {"__system_property_read_callback",
-                    reinterpret_cast<void*>(hook_system_property_read_callback),
-                    reinterpret_cast<void**>(&orig_prop_read_cb)},
-        {"__system_property_find",
-                    reinterpret_cast<void*>(hook_system_property_find),
-                    reinterpret_cast<void**>(&orig_prop_find)},
-        {"__system_property_get",
-                    reinterpret_cast<void*>(hook_system_property_get),
-                    reinterpret_cast<void**>(&orig_prop_get)},
-        {"popen",   reinterpret_cast<void*>(hook_popen),
-                    reinterpret_cast<void**>(&orig_popen)},
-        {"pclose",  reinterpret_cast<void*>(hook_pclose),
-                    reinterpret_cast<void**>(&orig_pclose)},
-        {"fclose",  reinterpret_cast<void*>(hook_fclose),
-                    reinterpret_cast<void**>(&orig_fclose)},
-        // The whole exec family, not just execve: on bionic every other member
-        // branches straight to the internal __execve and never touches the
-        // public thunk. See the exec-family guard comment above.
-        {"execve",  reinterpret_cast<void*>(hook_execve),
-                    reinterpret_cast<void**>(&orig_execve)},
-        {"execv",   reinterpret_cast<void*>(hook_execv),
-                    reinterpret_cast<void**>(&orig_execv)},
-        {"execvp",  reinterpret_cast<void*>(hook_execvp),
-                    reinterpret_cast<void**>(&orig_execvp)},
-        {"execvpe", reinterpret_cast<void*>(hook_execvpe),
-                    reinterpret_cast<void**>(&orig_execvpe)},
-        {"fexecve", reinterpret_cast<void*>(hook_fexecve),
-                    reinterpret_cast<void**>(&orig_fexecve)},
-        {"posix_spawn",  reinterpret_cast<void*>(hook_posix_spawn),
-                    reinterpret_cast<void**>(&orig_posix_spawn)},
-        {"posix_spawnp", reinterpret_cast<void*>(hook_posix_spawnp),
-                    reinterpret_cast<void**>(&orig_posix_spawnp)},
     };
 
     // Collect the libraries to hook, scanning /proc/self/maps once:
@@ -1380,7 +1540,7 @@ void install_native_read_hooks(Api* api) {
         struct stat st;
         if (stat(path.c_str(), &st) != 0) continue;
         if (strncmp(path.c_str(), "/data/app/", 10) == 0) ++app_libs;
-        for (const HookReg& r : regs) {
+        for (const HookReg& r : kPltRegs) {
             // Zygisk's pltHookRegister returns void: a symbol this library does
             // not import is simply not redirected, which is harmless.
             api->pltHookRegister(st.st_dev, st.st_ino, r.name, r.fn, r.orig);
@@ -1456,6 +1616,12 @@ void install_native_read_hooks(Api* api) {
         {"execv",        reinterpret_cast<void*>(execv),        reinterpret_cast<void*>(hook_execv),        reinterpret_cast<void**>(&orig_execv)},
         {"execvp",       reinterpret_cast<void*>(execvp),       reinterpret_cast<void*>(hook_execvp),       reinterpret_cast<void**>(&orig_execvp)},
         {"execvpe",      reinterpret_cast<void*>(execvpe),      reinterpret_cast<void*>(hook_execvpe),      reinterpret_cast<void**>(&orig_execvpe)},
+        // The varargs spellings: bionic routes them to the internal __execve,
+        // which is not exported, so hooking them is the only way to cover
+        // execl()/execlp()/execle() callers. See hook_execl.
+        {"execl",        reinterpret_cast<void*>(execl),        reinterpret_cast<void*>(hook_execl),        reinterpret_cast<void**>(&orig_execl)},
+        {"execlp",       reinterpret_cast<void*>(execlp),       reinterpret_cast<void*>(hook_execlp),       reinterpret_cast<void**>(&orig_execlp)},
+        {"execle",       reinterpret_cast<void*>(execle),       reinterpret_cast<void*>(hook_execle),       reinterpret_cast<void**>(&orig_execle)},
         // By name, not by reference: see sbx_libc_sym() - these three are
         // hidden by bionic's API-level availability guards at MIN_SDK=26.
         {"fexecve",      sbx_libc_sym("fexecve"),      reinterpret_cast<void*>(hook_fexecve),      reinterpret_cast<void**>(&orig_fexecve)},
@@ -1497,7 +1663,7 @@ void install_native_read_hooks(Api* api) {
          "%d registration(s), %d live trampoline(s)): "
          "open/openat/__open_2/__openat_2/read/pread64/lseek/lseek64/close + "
          "__system_property_find/get/read_callback + "
-         "popen/pclose/fclose + execve/execv/execvp/execvpe/fexecve + "
+         "popen/pclose/fclose + execve/execv/execvp/execvpe/execl/execlp/execle/fexecve + "
          "posix_spawn/posix_spawnp",
          registered, app_libs, symbols, live);
     (void)symbols;   // counted for the log only

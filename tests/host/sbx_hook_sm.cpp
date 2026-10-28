@@ -18,7 +18,16 @@
 // ---- stubs for the parts that live in other TUs / the framework ----------
 std::map<std::string, std::string> g_identity;
 std::string g_pkg = "com.test.app";
-bool spoof_prop_value(const std::string&, std::string&) { return false; }
+// The real spoof_prop_value lives in prop_hooks.cpp behind the identity map;
+// the test drives it directly so the popen getprop filter can be exercised
+// without pulling in the whole prop layer.
+static std::map<std::string, std::string> g_test_props;
+bool spoof_prop_value(const std::string& k, std::string& out) {
+    auto it = g_test_props.find(k);
+    if (it == g_test_props.end()) return false;
+    out = it->second;
+    return true;
+}
 extern "C" int __android_log_print(int, const char*, const char*, ...) { return 0; }
 extern "C" int __android_log_write(int, const char*, const char*) { return 0; }
 // val() normally lives in prop_hooks.cpp; here it reads the test's g_identity.
@@ -216,6 +225,166 @@ int main() {
     CHECK(qn > 0 && memcmp(qbuf, mine.data(), (size_t)qn) == 0,
           "pread64 left the sequential cursor alone");
     hook_close(pfd);
+
+    // ---- 10. popen("getprop") must not leak the real property table -------
+    // The single-key branch answered 'getprop <known key>'. Every other form -
+    // bare `getprop` above all, which is how a probe enumerates a device - fell
+    // through to the unfiltered real command. These checks drive the filter
+    // that now sits on that path.
+    g_test_props["ro.product.model"] = "Pixel 8";
+    g_test_props["ro.serialno"]      = "SPOOFED123";
+    // The host's real model string also appears in ro.product.odm.model, which
+    // production spoofs from NATIVE_PROPS. The stub has to mirror that key set
+    // or the end-to-end check below fails on the harness, not on the filter.
+    g_test_props["ro.product.odm.model"] = "Pixel 8";
+
+    {
+        // A spoofed key's value is replaced; an ordinary key passes through.
+        std::string l = "[ro.product.model]: [M2012K11AG]\n";
+        bool rw = false;
+        CHECK(sbx_filter_getprop_line(l, &rw), "getprop line with a spoofed key is kept");
+        CHECK(rw, "getprop line with a spoofed key is marked rewritten");
+        CHECK(l == "[ro.product.model]: [Pixel 8]\n", "spoofed value replaces the real one");
+        CHECK(l.find("M2012K11AG") == std::string::npos, "the real model never survives the rewrite");
+
+        std::string p = "[ro.other.thing]: [keepme]\n";
+        rw = true;
+        CHECK(sbx_filter_getprop_line(p, &rw), "unrelated getprop line is kept");
+        CHECK(!rw, "unrelated getprop line is not marked rewritten");
+        CHECK(p == "[ro.other.thing]: [keepme]\n", "unrelated getprop line is untouched");
+
+        // A hidden property must disappear from the enumeration entirely.
+        std::string h = "[ro.miui.ui.version.name]: [V816]\n";
+        rw = false;
+        CHECK(!sbx_filter_getprop_line(h, &rw), "a hidden prop is dropped from the dump");
+
+        // A value containing ']' must not be cut short at the first bracket.
+        g_test_props["ro.weird"] = "a]b";
+        std::string w = "[ro.weird]: [real]\n";
+        rw = false;
+        CHECK(sbx_filter_getprop_line(w, &rw), "a value with a bracket is still filtered");
+        CHECK(w == "[ro.weird]: [a]b]\n", "the closing bracket is found from the end, not the first match");
+    }
+
+    {
+        // End to end through the real popen path: the host has a real getprop,
+        // so an unfiltered leak is visible as the host's own model string.
+        FILE* fp = hook_popen("getprop", "r");
+        CHECK(fp != nullptr, "hook_popen('getprop') returns a stream");
+        std::string dump;
+        if (fp) {
+            char b[4096];
+            size_t n;
+            while ((n = fread(b, 1, sizeof(b), fp)) > 0) dump.append(b, n);
+            hook_pclose(fp);
+        }
+        CHECK(!dump.empty(), "the filtered dump is non-empty");
+        CHECK(dump.find("M2012K11AG") == std::string::npos,
+              "the host's real ro.product.model is not in the filtered dump");
+        CHECK(dump.find("Pixel 8") != std::string::npos,
+              "the persona model is served in the filtered dump");
+    }
+    g_test_props.clear();
+
+    // ---- 11. the varargs exec family is guarded too ------------------------
+    // execl/execle/execlp call the internal __execve, which is not exported and
+    // cannot be PLT-hooked, so their bodies are rebuilt on the hooked
+    // execv/execvp. These checks pin that: each varargs form must reach the
+    // same deny decision, and must pass the argv through intact.
+    {
+        // Route the hooked entry points to a recorder instead of a real exec,
+        // so the decision and the argv are observable from the host.
+        static std::string got_path, got_argv0, got_argv1;
+        static int calls = 0;
+        orig_execv = [](const char* p, char* const a[]) -> int {
+            ++calls; got_path = p ? p : "";
+            got_argv0 = (a && a[0]) ? a[0] : "";
+            got_argv1 = (a && a[1]) ? a[1] : "";
+            return 0;
+        };
+        orig_execvp = [](const char* p, char* const a[]) -> int {
+            ++calls; got_path = p ? p : "";
+            got_argv0 = (a && a[0]) ? a[0] : "";
+            got_argv1 = (a && a[1]) ? a[1] : "";
+            return 0;
+        };
+
+        calls = 0;
+        CHECK(hook_execl("/bin/echo", "echo", "hello", (char*)nullptr) == 0,
+              "execl reaches the guarded execv");
+        CHECK(calls == 1 && got_path == "/bin/echo", "execl passes its path through");
+        CHECK(got_argv0 == "echo" && got_argv1 == "hello",
+              "execl rebuilds argv from the va_list, in order");
+
+        calls = 0;
+        CHECK(hook_execlp("echo", "echo", "hi", (char*)nullptr) == 0,
+              "execlp reaches the guarded execvp");
+        CHECK(calls == 1 && got_path == "echo", "execlp passes its file through");
+
+        // The deny decision itself must fire for a varargs caller naming su.
+        calls = 0;
+        errno = 0;
+        CHECK(hook_execl("/system/bin/su", "su", "-c", "id", (char*)nullptr) == -1,
+              "execl('/system/bin/su') is denied");
+        CHECK(errno == ENOENT, "a denied execl reports ENOENT, like the other forms");
+        CHECK(calls == 0, "a denied execl never reaches the real execv");
+
+        calls = 0;
+        errno = 0;
+        CHECK(hook_execlp("su", "su", "-c", "id", (char*)nullptr) == -1,
+              "execlp('su') is denied");
+        CHECK(calls == 0, "a denied execlp never reaches the real execvp");
+
+        // execle is the one that can silently corrupt the call: its envp sits
+        // AFTER the argv's terminating null, so reading it one slot early hands
+        // execve the last argv entry as the environment. Capture what actually
+        // arrives.
+        static const char* got_envp0 = nullptr;
+        orig_execve = [](const char* p, char* const a[], char* const e[]) -> int {
+            ++calls; got_path = p ? p : "";
+            got_argv0 = (a && a[0]) ? a[0] : "";
+            got_argv1 = (a && a[1]) ? a[1] : "";
+            got_envp0 = (e && e[0]) ? e[0] : nullptr;
+            return 0;
+        };
+
+        static char e0[] = "PATH=/bin";
+        static char* const envp[] = { e0, nullptr };
+        calls = 0; got_envp0 = nullptr;
+        CHECK(hook_execle("/bin/echo", "echo", "hello", (char*)nullptr, envp) == 0,
+              "execle reaches the guarded execve");
+        CHECK(calls == 1 && got_path == "/bin/echo", "execle passes its path through");
+        CHECK(got_argv0 == "echo" && got_argv1 == "hello",
+              "execle rebuilds argv without swallowing the envp");
+        CHECK(got_envp0 == e0,
+              "execle hands the real envp to execve, not the last argv entry");
+
+        orig_execv = nullptr;
+        orig_execvp = nullptr;
+        orig_execve = nullptr;
+    }
+
+    // ---- 12. every guarded entry point is actually registered --------------
+    // A hook body that exists but is never listed in the PLT table is dead
+    // code: the guard silently does nothing. That is how execl/execlp/execle
+    // went uncovered while a comment claimed the whole exec family was handled.
+    // The table is at file scope precisely so this can be asserted.
+    {
+        auto registered = [](const char* name) {
+            for (const HookReg& r : kPltRegs)
+                if (strcmp(r.name, name) == 0) return true;
+            return false;
+        };
+        for (const char* n : {"execve", "execv", "execvp", "execvpe",
+                              "execl", "execlp", "execle",
+                              "fexecve", "posix_spawn", "posix_spawnp"})
+            CHECK(registered(n), (std::string("PLT table registers ") + n).c_str());
+        // And the reverse: a table entry pointing at a null body would be
+        // registered but do nothing.
+        for (const HookReg& r : kPltRegs)
+            CHECK(r.fn != nullptr && r.orig != nullptr,
+                  (std::string("PLT entry '") + r.name + "' has a body and a slot").c_str());
+    }
 
     printf("\n%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
