@@ -471,13 +471,14 @@ does not run in userspace.
 - **A child process is not the target process.** The shell guard covers
   `popen()` in-process — including `popen("getprop")`, whose output is filtered
   key by key — and it denies the whole exec family when the command names a
-  root binary. It does not, and cannot, filter the output of a child the app
-  spawns through `Runtime.exec()`: that child is a new process, Zygisk does not
-  inject it (fork+exec from an app does not pass through zygote), and once it
-  has exec'd `getprop` it reads the real property table. The guard's job there
-  is to deny the root probes it can see, not to rewrite an unrelated program's
-  stdout. A probe that runs `getprop` as a subprocess therefore sees real
-  values; one that runs it through `popen`/`system` does not.
+  root binary. It does not filter the output of a child the app spawns any
+  other way. `Runtime.exec()` and `system()` both end at `posix_spawn`/`execve`
+  in a *new* process, which Zygisk does not inject (fork+exec from an app does
+  not pass through zygote), so once that child has exec'd `getprop` it reads
+  the real property table. The guard's job there is to deny the root probes it
+  can see, not to rewrite an unrelated program's stdout — and it cannot, since
+  the bytes never pass through this process. A probe that runs `getprop`
+  through `popen` sees the persona; one that runs it as a subprocess does not.
 - **Bootloader/kernel build identity.** `/proc/version` and the `Build.TIME`
   field are patched in-process, but a reader that shells out (`uname -r`) reads
   the running kernel, which is whatever the device actually boots.
