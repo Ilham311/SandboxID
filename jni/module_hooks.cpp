@@ -933,7 +933,9 @@ static FILE* hook_popen(const char* command, const char* type) {
 
     // 1. Root & binary probing via shell
     if (sbx_cmd_probes_root(cmd) || sbx_cmd_probes_busybox(cmd)) {
-        LOGD("NATIVE_POPEN BLOCKED root tool check: '%s'", command);
+        // LOGI for the same reason as sbx_exec_denied: a blocked probe is the
+        // event this layer exists for, and LOGD vanishes in a release build.
+        LOGI("NATIVE_POPEN BLOCKED root tool check: '%s'", command);
         // The shell's own wording for a command it cannot find, and the exit
         // status it uses for one (127). Returning the empty string with status
         // 1 here would be a different, equally detectable answer.
@@ -1088,6 +1090,23 @@ typedef int  (*fexecve_fn)(int, char* const[], char* const[]);
 typedef int  (*posix_spawn_fn)(pid_t*, const char*, const posix_spawn_file_actions_t*,
                                const posix_spawnattr_t*, char* const[], char* const[]);
 
+// Resolve a libc symbol by name.
+//
+// Three of the entry points below cannot be named directly: bionic declares
+// posix_spawn/posix_spawnp only from API 28 and fexecve only from API 30, while
+// this module builds with MIN_SDK=26, so the declarations are not visible and a
+// direct reference is a compile error ("no member named 'fexecve' in the global
+// namespace"). The symbols themselves are present in libc on every device the
+// module targets, so resolving them by name at runtime gives the same address a
+// direct reference would, without pinning the build to a higher API level.
+//
+// A null return is a real possibility only on an API < 28 device, where the
+// symbol genuinely does not exist; the Dobby table skips a null target, so the
+// guard for that one entry point is simply not installed.
+static void* sbx_libc_sym(const char* name) {
+    return dlsym(RTLD_DEFAULT, name);
+}
+
 static execv_fn        orig_execv = nullptr;
 static execvp_fn       orig_execvp = nullptr;
 static execvpe_fn      orig_execvpe = nullptr;
@@ -1116,16 +1135,22 @@ static bool sbx_shell_c_denied(char* const argv[]) {
 // Single decision point for the whole exec family. Returns true to deny.
 static bool sbx_exec_denied(const char* pathname, char* const argv[],
                             const char* tag, const char* what) {
+    // LOGI, not LOGD. A denial is the one event this whole layer exists to
+    // produce, it is rare by construction (the app has to actually reach for
+    // su/magisk), and in a release build LOGD compiles to nothing - so at DEBUG
+    // the guard would block a root probe and leave no trace of having done it.
+    // That is the same reasoning module.cpp applies to its L3 line: the signal
+    // that a security layer fired must survive a release build.
     if (pathname && sbx_is_root_binary(pathname)) {
-        LOGD("NATIVE_%s BLOCKED %s='%s'", tag, what, pathname);
+        LOGI("NATIVE_%s BLOCKED %s='%s'", tag, what, pathname);
         return true;
     }
     if (argv && argv[0] && sbx_is_root_binary(argv[0])) {
-        LOGD("NATIVE_%s BLOCKED argv[0]='%s'", tag, argv[0]);
+        LOGI("NATIVE_%s BLOCKED argv[0]='%s'", tag, argv[0]);
         return true;
     }
     if (sbx_shell_c_denied(argv)) {
-        LOGD("NATIVE_%s BLOCKED shell -c root command", tag);
+        LOGI("NATIVE_%s BLOCKED shell -c root command", tag);
         return true;
     }
     return false;
@@ -1166,7 +1191,13 @@ static int hook_fexecve(int fd, char* const argv[], char* const envp[]) {
         errno = ENOENT;
         return -1;
     }
-    return orig_fexecve ? orig_fexecve(fd, argv, envp) : ::fexecve(fd, argv, envp);
+    // The fallback is the by-name resolution, not a direct call: ::fexecve is
+    // not declared at MIN_SDK=26. It is only reached if the Dobby pass above
+    // failed to install this hook, in which case this body is not on the call
+    // path at all - but it still has to compile.
+    if (orig_fexecve) return orig_fexecve(fd, argv, envp);
+    auto real = reinterpret_cast<fexecve_fn>(sbx_libc_sym("fexecve"));
+    return real ? real(fd, argv, envp) : -1;
 }
 
 static int hook_posix_spawn(pid_t* pid, const char* path,
@@ -1174,8 +1205,10 @@ static int hook_posix_spawn(pid_t* pid, const char* path,
                             const posix_spawnattr_t* attr,
                             char* const argv[], char* const envp[]) {
     if (sbx_exec_denied(path, argv, "POSIX_SPAWN", "path")) return ENOENT;
-    return orig_posix_spawn ? orig_posix_spawn(pid, path, fa, attr, argv, envp)
-                            : ::posix_spawn(pid, path, fa, attr, argv, envp);
+    if (orig_posix_spawn) return orig_posix_spawn(pid, path, fa, attr, argv, envp);
+    // By name: ::posix_spawn is not declared at MIN_SDK=26 (API 28+).
+    auto real = reinterpret_cast<posix_spawn_fn>(sbx_libc_sym("posix_spawn"));
+    return real ? real(pid, path, fa, attr, argv, envp) : ENOSYS;
 }
 
 static int hook_posix_spawnp(pid_t* pid, const char* file,
@@ -1183,8 +1216,10 @@ static int hook_posix_spawnp(pid_t* pid, const char* file,
                              const posix_spawnattr_t* attr,
                              char* const argv[], char* const envp[]) {
     if (sbx_exec_denied(file, argv, "POSIX_SPAWNP", "file")) return ENOENT;
-    return orig_posix_spawnp ? orig_posix_spawnp(pid, file, fa, attr, argv, envp)
-                             : ::posix_spawnp(pid, file, fa, attr, argv, envp);
+    if (orig_posix_spawnp) return orig_posix_spawnp(pid, file, fa, attr, argv, envp);
+    // By name: ::posix_spawnp is not declared at MIN_SDK=26 (API 28+).
+    auto real = reinterpret_cast<posix_spawn_fn>(sbx_libc_sym("posix_spawnp"));
+    return real ? real(pid, file, fa, attr, argv, envp) : ENOSYS;
 }
 
 // fclose on a synthetic stream: without this, an app that closes a popen()
@@ -1415,9 +1450,11 @@ void install_native_read_hooks(Api* api) {
         {"execv",        reinterpret_cast<void*>(execv),        reinterpret_cast<void*>(hook_execv),        reinterpret_cast<void**>(&orig_execv)},
         {"execvp",       reinterpret_cast<void*>(execvp),       reinterpret_cast<void*>(hook_execvp),       reinterpret_cast<void**>(&orig_execvp)},
         {"execvpe",      reinterpret_cast<void*>(execvpe),      reinterpret_cast<void*>(hook_execvpe),      reinterpret_cast<void**>(&orig_execvpe)},
-        {"fexecve",      reinterpret_cast<void*>(fexecve),      reinterpret_cast<void*>(hook_fexecve),      reinterpret_cast<void**>(&orig_fexecve)},
-        {"posix_spawn",  reinterpret_cast<void*>(posix_spawn),  reinterpret_cast<void*>(hook_posix_spawn),  reinterpret_cast<void**>(&orig_posix_spawn)},
-        {"posix_spawnp", reinterpret_cast<void*>(posix_spawnp), reinterpret_cast<void*>(hook_posix_spawnp), reinterpret_cast<void**>(&orig_posix_spawnp)},
+        // By name, not by reference: see sbx_libc_sym() - these three are
+        // hidden by bionic's API-level availability guards at MIN_SDK=26.
+        {"fexecve",      sbx_libc_sym("fexecve"),      reinterpret_cast<void*>(hook_fexecve),      reinterpret_cast<void**>(&orig_fexecve)},
+        {"posix_spawn",  sbx_libc_sym("posix_spawn"),  reinterpret_cast<void*>(hook_posix_spawn),  reinterpret_cast<void**>(&orig_posix_spawn)},
+        {"posix_spawnp", sbx_libc_sym("posix_spawnp"), reinterpret_cast<void*>(hook_posix_spawnp), reinterpret_cast<void**>(&orig_posix_spawnp)},
     };
     for (const DobbyReg& d : dobby_regs) {
         if (!d.target) continue;
