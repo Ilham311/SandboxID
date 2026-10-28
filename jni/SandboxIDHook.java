@@ -69,6 +69,49 @@ public final class EnvCompatState {
      * impossible: LSPlant refuses a second hook on an already-hooked method.
      */
     public static final int M_VALUE_MULTI = 9;
+    /**
+     * Return a synthesized {@code AdvertisingIdClient$Info} instead of calling
+     * the original. This is the only place the advertising id can be fixed for
+     * an app that BUNDLES the Play-services client.
+     *
+     * <p>Hooking {@code $Info.getId()} is not enough, and the reason is a
+     * control-flow fact rather than a naming one. Grab ships its own copy of
+     * {@code com.google.android.gms.ads.identifier.AdvertisingIdClient} in its
+     * DEX. Its {@code getAdvertisingIdInfo(Context)} constructs a client and
+     * calls {@code b(false)}, which binds to the Play-services advertising-id
+     * service and throws {@code java.io.IOException} ("Google Play services not
+     * available" / "Connection failure") when that bind fails. The exception
+     * leaves {@code getAdvertisingIdInfo} before any {@code Info} object exists,
+     * so {@code getId()} is never invoked and its hook never fires. Grab's
+     * caller then catches it and records {@code GENERAL_EXCEPTION} (er:109) for
+     * both the adId and the limit-tracking flag.
+     *
+     * <p>The {@code Info} class is taken from the hooked method's own return
+     * type, not from {@code Class.forName}: the class lives in the app's DEX, so
+     * the callback's own loader cannot see it, while the backup Method's return
+     * type was resolved by the app's loader and is therefore the right Class.
+     */
+    public static final int M_GAID_INFO = 10;
+    /**
+     * Answer a GSF gservices query with a synthesized cursor instead of calling
+     * the original.
+     *
+     * <p>Grab reads the GSF id as
+     * {@code query("content://com.google.android.gsf.gservices", null, null,
+     * new String[]{"android_id"}, null)}, then {@code Long.parseLong(
+     * cursor.getString(1))}, then {@code Long.toHexString()}. The value on the
+     * wire is a DECIMAL long, so a device whose gservices table has no row for
+     * the key (no Google account ever signed in - the state this test device is
+     * in) hands back a null or non-numeric column and the parse throws
+     * {@code NumberFormatException}, which Grab reports as gs:"er:103"
+     * ({@code GSF_NUMBER_FORMAT_EXCEPTION}).
+     *
+     * <p>The projection is null and the key travels in selectionArgs - that is
+     * the gservices provider's own idiom, and it is why hooking
+     * {@code Settings$Secure.getString} (which the module already does) does not
+     * cover this path: a different API is being used.
+     */
+    public static final int M_GSF_CURSOR = 11;
 
     public static final String[] HIDDEN_PACKAGES = new String[]{
         "com.topjohnwu.magisk",
@@ -128,6 +171,17 @@ public final class EnvCompatState {
     public byte[]  bval;        // spoof bytes (retType == 1)
     public Method  backup;      // original method returned by lsplant::Hook
     private boolean accessibleTried;
+
+    // M_GAID_INFO: the limit-ad-tracking flag to report. A real device that has
+    // not opted out reports false, and Grab records the flag as "f"/"t" - an
+    // exception here (which is what er:109 was) is a far louder tell than either
+    // value, so the flag is always answerable.
+    public boolean gaidLimitAdTracking = false;
+
+    // M_GSF_CURSOR: the decimal GSF id to serve. The URI it answers is carried
+    // by the ordinary keyMatch/keyArgIndex gate, so one mechanism covers both
+    // String-keyed and URI-keyed hooks.
+    public String  gsfId;
 
     // M_FORCE_FALSE
     public int     forceArgIndex = -1;
@@ -281,6 +335,11 @@ public final class EnvCompatState {
         // Same shape as M_ZERO_NUMERIC: the original runs first and its result
         // is rewritten, so this cannot fall through into the switch below.
         if (mode == M_REWRITE_STRING) return rewriteString(args);
+
+        // Both of these must short-circuit BEFORE invokeOriginal: the whole
+        // point is that the original throws or returns nothing usable.
+        if (mode == M_GAID_INFO)   return gaidInfo(args);
+        if (mode == M_GSF_CURSOR)  return gsfCursor(args);
 
         if (mode == M_DISPLAY_METRICS) {
             Object r = invokeOriginal(args);
@@ -566,6 +625,113 @@ public final class EnvCompatState {
         return s;
     }
 
+    /**
+     * M_GAID_INFO: build an {@code AdvertisingIdClient$Info} carrying the
+     * persona's advertising id, without ever touching Play services.
+     *
+     * <p>The class comes from {@code backup.getReturnType()}: the backup Method
+     * was produced by LSPlant from the hooked ArtMethod, whose return type was
+     * resolved by the app's own ClassLoader. {@code Class.forName} from this
+     * callback would resolve against the module's InMemoryDexClassLoader and
+     * miss the class entirely - it lives in the app's DEX.
+     *
+     * <p>Constructor {@code (String, boolean)} is the only one the class has.
+     * If it cannot be built, the original is called after all: returning null
+     * would make Grab dereference a null Info and crash, and an exception would
+     * be a louder tell than the er:109 this replaces.
+     */
+    private Object gaidInfo(Object[] args) {
+        Class<?> infoCls = null;
+        try {
+            if (backup != null) infoCls = backup.getReturnType();
+        } catch (Throwable ignored) {}
+        if (infoCls != null && infoCls != Object.class && sval != null) {
+            try {
+                Constructor<?> c = infoCls.getConstructor(String.class, boolean.class);
+                return c.newInstance(sval, Boolean.valueOf(gaidLimitAdTracking));
+            } catch (Throwable ignored) {}
+        }
+        return invokeOriginal(args);
+    }
+
+    /**
+     * M_GSF_CURSOR: answer the gservices "android_id" lookup with a one-row,
+     * two-column cursor shaped exactly like the provider's own.
+     *
+     * <p>Shape matters as much as the value. Grab checks
+     * {@code moveToFirst()}, then {@code getColumnCount() >= 2}, then reads
+     * column 1; the provider returns {key, value} in that order. A single-column
+     * cursor would make Grab take its own GSF_QUERY_FAILED branch, and a cursor
+     * whose column 1 is not a decimal long makes it throw
+     * NumberFormatException - the er:103 this exists to remove.
+     *
+     * <p>Gated on the URI: {@code ContentResolver.query} is called for every
+     * provider in the process, and answering any of them with a gservices row
+     * would break unrelated reads. Anything that is not the gservices URI falls
+     * through to the real method untouched.
+     *
+     * <p>Which overload is hooked, and why it is the right one: Android 11+
+     * deprecates the 5-arg form in favour of the Bundle one, but the
+     * delegation runs the other way - the 5-arg body calls the 6-arg
+     * (CancellationSignal) form, which in turn calls the Bundle form. So a
+     * caller using the 5-arg form is caught by a hook on the 5-arg form, and
+     * that is what Grab uses (verified in its DEX at {@code c.g.o7y1.a()},
+     * which invokes exactly this signature). A caller using the Bundle form
+     * directly is NOT covered by this hook; Grab is not such a caller.
+     */
+    private Object gsfCursor(Object[] args) {
+        // The gate is keyArgIndex=1 (the Uri) with keyMatch set to the gservices
+        // URI. matches() compares String.valueOf(args[1]), and a Uri's toString()
+        // is exactly its string form, so the same helper that gates String-keyed
+        // hooks gates this one.
+        if (!matches(args)) return invokeOriginal(args);
+        if (gsfId == null || gsfId.isEmpty()) return invokeOriginal(args);
+
+        // The gservices provider's idiom is that selectionArgs ARE the keys
+        // being looked up, and this hook only knows one of them. Answering a
+        // query for any other key with the android_id row would corrupt an
+        // unrelated read - and Grab does read other keys through the same
+        // provider. So: answer only when "android_id" is among the requested
+        // keys, and let everything else reach the real provider.
+        if (!wantsAndroidId(args)) return invokeOriginal(args);
+
+        try {
+            Class<?> mc = Class.forName("android.database.MatrixCursor");
+            Object cursor = mc.getConstructor(String[].class, int.class)
+                    .newInstance(new String[]{"_id", "value"}, Integer.valueOf(1));
+            mc.getMethod("addRow", Object[].class)
+                    .invoke(cursor, (Object) new Object[]{"android_id", gsfId});
+            return cursor;
+        } catch (Throwable ignored) {
+            // No MatrixCursor (or it refused) - the original still answers, just
+            // with whatever the device really has. Better a real miss than a
+            // crash inside a framework method.
+            return invokeOriginal(args);
+        }
+    }
+
+    /**
+     * True when the query's selectionArgs name "android_id".
+     *
+     * <p>Index 4, not 3: for a non-static hook args[0] is the receiver, so the
+     * signature (Uri, projection, selection, selectionArgs, sortOrder) lands at
+     * args[1..5]. Verified against Grab's own call site in {@code c.g.o7y1.a()},
+     * where the invoke-virtual/range register list is
+     * {receiver, Uri, projection=null, selection=null, selectionArgs={"android_id"},
+     * sortOrder=null}.
+     *
+     * <p>A null or empty selectionArgs means the caller wants every row, which
+     * this hook cannot honestly serve - fall through.
+     */
+    private static boolean wantsAndroidId(Object[] args) {
+        if (args == null || args.length <= 4) return false;
+        Object sel = args[4];
+        if (!(sel instanceof Object[])) return false;
+        for (Object o : (Object[]) sel) {
+            if ("android_id".equals(o)) return true;
+        }
+        return false;
+    }
     private Object filterPackages(Object[] args) {
         if (args != null && args.length > 1 && args[1] instanceof String) {
             String pkg = (String) args[1];

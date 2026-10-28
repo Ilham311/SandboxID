@@ -371,6 +371,10 @@ private:
         // GAID: a stable UUID per persona. Same derivation the L3 hooks would
         // otherwise have to invent, kept here so it rotates with the seed.
         hv.gaid       = sbxnr::uuid_from_seed(hv.seed ^ 0x47414944ULL);   // "GAID"
+        // GSF id: decimal, because the gservices provider serves a decimal long
+        // and every client parses it with Long.parseLong(). Distinct salt from
+        // GAID so the two ids are not visibly related.
+        hv.gsf_id     = sbxnr::decimal_from_seed(hv.seed ^ 0x4753464944ULL); // "GSFID"
 
         // Display metrics resolution based on persona model
         {

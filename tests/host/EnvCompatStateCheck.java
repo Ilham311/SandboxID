@@ -108,6 +108,46 @@ public class EnvCompatStateCheck {
         public Object getEnabledAccessibilityServiceList(int feedbackType) {
             return getInstalledAccessibilityServiceList();
         }
+
+        /**
+         * Grab's bundled AdvertisingIdClient.getAdvertisingIdInfo. The real one
+         * throws here: its b(false) binds to the Play-services advertising-id
+         * service and wraps a failed bind in java.io.IOException before any
+         * Info exists. Modelled exactly - static, taking a Context, returning
+         * the Info type - because that is the control flow the M_GAID_INFO hook
+         * has to pre-empt. A stub that returned an Info, or one whose return
+         * type were Object, would make the test pass without the hook doing
+         * anything: the hook takes the Info class from
+         * backup.getReturnType().
+         */
+        public static com.google.android.gms.ads.identifier.AdvertisingIdClient.Info
+                getAdvertisingIdInfo(Object context) throws java.io.IOException {
+            throw new java.io.IOException("Google Play services not available");
+        }
+
+        /**
+         * ContentResolver.query, as Grab calls it for the GSF id. The real
+         * gservices provider carries the keys in selectionArgs and returns one
+         * row per requested key that exists. Modelled faithfully - including
+         * returning an empty cursor for a key it does not have - so the test can
+         * tell "the hook answered" apart from "the provider answered", which is
+         * the whole point of the gate.
+         */
+        public Object query(Object uri, String[] projection, String selection,
+                            String[] selectionArgs, String sortOrder) {
+            String u = String.valueOf(uri);
+            if (u.equals("content://com.google.android.gsf.gservices")
+                    || u.equals("content://settings/secure")) {
+                // Both providers are queried with selectionArgs={"android_id"},
+                // and both return an empty cursor here: gservices has no row for
+                // the key (the er:103 state), and Settings.Secure's row is served
+                // by a different code path entirely. Returning the same shape for
+                // both is what lets the test prove the hook distinguishes them by
+                // URI rather than by key.
+                return new android.database.MatrixCursor(new String[]{"_id", "value"}, 1);
+            }
+            return "real-cursor:" + u;
+        }
     }
 
     /** Minimal stand-in for android.accessibilityservice.AccessibilityServiceInfo. */
@@ -405,6 +445,157 @@ public class EnvCompatStateCheck {
             }
         }
         check("getEnabledAccessibilityServiceList also filters MT Manager", !enHasMt);
+
+        // ---- M_GAID_INFO: the advertising id for an app that bundles the client
+        //
+        // The failure this fixes, seen in Grab's scan result: ad:"er:109" and
+        // adl:"er:109", both GENERAL_EXCEPTION. Grab ships its own
+        // AdvertisingIdClient, whose getAdvertisingIdInfo() calls b(false) ->
+        // bindService -> throws java.io.IOException before any Info exists. The
+        // pre-existing hook on $Info.getId() therefore never fires: getId() is
+        // never reached. The hook has to be on the static entry point.
+        androidx.core.os.EnvCompatState g = new androidx.core.os.EnvCompatState();
+        g.mode = androidx.core.os.EnvCompatState.M_GAID_INFO;
+        g.isStatic = true;
+        g.sval = "11111111-2222-4333-8444-555555555555";
+        g.gaidLimitAdTracking = false;
+        g.backup = Target.class.getDeclaredMethod("getAdvertisingIdInfo", Object.class);
+        // Wrapped: if the hook does not pre-empt the original, the original's
+        // IOException escapes here. Reporting that as a named failure is far more
+        // useful than letting main() die with a stack trace that names the stub
+        // instead of the regression.
+        Object infoObj = null;
+        Throwable gaidErr = null;
+        try {
+            infoObj = g.handle(new Object[]{ t });
+        } catch (Throwable e) {
+            gaidErr = e;
+        }
+        check("M_GAID_INFO does not let the original IOException escape",
+                gaidErr == null);
+
+        check("M_GAID_INFO returns an Info instead of propagating the IOException",
+                infoObj instanceof com.google.android.gms.ads.identifier.AdvertisingIdClient.Info);
+        if (infoObj instanceof com.google.android.gms.ads.identifier.AdvertisingIdClient.Info) {
+            com.google.android.gms.ads.identifier.AdvertisingIdClient.Info info =
+                    (com.google.android.gms.ads.identifier.AdvertisingIdClient.Info) infoObj;
+            check("M_GAID_INFO carries the persona advertising id",
+                    "11111111-2222-4333-8444-555555555555".equals(info.getId()));
+            check("M_GAID_INFO reports limit-ad-tracking false (not opted out)",
+                    !info.isLimitAdTrackingEnabled());
+        }
+
+        // The other direction: with no id to serve, the original must still run
+        // and its own exception must reach the caller unchanged. A hook that
+        // swallowed the IOException and returned null would hand Grab a null
+        // Info to dereference.
+        androidx.core.os.EnvCompatState gNoVal = new androidx.core.os.EnvCompatState();
+        gNoVal.mode = androidx.core.os.EnvCompatState.M_GAID_INFO;
+        gNoVal.isStatic = true;
+        gNoVal.backup = Target.class.getDeclaredMethod("getAdvertisingIdInfo", Object.class);
+        try {
+            gNoVal.handle(new Object[]{ t });
+            check("M_GAID_INFO without a value still throws", false);
+        } catch (Throwable e) {
+            check("M_GAID_INFO without a value propagates the original IOException",
+                    e instanceof java.io.IOException);
+        }
+
+        // ---- M_GSF_CURSOR: the GSF id for a device with an empty gservices table
+        //
+        // The failure this fixes: gs:"er:103" (GSF_NUMBER_FORMAT_EXCEPTION).
+        // Grab does Long.parseLong(cursor.getString(1)); the stub's column 1 is
+        // null, which throws exactly the NumberFormatException that produces
+        // er:103. The hook must answer with a cursor whose column 1 parses.
+        androidx.core.os.EnvCompatState s = new androidx.core.os.EnvCompatState();
+        s.mode = androidx.core.os.EnvCompatState.M_GSF_CURSOR;
+        s.isStatic = false;
+        s.keyArgIndex = 1;
+        s.keyMatch = "content://com.google.android.gsf.gservices";
+        s.keyContains = false;
+        s.gsfId = "81985529216486895";
+        s.backup = Target.class.getDeclaredMethod("query", Object.class, String[].class,
+                String.class, String[].class, String.class);
+        Object curObj = s.handle(new Object[]{ t,
+                "content://com.google.android.gsf.gservices", null, null,
+                new String[]{"android_id"}, null });
+
+        check("M_GSF_CURSOR returns a MatrixCursor",
+                curObj instanceof android.database.MatrixCursor);
+        if (curObj instanceof android.database.MatrixCursor) {
+            android.database.MatrixCursor c = (android.database.MatrixCursor) curObj;
+            check("M_GSF_CURSOR cursor has the provider's two columns",
+                    c.getColumnCount() == 2);
+            // Read column 1 defensively: a one-column cursor would otherwise
+            // throw and turn this regression into a stack trace from main()
+            // rather than a named failure.
+            String col0 = null, col1 = null;
+            try { col0 = c.getString(0); } catch (Throwable ignored) {}
+            try { col1 = c.getString(1); } catch (Throwable ignored) {}
+            check("M_GSF_CURSOR column 0 is the queried key", "android_id".equals(col0));
+            check("M_GSF_CURSOR column 1 is the persona GSF id",
+                    "81985529216486895".equals(col1));
+            // The whole point: the value Grab parses must actually parse, and
+            // must round-trip through the same call chain Grab uses -
+            // Long.parseLong(decimal) then Long.toHexString(). Asserting a fixed
+            // hex length would be asserting something no device guarantees:
+            // toHexString() trims leading zeros, so a value below 2^60 renders
+            // in 15 digits, and that is a perfectly normal GSF id.
+            boolean parsed = false;
+            boolean roundTrips = false;
+            try {
+                long v = Long.parseLong(col1);
+                String hex = Long.toHexString(v);
+                parsed = true;
+                roundTrips = !hex.isEmpty() && Long.parseLong(hex, 16) == v;
+            } catch (Throwable ignored) {}
+            check("M_GSF_CURSOR column 1 survives Long.parseLong", parsed);
+            check("M_GSF_CURSOR column 1 round-trips through Long.toHexString", roundTrips);
+        }
+
+        // The other direction: a query for any other provider must reach the
+        // real ContentResolver untouched. This hook sits on a method called for
+        // every provider in the process, so a gate that leaked would corrupt
+        // unrelated reads.
+        Object other = s.handle(new Object[]{ t,
+                "content://com.example.other", null, null, null, null });
+        check("M_GSF_CURSOR leaves other providers alone",
+                "real-cursor:content://com.example.other".equals(String.valueOf(other)));
+
+        // And the same provider, a different key: gservices carries the keys in
+        // selectionArgs, so a query for another key must reach the real provider
+        // rather than be answered with the android_id row. The stub's own cursor
+        // is empty and has no rows, while the hook's is one row - so "count == 0"
+        // is what distinguishes "fell through" from "answered".
+        Object otherKey = s.handle(new Object[]{ t,
+                "content://com.google.android.gsf.gservices", null, null,
+                new String[]{"logging_id2"}, null });
+        check("M_GSF_CURSOR leaves other gservices keys alone",
+                otherKey instanceof android.database.MatrixCursor
+                        && ((android.database.MatrixCursor) otherKey).getCount() == 0);
+
+        // A query with no selectionArgs asks for every row; this hook cannot
+        // honestly serve that either.
+        Object allRows = s.handle(new Object[]{ t,
+                "content://com.google.android.gsf.gservices", null, null, null, null });
+        check("M_GSF_CURSOR leaves an unfiltered gservices query alone",
+                allRows instanceof android.database.MatrixCursor
+                        && ((android.database.MatrixCursor) allRows).getCount() == 0);
+
+        // The URI gate is NOT redundant with the key gate, and this is the case
+        // that proves it: Settings.Secure's provider is queried with
+        // selectionArgs={"android_id"} too, because that is how
+        // Settings.Secure.getString(name) is implemented. The android_id and the
+        // GSF id are different identifiers, so answering that query with the GSF
+        // id would hand the app the wrong value under the right name - a subtler
+        // and worse failure than the er:103 this fix removes. Only the gservices
+        // URI may be answered.
+        Object secureAndroidId = s.handle(new Object[]{ t,
+                "content://settings/secure", null, null,
+                new String[]{"android_id"}, null });
+        check("M_GSF_CURSOR does not answer Settings.Secure's android_id lookup",
+                secureAndroidId instanceof android.database.MatrixCursor
+                        && ((android.database.MatrixCursor) secureAndroidId).getCount() == 0);
 
         System.out.println(fails == 0 ? "ALL PASS" : fails + " FAILED");
         if (fails != 0) System.exit(1);

@@ -65,6 +65,13 @@ std::string uuid_from_seed(uint64_t seed);
 std::string mac_from_seed(uint64_t seed);
 bool is_valid_mac(const std::string& m);
 std::string hex_from_seed(uint64_t seed, size_t nbytes);
+// A positive 63-bit value rendered as decimal digits. This is the shape the
+// GSF gservices provider serves for the android_id row: clients read it with
+// Long.parseLong() and then Long.toHexString() it, so the wire format is
+// decimal even though the id is usually *displayed* as hex. Clearing the top
+// bit keeps the value inside a signed long without a sign for the client to
+// round-trip.
+std::string decimal_from_seed(uint64_t seed);
 
 std::string snowflake_from_seed(uint64_t seed, uint64_t epoch_ms);
 ApplogIds make_applog_ids(uint64_t seed, uint64_t epoch_ms);

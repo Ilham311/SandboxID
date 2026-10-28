@@ -72,6 +72,15 @@ struct HookValues {
     std::string op_alpha;   // operator display name, e.g. "Telkomsel"
     std::string op_iso;     // operator country iso, e.g. "id"
     std::string gaid;       // advertising id, synthesized from seed
+    // GSF id, as the decimal string Grab parses. Grab reads it by querying
+    // content://com.google.android.gsf.gservices for the "android_id" row and
+    // running Long.parseLong(cursor.getString(1)) on the result, then
+    // Long.toHexString() on that - so the wire format is a *decimal* long, not
+    // the hex form the id is usually displayed in. A device whose gservices
+    // table is empty (no Google account ever signed in) makes that parse throw
+    // NumberFormatException, which Grab reports as gs:"er:103"
+    // (GSF_NUMBER_FORMAT_EXCEPTION) and treats as a device tell.
+    std::string gsf_id;     // decimal digits, fits in a signed 64-bit long
     std::string openudid;   // persona openudid (same value rotate_ids.sh seeds)
     std::string clientudid; // persona clientudid
     std::string cdid;       // persona cdid
@@ -253,7 +262,7 @@ inline bool sbx_inline_unhooker(void* func) { return DobbyDestroy(func) == 0; }
 enum ValId {
     V_NONE = 0, V_ZERO, V_ANDROID_ID, V_SERIAL, V_IMEI, V_MEID, V_IMSI, V_ICCID,
     V_OP_NUM, V_OP_ALPHA, V_OP_ISO, V_WIFI_MAC, V_BT_ADDR, V_WIDEVINE,
-    V_GAID, V_OPENUDID, V_CLIENTUDID, V_CDID
+    V_GAID, V_OPENUDID, V_CLIENTUDID, V_CDID, V_GSF_ID
 };
 
 // Callback behaviour, mirrored by the constants in jni/SandboxIDHook.java.
@@ -268,6 +277,8 @@ enum Mode {
     M_APP_ATTACH      = 7,// intercept Application attach/create and hook app-level targets
     M_FILTER_PACKAGES = 8,// hide root apps & tools from PackageManager queries
     M_VALUE_MULTI     = 9,// return the spoof value for the gated key, from a key->value table
+    M_GAID_INFO       = 10,// build an AdvertisingIdClient$Info without calling Play services
+    M_GSF_CURSOR      = 11,// answer a gservices query with a synthesized cursor
 };
 
 // ret_type: 0 String, 1 byte[]
@@ -308,6 +319,7 @@ struct State {
               f_cdid = nullptr, f_rwFrom = nullptr, f_rwTo = nullptr,
               f_deny = nullptr,
               f_multiKeys = nullptr, f_multiVals = nullptr,
+              f_gaidLimit = nullptr, f_gsfId = nullptr,
               f_dispW = nullptr, f_dispH = nullptr, f_dispDpi = nullptr,
               f_dispXdpi = nullptr, f_dispYdpi = nullptr,
               f_dispMetricType = nullptr;
@@ -452,6 +464,8 @@ inline bool resolve_callback_members(JNIEnv* env) {
     g.f_rwTo       = env->GetFieldID(g.cb_class, "rwTo",         "[Ljava/lang/String;");
     g.f_multiKeys  = env->GetFieldID(g.cb_class, "multiKeys",    "[Ljava/lang/String;");
     g.f_multiVals  = env->GetFieldID(g.cb_class, "multiVals",    "[Ljava/lang/String;");
+    g.f_gaidLimit  = env->GetFieldID(g.cb_class, "gaidLimitAdTracking", "Z");
+    g.f_gsfId      = env->GetFieldID(g.cb_class, "gsfId",        "Ljava/lang/String;");
     g.f_deny       = env->GetStaticFieldID(g.cb_class, "deny",    "[Ljava/lang/String;");
 
     g.f_dispW          = env->GetFieldID(g.cb_class, "displayWidth",      "I");
@@ -505,7 +519,7 @@ inline bool resolve_callback_members(JNIEnv* env) {
            g.f_retType && g.f_sval && g.f_bval && g.f_backup && g.f_forceIdx &&
            g.f_bodyIdx && g.f_urlIdx && g.f_urlMatch && g.f_openudid &&
            g.f_clientudid && g.f_cdid && g.f_rwFrom && g.f_rwTo && g.f_deny &&
-           g.f_multiKeys && g.f_multiVals &&
+           g.f_multiKeys && g.f_multiVals && g.f_gaidLimit && g.f_gsfId &&
            g.f_dispW && g.f_dispH && g.f_dispDpi && g.f_dispMetricType;
 }
 
@@ -597,6 +611,7 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_WIFI_MAC:   return wifi;
         case V_BT_ADDR:    return bt;
         case V_GAID:       return v.gaid;
+        case V_GSF_ID:     return v.gsf_id;
         case V_OPENUDID:   return v.openudid;
         case V_CLIENTUDID: return v.clientudid;
         case V_CDID:       return v.cdid;
@@ -780,6 +795,24 @@ inline bool hook_one_class(JNIEnv* env, jclass cls, const HookSpec& sp) {
                 }
             }
         }
+        if (sp.mode == M_GAID_INFO) {
+            // The id itself, plus the limit-tracking flag. Both are needed
+            // before the hook can answer: the constructor takes (String,
+            // boolean) and Grab records the flag as "f"/"t".
+            std::string sval = sbx_value_for(sp.val_id, g.vals, g.ids, g.wifi, g.bt);
+            if (!sval.empty()) {
+                jstring sv = env->NewStringUTF(sval.c_str());
+                if (sv) env->SetObjectField(hooker, g.f_sval, sv);
+            }
+            env->SetBooleanField(hooker, g.f_gaidLimit, JNI_FALSE);
+        }
+        if (sp.mode == M_GSF_CURSOR) {
+            std::string sval = sbx_value_for(sp.val_id, g.vals, g.ids, g.wifi, g.bt);
+            if (!sval.empty()) {
+                jstring sv = env->NewStringUTF(sval.c_str());
+                if (sv) env->SetObjectField(hooker, g.f_gsfId, sv);
+            }
+        }
 
         jobject backup = lsplant::Hook(env, target, hooker, g.cb_reflected);
         if (!backup || env->ExceptionCheck()) { env->ExceptionClear(); why = "lsplant::Hook refused"; return false; }
@@ -868,9 +901,42 @@ inline const HookSpec* hook_specs(size_t& n) {
           false, M_VALUE, -1, nullptr, false, 0, V_BT_ADDR, -1, -1, -1, nullptr },
 
         // ---- P2: advertising id (Play services) ----
+        //
+        // Two hooks, and the second is the one that matters for an app that
+        // bundles the client. $Info.getId() only covers a caller that already
+        // obtained an Info - i.e. one whose getAdvertisingIdInfo() succeeded.
+        // Grab ships its own AdvertisingIdClient, and its getAdvertisingIdInfo
+        // calls b(false), which binds to the Play-services advertising-id
+        // service and throws java.io.IOException ("Google Play services not
+        // available", "Connection failure") before any Info exists. The
+        // exception leaves the method, getId() is never reached, and Grab's
+        // caller records GENERAL_EXCEPTION (er:109) for both adId and the
+        // limit-tracking flag. Hooking the static entry point is what removes
+        // that; getId() stays for callers that reach it.
         { "com/google/android/gms/ads/identifier/AdvertisingIdClient$Info", "getId",
           "()Ljava/lang/String;", false, M_VALUE, -1, nullptr, false, 0, V_GAID,
           -1, -1, -1, nullptr },
+        { "com/google/android/gms/ads/identifier/AdvertisingIdClient", "getAdvertisingIdInfo",
+          "(Landroid/content/Context;)Lcom/google/android/gms/ads/identifier/AdvertisingIdClient$Info;",
+          true, M_GAID_INFO, -1, nullptr, false, 0, V_GAID, -1, -1, -1, nullptr },
+
+        // ---- P2b: GSF id (gservices provider) ----
+        //
+        // Grab reads the GSF id by querying content://com.google.android.gsf.gservices
+        // for the "android_id" row, then Long.parseLong(cursor.getString(1)) and
+        // Long.toHexString(). Hooking Settings$Secure.getString does not cover
+        // this - it is a different API against a different provider. On a device
+        // whose gservices table has no row (no Google account ever signed in)
+        // the parse throws NumberFormatException and Grab records
+        // gs:"er:103" (GSF_NUMBER_FORMAT_EXCEPTION).
+        //
+        // The gate is the Uri at args[1]; matches() compares String.valueOf(),
+        // which for a Uri is its string form. Every other provider query in the
+        // process falls through to the real ContentResolver.
+        { "android/content/ContentResolver", "query",
+          "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+          false, M_GSF_CURSOR, 1, "content://com.google.android.gsf.gservices", false, 0,
+          V_GSF_ID, -1, -1, -1, nullptr },
 
         // ---- P3: class-load observer (feeds the TikTok table below) ----
         { "java/lang/ClassLoader", "loadClass", "(Ljava/lang/String;Z)Ljava/lang/Class;",

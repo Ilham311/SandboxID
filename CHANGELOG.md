@@ -2,6 +2,72 @@
 
 ## Unreleased
 
+### Fix: `gs:"er:103"` dan `ad`/`adl:"er:109"` di hasil scan Grab
+
+**Gejala.** Hasil scan Grab memuat `gs:"er:103"`, `ad:"er:109"`, dan
+`adl:"er:109"`. Ketiganya adalah field identitas yang gagal dibaca, dan
+kegagalan itu sendiri adalah sinyal perangkat yang lebih keras daripada nilai
+apa pun yang benar.
+
+**Akar masalah, `ad`/`adl`.** Grab **membundel sendiri**
+`com.google.android.gms.ads.identifier.AdvertisingIdClient` di DEX-nya. Metode
+`getAdvertisingIdInfo(Context)` membuat client lalu memanggil `b(false)`, yang
+melakukan `bindService` ke service advertising-id Play services dan melempar
+`java.io.IOException` (`"Google Play services not available"`,
+`"Connection failure"`) bila bind gagal. Exception itu keluar dari
+`getAdvertisingIdInfo` **sebelum** objek `Info` pernah dibuat, sehingga
+`$Info.getId()` tidak pernah dipanggil dan hook yang sudah ada tidak pernah
+menyala. Pemanggil Grab menangkapnya dan mencatat `GENERAL_EXCEPTION` (109)
+untuk kedua field.
+
+**Akar masalah, `gs`.** Grab membaca GSF id dengan
+`query("content://com.google.android.gsf.gservices", null, null,
+new String[]{"android_id"}, null)`, lalu `Long.parseLong(cursor.getString(1))`
+dan `Long.toHexString()`. Hook `Settings$Secure.getString` yang sudah ada tidak
+menutupi jalur ini — API dan provider-nya berbeda. Pada perangkat yang tabel
+gservices-nya kosong (belum pernah ada akun Google), kolom 1 bukan long yang
+bisa di-parse, `parseLong` melempar `NumberFormatException`, dan Grab mencatat
+`GSF_NUMBER_FORMAT_EXCEPTION` (103).
+
+**Bukti.** `dexdump -d` pada `classes.dex` Grab:
+`c.g.o7y1.a()` memanggil `getAdvertisingIdInfo` lalu `$Info.getId()` dan
+`isLimitAdTrackingEnabled()`; blok `catch`-nya memetakan
+`NoClassDefFoundError`/`ClassNotFoundException` → 111, kedua exception GMS →
+112, dan **exception lain apa pun** → 109. Body `AdvertisingIdClient.b(Z)`
+menunjukkan `java.io.IOException` dilempar dari tiga tempat (bind gagal,
+`GoogleApiAvailabilityLight` bukan `SUCCESS`, interrupted). Untuk `gs`,
+`c.g.o7y1.a()` memuat `content://com.google.android.gsf.gservices`, memanggil
+`ContentResolver.query`, lalu `moveToFirst`/`getColumnCount() >= 2`/
+`getString(1)`/`Long.parseLong`/`Long.toHexString`, dengan
+`NumberFormatException` → field `.g` = 103. Pemetaan enum diverifikasi dari
+bytecode `clinit` `c.g.cvy1`, bukan dari urutan ordinal.
+
+**Perbaikan.** Dua mode callback baru:
+`M_GAID_INFO` (10) membangun `AdvertisingIdClient$Info` sendiri dari
+`backup.getReturnType()` — kelas itu hidup di DEX aplikasi, jadi `Class.forName`
+dari callback tidak akan menemukannya — sehingga `getAdvertisingIdInfo` tidak
+pernah menyentuh Play services; `M_GSF_CURSOR` (11) menjawab query gservices
+dengan `MatrixCursor` dua kolom `{_id, value}` berisi GSF id **desimal** dari
+persona, sehingga `Long.parseLong` berhasil. Nilai GSF id berasal dari
+`decimal_from_seed(seed ^ "GSFID")`, dengan bit teratas dibersihkan agar selalu
+positif 63-bit seperti id asli.
+
+**Kenapa desimal, bukan hex.** Provider gservices menyajikan long desimal; hanya
+`toHexString()` milik klien yang mengubahnya ke hex. Menyajikan hex di sini akan
+melempar `NumberFormatException` di klien — persis kegagalan yang diperbaiki.
+
+**Regresi tertutup.** `tests/host/EnvCompatStateCheck.java` menguji kedua arah
+untuk masing-masing hook: dengan nilai, `IOException` asli tidak boleh lolos dan
+`Info` harus membawa id persona serta flag limit-tracking `false`; tanpa nilai,
+`IOException` asli harus tetap sampai ke pemanggil (mengembalikan `null` akan
+membuat Grab melakukan dereference pada `Info` null). Untuk GSF, query ke
+provider lain harus tetap mencapai `ContentResolver` asli. `tests/host/sbx_pure.cpp`
+mengunci format: semua digit, deterministik, berbeda per seed, dan berada dalam
+rentang long positif untuk 4096 seed. Uji mutasi: hook GAID dijadikan no-op
+menggagalkan 2 check, gerbang URI dibuang menggagalkan 1, cursor satu kolom
+menggagalkan 3, bit teratas tidak dibersihkan menggagalkan 3, dan hex alih-alih
+desimal menggagalkan 2.
+
 ### Fix: daftar accessibility service membocorkan paket yang sudah disembunyikan
 
 **Gejala.** Grab mencatat `bin.mt.plus.canary/l.ۖۢۖ` di daftar accessibility

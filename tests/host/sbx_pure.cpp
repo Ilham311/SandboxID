@@ -332,6 +332,37 @@ int main() {
     CHECK(uuid_from_seed(42) == u, "uuid deterministic");
     CHECK(hex_from_seed(1, 32).size() == 64, "hex_from_seed 32 bytes -> 64 chars");
 
+    // ---- decimal_from_seed: the GSF id wire format ------------------------
+    //
+    // The value must be a DECIMAL string, because every client parses it with
+    // Long.parseLong() and only then calls Long.toHexString(). Serving hex here
+    // throws NumberFormatException in the client - that is Grab's gs:"er:103".
+    {
+        std::string d = decimal_from_seed(42);
+        CHECK(!d.empty(), "decimal_from_seed non-empty");
+        CHECK(d.find_first_not_of("0123456789") == std::string::npos,
+              "decimal_from_seed is all digits (Long.parseLong-able)");
+        CHECK(decimal_from_seed(42) == d, "decimal_from_seed deterministic");
+        CHECK(decimal_from_seed(42) != decimal_from_seed(43),
+              "decimal_from_seed differs per seed");
+        // A real GSF id is a positive 63-bit value. A negative one would render
+        // through Long.toHexString() as a 16-digit two's-complement string,
+        // which no device produces.
+        CHECK(d.size() < 20, "decimal_from_seed fits in a signed 64-bit long");
+        CHECK(d[0] != '-', "decimal_from_seed is not negative");
+        // Sweep: the top bit must be clear for every seed, not just this one.
+        bool allPositive = true;
+        for (uint64_t s = 0; s < 4096; ++s) {
+            std::string x = decimal_from_seed(s);
+            if (x.empty() || x[0] == '-' || x.size() > 19) { allPositive = false; break; }
+            // 9223372036854775807 is LONG_MAX; compare as strings by length then
+            // lexicographically, since the host has no 64-bit decimal parser here.
+            static const char* kMax = "9223372036854775807";
+            if (x.size() == 19 && x.compare(kMax) > 0) { allPositive = false; break; }
+        }
+        CHECK(allPositive, "decimal_from_seed stays within the positive long range for all seeds");
+    }
+
     // ---- snowflake -------------------------------------------------------
     CHECK(snowflake_from_seed(1, 1700000000000ULL) == snowflake_from_seed(1, 1700000000000ULL),
           "snowflake deterministic");

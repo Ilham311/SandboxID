@@ -80,6 +80,26 @@ std::string hex_from_seed(uint64_t seed, size_t nbytes) {
     return s;
 }
 
+// The GSF id, in the shape the gservices provider actually serves it.
+//
+// Grab reads it as: query("content://com.google.android.gsf.gservices",
+// projection=null, selection=null, selectionArgs={"android_id"}, sortOrder=null)
+// -> cursor.getString(1) -> Long.parseLong() -> Long.toHexString(). The value on
+// the wire is therefore a DECIMAL string, not the 16-hex-digit form the id is
+// normally shown in; only the client's own toHexString() turns it into hex.
+// Serving hex here would throw NumberFormatException in the client, which is
+// precisely the failure this exists to prevent (Grab reports it as gs:"er:103").
+//
+// A real GSF id is a 63-bit positive value, so the top bit is cleared: a
+// negative decimal would round-trip through Long.toHexString() as a 16-digit
+// two's-complement string, which no real device produces.
+std::string decimal_from_seed(uint64_t seed) {
+    uint64_t v = splitmix64(seed) & 0x7FFFFFFFFFFFFFFFULL;
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(v));
+    return std::string(buf);
+}
+
 std::string snowflake_from_seed(uint64_t seed, uint64_t epoch_ms) {
     uint64_t v = (epoch_ms << 22) | (splitmix64(seed) & 0x3FFFFFULL);
     char buf[24];
