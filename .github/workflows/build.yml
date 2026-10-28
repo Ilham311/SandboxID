@@ -70,6 +70,24 @@ jobs:
           java -cp out id.sandboxid.tt.RewriteTest3 | tee test.log
           grep -q 'ALL PASS' test.log
 
+      - name: LSPosed hardware-naming unit test
+        # The Java side had the same bug the native side had: PersonaGenerator
+        # derived BOARD, BOARD_PLATFORM and HARDWARE from the single `board`
+        # column of devices.tsv, so a Qualcomm persona advertised
+        # ro.hardware=taro — a token no Qualcomm device ships, since init picks
+        # /vendor/etc/init/hw/init.<ro.hardware>.rc. HwNaming is the fix and has
+        # no Android dependency, so it is pinned here against the same values
+        # tests/host/sbx_hw_naming.cpp asserts. See
+        # lsp/app/src/test/java/id/sandboxid/tt/HwNamingTest.java.
+        run: |
+          set -eu
+          mkdir -p out2/id/sandboxid/tt
+          cp lsp/app/src/main/java/id/sandboxid/tt/HwNaming.java out2/id/sandboxid/tt/
+          cp lsp/app/src/test/java/id/sandboxid/tt/HwNamingTest.java out2/
+          javac -d out2 out2/id/sandboxid/tt/HwNaming.java out2/HwNamingTest.java
+          java -cp out2 id.sandboxid.tt.HwNamingTest | tee hwnaming.log
+          grep -q 'ALL PASS' hwnaming.log
+
       - name: Shell lint (syntax + shellcheck)
         run: |
           set -eu

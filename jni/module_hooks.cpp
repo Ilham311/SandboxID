@@ -547,7 +547,14 @@ static void synth_track_dirfd(int fd, int dirfd, const char* path) {
     char link[64];
     std::snprintf(link, sizeof(link), "/proc/self/fd/%d", dirfd);
     char dir[PATH_MAX];
-    ssize_t r = ::readlink(link, dir, sizeof(dir) - 1);
+    // Raw syscall, not ::readlink(): readlink is inline-hooked (hook_readlink),
+    // so the libc body this would call is now a trampoline back into this
+    // module. That is not a loop - sbx_meta_hidden answers false for
+    // /proc/self/fd/N - but it is a wasted hook frame on every relative openat,
+    // which is the hot path for glob(3) and DirectoryStream. The syscall has no
+    // such coupling.
+    long r = ::syscall(__NR_readlinkat, AT_FDCWD, link, dir,
+                       static_cast<long>(sizeof(dir) - 1));
     if (r <= 0) return;
     dir[r] = '\0';
     std::string full = std::string(dir) + "/" + path;
@@ -656,6 +663,180 @@ static int hook_openat_2(int dirfd, const char* path, int flags) {
     if (fd < 0 || !path) return fd;
     synth_track_dirfd(fd, dirfd, path);
     return fd;
+}
+
+// ---------- file METADATA hooks (stat family) ----------
+// The read hooks above cover a library that OPENS a file. They do not cover a
+// library that only asks whether a file EXISTS, and that is the shape of the
+// root check Grab actually ships.
+//
+// Measured, not assumed. libsafexEx.so (Neutralbase SafeX) exports
+// Java_com_neutralbase_lib_safex_SafeXNative_isSUExist; disassembling that
+// 196-byte body shows exactly eight `bl <stat@plt>` calls and nothing else, and
+// the eight string literals it loads are /sbin/su, /system/bin/su,
+// /system/xbin/su, /data/local/xbin/su, /data/local/bin/su, /system/sd/xbin/su,
+// /system/bin/failsafe/su and /data/local/su. On the reference device
+// /system/bin/su EXISTS (it is a hardlink to /system/bin/sh, inode 544, mode
+// 0755 root:shell, label u:object_r:system_file:s0 - world-traversable, so an
+// app-uid stat() reaches it). Every one of those stat() calls returns success
+// for that path, and the module never sees it: stat is not in kPltRegs and was
+// not inline-hooked, so SafeX reads the real answer for the one path that
+// matters.
+//
+// The same library also exports checkFilesExistByPath, which walks a
+// caller-supplied path list through stdio (fopen/fgets) and
+// processLineForKeywords - the keyword list comes from Grab's DEX, not the .so,
+// so it cannot be enumerated from the binary. Hiding the stat family is what
+// makes BOTH checks answer "absent" without knowing that list.
+//
+// Deliberately narrow: only the root-binary basenames the module already
+// refuses to exec (sbx_is_root_binary) are reported absent. Hiding every path
+// would break the app's own file access and is not what the check asks about.
+typedef int (*stat_fn)(const char*, struct stat*);
+typedef int (*lstat_fn)(const char*, struct stat*);
+typedef int (*fstatat_fn)(int, const char*, struct stat*, int);
+typedef int (*access_fn)(const char*, int);
+typedef ssize_t (*readlink_fn)(const char*, char*, size_t);
+
+static stat_fn     orig_stat     = nullptr;
+static lstat_fn    orig_lstat    = nullptr;
+static fstatat_fn  orig_fstatat  = nullptr;
+static access_fn   orig_access   = nullptr;
+static readlink_fn orig_readlink = nullptr;
+
+// Defined further down with the exec guard; declared here because the metadata
+// hooks below are the second consumer. One definition, so the exec guard and
+// the stat guard can never disagree about which basenames are root binaries.
+static bool sbx_is_root_binary(const char* path);
+
+// Shared by every metadata hook: the path is one this module reports as absent.
+// A relative path is resolved against the caller's dirfd the same way
+// synth_track_dirfd does, so a stat via a directory fd cannot slip past.
+static bool sbx_meta_hidden(const char* path) {
+    if (!path || !*path) return false;
+    if (path[0] == '/') {
+        if (!sbx_is_root_binary(path)) return false;
+        // Logged because this is the layer that answers SafeX's root check, and
+        // a silent hide is indistinguishable in a session log from a check that
+        // never ran. summarize.sh counts this line.
+        LOGD("NATIVE_META HIDE '%s'", path);
+        return true;
+    }
+    // Relative: the probe is only meaningful when the caller resolved it to an
+    // absolute root-binary path. Without the dirfd there is nothing to judge,
+    // so fail open (report as present) rather than deny a legitimate stat.
+    return false;
+}
+
+static int hook_stat(const char* path, struct stat* buf) {
+    if (sbx_meta_hidden(path)) { errno = ENOENT; return -1; }
+    return orig_stat ? orig_stat(path, buf)
+                     : ::syscall(__NR_newfstatat, AT_FDCWD, path, buf, 0);
+}
+
+static int hook_lstat(const char* path, struct stat* buf) {
+    if (sbx_meta_hidden(path)) { errno = ENOENT; return -1; }
+    return orig_lstat ? orig_lstat(path, buf)
+                      : ::syscall(__NR_newfstatat, AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW);
+}
+
+static int hook_fstatat(int dirfd, const char* path, struct stat* buf, int flags) {
+    // Absolute paths are the common case for a hardcoded probe list, and the
+    // ones the SafeX code uses. A relative path is resolved through
+    // /proc/self/fd/<dirfd> so the dirfd form cannot bypass the check.
+    //
+    // The resolution uses the raw syscall, not ::readlink(): readlink is itself
+    // inline-hooked below, and routing this through the hook would add a frame
+    // that has to re-enter sbx_meta_hidden for "/proc/self/fd/N" on every
+    // fstatat. The syscall has no such coupling.
+    if (path && path[0] != '/' && dirfd != AT_FDCWD) {
+        char link[64], dir[PATH_MAX];
+        std::snprintf(link, sizeof(link), "/proc/self/fd/%d", dirfd);
+        long r = ::syscall(__NR_readlinkat, AT_FDCWD, link, dir,
+                           static_cast<long>(sizeof(dir) - 1));
+        if (r > 0) {
+            dir[r] = '\0';
+            std::string full = std::string(dir) + "/" + path;
+            if (sbx_meta_hidden(full.c_str())) { errno = ENOENT; return -1; }
+        }
+    } else if (sbx_meta_hidden(path)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_fstatat ? orig_fstatat(dirfd, path, buf, flags)
+                        : ::syscall(__NR_newfstatat, dirfd, path, buf, flags);
+}
+
+static int hook_access(const char* path, int mode) {
+    if (sbx_meta_hidden(path)) { errno = ENOENT; return -1; }
+    return orig_access ? orig_access(path, mode)
+                       : ::syscall(__NR_faccessat, AT_FDCWD, path, mode, 0);
+}
+
+// readlink is how a probe learns that a path it DID find is really something
+// else (the /system/bin/su hardlink on this device). Reporting ENOENT keeps the
+// story consistent with the stat hooks above.
+static ssize_t hook_readlink(const char* path, char* buf, size_t size) {
+    if (sbx_meta_hidden(path)) { errno = ENOENT; return -1; }
+    return orig_readlink ? orig_readlink(path, buf, size)
+                         : ::syscall(__NR_readlinkat, AT_FDCWD, path, buf, size);
+}
+
+// ---------- uname (kernel identity) ----------
+// /proc/version is synthesized from the persona (synth_proc_version), but
+// uname(2) is a separate syscall wrapper and was never hooked, so the two
+// disagreed in the same process. Measured on the reference device with the
+// OPPO CPH2521 / taro persona: /proc/version would be served as
+// "Linux version 6.1.1xx-android15-...", while uname() returned the real
+// "4.19.337-FakeDreamer-1.9-Universe" - a kernel that no CPH2521 ever ran, and
+// a build string that names the ROM. libpsec.so imports uname and calls it
+// (`bl <uname@plt>` at 0x1be454) before building a string from the result, so
+// this is not a hypothetical: Grab's own security library reads it.
+//
+// The synthetic value is derived from the SAME persona inputs as
+// synth_proc_version, so the two lenses agree instead of contradicting.
+typedef int (*uname_fn)(struct utsname*);
+static uname_fn orig_uname = nullptr;
+
+static int hook_uname(struct utsname* buf) {
+    int rc = orig_uname ? orig_uname(buf) : ::syscall(__NR_uname, buf);
+    if (rc != 0 || !buf) return rc;
+    // Only rewrite when the persona is complete enough to describe a kernel;
+    // otherwise leave the real value (failing open here beats inventing a
+    // kernel that contradicts the rest of the persona's Build surface).
+    const std::string& release    = val("RELEASE");
+    const std::string& incremental = val("INCREMENTAL");
+    const std::string& platform   = val("BOARD_PLATFORM");
+    const std::string& host       = val("HOST");
+    const std::string& serial     = val("SERIAL");
+    if (release.empty() || platform.empty() || serial.empty()) return rc;
+
+    std::string ver = sbxnr::synth_proc_version(
+        release, incremental, platform, host, sbxnr::fnv1a(serial));
+    if (ver.empty()) return rc;
+
+    // synth_proc_version returns the whole /proc/version line:
+    //   "Linux version <release> (...) #1 SMP PREEMPT <date>"
+    // utsname.release wants only the <release> token, and utsname.version the
+    // rest of the line after it. Split rather than re-deriving, so the two
+    // lenses cannot drift.
+    static const char kPrefix[] = "Linux version ";
+    const size_t pl = sizeof(kPrefix) - 1;
+    if (ver.compare(0, pl, kPrefix) != 0) return rc;
+    std::string body = ver.substr(pl);
+    size_t sp = body.find(' ');
+    if (sp == std::string::npos) return rc;
+    std::string rel = body.substr(0, sp);
+    std::string rest = body.substr(sp + 1);
+    if (rel.empty()) return rc;
+
+    std::snprintf(buf->release, sizeof(buf->release), "%s", rel.c_str());
+    std::snprintf(buf->version, sizeof(buf->version), "%s", rest.c_str());
+    LOGD("NATIVE_UNAME SPOOF release='%s'", rel.c_str());
+    // sysname/nodename/machine are left alone: the persona does not describe a
+    // different OS or architecture, and rewriting them would be a new lie
+    // rather than the removal of one.
+    return rc;
 }
 
 // ---------- __system_property hooks (NATIVE layer) ----------
@@ -1347,7 +1528,11 @@ static int hook_fexecve(int fd, char* const argv[], char* const envp[]) {
     char link[64];
     snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
     char target[PATH_MAX];
-    ssize_t n = readlink(link, target, sizeof(target) - 1);
+    // Raw syscall, not readlink(): readlink is inline-hooked (hook_readlink),
+    // and this body runs on the exec path where an extra trampoline frame buys
+    // nothing - sbx_meta_hidden answers false for /proc/self/fd/N anyway.
+    long n = ::syscall(__NR_readlinkat, AT_FDCWD, link, target,
+                       static_cast<long>(sizeof(target) - 1));
     if (n > 0) {
         target[n] = '\0';
         if (sbx_exec_denied(target, argv, "FEXECVE", "fd target")) { errno = ENOENT; return -1; }
@@ -1437,6 +1622,21 @@ static const HookReg kPltRegs[] = {
                    reinterpret_cast<void**>(&orig_open_2)},
     {"__openat_2", reinterpret_cast<void*>(hook_openat_2),
                    reinterpret_cast<void**>(&orig_openat_2)},
+    // Metadata family. A library that only asks whether a path EXISTS never
+    // calls open(), so none of the hooks above fire for it. This is the exact
+    // shape of SafeX's root check - see the block comment above hook_stat.
+    {"stat",     reinterpret_cast<void*>(hook_stat),
+                 reinterpret_cast<void**>(&orig_stat)},
+    {"lstat",    reinterpret_cast<void*>(hook_lstat),
+                 reinterpret_cast<void**>(&orig_lstat)},
+    {"fstatat",  reinterpret_cast<void*>(hook_fstatat),
+                 reinterpret_cast<void**>(&orig_fstatat)},
+    {"access",   reinterpret_cast<void*>(hook_access),
+                 reinterpret_cast<void**>(&orig_access)},
+    {"readlink", reinterpret_cast<void*>(hook_readlink),
+                 reinterpret_cast<void**>(&orig_readlink)},
+    {"uname",    reinterpret_cast<void*>(hook_uname),
+                 reinterpret_cast<void**>(&orig_uname)},
     {"__system_property_read_callback",
                 reinterpret_cast<void*>(hook_system_property_read_callback),
                 reinterpret_cast<void**>(&orig_prop_read_cb)},
@@ -1480,6 +1680,57 @@ static const HookReg kPltRegs[] = {
     {"posix_spawnp", reinterpret_cast<void*>(hook_posix_spawnp),
                 reinterpret_cast<void**>(&orig_posix_spawnp)},
 };
+
+// The property and file entry points that must ALSO be inline-hooked, so that a
+// library dlopened AFTER the one-shot PLT scan still inherits the guard.
+//
+// Why this table exists at all: the PLT pass walks /proc/self/maps once, in
+// postAppSpecialize, and registers only the GOT slots of libraries already
+// mapped at that moment. A target app whose security stack is dlopened later -
+// Grab's is, from Application.onCreate - resolves the real symbols and reads
+// real values. Measured on the reference device for com.grabtaxi.passenger: the
+// PLT pass logged "11 lib(s) incl. 0 app-owned", and libpsec.so,
+// libCredolabNative.so and libcore-lib.so each import __system_property_get
+// directly (readelf --dyn-syms). A native probe in one of those libraries then
+// read ro.product.model = alioth while the Java lens served Build.MODEL =
+// CPH2521 - a direct contradiction, and libsafexEx.so ships
+// SafeXNative.hasReadProcMaps() for exactly this class of check.
+//
+// Declared OUTSIDE the SBX_ENABLE_LSPLANT guard on purpose: the host suites
+// build this translation unit with LSPLANT off, and they are the only place
+// this invariant can be checked without a device. The table carries no `target`
+// - the install site resolves each name through sbx_libc_sym() at hook time,
+// which is also what keeps Dobby off this module's own PLT stub. Keeping the
+// names in the SAME table the installer walks is deliberate: a second,
+// parallel name list is the very drift this table exists to prevent, and the
+// host test asserts set equality against kPltRegs in both directions.
+struct LateReg { const char* name; void* hook; void** orig; };
+static const LateReg kLateRegs[] = {
+    {"__system_property_get",           reinterpret_cast<void*>(hook_system_property_get),           reinterpret_cast<void**>(&orig_prop_get)},
+    {"__system_property_find",          reinterpret_cast<void*>(hook_system_property_find),          reinterpret_cast<void**>(&orig_prop_find)},
+    {"__system_property_read_callback", reinterpret_cast<void*>(hook_system_property_read_callback), reinterpret_cast<void**>(&orig_prop_read_cb)},
+    {"open",     reinterpret_cast<void*>(hook_open),     reinterpret_cast<void**>(&orig_open)},
+    {"openat",   reinterpret_cast<void*>(hook_openat),   reinterpret_cast<void**>(&orig_openat)},
+    {"read",     reinterpret_cast<void*>(hook_read),     reinterpret_cast<void**>(&orig_read)},
+    {"pread64",  reinterpret_cast<void*>(hook_pread64),  reinterpret_cast<void**>(&orig_pread64)},
+    {"close",    reinterpret_cast<void*>(hook_close),    reinterpret_cast<void**>(&orig_close)},
+    {"lseek",    reinterpret_cast<void*>(hook_lseek),    reinterpret_cast<void**>(&orig_lseek)},
+    {"lseek64",  reinterpret_cast<void*>(hook_lseek64),  reinterpret_cast<void**>(&orig_lseek64)},
+    {"__open_2",   reinterpret_cast<void*>(hook_open_2),   reinterpret_cast<void**>(&orig_open_2)},
+    {"__openat_2", reinterpret_cast<void*>(hook_openat_2), reinterpret_cast<void**>(&orig_openat_2)},
+    // Metadata family and uname: the same reasoning as the PLT block above, but
+    // for a library that dlopens after the maps scan. SafeX's isSUExist is in
+    // exactly that position - libsafexEx.so is loaded from Grab's Application,
+    // long after postAppSpecialize - so without these rows the stat hooks would
+    // exist and still never see the check that matters.
+    {"stat",     reinterpret_cast<void*>(hook_stat),     reinterpret_cast<void**>(&orig_stat)},
+    {"lstat",    reinterpret_cast<void*>(hook_lstat),    reinterpret_cast<void**>(&orig_lstat)},
+    {"fstatat",  reinterpret_cast<void*>(hook_fstatat),  reinterpret_cast<void**>(&orig_fstatat)},
+    {"access",   reinterpret_cast<void*>(hook_access),   reinterpret_cast<void**>(&orig_access)},
+    {"readlink", reinterpret_cast<void*>(hook_readlink), reinterpret_cast<void**>(&orig_readlink)},
+    {"uname",    reinterpret_cast<void*>(hook_uname),    reinterpret_cast<void**>(&orig_uname)},
+};
+static const size_t kLateRegsN = sizeof(kLateRegs) / sizeof(kLateRegs[0]);
 
 void install_native_read_hooks(Api* api) {
     const std::string& nr = val("SBX_NATIVE_READ");
@@ -1657,6 +1908,52 @@ void install_native_read_hooks(Api* api) {
     }
     LOGI("NATIVE_READ: DobbyHook %d/%zu shell-guard entry point(s) inline-hooked",
          dobby_hooked, sizeof(dobby_regs) / sizeof(dobby_regs[0]));
+
+    // ---- property and file family, inline ------------------------------
+    // The PLT pass reaches only the libraries mapped when it ran, and the
+    // exec/popen group above covers only the shell guard. Everything else a
+    // late-dlopened library reads - the property table and the /proc files -
+    // was left unguarded, and that is the widest of the three holes.
+    //
+    // The table itself is at file scope (kLateRegs) so the host suite can pin
+    // its coverage; the reasoning and the Grab measurement are in the comment
+    // there. What is local to this pass is only the resolution: each name is
+    // looked up through sbx_libc_sym() here, not stored in the table, because
+    // a direct reference would bind to this module's own PLT stub rather than
+    // the libc body and Dobby would relocate the stub instead of the function.
+    //
+    // The file family is the same set the PLT pass registers, extended to late
+    // loaders. It matters for a lib that reaches /proc through stdio: bionic's
+    // fopen64() calls open@plt (verified by disassembling
+    // /apex/com.android.runtime/lib64/bionic/libc.so at fopen64, which issues
+    // `bl 0xd3330 <open@plt>`), and that stub resolves to libc's OWN open body
+    // - the exact function Dobby patches. So a late loader's fopen() of
+    // /proc/cpuinfo is covered even though it never crosses a library boundary.
+    // (An earlier revision of this comment claimed fopen called __open_2; it
+    // does not, and the distinction matters because __open_2 is a separate
+    // body that fopen never reaches.)
+    //
+    // Kept in a SECOND pass with its own log line on purpose: the line above
+    // is what sh/debug/summarize.sh counts as the shell-guard verdict, and
+    // folding these in would relabel that count without changing the regex.
+    int dobby_late = 0;
+    for (const LateReg& d : kLateRegs) {
+        void* target = sbx_libc_sym(d.name);
+        if (!target) continue;
+        void* orig = nullptr;
+        if (DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(d.hook),
+                      reinterpret_cast<dobby_dummy_func_t*>(&orig)) == 0 && orig) {
+            *d.orig = orig;
+            ++dobby_late;
+            LOGI("NATIVE_READ: DobbyHook late %s registered", d.name);
+        } else {
+            LOGW("NATIVE_READ: DobbyHook late %s FAILED - a library that dlopens "
+                 "after postAppSpecialize reads the real value for this entry "
+                 "point", d.name);
+        }
+    }
+    LOGI("NATIVE_READ: DobbyHook %d/%zu late-loader property/file entry point(s) "
+         "inline-hooked", dobby_late, kLateRegsN);
 #endif
 
     if (!committed && live == 0) {

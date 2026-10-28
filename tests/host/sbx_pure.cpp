@@ -332,6 +332,37 @@ int main() {
     CHECK(uuid_from_seed(42) == u, "uuid deterministic");
     CHECK(hex_from_seed(1, 32).size() == 64, "hex_from_seed 32 bytes -> 64 chars");
 
+    // ---- decimal_from_seed: the GSF id wire format ------------------------
+    //
+    // The value must be a DECIMAL string, because every client parses it with
+    // Long.parseLong() and only then calls Long.toHexString(). Serving hex here
+    // throws NumberFormatException in the client - that is Grab's gs:"er:103".
+    {
+        std::string d = decimal_from_seed(42);
+        CHECK(!d.empty(), "decimal_from_seed non-empty");
+        CHECK(d.find_first_not_of("0123456789") == std::string::npos,
+              "decimal_from_seed is all digits (Long.parseLong-able)");
+        CHECK(decimal_from_seed(42) == d, "decimal_from_seed deterministic");
+        CHECK(decimal_from_seed(42) != decimal_from_seed(43),
+              "decimal_from_seed differs per seed");
+        // A real GSF id is a positive 63-bit value. A negative one would render
+        // through Long.toHexString() as a 16-digit two's-complement string,
+        // which no device produces.
+        CHECK(d.size() < 20, "decimal_from_seed fits in a signed 64-bit long");
+        CHECK(d[0] != '-', "decimal_from_seed is not negative");
+        // Sweep: the top bit must be clear for every seed, not just this one.
+        bool allPositive = true;
+        for (uint64_t s = 0; s < 4096; ++s) {
+            std::string x = decimal_from_seed(s);
+            if (x.empty() || x[0] == '-' || x.size() > 19) { allPositive = false; break; }
+            // 9223372036854775807 is LONG_MAX; compare as strings by length then
+            // lexicographically, since the host has no 64-bit decimal parser here.
+            static const char* kMax = "9223372036854775807";
+            if (x.size() == 19 && x.compare(kMax) > 0) { allPositive = false; break; }
+        }
+        CHECK(allPositive, "decimal_from_seed stays within the positive long range for all seeds");
+    }
+
     // ---- snowflake -------------------------------------------------------
     CHECK(snowflake_from_seed(1, 1700000000000ULL) == snowflake_from_seed(1, 1700000000000ULL),
           "snowflake deterministic");
@@ -343,6 +374,50 @@ int main() {
     CHECK(should_hide_prop("ro.boot.qemu"), "hide ro.boot.qemu");
     CHECK(should_hide_prop("ro.lineage.build.version"), "hide lineage prop");
     CHECK(!should_hide_prop("ro.build.fingerprint"), "do not hide fingerprint");
+
+    // The updatable-graphics-driver family. These must be HIDDEN, never
+    // spoofed: GraphicsEnvironment.get() reads them and asks PackageManager
+    // whether the named package is installed, so a derived name is reported as
+    // "updatable driver package '<name>' not installed" - a louder tell than
+    // the real value. Measured on the reference device: ro.gfx.driver.0=
+    // com.xiaomi.ugd, ro.gfx.driver.1=com.qualcomm.qti.gpudrivers.kona.api30.
+    CHECK(should_hide_prop("ro.gfx.driver.0"), "hide ro.gfx.driver.0");
+    CHECK(should_hide_prop("ro.gfx.driver.1"), "hide ro.gfx.driver.1");
+    CHECK(should_hide_prop("ro.gfx.driver_build_time"),
+          "hide ro.gfx.driver_build_time");
+
+    // The "persist.sys.miui" family, in all three separators. Enumerating
+    // separators is what kept leaving holes: the dotted form was covered, then
+    // the underscore form slipped through, then the run-together form
+    // (persist.sys.miuibooster.name) slipped through both.
+    CHECK(should_hide_prop("persist.sys.miui.density_v2"), "hide persist.sys.miui.*");
+    CHECK(should_hide_prop("persist.sys.miui_animator_sched.big_prime_cores"),
+          "hide persist.sys.miui_*");
+    CHECK(should_hide_prop("persist.sys.miuibooster.name"),
+          "hide persist.sys.miui<run-together>");
+
+    // Camera module paths / package allowlists embed the device codename and
+    // the vendor. A target app read vendor.camera.aux.packagelist directly.
+    CHECK(should_hide_prop("persist.vendor.camera.rearMain.info"),
+          "hide persist.vendor.camera.*");
+    CHECK(should_hide_prop("vendor.camera.aux.packagelist"),
+          "hide vendor.camera.*");
+    CHECK(should_hide_prop("vendor.camera.aux.packagelistext"),
+          "hide vendor.camera.* ext");
+
+    // Remaining measured OEM/SoC tells.
+    CHECK(should_hide_prop("ro.com.google.clientidbase.pg"), "hide clientidbase.pg");
+    CHECK(should_hide_prop("ro.com.google.lens.oem_image_package"), "hide lens oem pkg");
+    CHECK(should_hide_prop("ro.vendor.extension_library"), "hide qti extension lib");
+    CHECK(should_hide_prop("vendor.media.target_variant"), "hide media target variant");
+    CHECK(should_hide_prop("vendor.usb.product_string"), "hide usb product string");
+    CHECK(should_hide_prop("ro.media.xml_variant.codecs"), "hide media xml variant");
+    CHECK(should_hide_prop("ro.csc.spotify.music.partnerid"), "hide spotify partner id");
+
+    // ...and the near-misses that must NOT be swallowed by those prefixes.
+    CHECK(!should_hide_prop("ro.gfx.driver"), "bare ro.gfx.driver is not a real prop");
+    CHECK(!should_hide_prop("ro.build.version.release"), "do not hide release");
+    CHECK(!should_hide_prop("vendor.camera"), "bare vendor.camera is not a real prop");
 
     printf("\n%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;

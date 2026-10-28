@@ -2,6 +2,166 @@
 
 ## Unreleased
 
+### Fix: `gs:"er:103"` dan `ad`/`adl:"er:109"` di hasil scan Grab
+
+**Gejala.** Hasil scan Grab memuat `gs:"er:103"`, `ad:"er:109"`, dan
+`adl:"er:109"`. Ketiganya adalah field identitas yang gagal dibaca, dan
+kegagalan itu sendiri adalah sinyal perangkat yang lebih keras daripada nilai
+apa pun yang benar.
+
+**Akar masalah, `ad`/`adl`.** Grab **membundel sendiri**
+`com.google.android.gms.ads.identifier.AdvertisingIdClient` di DEX-nya. Metode
+`getAdvertisingIdInfo(Context)` membuat client lalu memanggil `b(false)`, yang
+melakukan `bindService` ke service advertising-id Play services dan melempar
+`java.io.IOException` (`"Google Play services not available"`,
+`"Connection failure"`) bila bind gagal. Exception itu keluar dari
+`getAdvertisingIdInfo` **sebelum** objek `Info` pernah dibuat, sehingga
+`$Info.getId()` tidak pernah dipanggil dan hook yang sudah ada tidak pernah
+menyala. Pemanggil Grab menangkapnya dan mencatat `GENERAL_EXCEPTION` (109)
+untuk kedua field.
+
+**Akar masalah, `gs`.** Grab membaca GSF id dengan
+`query("content://com.google.android.gsf.gservices", null, null,
+new String[]{"android_id"}, null)`, lalu `Long.parseLong(cursor.getString(1))`
+dan `Long.toHexString()`. Hook `Settings$Secure.getString` yang sudah ada tidak
+menutupi jalur ini — API dan provider-nya berbeda. Pada perangkat yang tabel
+gservices-nya kosong (belum pernah ada akun Google), kolom 1 bukan long yang
+bisa di-parse, `parseLong` melempar `NumberFormatException`, dan Grab mencatat
+`GSF_NUMBER_FORMAT_EXCEPTION` (103).
+
+**Bukti.** `dexdump -d` pada `classes.dex` Grab:
+`c.g.o7y1.a()` memanggil `getAdvertisingIdInfo` lalu `$Info.getId()` dan
+`isLimitAdTrackingEnabled()`; blok `catch`-nya memetakan
+`NoClassDefFoundError`/`ClassNotFoundException` → 111, kedua exception GMS →
+112, dan **exception lain apa pun** → 109. Body `AdvertisingIdClient.b(Z)`
+menunjukkan `java.io.IOException` dilempar dari tiga tempat (bind gagal,
+`GoogleApiAvailabilityLight` bukan `SUCCESS`, interrupted). Untuk `gs`,
+`c.g.o7y1.a()` memuat `content://com.google.android.gsf.gservices`, memanggil
+`ContentResolver.query`, lalu `moveToFirst`/`getColumnCount() >= 2`/
+`getString(1)`/`Long.parseLong`/`Long.toHexString`, dengan
+`NumberFormatException` → field `.g` = 103. Pemetaan enum diverifikasi dari
+bytecode `clinit` `c.g.cvy1`, bukan dari urutan ordinal.
+
+**Perbaikan.** Dua mode callback baru:
+`M_GAID_INFO` (10) membangun `AdvertisingIdClient$Info` sendiri dari
+`backup.getReturnType()` — kelas itu hidup di DEX aplikasi, jadi `Class.forName`
+dari callback tidak akan menemukannya — sehingga `getAdvertisingIdInfo` tidak
+pernah menyentuh Play services; `M_GSF_CURSOR` (11) menjawab query gservices
+dengan `MatrixCursor` dua kolom `{_id, value}` berisi GSF id **desimal** dari
+persona, sehingga `Long.parseLong` berhasil. Nilai GSF id berasal dari
+`decimal_from_seed(seed ^ "GSFID")`, dengan bit teratas dibersihkan agar selalu
+positif 63-bit seperti id asli.
+
+**Kenapa desimal, bukan hex.** Provider gservices menyajikan long desimal; hanya
+`toHexString()` milik klien yang mengubahnya ke hex. Menyajikan hex di sini akan
+melempar `NumberFormatException` di klien — persis kegagalan yang diperbaiki.
+
+**Regresi tertutup.** `tests/host/EnvCompatStateCheck.java` menguji kedua arah
+untuk masing-masing hook: dengan nilai, `IOException` asli tidak boleh lolos dan
+`Info` harus membawa id persona serta flag limit-tracking `false`; tanpa nilai,
+`IOException` asli harus tetap sampai ke pemanggil (mengembalikan `null` akan
+membuat Grab melakukan dereference pada `Info` null). Untuk GSF, query ke
+provider lain harus tetap mencapai `ContentResolver` asli. `tests/host/sbx_pure.cpp`
+mengunci format: semua digit, deterministik, berbeda per seed, dan berada dalam
+rentang long positif untuk 4096 seed. Uji mutasi: hook GAID dijadikan no-op
+menggagalkan 2 check, gerbang URI dibuang menggagalkan 1, cursor satu kolom
+menggagalkan 3, bit teratas tidak dibersihkan menggagalkan 3, dan hex alih-alih
+desimal menggagalkan 2.
+
+### Fix: daftar accessibility service membocorkan paket yang sudah disembunyikan
+
+**Gejala.** Grab mencatat `bin.mt.plus.canary/l.ۖۢۖ` di daftar accessibility
+service pada setiap scan, padahal modul sudah menyembunyikan `bin.mt.plus` dari
+`getInstalledPackages`/`getPackageInfo`.
+
+**Akar masalah.** `M_FILTER_PACKAGES` hanya membaca field `packageName`, yang
+dimiliki `PackageInfo`/`ApplicationInfo`. `AccessibilityServiceInfo` tidak punya
+field itu — pemiliknya hanya bisa dibaca dari `getId()`, berformat
+`pkg/.Service`. Akibatnya filter bekerja untuk satu API dan tidak untuk yang
+lain, sehingga dalam satu proses aplikasi diberi tahu bahwa sebuah paket tidak
+ada, lalu tetap melihat service milik paket itu.
+
+**Bukti.** `dexdump -d` pada `classes.dex` Grab menunjukkan
+`AccessibilityManager.getInstalledAccessibilityServiceList` dipanggil di
+`c.g.joy1.b`, yang membangun daftar `AccessibilityServiceItemData(serviceId,
+isAccessibilityTool, serviceEnabled, isSystemApp, isSideloaded)` (label field
+dibaca dari `toString()` kelas `c.g.lhy1`). Hasil scan Grab memuat id service
+tersebut apa adanya.
+
+**Perbaikan.** `filterPackages` memakai `isHiddenItem()`, yang mencoba
+`packageName` lebih dulu lalu jatuh ke `getId()` dan memotong di `/`. Kedua
+entri `AccessibilityManager` (`getInstalledAccessibilityServiceList`,
+`getEnabledAccessibilityServiceList`) memakai mode `M_FILTER_PACKAGES` yang
+sama, sehingga himpunan tersembunyi hanya punya satu definisi.
+
+**Regresi tertutup.** `tests/host/EnvCompatStateCheck.java` menguji kedua arah:
+service MT Manager harus hilang dari kedua API, sedangkan TalkBack, SystemUI dan
+Katrina (yang memang **tidak** ada di `HIDDEN_PACKAGES`) harus tetap muncul —
+filter yang diam-diam melebar ke "apa pun yang sideloaded" adalah kebijakan lain
+yang tidak diminta. Uji mutasi: membuang jalur `getId()` menggagalkan 2 check,
+menyembunyikan semua item menggagalkan 5.
+
+### Fix: pemeriksaan root lewat `stat()` tidak pernah di-hook — Grab membaca `/system/bin/su` yang asli
+
+**Gejala.** Promo di aplikasi target ditolak dengan pesan
+"Promo yang kamu pilih nggak bisa digunakan. Klik di sini untuk melihat detail
+selengkapnya." — padahal persona sudah aktif dan hook properti berjalan.
+
+**Akar masalah.** Seluruh lapisan file yang ada hanya meng-hook jalur **isi**
+(`open`/`openat`/`read`/`pread64`/`lseek`/`close`). Sebuah library yang hanya
+menanyakan apakah sebuah path **ada** tidak pernah memanggil `open()`, sehingga
+tidak satu pun hook itu menyala untuknya.
+
+Itu persis bentuk pemeriksaan root yang dikirim Grab. `libsafexEx.so`
+(Neutralbase **SafeX**) mengekspor
+`Java_com_neutralbase_lib_safex_SafeXNative_isSUExist`; membongkar badan
+196-byte-nya menunjukkan **delapan** `bl <stat@plt>` dan tidak ada yang lain, dan
+delapan literal string yang dimuatnya adalah `/sbin/su`, `/system/bin/su`,
+`/system/xbin/su`, `/data/local/xbin/su`, `/data/local/bin/su`,
+`/system/sd/xbin/su`, `/system/bin/failsafe/su`, `/data/local/su`.
+
+Di perangkat referensi `/system/bin/su` **ada**: hardlink ke `/system/bin/sh`
+(inode 544, mode `0755 root:shell`, label `u:object_r:system_file:s0` —
+world-traversable, jadi `stat()` dari uid app berhasil). Kedelapan panggilan itu
+mengembalikan sukses dan modul tidak pernah melihatnya.
+
+**Bukti.** `readelf -sW --dyn-syms` pada keempat library keamanan Grab
+(`libpsec.so`, `libsafexEx.so`, `libCredolabNative.so`, `libcore-lib.so`)
+menunjukkan `stat`/`lstat`/`access`/`readlink`/`uname` diimpor tetapi tidak ada
+satu pun di `kPltRegs` (saat itu 25 simbol, semuanya keluarga
+file/properti/exec). `libpsec.so` juga mengimpor `uname` dan memanggilnya
+(`bl <uname@plt>` di `0x1be454`).
+
+**Perbaikan.** `stat`, `lstat`, `fstatat`, `access` dan `readlink` di-hook di
+kedua jalur (PLT dan inline/Dobby) dan melaporkan `ENOENT` untuk basename biner
+root yang sudah ditolak `sbx_is_root_binary()` — satu definisi, sehingga penjaga
+exec dan penjaga stat tidak bisa berbeda pendapat. Sengaja sempit: hanya
+basename root yang di-hide, bukan seluruh path, karena memblokir semua `stat`
+akan merusak akses file app sendiri.
+
+`uname` juga di-hook: `/proc/version` sudah disintesis dari persona, tetapi
+`uname(2)` adalah pembungkus syscall terpisah, sehingga keduanya saling
+bertentangan di dalam satu proses (persona CPH2521/taro: `/proc/version` =
+`6.1.x-android15`, `uname()` = `4.19.337-FakeDreamer-1.9-Universe` — kernel yang
+tidak pernah dijalankan CPH2521 mana pun, dan string build yang menyebut ROM-nya).
+Keduanya sekarang diturunkan dari input persona yang sama.
+
+**Regresi tertutup.** `tests/host/sbx_hook_sm.cpp` §15 memaku kedua arah:
+kedelapan path SafeX (plus `daemonsu`/`magisk`/`ksud`) harus di-hide, dan path
+biasa (`/system/bin/sh`, `/proc/self/maps`, file app sendiri, path yang hanya
+* mengandung* "su") **tidak** boleh. Uji mutasi mengonfirmasi kedua arah bergigi:
+meng-hide semua path menggagalkan 6 check, meng-hide nol path menggagalkan 11.
+
+§16 memaku `uname` terhadap `/proc/version`: `release` harus sama persis dengan
+token pertama baris yang disintesis, dan `version` harus berupa **prefiks** dari
+sisanya yang dipotong tepat di batas field 64 karakter. Kesamaan penuh tidak
+mungkin dan tidak benar — `utsname.version` hanya 65 byte sedangkan sisa baris
+`/proc/version` lebih panjang, sehingga kernel sungguhan pun memotong dengan cara
+yang sama. Tiga mutasi membuktikan uji ini bergigi: memecah di spasi terakhir
+menggagalkan 3 check, memotong di 32 karakter menggagalkan 1, dan menjadikan hook
+no-op menggagalkan 5.
+
+Total suite host: **238 check, 0 gagal**.
 
 ## v2.2.36 (2026-10-28)
 
@@ -74,6 +234,175 @@ pada `zygisk/arm64-v8a.so` tidak memuat `getprop dump filtered`, `execlp`,
 `fexecve`, `posix_spawn`, `sbx_popen_readable`, `sbx_exec_denied`,
 `NATIVE_%s BLOCKED`, maupun `shell-guard entry point(s)`. Perlu build + install
 ulang supaya perbaikan-perbaikan itu benar-benar berjalan.
+
+### Fix: persona Qualcomm mengaku `ro.hardware=taro` — perangkat yang tidak mungkin boot
+
+**Gejala yang dilaporkan.** Promo/voucher yang dipilih di app target tidak bisa
+dipakai; app menampilkan "Klik di sini untuk melihat detail selengkapnya" —
+gejala risk-control, bukan bug fungsional.
+
+**Akar masalah.** Persona yang aktif di perangkat (OPPO CPH2521, `devices.tsv`
+baris 77) meruntuhkan **empat prop berbeda** menjadi satu nilai, sehingga
+menggambarkan perangkat yang tidak pernah ada:
+
+| prop | perangkat nyata (alioth/SM8250) | persona (sebelum) |
+|---|---|---|
+| `ro.hardware` | `qcom` | `taro` |
+| `ro.boot.hardware` | `qcom` | `taro` |
+| `ro.board.platform` | `kona` | `taro` |
+| `ro.product.board` | `alioth` | `taro` |
+| `ro.soc.manufacturer` | `QTI` | `Qualcomm` |
+| `dalvik.vm.isa.arm64.variant` | `kryo300` | `generic` |
+| `dalvik.vm.isa.arm.variant` | `cortex-a75` | `generic` |
+
+Bukti bahwa `ro.hardware=qcom` di Qualcomm: `/proc/cmdline` (kernel, tidak bisa
+di-spoof) berbunyi `androidboot.hardware=qcom`; `/vendor/etc/init/hw/init.qcom.rc`
+**ada** sedangkan `init.taro.rc` **tidak ada** — dan `ro.hardware` justru token
+yang dipakai init untuk memilih `init.<ro.hardware>.rc`, jadi `ro.hardware=taro`
+menggambarkan perangkat yang tidak mungkin boot. Pencarian kode di device tree
+menemukan `ro.hardware=qcom` di mana-mana pada tree Qualcomm, dan **nol** hasil
+untuk `ro.hardware=taro|kona|pineapple|kalama|lahaina`.
+
+**Temuan kedua — prop yang bocor menyebut hardware/ROM asli.** Prop yang dibaca
+app target (com.gojek.app, com.wowsoftware.devicefingerprint, id.dana) tapi tidak
+di-spoof maupun di-hide:
+
+- `ro.gfx.driver.1 = com.qualcomm.qti.gpudrivers.kona.api30` → **`kona` adalah
+  platform ASLI**, bertentangan dengan persona yang mengaku `SM8475`/`taro`
+- `ro.gfx.driver.0 = com.xiaomi.ugd` → jejak Xiaomi di bawah persona OPPO
+- `ro.appsflyer.preinstall.path = /data/miui/pai/pre_install.appsflyer` → jejak MIUI
+- `persist.sys.turbosched.*` (8), `persist.sys.perf_scenario_recognition.*` (4),
+  `persist.sys.perfdebug.*` (2), `persist.sys.smart_gc.*` (2),
+  `persist.sys.miui_animator_sched.*` (2), `ro.vendor.mi_sf.*` (7),
+  `persist.miui.*`, `ro.display.mimotion`, `vendor.boostfwk.frameprefetcher`,
+  `miui.usb.dialog`
+
+`ro.miui.*` sudah di-hide dengan benar; yang lolos adalah bentuk garis bawah
+`persist.sys.miui_` dan namespace MIUI di luar `ro.miui`.
+
+**Perbaikan.**
+
+- `native/include/hw_naming.hpp` (baru) — satu sumber kebenaran untuk penamaan
+  hardware, murni (tanpa JNI/header Android/global) sehingga suite host bisa
+  mem-pin-nya. `hardware_token()` mengembalikan `qcom` untuk setiap SoC Qualcomm
+  dan token platform untuk MediaTek/Tensor/Exynos; `product_board()` memakai
+  kodename kecuali Samsung (yang menaruh platform di sana, termasuk di perangkat
+  Snapdragon-nya — Galaxy S23 = dm1q/SM8550 tapi `ro.product.board=kalama`);
+  `soc_manufacturer_name()` menulis `QTI`; `dalvik_arm64_variant()` menurunkan
+  sisanya. **`gpu_driver_pkg()` dihapus** — lihat temuan ketiga di bawah.
+- `native/sandboxid.cpp` — blok hardware di `derive_identity()` memakai aturan
+  di atas; `ro.hardware` tidak lagi menyalin platform.
+- `native/include/prop_defs.hpp` — `ro.gfx.driver.1`,
+  `dalvik.vm.isa.arm64.variant`, `dalvik.vm.isa.arm.variant` dipetakan.
+- `jni/prop_hooks.cpp` — `derive_hw_value()` menurunkan ketiganya saat identitas
+  di disk belum punya field itu, jadi perbaikan berlaku **tanpa perlu re-roll**.
+- `jni/module_impl.hpp` — `sbx_oem_prop_hidden()`: `ro.appsflyer.preinstall.path`
+  hanya di-hide bila persona bukan vendor itu. `ro.gfx.driver.*` **tidak lagi**
+  di sini (lihat temuan ketiga).
+- `native/native_read.cpp` — `is_vendor_rom_prop()` diperluas dengan 3 nama
+  eksak dan 7 prefix HyperOS yang terukur di perangkat.
+- `sh/identity/autopif.sh` — cermin shell dari aturan yang sama. Nilai turunan
+  dihitung **sebelum** heredoc: menulis `VAR=` di dalam heredoc hanya menulis
+  teks, sehingga `$VAR` di baris berikutnya menjadi kosong.
+- `sh/debug/selftest.sh` — cek koherensi baru: FAIL bila persona Qualcomm
+  melaporkan `HARDWARE` selain `qcom`, dan bila
+  `HARDWARE`/`BOARD`/`BOARD_PLATFORM` runtuh menjadi satu nilai; WARN bila
+  `SOC_MANUFACTURER` bukan `QTI`, bila `BOARD` tidak mengikuti konvensi
+  vendor-nya, dan bila `DALVIK_ARM64_VARIANT` masih `generic`. Inilah kelas bug
+  yang **tidak terlihat** oleh selftest sebelumnya (`pass=14 warn=1 fail=0`).
+- `lsp/app/src/main/java/id/sandboxid/tt/HwNaming.java` (baru) — jalur LSPosed
+  punya bug identik. `PersonaGenerator` menurunkan `BOARD`, `BOARD_PLATFORM` dan
+  `HARDWARE` dari kolom `board` yang sama.
+- `lsp/.../PropMap.java` — `ro.hardware`, `ro.board.platform`, `ro.product.board`,
+  `ro.gfx.driver.1` dan kedua `dalvik.vm.isa.*.variant` **tidak dipetakan sama
+  sekali**: app yang membaca `SystemProperties.get("ro.hardware")` melihat token
+  perangkat asli sementara `Build.HARDWARE` melaporkan milik persona.
+- `lsp/.../PropHook.java` — memakai `HwNaming` dan daftar hide yang disinkronkan
+  dengan `is_vendor_rom_prop()` native.
+
+**Regression test.** `tests/host/sbx_hw_naming.cpp` (C++) dan
+`lsp/app/src/test/java/id/sandboxid/tt/HwNamingTest.java` (JDK murni, dijalankan
+CI) mem-pin nilai yang sama. `product_board()` awalnya di-key pada Exynos dan
+langsung tertangkap oleh suite baru (`got 'dm1q', want 'kalama'`).
+
+### Fix: `ro.gfx.driver.*` di-spoof → framework mengeluh paketnya "not installed"
+
+**Temuan ketiga, dan ini cacat dari perbaikan di atas.** Perbaikan pertama
+memetakan `ro.gfx.driver.1` ke identitas `GPU_DRIVER` dan menurunkannya dari
+platform persona menjadi `com.qualcomm.qti.gpudrivers.<platform>.api30`. Itu
+**salah arah**, dan lebih buruk daripada kebocoran yang hendak ditutup.
+
+`ro.gfx.driver.0/.1` bukan nama platform yang perlu disamarkan — keduanya nama
+**paket yang harus terpasang**. Buktinya dari `framework.jar` (dex
+`android/os/GraphicsEnvironment;`), satu-satunya pembacanya di seluruh framework:
+
+```
+'ro.gfx.driver.0'   'ro.gfx.driver.1'   'ro.gfx.driver_build_time'
+"updatable driver package '" ... "' not installed"
+'App is not on the allowlist for updatable production driver.'
+'Neither updatable production driver nor prerelease driver is supported.'
+```
+
+`GraphicsEnvironment.get()` membaca prop itu lalu menanyakan PackageManager
+apakah paketnya ada. Di perangkat referensi yang terpasang hanya
+`com.xiaomi.ugd` dan `com.qualcomm.qti.gpudrivers.kona.api30` — **tidak ada**
+`...gpudrivers.taro.api30`. Jadi menurunkan nilainya dari persona `taro`
+membuat framework mencatat `updatable driver package
+'com.qualcomm.qti.gpudrivers.taro.api30' not installed`: pesan yang **lebih
+spesifik** daripada nilai asli yang digantikannya, karena ia menyebut platform
+persona yang memang tidak punya paket driver di perangkat ini.
+
+Bentuk yang benar adalah **hide, bukan spoof**. "Device ini tidak mengirim paket
+UGD" adalah keadaan perangkat yang wajar dan koheren; "device ini menyebut paket
+UGD yang tidak terpasang" bukan. Karena itu:
+
+- `native/include/hw_naming.hpp` — `gpu_driver_pkg()` **dihapus**, bukan
+  dibiarkan tak terpakai: helper yang menghitung nama paket adalah jebakan bagi
+  pembaca berikutnya.
+- `native/include/prop_defs.hpp` — entri `ro.gfx.driver.1` → `GPU_DRIVER` dibuang.
+- `jni/prop_hooks.cpp`, `lsp/.../PropHook.java`, `lsp/.../PropMap.java`,
+  `lsp/.../PersonaGenerator.java`, `native/sandboxid.cpp`,
+  `sh/identity/autopif.sh` — tidak ada lagi yang menurunkan `GPU_DRIVER`.
+- `native/native_read.cpp` — `is_vendor_rom_prop()` men-hide seluruh keluarga
+  `ro.gfx.driver.` dan `ro.gfx.driver_` (dua prefix, bukan satu batang
+  `ro.gfx.driver`, supaya nama yang bukan property tidak ikut tertelan). Ini
+  juga menutup `ro.gfx.driver_build_time`, yang di perangkat referensi bahkan
+  tidak diset.
+- `jni/module_impl.hpp` — `sbx_oem_prop_hidden()` tidak lagi menangani
+  `ro.gfx.driver.1`. Bentuk lamanya ("hide hanya bila persona bukan Qualcomm")
+  salah dua kali: persona Qualcomm justru menurunkan paket yang tidak terpasang.
+
+**Temuan keempat — daftar hide yang dienumerasi manual terus bocor.** Sapuan
+2514 property perangkat terhadap daftar spoof/hide menemukan 23 prop yang
+membawa jejak OEM/SoC asli dan tidak tercakup, di antaranya:
+
+| prop | nilai asli | jejak |
+|---|---|---|
+| `ro.media.xml_variant.codecs[_performance]` | `_kona` | platform asli |
+| `vendor.media.target_variant` | `_kona` | platform asli |
+| `ro.vendor.extension_library` | `libqti-perfd-client.so` | Qualcomm |
+| `vendor.usb.product_string` | `POCO F3` | model asli |
+| `ro.com.google.clientidbase.pg` | `android-xiaomi-deo2` | Xiaomi |
+| `ro.com.google.lens.oem_image_package` | `com.miui.gallery` | MIUI |
+| `ro.csc.spotify.music.{partnerid,referrerid}` | `xiaomi_mobile` | Xiaomi |
+| `persist.sys.miuibooster.name` | `miui_booster` | MIUI |
+| `persist.vendor.camera.*.info` (4) | `com.qti.sensormodule.alioth_*` | kodename + vendor |
+| `vendor.camera.aux.packagelist[ext]` | `com.xiaomi.cameratest` | Xiaomi |
+| `ro.miui.pai.preinstall.path`, `ro.miui.product.home` | `/data/miui/...` | MIUI |
+
+Akar polanya: setiap namespace MIUI ditulis sebagai daftar separator
+(`persist.sys.miui.`, lalu `persist.sys.miui_`), sehingga bentuk tanpa pemisah
+(`persist.sys.miuibooster.name`) lolos dari keduanya. Sekarang satu prefix
+`persist.sys.miui` menutup ketiga bentuk, dan keluarga baru ditambahkan sebagai
+prefix (`persist.vendor.camera.`, `vendor.camera.`, `ro.csc.spotify.`,
+`ro.media.xml_variant.`, `ro.gfx.driver.`/`_`) alih-alih nama satu per satu.
+
+**Regression test.** `tests/host/sbx_pure.cpp` mem-pin daftar hide yang baru —
+termasuk near-miss yang **tidak boleh** ikut tertelan (`ro.gfx.driver` dan
+`vendor.camera` telanjang). Diverifikasi dengan mutation testing: menghapus
+baris hide `ro.gfx.driver.*` menghasilkan 3 FAIL, dan mengembalikan bentuk
+separator lama menghasilkan 2 FAIL — jadi cek ini benar-benar mendiskriminasi,
+bukan lulus kosong.
 
 
 ## v2.2.18 (2026-10-06)

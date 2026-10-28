@@ -23,6 +23,12 @@
 #                  specialized at all. Pure header test; no module TU, no
 #                  device. An AppZygote that slips through aborts on its next
 #                  fork (AOSP ForkCommon -> FileDescriptorTable::Restat).
+#   sbx_hw_naming  native/include/hw_naming.hpp: which value goes into
+#                  ro.hardware vs ro.board.platform vs ro.product.board, plus
+#                  ro.soc.manufacturer, the Dalvik ISA variant and the GPU
+#                  driver package. Pure header test; no module TU, no device.
+#                  Deriving all of them from one column made a Qualcomm persona
+#                  advertise ro.hardware=taro, a token no Qualcomm device ships.
 #   console_check  the WebUI console module (webroot/console.js) under a stubbed
 #                  DOM: capture, badge semantics, stream guards, save transport.
 #                  Skipped unless node is on PATH.
@@ -125,7 +131,7 @@ mkdir -p "$OUT"
 
 exit_code=0
 
-for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe sbx_process_name; do
+for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe sbx_process_name sbx_hw_naming; do
     src="$REPO/tests/host/$suite.cpp"
     bin="$OUT/$suite"
 
@@ -135,7 +141,7 @@ for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe sbx_process_name;
     # into a test that has nothing to do with it.
     extra=""
     case "$suite" in
-        sbx_elf_probe|sbx_process_name) ;;
+        sbx_elf_probe|sbx_process_name|sbx_hw_naming) ;;
         *) extra="$REPO/native/native_read.cpp" ;;
     esac
     if ! "$CXX" "${FLAGS[@]}" "$src" $extra -o "$bin"; then
@@ -171,14 +177,18 @@ if command -v javac >/dev/null 2>&1 && command -v java >/dev/null 2>&1; then
             "$REPO/tests/host/DisplayMetrics.java" \
             "$REPO/tests/host/Configuration.java" \
             "$REPO/tests/host/PackageManager.java" \
-            "$REPO/tests/host/PackageInfo.java" 2>"$jout/javac.log" \
+            "$REPO/tests/host/PackageInfo.java" \
+            "$REPO/tests/host/MatrixCursor.java" \
+            "$REPO/tests/host/AdvertisingIdClient.java" 2>"$jout/javac.log" \
        || javac -source 1.8 -target 1.8 -d "$jout/classes" \
             "$jout/src/androidx/core/os/EnvCompatState.java" \
             "$jout/src/EnvCompatStateCheck.java" \
             "$REPO/tests/host/DisplayMetrics.java" \
             "$REPO/tests/host/Configuration.java" \
             "$REPO/tests/host/PackageManager.java" \
-            "$REPO/tests/host/PackageInfo.java" 2>>"$jout/javac.log"; then
+            "$REPO/tests/host/PackageInfo.java" \
+            "$REPO/tests/host/MatrixCursor.java" \
+            "$REPO/tests/host/AdvertisingIdClient.java" 2>>"$jout/javac.log"; then
         if ! java -ea -cp "$jout/classes" EnvCompatStateCheck; then
             echo "FAIL: EnvCompatStateCheck reported failures"
             exit_code=1

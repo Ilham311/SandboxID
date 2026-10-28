@@ -106,17 +106,51 @@ final class PropHook {
         if (key == null) return null;
         String idk = PropMap.IDENTITY.get(key);
         if (idk != null) {
-            String v = IdentityStore.load().get(idk);
+            Map<String, String> id = IdentityStore.load();
+            String v = id.get(idk);
             if (v != null && !v.isEmpty()) return v;
+            // Derived from the SoC rather than stored. A persona written before
+            // these keys existed has no entry for them, so deriving here keeps
+            // the fix effective without forcing a re-roll — and it is the same
+            // path the native derive_hw_value() takes.
+            String d = deriveHwValue(idk, id);
+            if (d != null) return d;
         }
         return PropMap.CONSTANT.get(key);
     }
 
     /**
-     * Props the module deliberately reports as absent. Direct port of
-     * {@code should_hide_prop()} in {@code native/native_read.cpp}, which
-     * composes {@code is_emulator_prop} + {@code is_custom_rom_prop} +
-     * {@code is_vendor_rom_prop}.
+     * @return the derived value, or null when the key is not derived (or
+     *         derives to empty, in which case the prop is hidden instead).
+     *         Mirrors {@code derive_hw_value()} in {@code jni/prop_hooks.cpp}.
+     */
+    private static String deriveHwValue(String idk, Map<String, String> id) {
+        String man = orEmpty(id.get("SOC_MANUFACTURER"));
+        String mod = orEmpty(id.get("SOC_MODEL"));
+        String plat = orEmpty(id.get("BOARD_PLATFORM"));
+        switch (idk) {
+            case "DALVIK_ARM64_VARIANT":
+                return HwNaming.dalvikArm64Variant(man, mod, plat);
+            case "DALVIK_ARM_VARIANT":
+                return HwNaming.dalvikArmVariant();
+            // GPU_DRIVER is deliberately NOT derived. ro.gfx.driver.1 names an
+            // installed package, and android.os.GraphicsEnvironment.get()
+            // checks that with PackageManager: a derived name
+            // (com.qualcomm.qti.gpudrivers.<platform>.api30) does not exist on
+            // the device, so the framework logs "updatable driver package
+            // '<name>' not installed" - a louder tell than the leak. The whole
+            // ro.gfx.driver.* family is hidden by isVendorRomProp() instead.
+            default:
+                return null;
+        }
+    }
+
+    private static String orEmpty(String s) { return s == null ? "" : s; }
+
+    /**
+     * Props the module deliberately reports as absent. Mirrors
+     * {@code sbx_prop_hidden()} in {@code jni/module_impl.hpp}, composing the
+     * emulator/custom-ROM/vendor-ROM rules with persona-aware OEM rules.
      *
      * <p>The point: a stock Pixel (what the persona claims to be) has none of
      * these, so an in-app read must behave as if the property did not exist —
@@ -126,7 +160,31 @@ final class PropHook {
      */
     private static boolean isHidden(String key) {
         if (key == null) return false;
-        return isEmulatorProp(key) || isCustomRomProp(key) || isVendorRomProp(key);
+        return isEmulatorProp(key) || isCustomRomProp(key) || isVendorRomProp(key)
+                || isOemPropHidden(key);
+    }
+
+    /**
+     * Persona-aware hides, mirroring {@code sbx_oem_prop_hidden()} in
+     * {@code jni/module_impl.hpp}. Kept separate from the pure lists above
+     * because these need the identity, which the pure predicates cannot see.
+     *
+     * <p>{@code ro.gfx.driver.0/.1} are deliberately NOT here — they are hidden
+     * unconditionally by {@link #isVendorRomProp}. Hiding {@code .1} only when
+     * the persona is non-Qualcomm was the wrong shape twice over: a Qualcomm
+     * persona then derived {@code com.qualcomm.qti.gpudrivers.<platform>.api30},
+     * a package that is not installed on this device, and
+     * {@code GraphicsEnvironment.get()} logs "updatable driver package
+     * '<name>' not installed" for it.
+     */
+    private static boolean isOemPropHidden(String k) {
+        // Only ONE name is persona-aware now, so check it before paying for the
+        // identity load: this runs on every SystemProperties.get() miss.
+        if (!"ro.appsflyer.preinstall.path".equals(k)) return false;
+        Map<String, String> id = IdentityStore.load();
+        String man = orEmpty(id.get("MANUFACTURER")), brd = orEmpty(id.get("BRAND"));
+        boolean xiaomi = man.matches("Xiaomi|Redmi|POCO") || brd.matches("Xiaomi|Redmi|POCO");
+        return !xiaomi;
     }
 
     private static boolean isEmulatorProp(String k) {
@@ -168,16 +226,58 @@ final class PropHook {
     // device: ro.miui.ui.version.name=V816, persist.sys.hardcoder.name=
     // miui_booster — unambiguous OEM tells the persona's Build surface
     // contradicts. Same treatment as the custom-ROM props above.
+    //
+    // Kept in step with is_vendor_rom_prop() in native/native_read.cpp: the
+    // underscore form persist.sys.miui_* is a DIFFERENT namespace from
+    // persist.sys.miui.* and slipped past a dot-prefixed test while a target app
+    // read it, and the HyperOS scheduler prefixes (turbosched, dexpreload,
+    // perf_scenario_recognition, perfdebug, smart_gc) are separate again.
     private static boolean isVendorRomProp(String k) {
         switch (k) {
             case "persist.sys.hardcoder.name":
             case "ro.com.miui.rsa":
+            case "ro.boot.cert":
+            case "ro.product.cert":
+            case "ro.product.odm.cert":
+            case "ro.product.vendor.cert":
+            case "ro.display.mimotion":
+            case "vendor.boostfwk.frameprefetcher":
+            case "miui.usb.dialog":
+            // Measured on the reference device; each names the real OEM, the
+            // real SoC platform, or both.
+            case "ro.com.google.clientidbase.pg":        // android-xiaomi-deo2
+            case "ro.com.google.lens.oem_image_package": // com.miui.gallery
+            case "ro.vendor.extension_library":          // libqti-perfd-client.so
+            case "vendor.media.target_variant":          // _kona
+            case "vendor.usb.product_string":            // POCO F3
                 return true;
             default:
                 return k.startsWith("ro.miui.")
                         || k.startsWith("ro.vendor.miui.")
                         || k.startsWith("ro.ril.miui.")
-                        || k.startsWith("persist.sys.miui.");
+                        // One prefix for the whole "persist.sys.miui" family:
+                        // the dotted form, the underscore form
+                        // (persist.sys.miui_animator_sched.*, a different
+                        // namespace) and the run-together form
+                        // (persist.sys.miuibooster.name) that neither matched.
+                        || k.startsWith("persist.sys.miui")
+                        || k.startsWith("persist.miui.")
+                        || k.startsWith("persist.sys.turbosched.")
+                        || k.startsWith("persist.sys.dexpreload.")
+                        || k.startsWith("persist.sys.perf_scenario_recognition.")
+                        || k.startsWith("persist.sys.perfdebug.")
+                        || k.startsWith("persist.sys.smart_gc.")
+                        || k.startsWith("ro.vendor.mi_sf.")
+                        // ro.gfx.driver.* — hidden, never derived: see the note
+                        // in deriveHwValue(). Two prefixes, not one bare stem:
+                        // the real names are ro.gfx.driver.0/.1 (dot) and
+                        // ro.gfx.driver_build_time (underscore).
+                        || k.startsWith("ro.gfx.driver.")
+                        || k.startsWith("ro.gfx.driver_")
+                        || k.startsWith("persist.vendor.camera.")
+                        || k.startsWith("vendor.camera.")
+                        || k.startsWith("ro.csc.spotify.")
+                        || k.startsWith("ro.media.xml_variant.");
         }
     }
 }

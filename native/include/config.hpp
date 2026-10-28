@@ -66,9 +66,14 @@ inline constexpr KV STATIC_PROP_DEFAULTS[] = {
     {"ro.zygote",                    "zygote64_32"},
     {"ro.dalvik.vm.native.bridge",   "0"},
     {"ro.allow.mock.location",       "0"},
-    {"dalvik.vm.isa.arm64.variant",  "generic"},
+    // dalvik.vm.isa.*.variant is NOT here any more. "generic" is the
+    // AOSP/GSI/emulator default, not what a retail device ships, and serving it
+    // for every persona was a contradiction for any device claiming to be a
+    // modern flagship. The variant is derived per-persona from the SoC in
+    // spoof_prop_value() (see hw_naming.hpp), which also covers an identity
+    // written before that field existed. The .features halves stay: "default"
+    // is what real devices report.
     {"dalvik.vm.isa.arm64.features", "default"},
-    {"dalvik.vm.isa.arm.variant",    "generic"},
     {"dalvik.vm.isa.arm.features",   "default"},
     {"dalvik.vm.heapsize",           "512m"},
     {"ro.build.version.preview_sdk", "0"},

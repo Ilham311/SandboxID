@@ -13,6 +13,7 @@
 #include <sys/system_properties.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <dlfcn.h>
@@ -31,6 +32,7 @@
 #include "zygisk.hpp"
 #include "config.hpp"
 #include "native_read.hpp"
+#include "hw_naming.hpp"
 #include "raii.hpp"
 #include "jni_string.hpp"
 
@@ -60,8 +62,44 @@ extern const std::string& val(const std::string& k);
 extern bool spoof_prop_value(const std::string& k, std::string& out);
 
 // ---- Inline helpers used across TUs ----
+
+// Props that name a specific OEM, and so must be hidden unless the persona IS
+// that OEM. These cannot live in should_hide_prop() (native/native_read.cpp):
+// that function is pure and has no access to the identity, and it is also
+// compiled into the CLI. The JNI layer is where the persona is known.
+//
+// Measured on the reference device:
+// ro.appsflyer.preinstall.path=/data/miui/pai/pre_install.appsflyer. A target
+// app read it and got the real Xiaomi/MIUI value back while every other surface
+// showed the OPPO persona.
+inline bool sbx_oem_prop_hidden(const char* name) {
+    if (!name) return false;
+    const std::string& man = val("MANUFACTURER");
+    const std::string& brd = val("BRAND");
+
+    const bool xiaomi = man == "Xiaomi" || man == "Redmi" || man == "POCO" ||
+                        brd == "Xiaomi" || brd == "Redmi" || brd == "POCO";
+    if (!xiaomi) {
+        static const char* const xiaomi_only[] = {
+            "ro.appsflyer.preinstall.path", // /data/miui/pai/...
+        };
+        for (const char* e : xiaomi_only)
+            if (std::strcmp(name, e) == 0) return true;
+    }
+
+    // ro.gfx.driver.0/.1 used to be handled here, hidden only when the persona
+    // was non-Qualcomm. That was the wrong shape twice over: a Qualcomm persona
+    // then DERIVED a package name (com.qualcomm.qti.gpudrivers.<platform>.api30)
+    // that is not installed on this device, and GraphicsEnvironment.get() logs
+    // "updatable driver package '<name>' not installed" for it. The whole
+    // ro.gfx.driver.* family is now hidden unconditionally, by the pure
+    // is_vendor_rom_prop() list in native/native_read.cpp. See prop_defs.hpp.
+    return false;
+}
+
 inline bool sbx_prop_hidden(const char* name) {
-    return name && sbxnr::should_hide_prop(name);
+    if (!name) return false;
+    return sbxnr::should_hide_prop(name) || sbx_oem_prop_hidden(name);
 }
 
 inline bool sbx_parse_longlong(const std::string& v, long long& out) {

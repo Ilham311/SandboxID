@@ -37,6 +37,10 @@ if [ -n "$_fp" ]; then
     _plat="$(id_get BOARD_PLATFORM)"
     _socman="$(id_get SOC_MANUFACTURER)"; _socmod="$(id_get SOC_MODEL)"
     _type="$(id_get TYPE)";       _tags="$(id_get TAGS)"
+    # Named _id* on purpose: _hw is reused further down for the device-wide
+    # `getprop ro.hardware`, and a bare _hw here would be silently clobbered.
+    _idhw="$(id_get HARDWARE)";   _idboard="$(id_get BOARD)"
+    _manuf="$(id_get MANUFACTURER)"
 
     _expfp="${_brand}/${_product}/${_device}:${_release}/${_bid}/${_incr}:user/release-keys"
     if [ "$_fp" = "$_expfp" ]; then
@@ -101,6 +105,87 @@ if [ -n "$_fp" ]; then
             fi
             ;;
     esac
+
+    # ---- penamaan hardware ------------------------------------------------
+    # HARDWARE adalah token yang dipakai init untuk memilih
+    # /vendor/etc/init/hw/init.<HARDWARE>.rc. Qualcomm memakai satu token yang
+    # sama — "qcom" — untuk SEMUA SoC-nya, jadi persona Qualcomm dengan
+    # HARDWARE=taro menyebut init rc yang tidak ada di perangkat Qualcomm mana
+    # pun (init.taro.rc tidak pernah dikirim; yang ada init.qcom.rc). Runtuhnya
+    # HARDWARE/BOARD/BOARD_PLATFORM menjadi satu nilai adalah bug yang sama
+    # dilihat dari sisi lain.
+    if [ -n "$_plat" ]; then
+        _sml="$(printf '%s' "$_socman" | tr 'A-Z' 'a-z')"
+        _qcom=no
+        case "$_sml" in *qualcomm*|*qti*) _qcom=yes ;; esac
+        case "$_socmod" in SM*|MSM*|SDM*|QCM*|APQ*) _qcom=yes ;; esac
+
+        if [ "$_qcom" = yes ]; then
+            if [ "$_idhw" = "qcom" ]; then
+                emit koherensi PASS "ro.hardware=qcom untuk persona Qualcomm ($_socmod)"
+            else
+                emit koherensi FAIL "persona Qualcomm ($_socmod) tapi HARDWARE=${_idhw:-kosong} (harus qcom — init memilih init.qcom.rc)"
+            fi
+            if [ "$_idhw" = "$_idboard" ] && [ "$_idboard" = "$_plat" ]; then
+                emit koherensi FAIL "HARDWARE=BOARD=BOARD_PLATFORM=$_plat — tiga prop berbeda runtuh jadi satu"
+            fi
+            case "$_socman" in
+                QTI) emit koherensi PASS "SOC_MANUFACTURER=QTI (penulisan modern Qualcomm)" ;;
+                *)   emit koherensi WARN "SOC_MANUFACTURER=${_socman:-kosong} untuk $_socmod (vendor.prop modern menulis QTI)" ;;
+            esac
+        else
+            # MediaTek (init.mt6789.rc), Tensor (init.gs201.rc) dan Exynos
+            # (init.exynos2100.rc) menamai init rc-nya setelah token platform.
+            if [ "$_idhw" = "$_plat" ]; then
+                emit koherensi PASS "ro.hardware=$_idhw mengikuti platform ($_socmod)"
+            else
+                emit koherensi WARN "HARDWARE=${_idhw:-kosong} != BOARD_PLATFORM=$_plat (persona non-Qualcomm)"
+            fi
+        fi
+    fi
+
+    # Samsung adalah pengecualian ro.product.board: ia menaruh PLATFORM di sana,
+    # termasuk pada perangkat Snapdragon-nya (Galaxy S23 = dm1q/SM8550 tapi
+    # ro.product.board=kalama). OEM lain menaruh nama kodename perangkat.
+    case "$(printf '%s%s' "$_manuf" "$(id_get BRAND)" | tr 'A-Z' 'a-z')" in
+        *samsung*)
+            if [ "$_idboard" = "$_plat" ]; then
+                emit koherensi PASS "BOARD=BOARD_PLATFORM=$_plat (konvensi Samsung)"
+            else
+                emit koherensi WARN "Samsung tapi BOARD=${_idboard:-kosong} != BOARD_PLATFORM=$_plat (Samsung menaruh platform di ro.product.board)"
+            fi
+            ;;
+        "")
+            ;;
+        *)
+            if [ "$_idboard" = "$_device" ]; then
+                emit koherensi PASS "BOARD=$_idboard mengikuti DEVICE (konvensi non-Samsung)"
+            else
+                emit koherensi WARN "BOARD=${_idboard:-kosong} != DEVICE=${_device:-kosong} (non-Samsung biasanya memakai kodename)"
+            fi
+            ;;
+    esac
+
+    _dvar="$(id_get DALVIK_ARM64_VARIANT)"
+    case "$_dvar" in
+        ""|generic)
+            emit koherensi WARN "DALVIK_ARM64_VARIANT=${_dvar:-kosong} (generic = default AOSP/GSI/emulator, bukan nilai ritel)" ;;
+        *)
+            emit koherensi PASS "DALVIK_ARM64_VARIANT=$_dvar" ;;
+    esac
+
+    # ro.gfx.driver.0/.1 TIDAK boleh punya nilai turunan. Keduanya nama PAKET
+    # yang harus terpasang, dan android.os.GraphicsEnvironment.get() menanyakan
+    # keberadaannya ke PackageManager. Menurunkan nama dari platform persona
+    # menghasilkan paket yang tidak ada di perangkat, dan framework mencatat
+    # "updatable driver package '<nama>' not installed" — pesan yang lebih
+    # spesifik daripada nilai asli yang digantikannya. Keluarga ini di-HIDE.
+    _gpu="$(id_get GPU_DRIVER)"
+    if [ -n "$_gpu" ]; then
+        emit koherensi FAIL "GPU_DRIVER=$_gpu — ro.gfx.driver.* harus di-hide, bukan diturunkan (paket turunan tidak terpasang di perangkat ini)"
+    else
+        emit koherensi PASS "tidak ada GPU_DRIVER turunan (ro.gfx.driver.* di-hide)"
+    fi
 
     _flavor="$(id_get FLAVOR)"
     if [ -n "$_flavor" ]; then

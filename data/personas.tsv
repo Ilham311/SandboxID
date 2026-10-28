@@ -27,8 +27,15 @@
 # because it can't safely inherit the Tensor google/GS*/g5* values. `radio` is
 # the LAST column and is OPTIONAL: no public baseband data exists for most OEM
 # builds, so leave it off and the device keeps its REAL baseband (safer than a
-# fabricated one). board == platform is fine for OEM rows (both hold the SoC
-# platform, e.g. `pineapple`), and ro.hardware then tracks that too.
+# fabricated one).
+#
+# `board` is ro.product.board and `platform` is ro.board.platform: they are NOT
+# the same prop and must not be collapsed. ro.board.platform is always the SoC
+# platform (pineapple, taro, mt6789). ro.product.board is the device codename on
+# most OEMs (alioth, shiba, houji) — Samsung is the exception and puts the
+# PLATFORM there, on its Snapdragon devices too. ro.hardware is derived, not
+# stored: it is "qcom" for every Qualcomm SoC (init ships init.qcom.rc on all of
+# them) and the platform token otherwise. See native/include/hw_naming.hpp.
 #
 # SDK<->Android:  31=12  32=12L  33=13  34=14  35=15  36=16
 # The CLI matches a persona to the device's real SDK and NEVER presents a higher

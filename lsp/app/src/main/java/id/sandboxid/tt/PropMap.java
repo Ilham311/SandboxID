@@ -157,6 +157,22 @@ final class PropMap {
         id.put("ro.product.build.version.release_or_codename", "RELEASE");
         id.put("ro.product.build.version.sdk", "SDK_INT");
         id.put("ro.boot.hardware", "HARDWARE");
+        // The hardware-naming trio. These are NOT interchangeable (see
+        // hw_naming.hpp on the native side): ro.hardware is the init rc
+        // selector, ro.board.platform is the SoC platform, ro.product.board is
+        // the device codename. Without these entries an app reading
+        // SystemProperties.get("ro.hardware") saw the REAL device's token while
+        // Build.HARDWARE reported the persona's - a direct contradiction.
+        id.put("ro.hardware", "HARDWARE");
+        id.put("ro.board.platform", "BOARD_PLATFORM");
+        id.put("ro.product.board", "BOARD");
+        // ro.gfx.driver.0/.1 are NOT mapped to an identity key. They are hidden
+        // by isVendorRomProp() instead: the prop names an installed package and
+        // GraphicsEnvironment.get() checks it with PackageManager, so a derived
+        // name would be reported as "not installed" — a louder tell than the
+        // leak. See the note in PropHook.deriveHwValue().
+        id.put("dalvik.vm.isa.arm64.variant", "DALVIK_ARM64_VARIANT");
+        id.put("dalvik.vm.isa.arm.variant", "DALVIK_ARM_VARIANT");
         id.put("gsm.operator.numeric", "GSM_OPERATOR_NUMERIC");
         id.put("gsm.sim.operator.numeric", "GSM_OPERATOR_NUMERIC");
         id.put("gsm.operator.alpha", "GSM_OPERATOR_ALPHA");
