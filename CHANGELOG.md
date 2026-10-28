@@ -163,6 +163,8 @@ no-op menggagalkan 5.
 
 Total suite host: **238 check, 0 gagal**.
 
+## v2.2.36 (2026-10-28)
+
 ### Fix: AppZygote (`<pkg>_zygote`) di-specialize → prosesnya SIGABRT saat fork berikutnya
 
 **Gejala.** `com.shopee.id_zygote` mati dengan `SIGABRT` sesaat setelah modul

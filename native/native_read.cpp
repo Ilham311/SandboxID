@@ -332,11 +332,11 @@ uint64_t ram_gb_to_memtotal_kb(int gb) {
 }
 
 uint64_t round_up_marketing_gb(uint64_t real_kb) {
-    static const int tiers[] = {2, 3, 4, 6, 8, 12, 16, 18, 24};
+    static const int tiers[] = {2, 3, 4, 6, 8, 12, 16, 18, 24, 32, 48, 64, 96, 128};
     // Clamp only pathological values before the rounding add. `real_kb +
     // 1048575ULL` can wrap near UINT64_MAX, and the eventual int cast must stay
-    // in range. 1 TiB is not real hardware, while values above 24 GiB remain
-    // represented instead of being collapsed to the largest marketing tier.
+    // in range. 1 TiB is not real hardware, while values above the largest
+    // marketing tier remain represented instead of being collapsed to it.
     constexpr uint64_t kMaxKb = 1024ULL * 1024ULL * 1024ULL;   // 1 TiB in kB
     if (real_kb > kMaxKb) real_kb = kMaxKb;
     uint64_t gib = (real_kb + 1048575ULL) / 1048576ULL;

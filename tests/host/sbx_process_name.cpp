@@ -120,8 +120,8 @@ int main() {
     {
         const std::string pkg = "com.shopee.id_zygote";
         CHECK(has_zygote_suffix(pkg));
-        // Both the module (flag absent on the provider that was live) and the
-        // companion must now refuse it.
+        // With the provider's flag absent, the module's name fallback refuses
+        // it before requesting an identity from the companion.
         CHECK(is_child_zygote(false, false, pkg));
         // ...while the app's own processes are still served.
         CHECK(!is_child_zygote(false, false, "com.shopee.id"));
