@@ -28,6 +28,7 @@
 #include <android/log.h>
 #include "config.hpp"
 #include "mountinfo.hpp"
+#include "sbx_process_name.hpp"
 
 #define LOG_TAG "SandboxIDCompanion"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -103,23 +104,37 @@ static void reload_targets_if_changed() {
     g_targets_mtime_nsec = st.st_mtim.tv_nsec;
 }
 
+// Canonical package for a process name: sub-process and AppZygote markers
+// removed. Shared with the module (jni/sbx_process_name.hpp) so the two cannot
+// drift - the module derives g_pkg with the same function, and L3, L9 and
+// rotate_ids.sh all have to seed from one string.
 static std::string extract_base_pkg(const std::string& pkg) {
     if (pkg.empty()) return "";
-    std::string base = pkg;
-    size_t colon = base.find(':');
-    if (colon != std::string::npos) {
-        base = base.substr(0, colon);
-    }
-    static const std::string kZygoteSuffix = "_zygote";
-    if (base.size() > kZygoteSuffix.size() &&
-        base.rfind(kZygoteSuffix) == (base.size() - kZygoteSuffix.size())) {
-        base = base.substr(0, base.size() - kZygoteSuffix.size());
-    }
-    return base;
+    return sbxproc::canonical_pkg(pkg);
 }
 
 static bool is_target(const std::string& pkg) {
     if (pkg.empty()) return false;
+    // Refuse child zygotes (AppZygote, "<pkg>_zygote") here as well as in the
+    // module's preAppSpecialize. The module is the first line of defence, but
+    // this is the authority: a client that still asks for an identity under a
+    // child-zygote name gets none, whatever build it is. That matters because
+    // the failure it prevents is not a leak but a crash - an AppZygote holding
+    // a companion socket aborts on its next fork, when AOSP's ForkCommon ->
+    // FileDescriptorTable::Restat fstat()s the fd and calls ZygoteFailure:
+    //
+    //   Abort message: 'JNI FatalError called: (zygote) Unable to stat 120'
+    //   Cmdline: com.shopee.id_zygote
+    //
+    // The app's real process is forked from the AppZygote afterwards and asks
+    // again under the plain package name, so refusing here loses no coverage.
+    // See jni/sbx_process_name.hpp.
+    if (sbxproc::has_zygote_suffix(pkg)) {
+        LOGW("refusing identity for child zygote '%s' - not an app process; "
+             "granting it would abort that zygote on its next fork",
+             pkg.c_str());
+        return false;
+    }
     std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     reload_targets_if_changed();
     for (const auto& t : g_targets) {

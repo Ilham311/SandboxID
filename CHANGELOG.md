@@ -2,6 +2,76 @@
 
 ## Unreleased
 
+### Fix: AppZygote (`<pkg>_zygote`) di-specialize → prosesnya SIGABRT saat fork berikutnya
+
+**Gejala.** `com.shopee.id_zygote` mati dengan `SIGABRT` sesaat setelah modul
+mengaktifkannya. Tombstone di `debug/report/crashes-*.log`:
+
+```
+Abort message: 'JNI FatalError called: (zygote) Unable to stat 120'
+Cmdline: com.shopee.id_zygote
+#06 FileDescriptorInfo::CreateFromFd
+#07 FileDescriptorTable::RestatInternal
+#08 FileDescriptorTable::Restat
+#09 zygote::ForkCommon
+#10 zygote::forkApp
+```
+
+**Akar masalah.** `com.shopee.id_zygote` adalah **AppZygote** — zygote milik app
+itu sendiri (dari `android:zygotePreloadName`), bukan proses app. Proses app yang
+sebenarnya di-fork **dari** AppZygote itu belakangan, dan fork itulah yang
+menjalankan `SpecializeCommon` dengan nama paket biasa.
+
+`jni/companion.cpp:extract_base_pkg()` sengaja membuang sufiks `_zygote`, sehingga
+`com.shopee.id_zygote` cocok dengan target `com.shopee.id`. Modul lalu menjalankan
+`postAppSpecialize` penuh di dalam AppZygote itu, termasuk membuka soket companion.
+
+Karena AppZygote **adalah** zygote, setiap fork yang dilakukannya menjalankan
+`zygote::ForkCommon` → `FileDescriptorTable::Restat` → `CreateFromFd`, yang
+`fstat()` **setiap** fd terbuka dan memanggil `fail_fn("Unable to stat %d")` bila
+gagal. `fail_fn` = `ZygoteFailure` → `env->FatalError()` → `SIGABRT`. Daftar
+`fds_to_ignore` dibangun **per-fork** dan hanya memuat fd yang diketahui framework;
+soket companion yang dibuka modul di dalam AppZygote tidak pernah ada di dalamnya.
+AppZygote pun mati pada fork berikutnya. Angka `120` di abort message itu persis fd
+yang baru dikembalikan `connectCompanion()` di pid tersebut.
+
+**Bukti korelasi.** Setiap AppZygote yang di-specialize crash; setiap yang
+di-skip tidak:
+
+```
+com.shopee.id_zygote  specialized=1 crash=1   (2 kejadian)
+com.android.chrome_zygote / webview_zygote /
+com.instagram.android_zygote / ...  specialized=0 crash=0
+```
+
+**Perbaikan.** Child zygote ditolak, bukan di-specialize:
+
+- `jni/sbx_process_name.hpp` (baru) — satu sumber kebenaran untuk aturan nama
+  proses, murni (tanpa JNI/header Android), dipakai **modul dan companion**
+  sekaligus supaya keduanya tidak bisa menyimpang. `is_child_zygote()` memakai
+  field framework `AppSpecializeArgs::is_child_zygote` bila provider mengisinya
+  (Magisk dan ReZygisk mengisinya dari parameter JNI asli), dan jatuh ke konvensi
+  nama `_zygote` bila field opsional itu null. Field itu sebelumnya **tidak pernah
+  dibaca sama sekali** di repo ini.
+- `jni/module.cpp` — `preAppSpecialize` menolak child zygote sebelum
+  `connectCompanion()`, jadi soket tidak pernah dibuka di dalamnya.
+- `jni/companion.cpp` — `is_target()` juga menolak child zygote. Ini lapisan kedua
+  yang berlaku **tanpa memandang build**: build lama yang masih terpasang di
+  perangkat pun tidak akan lagi menerima blob untuk nama `_zygote`.
+- `tests/host/sbx_process_name.cpp` (baru) — suite regression, terdaftar di
+  `tests/host/run.sh`. Lima mutan (sufiks selalu false, flag diabaikan, guard
+  panjang dibuang, sufiks dicocokkan sebagai infix, colon terakhir bukan pertama)
+  semuanya terbunuh, jadi suite ini benar-benar mendiskriminasi.
+- `sh/debug/summarize.sh` — dua penghitung baru: `child zygote skipped (module)`
+  dan `child zygote refused (companion)`.
+
+**Catatan operasional.** Build yang terpasang di perangkat saat audit ini
+(`v2.2.30`/`261`) **mendahului semua perbaikan yang sudah di-commit**; `strings`
+pada `zygisk/arm64-v8a.so` tidak memuat `getprop dump filtered`, `execlp`,
+`fexecve`, `posix_spawn`, `sbx_popen_readable`, `sbx_exec_denied`,
+`NATIVE_%s BLOCKED`, maupun `shell-guard entry point(s)`. Perlu build + install
+ulang supaya perbaikan-perbaikan itu benar-benar berjalan.
+
 
 ## v2.2.18 (2026-10-06)
 
