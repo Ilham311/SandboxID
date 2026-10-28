@@ -145,10 +145,9 @@ final class PropHook {
     private static String orEmpty(String s) { return s == null ? "" : s; }
 
     /**
-     * Props the module deliberately reports as absent. Direct port of
-     * {@code should_hide_prop()} in {@code native/native_read.cpp}, which
-     * composes {@code is_emulator_prop} + {@code is_custom_rom_prop} +
-     * {@code is_vendor_rom_prop}.
+     * Props the module deliberately reports as absent. Mirrors
+     * {@code sbx_prop_hidden()} in {@code jni/module_impl.hpp}, composing the
+     * emulator/custom-ROM/vendor-ROM rules with persona-aware OEM rules.
      *
      * <p>The point: a stock Pixel (what the persona claims to be) has none of
      * these, so an in-app read must behave as if the property did not exist —
@@ -158,7 +157,17 @@ final class PropHook {
      */
     private static boolean isHidden(String key) {
         if (key == null) return false;
-        return isEmulatorProp(key) || isCustomRomProp(key) || isVendorRomProp(key);
+        return isEmulatorProp(key) || isCustomRomProp(key) || isVendorRomProp(key)
+                || isOemPropHidden(key, IdentityStore.load());
+    }
+
+    private static boolean isOemPropHidden(String k, Map<String, String> id) {
+        String man = orEmpty(id.get("MANUFACTURER")), brd = orEmpty(id.get("BRAND"));
+        boolean xiaomi = man.matches("Xiaomi|Redmi|POCO") || brd.matches("Xiaomi|Redmi|POCO");
+        if (!xiaomi && (k.equals("ro.gfx.driver.0") || k.equals("ro.appsflyer.preinstall.path"))) return true;
+        if (k.equals("ro.gfx.driver.1"))
+            return !HwNaming.isQualcomm(orEmpty(id.get("SOC_MANUFACTURER")), orEmpty(id.get("SOC_MODEL")));
+        return false;
     }
 
     private static boolean isEmulatorProp(String k) {
