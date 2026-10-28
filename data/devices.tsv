@@ -47,9 +47,10 @@
 #
 # CAVEAT (Pixel rows): board = the Tensor SoC platform (gs101/gs201/zuma/
 # zumapro/laguna) so ro.board.platform stays coherent with soc_model (GS101..
-# GS501) and the SoC-detect anchor is correct. Real Pixels expose the codename
-# (e.g. shiba) in ro.product.board while ro.hardware/ro.board.platform is the
-# platform — a minor divergence; the fingerprint (google/<codename>/...) is exact.
+# GS501) and the SoC-detect anchor is correct. ro.product.board and ro.hardware
+# are DERIVED from this row, not read from it: ro.product.board becomes the
+# codename (shiba) and ro.hardware becomes the platform token on Tensor. See
+# native/include/hw_naming.hpp and HwNaming.java, which both sides share.
 Infinix	INFINIX	Infinix Note 30	Infinix X6833B	Infinix-X6833B	X6833B-GL	mt6789	MediaTek	MT6789	33	13	TP1A.220624.014	230817V2345	2023-08-05	2023-05
 Infinix	INFINIX	Infinix GT 10 Pro	Infinix X6739	Infinix-X6739	X6739-GL	mt6893	MediaTek	MT6893	33	13	TP1A.220624.014	231024V2278	2023-10-05	2023-08
 Infinix	INFINIX	Infinix Zero 30 5G	Infinix X6731	Infinix-X6731	X6731-GL	mt6893	MediaTek	MT6893	33	13	TP1A.220624.014	240829V442	2024-07-05	2023-09

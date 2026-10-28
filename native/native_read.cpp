@@ -649,12 +649,33 @@ bool is_vendor_rom_prop(const char* name) {
         "ro.product.cert",
         "ro.product.odm.cert",
         "ro.product.vendor.cert",
+        // HyperOS performance/framework props. None of these exist on a stock
+        // Pixel, and a target app that reads them sees the ROM it is running
+        // on rather than the persona. Measured on a HyperOS device: a target
+        // app read all of these and got the real values back.
+        "ro.display.mimotion",
+        "vendor.boostfwk.frameprefetcher",
+        "miui.usb.dialog",
     };
     for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
     if (std::strncmp(name, "ro.miui.", 8) == 0)          return true;
     if (std::strncmp(name, "ro.vendor.miui.", 15) == 0) return true;
     if (std::strncmp(name, "ro.ril.miui.", 12) == 0)    return true;
     if (std::strncmp(name, "persist.sys.miui.", 17) == 0) return true;
+    // The underscore form. "persist.sys.miui_animator_sched.*" (2 props on the
+    // reference device) is a different namespace from "persist.sys.miui.*" and
+    // slipped past the dot-prefixed test above while a target app read it.
+    if (std::strncmp(name, "persist.sys.miui_", 18) == 0) return true;
+    // "persist.miui.*" (no ".sys"): persist.miui.density_v2, persist.miui.extm.*
+    if (std::strncmp(name, "persist.miui.", 13) == 0)    return true;
+    // The HyperOS scheduler and its siblings. Each prefix was measured on the
+    // device; a stock Pixel has none of them.
+    if (std::strncmp(name, "persist.sys.turbosched.", 23) == 0) return true;
+    if (std::strncmp(name, "persist.sys.dexpreload.", 23) == 0) return true;
+    if (std::strncmp(name, "persist.sys.perf_scenario_recognition.", 38) == 0) return true;
+    if (std::strncmp(name, "persist.sys.perfdebug.", 22) == 0) return true;
+    if (std::strncmp(name, "persist.sys.smart_gc.", 21) == 0) return true;
+    if (std::strncmp(name, "ro.vendor.mi_sf.", 16) == 0) return true;
     return false;
 }
 

@@ -21,6 +21,7 @@
 #include "prop_defs.hpp"
 #include "carrier.hpp"
 #include "native_read.hpp"
+#include "hw_naming.hpp"
 #include <sys/system_properties.h>
 
 static const char* IDENTITY_FILE  = sandboxid::IDENTITY_FILE;
@@ -232,10 +233,10 @@ struct PixelEntry {
     std::string brand, manufacturer, marketname, soc_manufacturer, soc_model, radio;
 };
 
-static bool is_tensor_platform(const std::string& plat) {
-    return plat == "gs101" || plat == "gs201" || plat == "zuma" ||
-           plat == "zumapro" || plat == "laguna";
-}
+// The Tensor platform test lives in hw_naming.hpp now: the hardware-naming
+// rules need it too, and two copies of "which platforms are Tensor" is exactly
+// the kind of drift that produced the ro.hardware bug.
+using sbxhw::is_tensor_platform;
 
 static long long build_utc_from_patch(const std::string& patch,
                                       const std::string& incremental) {
@@ -418,16 +419,43 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["MARKETNAME"]      = p.marketname.empty() ? p.model : p.marketname;
     id.kv["DEVICE"]          = p.device;
     id.kv["PRODUCT"]         = p.product;
-    id.kv["BOARD"]           = p.board;
-    id.kv["HARDWARE"]        = p.board;
+    // Hardware naming: ro.hardware is NOT ro.board.platform. See hw_naming.hpp
+    // for the measured conventions and the device evidence. Deriving all three
+    // from one column made a Qualcomm persona advertise ro.hardware=taro, a
+    // token no Qualcomm device ships (init would look for init.taro.rc).
+    const std::string hw_token = sbxhw::hardware_token(soc_man, soc_mod, p.platform);
+    const std::string soc_man_final = sbxhw::soc_manufacturer_name(soc_man, soc_mod);
+
+    id.kv["BOARD"]           = sbxhw::product_board(p.device, p.platform, brand, manuf);
+    id.kv["HARDWARE"]        = hw_token;
     id.kv["BOARD_PLATFORM"]  = p.platform;
-    id.kv["SOC_MANUFACTURER"] = soc_man;
+    id.kv["SOC_MANUFACTURER"] = soc_man_final;
     id.kv["SOC_MODEL"]       = soc_mod;
     id.kv["ID"]              = p.id;
     id.kv["INCREMENTAL"]     = p.incremental;
     id.kv["RELEASE"]         = p.release;
     id.kv["SDK_INT"]         = std::to_string(p.sdk);
     id.kv["SECURITY_PATCH"]  = p.security_patch;
+
+    // The GPU driver package carries the SoC platform in its name, so it has to
+    // move with the persona. Empty for a non-Qualcomm persona: the prop is then
+    // hidden rather than replaced, since no such package exists there.
+    id.kv["GPU_DRIVER"] = sbxhw::gpu_driver_pkg(p.platform, soc_man, soc_mod);
+    // ro.appsflyer.preinstall.path is deliberately NOT derived here: the only
+    // value ever observed is the vendor's own (/data/miui/pai/... on HyperOS),
+    // and inventing "/data/<brand>/pai/..." for an OEM that does not ship one
+    // would be a fresh tell rather than a fix. It is hidden instead, unless the
+    // persona really is that vendor - see sbx_oem_prop_hidden().
+
+    // dalvik.vm.isa.*.variant: "generic" is the AOSP/GSI/emulator default, not
+    // what a retail device ships. A fingerprinting app reading "generic" off a
+    // device claiming to be an SM8475 flagship is looking at a contradiction.
+    // Measured: SM8250/SM8450/SM8550 -> kryo300, mt6789 -> cortex-a55,
+    // gs201/zuma -> cortex-a76.
+    id.kv["DALVIK_ARM64_VARIANT"] =
+        sbxhw::dalvik_arm64_variant(soc_man, soc_mod, p.platform);
+    id.kv["DALVIK_ARM_VARIANT"] =
+        sbxhw::dalvik_arm_variant(soc_man, soc_mod, p.platform);
     id.kv["BOOTLOADER"]      = "unknown";
     id.kv["HOST"]            = gen_host_suffix();
     id.kv["USER"]            = "android-build";

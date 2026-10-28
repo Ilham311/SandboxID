@@ -121,6 +121,24 @@ inline constexpr NativePropEntry NATIVE_PROPS[] = {
     {"sys.oem_unlock_allowed",             "0", "", false},
     {"ro.boot.hardware.sku",               nullptr, "SKU", false},
     {"ro.boot.product.hardware.sku",       nullptr, "ODM_SKU", false},
+    // The GPU driver package names the SoC platform in its middle segment:
+    // ro.gfx.driver.1=com.qualcomm.qti.gpudrivers.kona.api30 on the reference
+    // device. Left alone it contradicts the persona's own ro.soc.model (a
+    // target app read it and got "kona" while the persona claimed SM8475).
+    // GPU_DRIVER is derived from BOARD_PLATFORM in hw_naming.hpp; the vendor
+    // UGD slot (ro.gfx.driver.0) is OEM-specific and is hidden instead, since
+    // a Google persona has no com.xiaomi.ugd equivalent to substitute.
+    {"ro.gfx.driver.1",                    nullptr, "GPU_DRIVER", false},
+    // The Dalvik ISA variant. These used to be served from STATIC_PROP_DEFAULTS
+    // as a hardcoded "generic" for every persona, which is the AOSP/GSI/emulator
+    // default rather than anything a retail device ships. They are per-persona
+    // now; STATIC_PROP_DEFAULTS keeps them only as the fallback for an identity
+    // that predates this field.
+    {"dalvik.vm.isa.arm64.variant",        nullptr, "DALVIK_ARM64_VARIANT", false},
+    {"dalvik.vm.isa.arm.variant",          nullptr, "DALVIK_ARM_VARIANT", false},
+    // AppsFlyer/MyTracker preinstall path: /data/miui/pai/... on a HyperOS
+    // device. It names the real ROM, and a target app reads it.
+    {"ro.appsflyer.preinstall.path",       nullptr, "APPSFLYER_PREINSTALL", false},
     {"ro.build.version.base_os",           nullptr, "BASE_OS", false},
     {"ro.build.version.preview_sdk",       "0", "", false},
     {"ro.build.version.preview_sdk_fingerprint", "REL", "", false},

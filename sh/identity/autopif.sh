@@ -13,6 +13,73 @@ GEN_MAX_TRY="${AUTOPIF_GEN_MAX_TRY:-8}"
 
 log() { echo "[autopif] $*"; }
 
+# ---- hardware naming -------------------------------------------------------
+# Mirrors native/include/hw_naming.hpp. The two paths (this shell one and the
+# native `freshen` one) must hand the runtime the SAME value for the same
+# property, so any change here has to be made there too.
+#
+# devices.tsv column 7 is ro.board.platform. It is NOT ro.hardware: Qualcomm
+# ships a single "qcom" token for every SoC it makes (init.qcom.rc), while
+# MediaTek/Tensor/Exynos name the init rc after the platform. Deriving
+# ro.hardware from the platform column made a Qualcomm persona advertise
+# ro.hardware=taro - a token no Qualcomm device ships.
+_soc_is_qualcomm() {
+  case "$1" in *[Qq]ualcomm*|*QTI*) return 0 ;; esac
+  case "$2" in SM*|MSM*|SDM*|QCM*|APQ*) return 0 ;; esac
+  return 1
+}
+_soc_is_mediatek() {
+  case "$1" in *[Mm]edia[Tt]ek*) return 0 ;; esac
+  case "$2" in MT*) return 0 ;; esac
+  return 1
+}
+_soc_is_exynos() {
+  case "$2" in s5e*|exynos*) return 0 ;; esac
+  if _soc_is_qualcomm "$1" "$2" || _soc_is_mediatek "$1" "$2"; then return 1; fi
+  case "$1" in *[Ss]amsung*) return 0 ;; esac
+  return 1
+}
+# $1=soc_manufacturer $2=soc_model $3=platform -> ro.hardware / ro.boot.hardware
+hw_token() {
+  if _soc_is_qualcomm "$1" "$2"; then echo "qcom"; else echo "$3"; fi
+}
+# $1=device $2=platform $3=brand $4=manufacturer -> ro.product.board
+# Samsung puts the PLATFORM here, on its Snapdragon devices too (Galaxy S23 is
+# dm1q / SM8550 / Qualcomm and still reports ro.product.board=kalama).
+product_board() {
+  case "$3$4" in *[Ss]amsung*) echo "$2" ;; *) echo "$1" ;; esac
+}
+# $1=soc_manufacturer $2=soc_model -> ro.soc.manufacturer ("QTI" for Qualcomm)
+soc_manuf_name() {
+  if _soc_is_qualcomm "$1" "$2"; then echo "QTI"; else echo "$1"; fi
+}
+# $1=soc_manufacturer $2=soc_model $3=platform -> dalvik.vm.isa.arm64.variant
+dalvik_arm64_variant() {
+  if _soc_is_qualcomm "$1" "$2"; then echo "kryo300"; return; fi
+  if _soc_is_mediatek "$1" "$2"; then echo "cortex-a55"; return; fi
+  case "$3" in gs101|gs201|zuma|zumapro|laguna) echo "cortex-a76"; return ;; esac
+  if _soc_is_exynos "$1" "$2"; then echo "cortex-a76"; return; fi
+  echo "cortex-a55"
+}
+# $1=soc_manufacturer $2=soc_model -> dalvik.vm.isa.arm.variant
+# Only the little cluster runs AArch32 on an arm64 SoC, so this is the little
+# core's name, the same family across every modern SoC in the pool. The
+# reference device reports cortex-a75 because its msm-4.19 kernel names the
+# silver cluster that way; that value is specific to SM8250 and wrong for newer
+# parts, so the generic little-core name is used. It must match
+# hw_naming.hpp / HwNaming.java exactly - a divergence here means the shell and
+# the runtime hand an app two different values for the same property.
+dalvik_arm_variant() {
+  echo "cortex-a55"
+}
+# $1=platform $2=soc_manufacturer $3=soc_model -> ro.gfx.driver.1
+# api30 is the UGD API level, not the Android SDK: the reference device runs
+# Android 15 and still reports api30, as does every device tree checked.
+gpu_driver_pkg() {
+  if ! _soc_is_qualcomm "$2" "$3"; then echo ""; return; fi
+  echo "com.qualcomm.qti.gpudrivers.$1.api30"
+}
+
 rand_below() {
   _n="$1"
   [ "$_n" -gt 0 ] 2>/dev/null || { echo 0; return; }
@@ -275,6 +342,17 @@ assemble_identity() {
     *"Pixel 6"*)          _disp_w=1080; _disp_h=2400; _disp_dpi=420; _disp_xdpi=411; _disp_ydpi=411 ;;
   esac
 
+  # Resolve the hardware-naming fields BEFORE the heredoc. Assigning inside it
+  # would only write text into IDENTITY_KV, so a later "$VAR" in the same
+  # heredoc would expand to the empty string.
+  BOARD_PLATFORM="$BOARD"
+  HARDWARE=$(hw_token "$SOC_MANUF" "$SOC_MODEL" "$BOARD_PLATFORM")
+  BOARD=$(product_board "$DEVICE" "$BOARD_PLATFORM" "$BRAND" "$MANUFACTURER")
+  SOC_MANUFACTURER=$(soc_manuf_name "$SOC_MANUF" "$SOC_MODEL")
+  DALVIK_ARM64_VARIANT=$(dalvik_arm64_variant "$SOC_MANUF" "$SOC_MODEL" "$BOARD_PLATFORM")
+  DALVIK_ARM_VARIANT=$(dalvik_arm_variant)
+  GPU_DRIVER=$(gpu_driver_pkg "$BOARD_PLATFORM" "$SOC_MANUF" "$SOC_MODEL")
+
   IDENTITY_KV=$(cat <<EOF
 BRAND=$BRAND
 MANUFACTURER=$MANUFACTURER
@@ -283,10 +361,13 @@ MARKETNAME=$MARKETNAME
 DEVICE=$DEVICE
 PRODUCT=$PRODUCT
 BOARD=$BOARD
-HARDWARE=$BOARD
-BOARD_PLATFORM=$BOARD
-SOC_MANUFACTURER=$SOC_MANUF
+HARDWARE=$HARDWARE
+BOARD_PLATFORM=$BOARD_PLATFORM
+SOC_MANUFACTURER=$SOC_MANUFACTURER
 SOC_MODEL=$SOC_MODEL
+DALVIK_ARM64_VARIANT=$DALVIK_ARM64_VARIANT
+DALVIK_ARM_VARIANT=$DALVIK_ARM_VARIANT
+GPU_DRIVER=$GPU_DRIVER
 FINGERPRINT=$FINGERPRINT
 ID=$BUILD_ID
 DISPLAY=$BUILD_ID
@@ -349,7 +430,7 @@ display_profile() {
   printf '  %-12s %s\n'        "Pabrikan"    "$MANUFACTURER"
   printf '  %-12s %s (%s)\n'   "Model"       "$MARKETNAME" "$MODEL"
   printf '  %-12s %s / %s\n'   "Kode"        "$DEVICE" "$PRODUCT"
-  printf '  %-12s %s %s (%s)\n' "SoC"        "$SOC_MANUF" "$SOC_MODEL" "$BOARD"
+  printf '  %-12s %s %s (%s)\n' "SoC"        "$SOC_MANUF" "$SOC_MODEL" "$BOARD_PLATFORM"
   printf '  %-12s Android %s (SDK %s), patch %s\n' "OS" "$RELEASE" "$SDK" "$SECPATCH"
   printf '  %-12s %s\n'        "Fingerprint" "$FINGERPRINT"
   printf '  %-12s %s\n'        "Boot count"  "$BOOT_COUNT"

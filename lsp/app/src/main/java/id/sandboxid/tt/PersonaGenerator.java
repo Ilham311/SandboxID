@@ -108,10 +108,28 @@ final class PersonaGenerator {
         put(id, "MODEL", col(row, C_MODEL));
         put(id, "DEVICE", col(row, C_DEVICE));
         put(id, "PRODUCT", col(row, C_PRODUCT));
-        put(id, "BOARD", col(row, C_BOARD));
-        put(id, "BOARD_PLATFORM", col(row, C_BOARD));
-        put(id, "SOC_MANUFACTURER", col(row, C_SOC_MANUFACTURER));
-        put(id, "SOC_MODEL", col(row, C_SOC_MODEL));
+        // Column 7 is ro.board.platform (the SoC platform: taro, kona, mt6789).
+        // It is NOT ro.product.board and NOT ro.hardware — see hw_naming.hpp on
+        // the native side, which this mirrors. Collapsing the three into one
+        // value made a Qualcomm persona advertise ro.hardware=taro, a token no
+        // Qualcomm device ships: init selects /vendor/etc/init/hw/init.<hw>.rc,
+        // and every Qualcomm SoC ships init.qcom.rc.
+        String platform = col(row, C_BOARD);
+        String device = col(row, C_DEVICE);
+        String brand = col(row, C_BRAND);
+        String manufacturer = col(row, C_MANUFACTURER);
+        String socMan = col(row, C_SOC_MANUFACTURER);
+        String socModel = col(row, C_SOC_MODEL);
+
+        put(id, "BOARD_PLATFORM", platform);
+        put(id, "HARDWARE", HwNaming.hardwareToken(socMan, socModel, platform));
+        put(id, "BOARD", HwNaming.productBoard(device, platform, brand, manufacturer));
+        put(id, "SOC_MANUFACTURER", HwNaming.socManufacturerName(socMan, socModel));
+        put(id, "SOC_MODEL", socModel);
+        put(id, "DALVIK_ARM64_VARIANT",
+                HwNaming.dalvikArm64Variant(socMan, socModel, platform));
+        put(id, "DALVIK_ARM_VARIANT", HwNaming.dalvikArmVariant());
+        put(id, "GPU_DRIVER", HwNaming.gpuDriverPkg(platform, socMan, socModel));
 
         String sdk = col(row, C_SDK);
         String release = col(row, C_RELEASE);

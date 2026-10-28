@@ -73,12 +73,33 @@ static const std::map<std::string, std::string>& prop_to_identity_map() {
     return m;
 }
 
+// Fields whose value is derived from the SoC rather than stored. An identity
+// written before the field existed (one already on disk) has no entry for it,
+// so deriving here keeps the fix effective without forcing a re-roll - and it
+// is the single place both the Java surface and the native prop surface go
+// through, so the two can never disagree.
+static bool derive_hw_value(const std::string& k, std::string& out) {
+    const std::string& man = val("SOC_MANUFACTURER");
+    const std::string& mod = val("SOC_MODEL");
+    const std::string& plat = val("BOARD_PLATFORM");
+    if (k == "DALVIK_ARM64_VARIANT")
+        { out = sbxhw::dalvik_arm64_variant(man, mod, plat); return true; }
+    if (k == "DALVIK_ARM_VARIANT")
+        { out = sbxhw::dalvik_arm_variant(man, mod, plat); return true; }
+    if (k == "GPU_DRIVER") {
+        out = sbxhw::gpu_driver_pkg(plat, man, mod);
+        return !out.empty();   // empty -> not spoofed, hidden instead
+    }
+    return false;
+}
+
 bool spoof_prop_value(const std::string& k, std::string& out) {
     const auto& map = prop_to_identity_map();
     auto it = map.find(k);
     if (it != map.end()) {
         const std::string& v = val(it->second);
         if (!v.empty()) { out = v; return true; }
+        if (derive_hw_value(it->second, out)) return true;
     }
     for (size_t i = 0; i < sandboxid::STATIC_PROP_DEFAULTS_N; ++i) {
         if (k == sandboxid::STATIC_PROP_DEFAULTS[i].k) {

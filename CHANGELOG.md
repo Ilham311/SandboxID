@@ -72,6 +72,97 @@ pada `zygisk/arm64-v8a.so` tidak memuat `getprop dump filtered`, `execlp`,
 `NATIVE_%s BLOCKED`, maupun `shell-guard entry point(s)`. Perlu build + install
 ulang supaya perbaikan-perbaikan itu benar-benar berjalan.
 
+### Fix: persona Qualcomm mengaku `ro.hardware=taro` — perangkat yang tidak mungkin boot
+
+**Gejala yang dilaporkan.** Promo/voucher yang dipilih di app target tidak bisa
+dipakai; app menampilkan "Klik di sini untuk melihat detail selengkapnya" —
+gejala risk-control, bukan bug fungsional.
+
+**Akar masalah.** Persona yang aktif di perangkat (OPPO CPH2521, `devices.tsv`
+baris 77) meruntuhkan **empat prop berbeda** menjadi satu nilai, sehingga
+menggambarkan perangkat yang tidak pernah ada:
+
+| prop | perangkat nyata (alioth/SM8250) | persona (sebelum) |
+|---|---|---|
+| `ro.hardware` | `qcom` | `taro` |
+| `ro.boot.hardware` | `qcom` | `taro` |
+| `ro.board.platform` | `kona` | `taro` |
+| `ro.product.board` | `alioth` | `taro` |
+| `ro.soc.manufacturer` | `QTI` | `Qualcomm` |
+| `dalvik.vm.isa.arm64.variant` | `kryo300` | `generic` |
+| `dalvik.vm.isa.arm.variant` | `cortex-a75` | `generic` |
+
+Bukti bahwa `ro.hardware=qcom` di Qualcomm: `/proc/cmdline` (kernel, tidak bisa
+di-spoof) berbunyi `androidboot.hardware=qcom`; `/vendor/etc/init/hw/init.qcom.rc`
+**ada** sedangkan `init.taro.rc` **tidak ada** — dan `ro.hardware` justru token
+yang dipakai init untuk memilih `init.<ro.hardware>.rc`, jadi `ro.hardware=taro`
+menggambarkan perangkat yang tidak mungkin boot. Pencarian kode di device tree
+menemukan `ro.hardware=qcom` di mana-mana pada tree Qualcomm, dan **nol** hasil
+untuk `ro.hardware=taro|kona|pineapple|kalama|lahaina`.
+
+**Temuan kedua — prop yang bocor menyebut hardware/ROM asli.** Prop yang dibaca
+app target (com.gojek.app, com.wowsoftware.devicefingerprint, id.dana) tapi tidak
+di-spoof maupun di-hide:
+
+- `ro.gfx.driver.1 = com.qualcomm.qti.gpudrivers.kona.api30` → **`kona` adalah
+  platform ASLI**, bertentangan dengan persona yang mengaku `SM8475`/`taro`
+- `ro.gfx.driver.0 = com.xiaomi.ugd` → jejak Xiaomi di bawah persona OPPO
+- `ro.appsflyer.preinstall.path = /data/miui/pai/pre_install.appsflyer` → jejak MIUI
+- `persist.sys.turbosched.*` (8), `persist.sys.perf_scenario_recognition.*` (4),
+  `persist.sys.perfdebug.*` (2), `persist.sys.smart_gc.*` (2),
+  `persist.sys.miui_animator_sched.*` (2), `ro.vendor.mi_sf.*` (7),
+  `persist.miui.*`, `ro.display.mimotion`, `vendor.boostfwk.frameprefetcher`,
+  `miui.usb.dialog`
+
+`ro.miui.*` sudah di-hide dengan benar; yang lolos adalah bentuk garis bawah
+`persist.sys.miui_` dan namespace MIUI di luar `ro.miui`.
+
+**Perbaikan.**
+
+- `native/include/hw_naming.hpp` (baru) — satu sumber kebenaran untuk penamaan
+  hardware, murni (tanpa JNI/header Android/global) sehingga suite host bisa
+  mem-pin-nya. `hardware_token()` mengembalikan `qcom` untuk setiap SoC Qualcomm
+  dan token platform untuk MediaTek/Tensor/Exynos; `product_board()` memakai
+  kodename kecuali Samsung (yang menaruh platform di sana, termasuk di perangkat
+  Snapdragon-nya — Galaxy S23 = dm1q/SM8550 tapi `ro.product.board=kalama`);
+  `soc_manufacturer_name()` menulis `QTI`; `dalvik_arm64_variant()` dan
+  `gpu_driver_pkg()` menurunkan sisanya.
+- `native/sandboxid.cpp` — blok hardware di `derive_identity()` memakai aturan
+  di atas; `ro.hardware` tidak lagi menyalin platform.
+- `native/include/prop_defs.hpp` — `ro.gfx.driver.1`,
+  `dalvik.vm.isa.arm64.variant`, `dalvik.vm.isa.arm.variant` dipetakan.
+- `jni/prop_hooks.cpp` — `derive_hw_value()` menurunkan ketiganya saat identitas
+  di disk belum punya field itu, jadi perbaikan berlaku **tanpa perlu re-roll**.
+- `jni/module_impl.hpp` — `sbx_oem_prop_hidden()`: `ro.gfx.driver.0` dan
+  `ro.appsflyer.preinstall.path` hanya di-hide bila persona bukan vendor itu;
+  `ro.gfx.driver.1` di-hide bila persona bukan Qualcomm (paket GPU Qualcomm
+  tidak ada di perangkat MediaTek/Tensor/Exynos).
+- `native/native_read.cpp` — `is_vendor_rom_prop()` diperluas dengan 3 nama
+  eksak dan 7 prefix HyperOS yang terukur di perangkat.
+- `sh/identity/autopif.sh` — cermin shell dari aturan yang sama. Nilai turunan
+  dihitung **sebelum** heredoc: menulis `VAR=` di dalam heredoc hanya menulis
+  teks, sehingga `$VAR` di baris berikutnya menjadi kosong.
+- `sh/debug/selftest.sh` — cek koherensi baru: FAIL bila persona Qualcomm
+  melaporkan `HARDWARE` selain `qcom`, dan bila
+  `HARDWARE`/`BOARD`/`BOARD_PLATFORM` runtuh menjadi satu nilai; WARN bila
+  `SOC_MANUFACTURER` bukan `QTI`, bila `BOARD` tidak mengikuti konvensi
+  vendor-nya, dan bila `DALVIK_ARM64_VARIANT` masih `generic`. Inilah kelas bug
+  yang **tidak terlihat** oleh selftest sebelumnya (`pass=14 warn=1 fail=0`).
+- `lsp/app/src/main/java/id/sandboxid/tt/HwNaming.java` (baru) — jalur LSPosed
+  punya bug identik. `PersonaGenerator` menurunkan `BOARD`, `BOARD_PLATFORM` dan
+  `HARDWARE` dari kolom `board` yang sama.
+- `lsp/.../PropMap.java` — `ro.hardware`, `ro.board.platform`, `ro.product.board`,
+  `ro.gfx.driver.1` dan kedua `dalvik.vm.isa.*.variant` **tidak dipetakan sama
+  sekali**: app yang membaca `SystemProperties.get("ro.hardware")` melihat token
+  perangkat asli sementara `Build.HARDWARE` melaporkan milik persona.
+- `lsp/.../PropHook.java` — memakai `HwNaming` dan daftar hide yang disinkronkan
+  dengan `is_vendor_rom_prop()` native.
+
+**Regression test.** `tests/host/sbx_hw_naming.cpp` (C++) dan
+`lsp/app/src/test/java/id/sandboxid/tt/HwNamingTest.java` (JDK murni, dijalankan
+CI) mem-pin nilai yang sama. `product_board()` awalnya di-key pada Exynos dan
+langsung tertangkap oleh suite baru (`got 'dm1q', want 'kalama'`).
+
 
 ## v2.2.18 (2026-10-06)
 

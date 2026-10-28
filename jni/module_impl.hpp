@@ -31,6 +31,7 @@
 #include "zygisk.hpp"
 #include "config.hpp"
 #include "native_read.hpp"
+#include "hw_naming.hpp"
 #include "raii.hpp"
 #include "jni_string.hpp"
 
@@ -60,8 +61,47 @@ extern const std::string& val(const std::string& k);
 extern bool spoof_prop_value(const std::string& k, std::string& out);
 
 // ---- Inline helpers used across TUs ----
+
+// Props that name a specific OEM, and so must be hidden unless the persona IS
+// that OEM. These cannot live in should_hide_prop() (native/native_read.cpp):
+// that function is pure and has no access to the identity, and it is also
+// compiled into the CLI. The JNI layer is where the persona is known.
+//
+// Measured on the reference device: ro.gfx.driver.0=com.xiaomi.ugd and
+// ro.appsflyer.preinstall.path=/data/miui/pai/pre_install.appsflyer. A target
+// app read both and got the real Xiaomi/MIUI values back while every other
+// surface showed the OPPO persona.
+inline bool sbx_oem_prop_hidden(const char* name) {
+    if (!name) return false;
+    const std::string& man = val("MANUFACTURER");
+    const std::string& brd = val("BRAND");
+    const std::string& soc = val("SOC_MANUFACTURER");
+    const std::string& mod = val("SOC_MODEL");
+
+    const bool xiaomi = man == "Xiaomi" || man == "Redmi" || man == "POCO" ||
+                        brd == "Xiaomi" || brd == "Redmi" || brd == "POCO";
+    if (!xiaomi) {
+        static const char* const xiaomi_only[] = {
+            "ro.gfx.driver.0",              // com.xiaomi.ugd
+            "ro.appsflyer.preinstall.path", // /data/miui/pai/...
+        };
+        for (const char* e : xiaomi_only)
+            if (std::strcmp(name, e) == 0) return true;
+    }
+
+    // The Qualcomm GPU driver package only exists on a Qualcomm device, so a
+    // MediaTek/Tensor/Exynos persona must not advertise one at all. When it IS
+    // Qualcomm, spoof_prop_value() derives the package and wins before this is
+    // reached, so hiding here cannot suppress a valid value.
+    if (std::strcmp(name, "ro.gfx.driver.1") == 0)
+        return !sbxhw::is_qualcomm(soc, mod);
+
+    return false;
+}
+
 inline bool sbx_prop_hidden(const char* name) {
-    return name && sbxnr::should_hide_prop(name);
+    if (!name) return false;
+    return sbxnr::should_hide_prop(name) || sbx_oem_prop_hidden(name);
 }
 
 inline bool sbx_parse_longlong(const std::string& v, long long& out) {

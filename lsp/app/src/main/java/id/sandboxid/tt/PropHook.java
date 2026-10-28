@@ -106,11 +106,43 @@ final class PropHook {
         if (key == null) return null;
         String idk = PropMap.IDENTITY.get(key);
         if (idk != null) {
-            String v = IdentityStore.load().get(idk);
+            Map<String, String> id = IdentityStore.load();
+            String v = id.get(idk);
             if (v != null && !v.isEmpty()) return v;
+            // Derived from the SoC rather than stored. A persona written before
+            // these keys existed has no entry for them, so deriving here keeps
+            // the fix effective without forcing a re-roll — and it is the same
+            // path the native derive_hw_value() takes.
+            String d = deriveHwValue(idk, id);
+            if (d != null) return d;
         }
         return PropMap.CONSTANT.get(key);
     }
+
+    /**
+     * @return the derived value, or null when the key is not derived (or
+     *         derives to empty, in which case the prop is hidden instead).
+     *         Mirrors {@code derive_hw_value()} in {@code jni/prop_hooks.cpp}.
+     */
+    private static String deriveHwValue(String idk, Map<String, String> id) {
+        String man = orEmpty(id.get("SOC_MANUFACTURER"));
+        String mod = orEmpty(id.get("SOC_MODEL"));
+        String plat = orEmpty(id.get("BOARD_PLATFORM"));
+        switch (idk) {
+            case "DALVIK_ARM64_VARIANT":
+                return HwNaming.dalvikArm64Variant(man, mod, plat);
+            case "DALVIK_ARM_VARIANT":
+                return HwNaming.dalvikArmVariant();
+            case "GPU_DRIVER": {
+                String p = HwNaming.gpuDriverPkg(plat, man, mod);
+                return p.isEmpty() ? null : p;
+            }
+            default:
+                return null;
+        }
+    }
+
+    private static String orEmpty(String s) { return s == null ? "" : s; }
 
     /**
      * Props the module deliberately reports as absent. Direct port of
@@ -168,16 +200,37 @@ final class PropHook {
     // device: ro.miui.ui.version.name=V816, persist.sys.hardcoder.name=
     // miui_booster — unambiguous OEM tells the persona's Build surface
     // contradicts. Same treatment as the custom-ROM props above.
+    //
+    // Kept in step with is_vendor_rom_prop() in native/native_read.cpp: the
+    // underscore form persist.sys.miui_* is a DIFFERENT namespace from
+    // persist.sys.miui.* and slipped past a dot-prefixed test while a target app
+    // read it, and the HyperOS scheduler prefixes (turbosched, dexpreload,
+    // perf_scenario_recognition, perfdebug, smart_gc) are separate again.
     private static boolean isVendorRomProp(String k) {
         switch (k) {
             case "persist.sys.hardcoder.name":
             case "ro.com.miui.rsa":
+            case "ro.boot.cert":
+            case "ro.product.cert":
+            case "ro.product.odm.cert":
+            case "ro.product.vendor.cert":
+            case "ro.display.mimotion":
+            case "vendor.boostfwk.frameprefetcher":
+            case "miui.usb.dialog":
                 return true;
             default:
                 return k.startsWith("ro.miui.")
                         || k.startsWith("ro.vendor.miui.")
                         || k.startsWith("ro.ril.miui.")
-                        || k.startsWith("persist.sys.miui.");
+                        || k.startsWith("persist.sys.miui.")
+                        || k.startsWith("persist.sys.miui_")
+                        || k.startsWith("persist.miui.")
+                        || k.startsWith("persist.sys.turbosched.")
+                        || k.startsWith("persist.sys.dexpreload.")
+                        || k.startsWith("persist.sys.perf_scenario_recognition.")
+                        || k.startsWith("persist.sys.perfdebug.")
+                        || k.startsWith("persist.sys.smart_gc.")
+                        || k.startsWith("ro.vendor.mi_sf.");
         }
     }
 }
