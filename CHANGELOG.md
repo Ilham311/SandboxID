@@ -14,11 +14,17 @@ jni/module_hooks.cpp:767:37: error: use of undeclared identifier '__NR_newfstata
 ```
 
 **Akar masalah.** bionic memberi nama nomor syscall `fstatat` berbeda menurut
-lebar kata: ABI 64-bit memakai `__NR_newfstatat` (79 di x86_64), sedangkan
-**kedua** ABI 32-bit yang ikut dibangun modul ini — `armeabi-v7a` dan `x86` —
-hanya mendefinisikan `__NR_fstatat64` (327 di ARM, 300 di x86). `build.sh`
-membangun keempat ABI, jadi `arm64-v8a` lolos dan `armeabi-v7a` gagal lebih
-dulu; `x86` akan gagal dengan cara yang sama.
+lebar kata: ABI 64-bit memakai `__NR_newfstatat`, sedangkan **kedua** ABI 32-bit
+yang ikut dibangun modul ini — `armeabi-v7a` dan `x86` — hanya mendefinisikan
+`__NR_fstatat64`. `build.sh` membangun keempat ABI, jadi `arm64-v8a` lolos dan
+`armeabi-v7a` gagal lebih dulu; `x86` akan gagal dengan cara yang sama.
+
+Angka yang terukur di sini: aarch64 mendefinisikan `__NR_newfstatat` = **79** dan
+tidak mendefinisikan `__NR_fstatat64`; libc 32-bit ARM di perangkat memakai
+syscall **327** (`__NR_fstatat64`). Pasangan x86 mengikuti konvensi bionic yang
+sama, tetapi **tidak diukur di mesin ini** — toolchain host mengabaikan `-m32`
+tanpa error, jadi tidak ada cara memprobe-nya dari sini. Yang menutup x86 adalah
+CI: `build.sh` membangun keempat ABI, sehingga `x86` ikut dikompilasi di sana.
 
 **Kenapa lolos sampai CI.** Seluruh suite host mengompilasi
 `jni/module_hooks.cpp` memakai header glibc host yang 64-bit, yang punya
@@ -58,8 +64,8 @@ pemeriksaan compile-only.
 
 **Hasil mutasi.** Mengembalikan `__NR_newfstatat` di satu tempat saja langsung
 membuat `sbx_abi32` gagal kompilasi dan seluruh suite melaporkan
-`==> host suites FAILED`. Nilai makro juga diverifikasi per ABI: 79 (x86_64),
-327 (ARM 32-bit dipaksa), dan `fstatat64_defined` pada probe x86 `-m32`.
+`==> host suites FAILED`; setelah dipulihkan kembali hijau. Nilai makro
+diverifikasi: 79 pada aarch64 asli, dan 327 pada keadaan 32-bit yang dipaksakan.
 
 ### Fix: `gs:"er:103"` dan `ad`/`adl:"er:109"` di hasil scan Grab
 
