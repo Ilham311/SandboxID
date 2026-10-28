@@ -434,6 +434,32 @@ int main() {
                   (std::string("PLT entry '") + r.name + "' has a body and a slot").c_str());
     }
 
+    // ---- 13. write-mode popen is not answered with a read-only stream ------
+    // The filter reads the child's stdout, which only exists in read mode.
+    // Answering popen(cmd, "w") with a synthetic read-only stream changed the
+    // call's contract: the real one accepts writes, that one returned EBADF.
+    {
+        CHECK(!sbx_popen_readable("w"), "write mode is not treated as readable");
+        CHECK(!sbx_popen_readable("we"), "write+cloexec mode is not readable");
+        CHECK(sbx_popen_readable("r"), "read mode is readable");
+        CHECK(sbx_popen_readable("re"), "read+cloexec mode is readable");
+        CHECK(!sbx_popen_readable(nullptr), "a null mode is not readable");
+
+        // A write-mode command must go to the real popen, and the stream it
+        // returns must be writable, exactly as the real one's is. The command
+        // deliberately contains "getprop": without the mode check it takes the
+        // filter branch and comes back as a read-only synthetic stream, which
+        // is the defect. A command that does not name getprop would pass either
+        // way and prove nothing.
+        FILE* wfp = hook_popen("getprop > /dev/null", "w");
+        CHECK(wfp != nullptr, "write-mode popen still returns a stream");
+        if (wfp) {
+            int rc = fputc('x', wfp);
+            CHECK(rc == 'x', "write-mode stream accepts a write (not a read-only synth)");
+            hook_pclose(wfp);
+        }
+    }
+
     printf("\n%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }

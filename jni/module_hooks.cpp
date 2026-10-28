@@ -995,6 +995,18 @@ static FILE* sbx_getprop_filtered(const char* command, const char* type) {
     return create_synthetic_pipe(filtered, (rc >> 8) & 0xff);
 }
 
+// True when the stream is one we can read the child's output from.
+//
+// popen(cmd, "w") connects the child's STDIN to us, not its stdout, so there is
+// nothing to filter - and the filter's fgets on such a stream returns NULL
+// immediately (EBADF), which used to make hook_popen answer a write-mode call
+// with an empty READ-ONLY synthetic stream. A caller that then wrote to it got
+// EBADF where the real popen would have accepted the write. Only "r" (and the
+// "re" spelling) is readable.
+static bool sbx_popen_readable(const char* type) {
+    return type && type[0] == 'r';
+}
+
 static FILE* hook_popen(const char* command, const char* type) {
     if (!command) return orig_popen ? orig_popen(command, type) : ::popen(command, type);
     std::string cmd(command);
@@ -1014,8 +1026,10 @@ static FILE* hook_popen(const char* command, const char* type) {
             "/system/bin/sh: " + name + ": inaccessible or not found\n", 127);
     }
 
-    // 2. getprop queries via shell
-    size_t gp = cmd.find("getprop");
+    // 2. getprop queries via shell. Read mode only: in write mode the child's
+    // stdout is not ours to filter, and the synthetic stream would be the wrong
+    // kind of stream to hand back.
+    size_t gp = sbx_popen_readable(type) ? cmd.find("getprop") : std::string::npos;
     if (gp != std::string::npos) {
         size_t prop_start = gp + 7;
         while (prop_start < cmd.size() && isspace(static_cast<unsigned char>(cmd[prop_start]))) ++prop_start;
@@ -1077,8 +1091,8 @@ static FILE* hook_popen(const char* command, const char* type) {
         }
     }
 
-    // 3. pm list packages via shell
-    if (cmd.find("pm list packages") != std::string::npos) {
+    // 3. pm list packages via shell. Read mode only, for the same reason.
+    if (sbx_popen_readable(type) && cmd.find("pm list packages") != std::string::npos) {
         FILE* real_fp = orig_popen ? orig_popen(command, type) : ::popen(command, type);
         if (real_fp) {
             std::string filtered;
@@ -1107,7 +1121,7 @@ static FILE* hook_popen(const char* command, const char* type) {
     // `getprop`, which prints the entire real property table. Reachable by
     // anything that can run a shell command, and the first thing a root or
     // emulator probe runs.
-    if (cmd.find("getprop") != std::string::npos) {
+    if (sbx_popen_readable(type) && cmd.find("getprop") != std::string::npos) {
         FILE* fp = sbx_getprop_filtered(command, type);
         if (fp) return fp;
     }
