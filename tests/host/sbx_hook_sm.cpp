@@ -267,10 +267,18 @@ int main() {
     }
 
     {
-        // End to end through the real popen path: the host has a real getprop,
-        // so an unfiltered leak is visible as the host's own model string.
-        FILE* fp = hook_popen("getprop", "r");
-        CHECK(fp != nullptr, "hook_popen('getprop') returns a stream");
+        // End to end through the real popen path, with a canned dump so the
+        // check does not depend on the host having a getprop binary - a CI
+        // runner does not, and an assertion that silently degrades to "the
+        // command produced nothing" is worse than no assertion. The command
+        // string contains "getprop" so it takes the same branch hook_popen
+        // would, and the filter, pclose and synthetic pipe are the real ones.
+        g_test_props["ro.product.model"] = "Pixel 8";
+        FILE* fp = sbx_getprop_filtered(
+            "printf '[ro.product.model]: [M2012K11AG]\\n"
+            "[ro.miui.ui.version.name]: [V816]\\n"
+            "[ro.other]: [keepme]\\n' # getprop", "r");
+        CHECK(fp != nullptr, "the filtered dump returns a stream");
         std::string dump;
         if (fp) {
             char b[4096];
@@ -280,9 +288,49 @@ int main() {
         }
         CHECK(!dump.empty(), "the filtered dump is non-empty");
         CHECK(dump.find("M2012K11AG") == std::string::npos,
-              "the host's real ro.product.model is not in the filtered dump");
+              "the real model value is not in the filtered dump");
         CHECK(dump.find("Pixel 8") != std::string::npos,
               "the persona model is served in the filtered dump");
+        CHECK(dump.find("V816") == std::string::npos,
+              "a hidden prop is dropped from the dump entirely");
+        CHECK(dump.find("keepme") != std::string::npos,
+              "an unrelated prop survives the filter");
+    }
+
+    // The same path against the host's real getprop, when there is one. The
+    // host model string is read from the command itself rather than hardcoded,
+    // so this stays meaningful on any machine.
+    {
+        FILE* probe = orig_popen ? orig_popen("getprop ro.product.model", "r")
+                                 : ::popen("getprop ro.product.model", "r");
+        std::string host_model;
+        if (probe) {
+            char b[256];
+            size_t n;
+            while ((n = fread(b, 1, sizeof(b), probe)) > 0) host_model.append(b, n);
+            (orig_pclose ? orig_pclose(probe) : ::pclose(probe));
+            while (!host_model.empty() &&
+                   (host_model.back() == '\n' || host_model.back() == '\r'))
+                host_model.pop_back();
+        }
+        if (host_model.empty()) {
+            printf("skip: host has no getprop, real-dump check not run\n");
+        } else {
+            g_test_props["ro.product.model"] = "Pixel 8";
+            FILE* fp = hook_popen("getprop", "r");
+            std::string dump;
+            if (fp) {
+                char b[4096];
+                size_t n;
+                while ((n = fread(b, 1, sizeof(b), fp)) > 0) dump.append(b, n);
+                hook_pclose(fp);
+            }
+            CHECK(!dump.empty(), "the real getprop dump is non-empty");
+            CHECK(dump.find(host_model) == std::string::npos,
+                  "the host's real ro.product.model is not in the filtered dump");
+            CHECK(dump.find("Pixel 8") != std::string::npos,
+                  "the persona model replaces it in the real dump");
+        }
     }
     g_test_props.clear();
 
