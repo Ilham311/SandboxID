@@ -161,16 +161,30 @@ final class PropHook {
     private static boolean isHidden(String key) {
         if (key == null) return false;
         return isEmulatorProp(key) || isCustomRomProp(key) || isVendorRomProp(key)
-                || isOemPropHidden(key, IdentityStore.load());
+                || isOemPropHidden(key);
     }
 
-    private static boolean isOemPropHidden(String k, Map<String, String> id) {
+    /**
+     * Persona-aware hides, mirroring {@code sbx_oem_prop_hidden()} in
+     * {@code jni/module_impl.hpp}. Kept separate from the pure lists above
+     * because these need the identity, which the pure predicates cannot see.
+     *
+     * <p>{@code ro.gfx.driver.0/.1} are deliberately NOT here — they are hidden
+     * unconditionally by {@link #isVendorRomProp}. Hiding {@code .1} only when
+     * the persona is non-Qualcomm was the wrong shape twice over: a Qualcomm
+     * persona then derived {@code com.qualcomm.qti.gpudrivers.<platform>.api30},
+     * a package that is not installed on this device, and
+     * {@code GraphicsEnvironment.get()} logs "updatable driver package
+     * '<name>' not installed" for it.
+     */
+    private static boolean isOemPropHidden(String k) {
+        // Only ONE name is persona-aware now, so check it before paying for the
+        // identity load: this runs on every SystemProperties.get() miss.
+        if (!"ro.appsflyer.preinstall.path".equals(k)) return false;
+        Map<String, String> id = IdentityStore.load();
         String man = orEmpty(id.get("MANUFACTURER")), brd = orEmpty(id.get("BRAND"));
         boolean xiaomi = man.matches("Xiaomi|Redmi|POCO") || brd.matches("Xiaomi|Redmi|POCO");
-        if (!xiaomi && (k.equals("ro.gfx.driver.0") || k.equals("ro.appsflyer.preinstall.path"))) return true;
-        if (k.equals("ro.gfx.driver.1"))
-            return !HwNaming.isQualcomm(orEmpty(id.get("SOC_MANUFACTURER")), orEmpty(id.get("SOC_MODEL")));
-        return false;
+        return !xiaomi;
     }
 
     private static boolean isEmulatorProp(String k) {
