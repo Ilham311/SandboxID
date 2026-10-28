@@ -2,6 +2,65 @@
 
 ## Unreleased
 
+### Fix: build gagal di armeabi-v7a — `__NR_newfstatat` tidak ada di bionic 32-bit
+
+**Gejala.** Job CI `build` mati di langkah "Build (release + debug)" dengan tiga
+error yang sama:
+
+```
+jni/module_hooks.cpp:734:34: error: use of undeclared identifier '__NR_newfstatat'
+jni/module_hooks.cpp:740:35: error: use of undeclared identifier '__NR_newfstatat'
+jni/module_hooks.cpp:767:37: error: use of undeclared identifier '__NR_newfstatat'
+```
+
+**Akar masalah.** bionic memberi nama nomor syscall `fstatat` berbeda menurut
+lebar kata: ABI 64-bit memakai `__NR_newfstatat` (79 di x86_64), sedangkan
+**kedua** ABI 32-bit yang ikut dibangun modul ini — `armeabi-v7a` dan `x86` —
+hanya mendefinisikan `__NR_fstatat64` (327 di ARM, 300 di x86). `build.sh`
+membangun keempat ABI, jadi `arm64-v8a` lolos dan `armeabi-v7a` gagal lebih
+dulu; `x86` akan gagal dengan cara yang sama.
+
+**Kenapa lolos sampai CI.** Seluruh suite host mengompilasi
+`jni/module_hooks.cpp` memakai header glibc host yang 64-bit, yang punya
+`__NR_newfstatat`. Cabang 32-bit tidak pernah tersentuh di lokal, sehingga
+`host-tests` hijau sementara `build` merah. Ini kelas bug yang tidak bisa
+ditangkap suite mana pun yang hanya berjalan di satu ABI.
+
+**Perbaikan.** Satu makro `SBX_NR_FSTATAT` yang memilih nama yang tersedia,
+dengan `#error` bila tidak ada keduanya — supaya ABI baru di masa depan gagal
+saat kompilasi, bukan diam-diam kehilangan jalur fallback:
+
+```c
+#if defined(__NR_newfstatat)
+#  define SBX_NR_FSTATAT __NR_newfstatat
+#elif defined(__NR_fstatat64)
+#  define SBX_NR_FSTATAT __NR_fstatat64
+#else
+#  error "no fstatat syscall number for this ABI"
+#endif
+```
+
+**Kenapa ini bukan perubahan ABI.** Pada bionic 32-bit, `stat` dan `stat64`
+adalah **fungsi yang sama**. Di
+`/apex/com.android.runtime/lib/bionic/libc.so` perangkat referensi, kedua simbol
+itu resolve ke `0x495c8`, dan body-nya menyetel `r0 = AT_FDCWD` lalu bercabang
+ke `fstatat64` (`0x847dc`, `movw r7, #0x147` = 327). Artinya syscall yang
+menopang `stat` di proses 32-bit memang 327, dan struct yang diisinya adalah
+layout `off_t` 64-bit yang sudah menjadi `struct stat` bionic. Mengoper
+`struct stat*` ke syscall itu persis yang dilakukan libc sendiri — jadi
+mengganti nama makro tidak mengubah apa yang ditulis ke buffer.
+
+**Regresi tertutup.** `tests/host/sbx_abi32.cpp` + `tests/host/abi32_bionic.h`
+mengompilasi TU yang sama dengan keadaan preprocessor 32-bit dipaksakan
+(`__NR_newfstatat` di-undef, `__NR_fstatat64 = 327`), lewat `-include` agar
+berjalan sebelum `<sys/syscall.h>` milik TU itu. Dijalankan di `run.sh` sebagai
+pemeriksaan compile-only.
+
+**Hasil mutasi.** Mengembalikan `__NR_newfstatat` di satu tempat saja langsung
+membuat `sbx_abi32` gagal kompilasi dan seluruh suite melaporkan
+`==> host suites FAILED`. Nilai makro juga diverifikasi per ABI: 79 (x86_64),
+327 (ARM 32-bit dipaksa), dan `fstatat64_defined` pada probe x86 `-m32`.
+
 ### Fix: `gs:"er:103"` dan `ad`/`adl:"er:109"` di hasil scan Grab
 
 **Gejala.** Hasil scan Grab memuat `gs:"er:103"`, `ad:"er:109"`, dan
