@@ -180,15 +180,15 @@ int main() {
           std::string("garbage\nno memtotal here\n"),
           "meminfo with no MemTotal line is left alone");
 
-    // Real totals above the largest marketing tier should not be collapsed to
-    // 24 GB. Keep a 32 GiB value represented as 32 GB.
+    // Totals above the largest marketing tier should round up to the next real
+    // size instead of becoming a non-marketing value like 31 GB.
     {
-        const std::string large = "MemTotal:        33554432 kB\nMemFree: 1 kB\n";
+        const std::string large = "MemTotal:        32505856 kB\nMemFree: 1 kB\n";
         std::string h = patch_meminfo(large, 0);
         uint64_t expect = 32ULL * 1024 * 1024 * 955 / 1000;
         char buf[64];
         snprintf(buf, sizeof(buf), "MemTotal:       %llu kB", (unsigned long long)expect);
-        CHECK(h.find(buf) == 0, "32 GiB MemTotal remains represented as 32 GB");
+        CHECK(h.find(buf) == 0, "31 GiB MemTotal rounds up to marketing 32 GB");
     }
 
     // A hostile MemTotal must not produce a truncated or wrapped value. The

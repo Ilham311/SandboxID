@@ -115,26 +115,9 @@ static std::string extract_base_pkg(const std::string& pkg) {
 
 static bool is_target(const std::string& pkg) {
     if (pkg.empty()) return false;
-    // Refuse child zygotes (AppZygote, "<pkg>_zygote") here as well as in the
-    // module's preAppSpecialize. The module is the first line of defence, but
-    // this is the authority: a client that still asks for an identity under a
-    // child-zygote name gets none, whatever build it is. That matters because
-    // the failure it prevents is not a leak but a crash - an AppZygote holding
-    // a companion socket aborts on its next fork, when AOSP's ForkCommon ->
-    // FileDescriptorTable::Restat fstat()s the fd and calls ZygoteFailure:
-    //
-    //   Abort message: 'JNI FatalError called: (zygote) Unable to stat 120'
-    //   Cmdline: com.shopee.id_zygote
-    //
-    // The app's real process is forked from the AppZygote afterwards and asks
-    // again under the plain package name, so refusing here loses no coverage.
-    // See jni/sbx_process_name.hpp.
-    if (sbxproc::has_zygote_suffix(pkg)) {
-        LOGW("refusing identity for child zygote '%s' - not an app process; "
-             "granting it would abort that zygote on its next fork",
-             pkg.c_str());
-        return false;
-    }
+    // Child zygotes are rejected by the module before it requests an identity.
+    // Do not duplicate that decision here: the module's framework flag is
+    // authoritative when present, and the name is only a fallback when absent.
     std::lock_guard<std::recursive_mutex> lock(g_targets_mtx);
     reload_targets_if_changed();
     for (const auto& t : g_targets) {
