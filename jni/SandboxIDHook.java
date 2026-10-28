@@ -62,6 +62,13 @@ public final class EnvCompatState {
     public static final int M_APP_ATTACH = 7;
     /** Filter PackageManager queries (hide root, manager, modding apps). */
     public static final int M_FILTER_PACKAGES = 8;
+    /**
+     * Return the spoof value matching the gated String argument, looked up in
+     * the parallel multiKeys/multiVals tables. For a method that serves many
+     * keys (a SharedPreferences getString), where one hook per key is
+     * impossible: LSPlant refuses a second hook on an already-hooked method.
+     */
+    public static final int M_VALUE_MULTI = 9;
 
     public static final String[] HIDDEN_PACKAGES = new String[]{
         "com.topjohnwu.magisk",
@@ -132,6 +139,22 @@ public final class EnvCompatState {
     public String  openudid;
     public String  clientudid;
     public String  cdid;
+
+    /**
+     * M_VALUE_MULTI: parallel key/value tables for one hook that has to answer
+     * several keys of the SAME method.
+     *
+     * This exists because LSPlant cannot stack two hooks on one method: the
+     * second lsplant::Hook() call on an ArtMethod that already carries a hook
+     * is refused (its backup would be the previous hooker, which recurses).
+     * A SharedPreferences-style getString(String key, String def) is exactly
+     * one method serving every key, so three separate specs for openudid,
+     * clientudid and cdid could only ever install the first — the other two
+     * silently did nothing and those ids leaked. Verified on device: three
+     * specs for KevaSpFastAdapter.getString produced exactly one DoHook.
+     */
+    public String[] multiKeys;
+    public String[] multiVals;
 
     // M_DISPLAY_METRICS
     public int   displayWidth;
@@ -235,6 +258,14 @@ public final class EnvCompatState {
     public Object handle(Object[] args) {
         if (mode == M_OBSERVE) return observeAndPass(args);
         if (mode == M_FILTER_PACKAGES) return filterPackages(args);
+
+        // One method, many keys. Runs before the switch below so the value
+        // lookup happens against the tables rather than the single sval.
+        if (mode == M_VALUE_MULTI) {
+            String v = multiValue(args);
+            if (v != null) return v;
+            return invokeOriginal(args);
+        }
 
         // Handled before the try below: this mode has to call the original
         // itself, and falling through on an exception would call it twice.
@@ -348,17 +379,30 @@ public final class EnvCompatState {
             if (!appCreatedDone) {
                 try {
                     ClassLoader cl = null;
-                    if (args != null && args.length > 0 && isApplication(args[0])) {
+                    // Any Context can hand back the app ClassLoader, not just an
+                    // Application. Requiring an Application here made
+                    // attachBaseContext(Context) useless: its only argument is
+                    // a Context, so isApplication() was always false, cl stayed
+                    // null, and the earliest and most reliable app-attach point
+                    // never reached onAppCreated. Verified on device: the
+                    // "app target(s) hooked via onAppCreated" line never
+                    // appeared in any session, so every spec resolved only
+                    // through the class-load observer - which misses a class
+                    // that was already loaded before the hooks went in.
+                    //
+                    // Probed by reflection rather than with an `instanceof
+                    // android.content.Context`: this file is compiled by
+                    // jni/tools/gen_hook_dex.sh, which uses android.jar only
+                    // when ANDROID_HOME/ANDROID_SDK_ROOT provides one, and it
+                    // deliberately names every framework type as a String so it
+                    // builds without. A real type reference here would break
+                    // the build on a machine with no SDK - and getClassLoader
+                    // is exactly the method we want to call anyway.
+                    for (int i = 0; cl == null && args != null && i < args.length; i++) {
+                        if (args[i] == null) continue;
                         try {
-                            Method m = args[0].getClass().getMethod("getClassLoader");
-                            Object res = m.invoke(args[0]);
-                            if (res instanceof ClassLoader) cl = (ClassLoader) res;
-                        } catch (Throwable ignored) {}
-                    }
-                    if (cl == null && args != null && args.length > 1 && isApplication(args[1])) {
-                        try {
-                            Method m = args[1].getClass().getMethod("getClassLoader");
-                            Object res = m.invoke(args[1]);
+                            Method m = args[i].getClass().getMethod("getClassLoader");
+                            Object res = m.invoke(args[i]);
                             if (res instanceof ClassLoader) cl = (ClassLoader) res;
                         } catch (Throwable ignored) {}
                     }
@@ -580,6 +624,29 @@ public final class EnvCompatState {
         return keyContains ? s.contains(keyMatch) : keyMatch.equals(s);
     }
 
+    /**
+     * The M_VALUE_MULTI lookup: the gated argument is a key name, and the
+     * matching entry in multiVals is the value to return. Returns null when the
+     * key is absent or has no spoofed value, which makes the caller fall
+     * through to the real method — a keystore read of an unrelated preference
+     * must keep working.
+     */
+    private String multiValue(Object[] args) {
+        if (args == null || keyArgIndex < 0 || args.length <= keyArgIndex) return null;
+        if (multiKeys == null || multiVals == null) return null;
+        Object a = args[keyArgIndex];
+        if (!(a instanceof String)) return null;
+        String key = (String) a;
+        int n = Math.min(multiKeys.length, multiVals.length);
+        for (int i = 0; i < n; i++) {
+            if (key.equals(multiKeys[i])) {
+                String v = multiVals[i];
+                return (v == null || v.isEmpty()) ? null : v;
+            }
+        }
+        return null;
+    }
+
     private Object spoofValue() {
         switch (retType) {
             case 1: // byte[]
@@ -789,16 +856,6 @@ public final class EnvCompatState {
             setField(s_cfgScreenHeightDp, c, cfg, "screenHeightDp", finalShDp);
             setField(s_cfgSmallestScreenWidthDp, c, cfg, "smallestScreenWidthDp", portSwDp);
         } catch (Throwable ignored) {}
-    }
-
-    private static boolean isApplication(Object obj) {
-        if (obj == null) return false;
-        Class<?> c = obj.getClass();
-        while (c != null) {
-            if ("android.app.Application".equals(c.getName())) return true;
-            c = c.getSuperclass();
-        }
-        return false;
     }
 
     private static void setField(Field f, Class<?> c, Object obj, String name, int val) {

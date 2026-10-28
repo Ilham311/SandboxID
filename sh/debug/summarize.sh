@@ -58,7 +58,12 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     printf "  %-28s : %s\n" "zygote forks seen"      "$(count 'preAppSpecialize pkg=' )"
     printf "  %-28s : %s\n" "companion handshakes"   "$(count 'companion invoked:')"
     printf "  %-28s : %s\n" "REJECT (not in target)" "$(count 'REJECT pkg=')"
-    printf "  %-28s : %s\n" "ACCEPT (companion side)" "$(count 'ACCEPT pkg=')"
+    # Two literals: the companion logs "ACCEPT pkg='X'" for a whole-app target
+    # and "ACCEPT sub-process 'X' for target 'Y'" for a child process, so a
+    # grep for the first alone undercounts every session with a :push or
+    # :isolated child. Summed rather than concatenated.
+    ACC=$(grep -cE "${MOD}ACCEPT (pkg=|sub-process )" "$IN")
+    printf "  %-28s : %s\n" "ACCEPT (companion side)" "$ACC"
     printf "  %-28s : %s\n" "targets activated"      "$(count 'target active ')"
     echo ""
     echo "  Packages spawned (top 20, incl. rejected):"
@@ -168,7 +173,43 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     fi
     echo ""
 
-    # -------------------------------------------- companion hide pass (traces)
+    # ------------------------------------------- shell guard (popen/exec family)
+    echo "--- Shell guard: popen/pclose/fclose + exec family ---"
+    # Without these rows a completely dead shell guard reported a clean session:
+    # nothing else in this summary counts them, so the only way to tell "the app
+    # never probed for root" from "the guard never installed" was to read the
+    # C++ by hand.
+    SG_DOB=$(count 'NATIVE_READ: DobbyHook [0-9]+/[0-9]+ shell-guard')
+    SG_DOBFAIL=$(count 'NATIVE_READ: DobbyHook .* FAILED')
+    printf "  %-28s : %s\n" "DobbyHook install lines"   "$SG_DOB"
+    printf "  %-28s : %s\n" "DobbyHook failures"        "$SG_DOBFAIL"
+    printf "  %-28s : %s\n" "popen intercepted"         "$(count 'NATIVE_POPEN ')"
+    printf "  %-28s : %s\n" "  ...blocked as root"      "$(count 'NATIVE_POPEN BLOCKED')"
+    printf "  %-28s : %s\n" "  ...getprop spoofed"      "$(count 'NATIVE_POPEN SPOOF')"
+    printf "  %-28s : %s\n" "  ...getprop hidden"       "$(count 'NATIVE_POPEN HIDE')"
+    printf "  %-28s : %s\n" "exec family intercepted"   "$(count 'NATIVE_(EXECVE|EXECV|EXECVP|EXECVPE|FEXECVE|POSIX_SPAWN|POSIX_SPAWNP) ')"
+    printf "  %-28s : %s\n" "synthetic pipe truncated"  "$(count 'create_synthetic_pipe: pipe fallback truncated')"
+    echo ""
+    # A DobbyHook failure is the one shell-guard fault that is silent about its
+    # consequence: the PLT pass may still cover the libraries mapped at
+    # postAppSpecialize, but a security library that dlopens later resolves the
+    # real function and the guard misses it entirely.
+    if [ "$SG_DOBFAIL" -gt 0 ]; then
+        echo "  WARNING: $SG_DOBFAIL DobbyHook registration(s) FAILED. The PLT pass"
+        echo "  still covers libraries mapped at postAppSpecialize, but a security"
+        echo "  library that dlopens later (libpsec.so and friends) resolves the"
+        echo "  real symbol and bypasses the guard for that entry point."
+    fi
+    # The truncation line is a correctness signal, not noise: it means a
+    # synthetic popen result was cut short because the fallback pipe filled.
+    # On a kernel with memfd_create (Linux >= 3.17) it can never appear.
+    if [ "$(count 'create_synthetic_pipe: pipe fallback truncated')" -gt 0 ]; then
+        echo "  NOTE: a synthetic popen result was truncated - the app read an"
+        echo "  incomplete listing. memfd_create is unavailable in this process,"
+        echo "  so the fallback pipe path was used."
+    fi
+    echo ""
+
     echo "--- Companion hide pass (detach module mount traces) ---"
     # The companion's only post-specialize job now is the optional trace-detach
     # umount pass (enable_hide). Property/Build spoofing is entirely in-process
@@ -278,6 +319,13 @@ count() { grep -cE "${MOD}$1" "$IN"; }    # count of matching module lines
     # the only place the cause appears, so show it here next to our summary line.
     printf "  %-28s : %s\n" "lsplant::Init OK"   "$(grep -cE 'SandboxID-L3: .*lsplant::Init ok' "$IN")"
     printf "  %-28s : %s\n" "lsplant::Init failed" "$(grep -cE 'SandboxID-L3: .*lsplant::Init failed' "$IN")"
+    # Framework specs that FindClass could not resolve at postAppSpecialize and
+    # that the app-attach retry then installed through the app's ClassLoader.
+    # This is the only line that proves an app-bundled class (GAID) was reached:
+    # it is invisible to FindClass and to the class-load observer alike, so
+    # without this row the fix and its absence look identical in a summary.
+    printf "  %-28s : %s\n" "framework retry on attach" \
+        "$(grep -cE 'SandboxID-L3: .*framework target\(s\) hooked on app attach' "$IN")"
     LS=$(grep -cE '(E|W|I) LSPlant *: ' "$IN")
     if [ "$LS" -gt 0 ]; then
         echo "  LSPlant's own verdict (tag LSPlant):"
