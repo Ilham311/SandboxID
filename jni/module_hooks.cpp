@@ -705,6 +705,11 @@ static int hook_openat_2(int dirfd, const char* path, int flags) {
 //   the struct it fills is the 64-bit-off_t layout that bionic's `struct stat`
 //   already is. Passing `struct stat*` to it is exactly what libc does.
 //
+// Verified directly on this tree: aarch64 defines __NR_newfstatat = 79 and no
+// __NR_fstatat64; the device's 32-bit ARM libc uses syscall 327. The x86 pair
+// follows the same bionic convention but was not measured here — the host
+// toolchain ignores -m32, so there is no way to probe it from this machine.
+//
 // Without this, the build dies on armeabi-v7a with "use of undeclared
 // identifier '__NR_newfstatat'". The #error keeps a future ABI from silently
 // compiling a hook that cannot fall back.
