@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.37 (2026-10-28)
+
 ### Fix: build gagal di armeabi-v7a — `__NR_newfstatat` tidak ada di bionic 32-bit
 
 **Gejala.** Job CI `build` mati di langkah "Build (release + debug)" dengan tiga
