@@ -114,6 +114,12 @@ ApplogIds make_applog_ids(uint64_t seed, uint64_t epoch_ms) {
 
 bool patch_applog_xml(const std::string& real, const ApplogIds& ids,
                       std::string& out) {
+    // Every failure path clears `out`. The caller serves `out` only when this
+    // returns true, so leaving a half-built copy behind would be harmless today
+    // - but it is one careless `if (ok) serve(out); else serve(out);` away from
+    // serving the real device blob, and the whole point of the false return is
+    // that the real blob never reaches the app. Make it true by construction.
+    out.clear();
     if (real.find("<map") == std::string::npos ||
         real.find("<string") == std::string::npos)
         return false;
@@ -136,6 +142,7 @@ bool patch_applog_xml(const std::string& real, const ApplogIds& ids,
     };
 
     size_t pos = 0;
+    bool replaced = false;
     while (pos < real.size()) {
         size_t open = real.find('<', pos);
         if (open == std::string::npos) { out.append(real, pos, std::string::npos); break; }
@@ -163,19 +170,51 @@ bool patch_applog_xml(const std::string& real, const ApplogIds& ids,
                     else if (subst_contains_ci(key, "iid"))        repl = &ids.iid;
                 }
             }
+            // A self-closing <string name="did"/> has no value to replace, so
+            // it must be passed through untouched - and the check has to come
+            // BEFORE anything is appended for this element, or the tag is
+            // emitted twice.
+            //
+            // This is also what the value span below depends on. The span runs
+            // from the end of the opening tag to the next "</string>", and for
+            // a self-closing element that search lands on the NEXT element's
+            // closing tag: the output would be
+            // `<string name="did"/>VALUE</string>`, swallowing the sibling
+            // element and its real value and leaving the XML malformed.
+            if (repl && real[close - 1] == '/') repl = nullptr;
             if (repl) {
                 out.append(real, open, tag_end - open);
                 out.append(*repl);
                 size_t vend = real.find("</string>", tag_end);
-                if (vend == std::string::npos) return false;
+                if (vend == std::string::npos) { out.clear(); return false; }
                 size_t vtend = vend + 9;
                 out.append(real, vend, vtend - vend);
                 pos = vtend;
+                replaced = true;
                 continue;
             }
         }
         out.append(real, open, tag_end - open);
         pos = tag_end;
+    }
+    // Report failure when nothing was substituted, so the caller falls back to
+    // applog_xml_synth() instead of serving the real file.
+    //
+    // The map-shape guard at the top of this function only rejects input that
+    // is not XML at all. A file that IS map-shaped but whose keys are all
+    // unrecognised used to be copied through verbatim and still return true,
+    // and the caller (module_hooks.cpp, APPLOG_XML) returns `patched` on true -
+    // so the real device blob was served. That case is reachable, not
+    // theoretical: classify() routes /shared_prefs/bd_device_info.xml here, and
+    // that file is deliberately NOT seeded (its key scheme differs from the
+    // AppLog map), so it is exactly a map-shaped file with foreign keys.
+    if (!replaced) {
+        // The scan above copied the input into `out` as it went, so a declined
+        // patch would otherwise leave the real blob sitting in the caller's
+        // buffer. The caller today checks the return value first, but clearing
+        // makes the failure safe by construction rather than by that habit.
+        out.clear();
+        return false;
     }
     return true;
 }
@@ -274,6 +313,14 @@ uint64_t ram_gb_to_memtotal_kb(int gb) {
 
 uint64_t round_up_marketing_gb(uint64_t real_kb) {
     static const int tiers[] = {2, 3, 4, 6, 8, 12, 16, 18, 24};
+    // Clamp before the rounding add. `real_kb + 1048575ULL` wraps for a
+    // real_kb within ~1 MiB of UINT64_MAX, which turned a hostile
+    // `MemTotal: 18446744073709551615 kB` into tier 2 - a 2 GB persona, not the
+    // 0 the truncating cast below would have produced. Clamping first removes
+    // the wrap and the out-of-range cast together: the largest tier is 24, so
+    // any input at or above 24 GiB is the same answer anyway.
+    constexpr uint64_t kMaxKb = 24ULL * 1024ULL * 1024ULL;   // the largest tier
+    if (real_kb > kMaxKb) real_kb = kMaxKb;
     uint64_t gib = (real_kb + 1048575ULL) / 1048576ULL;
     for (int t : tiers) if (static_cast<uint64_t>(t) >= gib) return static_cast<uint64_t>(t);
     return gib;
@@ -298,7 +345,15 @@ std::string patch_meminfo(const std::string& real, int target_gb) {
         while (*p && (*p < '0' || *p > '9')) ++p;
         real_kb = std::strtoull(p, nullptr, 10);
         if (real_kb == 0) return real;
-        target_kb = ram_gb_to_memtotal_kb(static_cast<int>(round_up_marketing_gb(real_kb)));
+        // round_up_marketing_gb clamps to its largest tier (24), so the cast
+        // here is always in range and needs no guard of its own. It used to be
+        // reachable out of range: a hostile MemTotal (a modified kernel, or a
+        // FUSE-mounted /proc) skipped every tier and hit the int cast
+        // truncated. The clamp belongs in that function, next to the add that
+        // wraps - not here, where it would be a second, separately-wrong copy
+        // of the same bound.
+        target_kb = ram_gb_to_memtotal_kb(
+            static_cast<int>(round_up_marketing_gb(real_kb)));
     }
 
     char line[64];
@@ -402,19 +457,22 @@ std::string cpuinfo_synth(const std::string& platform, const std::string& real,
         while (pos < real.size()) {
             size_t eol = real.find('\n', pos);
             size_t le = (eol == std::string::npos) ? real.size() : eol;
+            // Only the COUNT of processor blocks matters - the index itself is
+            // never used. Parsing it into an int was both pointless and unsafe:
+            // `n = n * 10 + digit` overflows for a long digit run, and the input
+            // is the real /proc/cpuinfo, which a modified kernel or a
+            // FUSE-mounted /proc can shape freely. UBSan flags it as signed
+            // overflow at the multiply.
+            //
+            // The digit is still *required* - a bare "processor\t:" line is not
+            // a core - but only its presence is checked, never its value, so
+            // there is nothing left to overflow.
             if (le - pos >= 11 && std::memcmp(real.data() + pos, "processor\t:", 11) == 0) {
                 size_t j = pos + 11;
                 while (j < le && real[j] == ' ') ++j;
-                int n = 0;
-                while (j < le && real[j] >= '0' && real[j] <= '9') {
-                    n = n * 10 + (real[j] - '0');
-                    ++j;
-                }
-                if (j > pos + 11) { ++ncores; pos = le; }
-                else pos = le;
-            } else {
-                pos = le;
+                if (j < le && real[j] >= '0' && real[j] <= '9') ++ncores;
             }
+            pos = le;
             if (eol == std::string::npos) break;
             ++pos;
         }

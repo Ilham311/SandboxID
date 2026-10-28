@@ -341,9 +341,15 @@ static void synth_build(int fd) {
     // Bounded: /proc/meminfo and /proc/cpuinfo are kernel-sized (a few KB), but
     // applog.xml lives in the app's own dir and its size is app-controlled. A
     // pathological file must not make the hook buffer unbounded amounts in the
-    // app's process. The cap is far above any legitimate AppLog map; a truncation
-    // there makes patch_applog_xml decline the input and the hook fall back to the
-    // small synthetic map.
+    // app's process. The cap is far above any legitimate AppLog map.
+    //
+    // A truncation mid-element leaves the input unterminated, and
+    // patch_applog_xml then fails to find the closing "</string>" and declines
+    // it, so the hook falls back to the small synthetic map. (It also declines
+    // when it finds no key it recognises at all - see the `replaced` flag
+    // there. This comment previously claimed the truncation case was the only
+    // route to that fallback, which was wrong in a way that mattered: a
+    // map-shaped file with foreign keys used to be served verbatim.)
     auto read_real = [fd]() {
         constexpr size_t kMaxReal = 1u * 1024 * 1024;
         char tmp[8192];
