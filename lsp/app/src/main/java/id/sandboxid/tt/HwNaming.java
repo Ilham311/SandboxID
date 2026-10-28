@@ -125,19 +125,15 @@ final class HwNaming {
         return "cortex-a55";
     }
 
-    /**
-     * {@code ro.gfx.driver.1} — the Qualcomm GPU driver package, whose middle
-     * segment is the SoC platform. Empty on a non-Qualcomm persona: no such
-     * package exists there, and the prop is hidden rather than faked.
-     *
-     * <p>The trailing {@code api30} is the UGD API level, NOT the Android SDK:
-     * the reference device runs Android 15 (SDK 35) and still reports api30, as
-     * does every device tree checked (sm6150, lito, kona, lahaina, msmnile).
-     */
-    static String gpuDriverPkg(String platform, String socMan, String socModel) {
-        if (!isQualcomm(socMan, socModel)) return "";
-        return "com.qualcomm.qti.gpudrivers." + platform + ".api30";
-    }
+    // There is deliberately NO gpuDriverPkg() here any more.
+    //
+    // ro.gfx.driver.1 names an INSTALLED package, and
+    // android.os.GraphicsEnvironment.get() asks PackageManager whether it
+    // exists. Deriving a persona-shaped name produced one that is not installed
+    // on this device, and the framework logs
+    // "updatable driver package '<name>' not installed" — a louder tell than
+    // the real value it replaced. The whole ro.gfx.driver.* family is hidden by
+    // isVendorRomProp() instead. Mirrors native/include/hw_naming.hpp.
 
     private static String lower(String s) {
         return s == null ? "" : s.toLowerCase(Locale.ROOT);

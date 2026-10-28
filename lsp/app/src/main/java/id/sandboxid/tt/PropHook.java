@@ -133,10 +133,13 @@ final class PropHook {
                 return HwNaming.dalvikArm64Variant(man, mod, plat);
             case "DALVIK_ARM_VARIANT":
                 return HwNaming.dalvikArmVariant();
-            case "GPU_DRIVER": {
-                String p = HwNaming.gpuDriverPkg(plat, man, mod);
-                return p.isEmpty() ? null : p;
-            }
+            // GPU_DRIVER is deliberately NOT derived. ro.gfx.driver.1 names an
+            // installed package, and android.os.GraphicsEnvironment.get()
+            // checks that with PackageManager: a derived name
+            // (com.qualcomm.qti.gpudrivers.<platform>.api30) does not exist on
+            // the device, so the framework logs "updatable driver package
+            // '<name>' not installed" - a louder tell than the leak. The whole
+            // ro.gfx.driver.* family is hidden by isVendorRomProp() instead.
             default:
                 return null;
         }
@@ -217,20 +220,41 @@ final class PropHook {
             case "ro.display.mimotion":
             case "vendor.boostfwk.frameprefetcher":
             case "miui.usb.dialog":
+            // Measured on the reference device; each names the real OEM, the
+            // real SoC platform, or both.
+            case "ro.com.google.clientidbase.pg":        // android-xiaomi-deo2
+            case "ro.com.google.lens.oem_image_package": // com.miui.gallery
+            case "ro.vendor.extension_library":          // libqti-perfd-client.so
+            case "vendor.media.target_variant":          // _kona
+            case "vendor.usb.product_string":            // POCO F3
                 return true;
             default:
                 return k.startsWith("ro.miui.")
                         || k.startsWith("ro.vendor.miui.")
                         || k.startsWith("ro.ril.miui.")
-                        || k.startsWith("persist.sys.miui.")
-                        || k.startsWith("persist.sys.miui_")
+                        // One prefix for the whole "persist.sys.miui" family:
+                        // the dotted form, the underscore form
+                        // (persist.sys.miui_animator_sched.*, a different
+                        // namespace) and the run-together form
+                        // (persist.sys.miuibooster.name) that neither matched.
+                        || k.startsWith("persist.sys.miui")
                         || k.startsWith("persist.miui.")
                         || k.startsWith("persist.sys.turbosched.")
                         || k.startsWith("persist.sys.dexpreload.")
                         || k.startsWith("persist.sys.perf_scenario_recognition.")
                         || k.startsWith("persist.sys.perfdebug.")
                         || k.startsWith("persist.sys.smart_gc.")
-                        || k.startsWith("ro.vendor.mi_sf.");
+                        || k.startsWith("ro.vendor.mi_sf.")
+                        // ro.gfx.driver.* — hidden, never derived: see the note
+                        // in deriveHwValue(). Two prefixes, not one bare stem:
+                        // the real names are ro.gfx.driver.0/.1 (dot) and
+                        // ro.gfx.driver_build_time (underscore).
+                        || k.startsWith("ro.gfx.driver.")
+                        || k.startsWith("ro.gfx.driver_")
+                        || k.startsWith("persist.vendor.camera.")
+                        || k.startsWith("vendor.camera.")
+                        || k.startsWith("ro.csc.spotify.")
+                        || k.startsWith("ro.media.xml_variant.");
         }
     }
 }

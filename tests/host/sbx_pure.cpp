@@ -344,6 +344,50 @@ int main() {
     CHECK(should_hide_prop("ro.lineage.build.version"), "hide lineage prop");
     CHECK(!should_hide_prop("ro.build.fingerprint"), "do not hide fingerprint");
 
+    // The updatable-graphics-driver family. These must be HIDDEN, never
+    // spoofed: GraphicsEnvironment.get() reads them and asks PackageManager
+    // whether the named package is installed, so a derived name is reported as
+    // "updatable driver package '<name>' not installed" - a louder tell than
+    // the real value. Measured on the reference device: ro.gfx.driver.0=
+    // com.xiaomi.ugd, ro.gfx.driver.1=com.qualcomm.qti.gpudrivers.kona.api30.
+    CHECK(should_hide_prop("ro.gfx.driver.0"), "hide ro.gfx.driver.0");
+    CHECK(should_hide_prop("ro.gfx.driver.1"), "hide ro.gfx.driver.1");
+    CHECK(should_hide_prop("ro.gfx.driver_build_time"),
+          "hide ro.gfx.driver_build_time");
+
+    // The "persist.sys.miui" family, in all three separators. Enumerating
+    // separators is what kept leaving holes: the dotted form was covered, then
+    // the underscore form slipped through, then the run-together form
+    // (persist.sys.miuibooster.name) slipped through both.
+    CHECK(should_hide_prop("persist.sys.miui.density_v2"), "hide persist.sys.miui.*");
+    CHECK(should_hide_prop("persist.sys.miui_animator_sched.big_prime_cores"),
+          "hide persist.sys.miui_*");
+    CHECK(should_hide_prop("persist.sys.miuibooster.name"),
+          "hide persist.sys.miui<run-together>");
+
+    // Camera module paths / package allowlists embed the device codename and
+    // the vendor. A target app read vendor.camera.aux.packagelist directly.
+    CHECK(should_hide_prop("persist.vendor.camera.rearMain.info"),
+          "hide persist.vendor.camera.*");
+    CHECK(should_hide_prop("vendor.camera.aux.packagelist"),
+          "hide vendor.camera.*");
+    CHECK(should_hide_prop("vendor.camera.aux.packagelistext"),
+          "hide vendor.camera.* ext");
+
+    // Remaining measured OEM/SoC tells.
+    CHECK(should_hide_prop("ro.com.google.clientidbase.pg"), "hide clientidbase.pg");
+    CHECK(should_hide_prop("ro.com.google.lens.oem_image_package"), "hide lens oem pkg");
+    CHECK(should_hide_prop("ro.vendor.extension_library"), "hide qti extension lib");
+    CHECK(should_hide_prop("vendor.media.target_variant"), "hide media target variant");
+    CHECK(should_hide_prop("vendor.usb.product_string"), "hide usb product string");
+    CHECK(should_hide_prop("ro.media.xml_variant.codecs"), "hide media xml variant");
+    CHECK(should_hide_prop("ro.csc.spotify.music.partnerid"), "hide spotify partner id");
+
+    // ...and the near-misses that must NOT be swallowed by those prefixes.
+    CHECK(!should_hide_prop("ro.gfx.driver"), "bare ro.gfx.driver is not a real prop");
+    CHECK(!should_hide_prop("ro.build.version.release"), "do not hide release");
+    CHECK(!should_hide_prop("vendor.camera"), "bare vendor.camera is not a real prop");
+
     printf("\n%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }

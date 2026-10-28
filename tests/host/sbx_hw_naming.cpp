@@ -1,6 +1,5 @@
 // Pins the hardware-naming rules: ro.hardware, ro.board.platform,
-// ro.product.board, ro.soc.manufacturer, the Dalvik ISA variant and the GPU
-// driver package.
+// ro.product.board, ro.soc.manufacturer and the Dalvik ISA variant.
 //
 // These four props describe the hardware from different angles and are NOT
 // interchangeable. The module used to derive all of them from the single
@@ -122,21 +121,14 @@ int main() {
     CHECK_EQ(dalvik_arm_variant("Qualcomm", "SM8250", "kona"), "cortex-a55");
     CHECK(dalvik_arm_variant("MediaTek", "MT6789", "mt6789") != "generic");
 
-    std::printf("==> ro.gfx.driver.1: the GPU driver package\n");
-    // The middle segment is the SoC platform, so it must move with the persona.
-    CHECK_EQ(gpu_driver_pkg("taro", "Qualcomm", "SM8475"),
-             "com.qualcomm.qti.gpudrivers.taro.api30");
-    CHECK_EQ(gpu_driver_pkg("kalama", "Qualcomm", "SM8550"),
-             "com.qualcomm.qti.gpudrivers.kalama.api30");
-    // api30 is the UGD API level, not the Android SDK - the reference device
-    // runs Android 15 and still reports api30.
-    CHECK(gpu_driver_pkg("taro", "Qualcomm", "SM8475").find(".api30") !=
-          std::string::npos);
-    // Empty for a non-Qualcomm persona: the prop is hidden rather than faked,
-    // since no such package exists on those devices.
-    CHECK_EQ(gpu_driver_pkg("zuma", "Google", "GS301"), "");
-    CHECK_EQ(gpu_driver_pkg("mt6789", "MediaTek", "MT6789"), "");
-    CHECK_EQ(gpu_driver_pkg("erd9945", "Samsung", "s5e9945"), "");
+    // There is no gpu_driver_pkg() to test any more, on purpose. The prop names
+    // an INSTALLED package and GraphicsEnvironment.get() verifies that with
+    // PackageManager; deriving com.qualcomm.qti.gpudrivers.<persona>.api30 gave
+    // a package that is not installed on the device, and the framework logged
+    // "updatable driver package '<name>' not installed" - a louder tell than the
+    // real value it replaced. The whole family is hidden instead, for EVERY
+    // persona; the hide-list checks live in sbx_pure, which links
+    // native_read.cpp and therefore has should_hide_prop().
 
     std::printf("==> the exact device case (OPPO CPH2521 persona)\n");
     // The persona that was live on the device: OPPO Reno10 Pro+ 5G, taro,
@@ -149,8 +141,6 @@ int main() {
         CHECK_EQ(product_board("OP56D3L1", plat, man, mod), "OP56D3L1");
         CHECK_EQ(soc_manufacturer_name(man, mod), "QTI");
         CHECK_EQ(dalvik_arm64_variant(man, mod, plat), "kryo300");
-        CHECK_EQ(gpu_driver_pkg(plat, man, mod),
-                 "com.qualcomm.qti.gpudrivers.taro.api30");
     }
 
     std::printf("==> the reference device's real values\n");

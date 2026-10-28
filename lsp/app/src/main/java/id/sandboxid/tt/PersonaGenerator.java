@@ -129,7 +129,9 @@ final class PersonaGenerator {
         put(id, "DALVIK_ARM64_VARIANT",
                 HwNaming.dalvikArm64Variant(socMan, socModel, platform));
         put(id, "DALVIK_ARM_VARIANT", HwNaming.dalvikArmVariant());
-        put(id, "GPU_DRIVER", HwNaming.gpuDriverPkg(platform, socMan, socModel));
+        // No GPU_DRIVER key: ro.gfx.driver.* names an installed package and
+        // GraphicsEnvironment.get() checks it with PackageManager, so a derived
+        // name is reported as "not installed". Hidden instead — see PropMap.
 
         String sdk = col(row, C_SDK);
         String release = col(row, C_RELEASE);

@@ -86,10 +86,12 @@ static bool derive_hw_value(const std::string& k, std::string& out) {
         { out = sbxhw::dalvik_arm64_variant(man, mod, plat); return true; }
     if (k == "DALVIK_ARM_VARIANT")
         { out = sbxhw::dalvik_arm_variant(man, mod, plat); return true; }
-    if (k == "GPU_DRIVER") {
-        out = sbxhw::gpu_driver_pkg(plat, man, mod);
-        return !out.empty();   // empty -> not spoofed, hidden instead
-    }
+    // GPU_DRIVER is deliberately NOT derived. ro.gfx.driver.1 names an
+    // installed package, and GraphicsEnvironment.get() checks that with
+    // PackageManager: a derived name (com.qualcomm.qti.gpudrivers.<platform>.
+    // api30) does not exist on the device, so the framework logs "updatable
+    // driver package '<name>' not installed" - a louder tell than the leak.
+    // The whole ro.gfx.driver.* family is hidden by is_vendor_rom_prop().
     return false;
 }
 

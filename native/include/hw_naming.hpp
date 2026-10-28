@@ -163,22 +163,21 @@ inline std::string dalvik_arm_variant(const std::string& soc_man,
     return "cortex-a55";
 }
 
-// ro.gfx.driver.1: the Qualcomm GPU driver package. Its middle segment is the
-// SoC platform, so leaving the real one in place leaks the real SoC
-// (ro.gfx.driver.1=com.qualcomm.qti.gpudrivers.kona.api30 on a device whose
-// persona claims taro). Empty for a non-Qualcomm persona: no such package
-// exists there, and the caller hides the prop instead.
+// There is deliberately NO gpu_driver_pkg() here any more.
 //
-// The trailing apiN is the UGD API level, NOT the Android SDK: the reference
-// device runs Android 15 (SDK 35) and still reports api30, and every device
-// tree checked (sm6150, lito, kona, lahaina, msmnile) says api30 as well. So
-// api30 is the only value with evidence behind it; deriving it from the SDK
-// would invent a package name that does not exist.
-inline std::string gpu_driver_pkg(const std::string& platform,
-                                  const std::string& soc_man,
-                                  const std::string& soc_model) {
-    if (!is_qualcomm(soc_man, soc_model)) return std::string();
-    return "com.qualcomm.qti.gpudrivers." + platform + ".api30";
-}
+// ro.gfx.driver.1 names an INSTALLED package
+// (com.qualcomm.qti.gpudrivers.kona.api30 on the reference device) and
+// android.os.GraphicsEnvironment.get() asks PackageManager whether it exists.
+// Deriving a persona-shaped name produced one that is not installed on this
+// device, and the framework then logs
+//
+//     updatable driver package '<name>' not installed
+//
+// which is a louder, more specific tell than the real value it replaced. The
+// whole ro.gfx.driver.* family is hidden instead — see is_vendor_rom_prop() in
+// native/native_read.cpp. "This device ships no UGD package" is an ordinary,
+// coherent state; "this device names a UGD package that is not installed" is
+// not. A helper that computes the name is a trap for the next reader, so it is
+// gone rather than left unused.
 
 }  // namespace sbxhw

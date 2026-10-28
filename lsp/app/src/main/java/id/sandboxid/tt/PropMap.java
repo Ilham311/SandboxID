@@ -166,11 +166,11 @@ final class PropMap {
         id.put("ro.hardware", "HARDWARE");
         id.put("ro.board.platform", "BOARD_PLATFORM");
         id.put("ro.product.board", "BOARD");
-        // ro.gfx.driver.1 names the SoC platform in its middle segment
-        // (com.qualcomm.qti.gpudrivers.<platform>.api30), so leaving it alone
-        // leaks the real SoC. Empty for a non-Qualcomm persona, where the prop
-        // is hidden instead.
-        id.put("ro.gfx.driver.1", "GPU_DRIVER");
+        // ro.gfx.driver.0/.1 are NOT mapped to an identity key. They are hidden
+        // by isVendorRomProp() instead: the prop names an installed package and
+        // GraphicsEnvironment.get() checks it with PackageManager, so a derived
+        // name would be reported as "not installed" — a louder tell than the
+        // leak. See the note in PropHook.deriveHwValue().
         id.put("dalvik.vm.isa.arm64.variant", "DALVIK_ARM64_VARIANT");
         id.put("dalvik.vm.isa.arm.variant", "DALVIK_ARM_VARIANT");
         id.put("gsm.operator.numeric", "GSM_OPERATOR_NUMERIC");

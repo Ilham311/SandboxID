@@ -120,20 +120,13 @@ public class HwNamingTest {
         eq("little core", HwNaming.dalvikArmVariant(), "cortex-a55");
         check("not generic", !"generic".equals(HwNaming.dalvikArmVariant()));
 
-        System.out.println("-- ro.gfx.driver.1 --");
-        // The middle segment is the SoC platform, so it must move with the
-        // persona: leaving the real one in place leaks the real SoC.
-        eq("taro", HwNaming.gpuDriverPkg("taro", "Qualcomm", "SM8475"),
-                "com.qualcomm.qti.gpudrivers.taro.api30");
-        eq("kalama", HwNaming.gpuDriverPkg("kalama", "Qualcomm", "SM8550"),
-                "com.qualcomm.qti.gpudrivers.kalama.api30");
-        // api30 is the UGD API level, not the Android SDK.
-        check("api30 suffix", HwNaming.gpuDriverPkg("taro", "Qualcomm", "SM8475")
-                .endsWith(".api30"));
-        // Empty on non-Qualcomm: the prop is hidden rather than faked.
-        eq("tensor none", HwNaming.gpuDriverPkg("zuma", "Google", "GS301"), "");
-        eq("mediatek none", HwNaming.gpuDriverPkg("mt6789", "MediaTek", "MT6789"), "");
-        eq("exynos none", HwNaming.gpuDriverPkg("erd9945", "Samsung", "s5e9945"), "");
+        System.out.println("-- ro.gfx.driver.*: hidden, never derived --");
+        // There is no gpuDriverPkg() to test any more, on purpose. The prop
+        // names an INSTALLED package and GraphicsEnvironment.get() verifies it
+        // with PackageManager; deriving com.qualcomm.qti.gpudrivers.<persona>.
+        // api30 produced a package that is not installed here, and the
+        // framework logged "updatable driver package '<name>' not installed".
+        // The family is hidden instead — see PropHook.isVendorRomProp().
 
         System.out.println("-- the exact device case (OPPO CPH2521 persona) --");
         // The persona that was live on the device: OPPO Reno10 Pro+ 5G, taro,
@@ -142,8 +135,6 @@ public class HwNamingTest {
         eq("board", HwNaming.productBoard("OP56D3L1", "taro", "OPPO", "OPPO"), "OP56D3L1");
         eq("soc man", HwNaming.socManufacturerName("Qualcomm", "SM8475"), "QTI");
         eq("dalvik", HwNaming.dalvikArm64Variant("Qualcomm", "SM8475", "taro"), "kryo300");
-        eq("gpu", HwNaming.gpuDriverPkg("taro", "Qualcomm", "SM8475"),
-                "com.qualcomm.qti.gpudrivers.taro.api30");
 
         System.out.println("-- the reference device's real values --");
         // Redmi alioth / SM8250. The rules must reproduce what the device itself

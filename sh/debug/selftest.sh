@@ -174,6 +174,19 @@ if [ -n "$_fp" ]; then
             emit koherensi PASS "DALVIK_ARM64_VARIANT=$_dvar" ;;
     esac
 
+    # ro.gfx.driver.0/.1 TIDAK boleh punya nilai turunan. Keduanya nama PAKET
+    # yang harus terpasang, dan android.os.GraphicsEnvironment.get() menanyakan
+    # keberadaannya ke PackageManager. Menurunkan nama dari platform persona
+    # menghasilkan paket yang tidak ada di perangkat, dan framework mencatat
+    # "updatable driver package '<nama>' not installed" — pesan yang lebih
+    # spesifik daripada nilai asli yang digantikannya. Keluarga ini di-HIDE.
+    _gpu="$(id_get GPU_DRIVER)"
+    if [ -n "$_gpu" ]; then
+        emit koherensi FAIL "GPU_DRIVER=$_gpu — ro.gfx.driver.* harus di-hide, bukan diturunkan (paket turunan tidak terpasang di perangkat ini)"
+    else
+        emit koherensi PASS "tidak ada GPU_DRIVER turunan (ro.gfx.driver.* di-hide)"
+    fi
+
     _flavor="$(id_get FLAVOR)"
     if [ -n "$_flavor" ]; then
         if [ "$_flavor" = "${_product}-${_type}" ]; then

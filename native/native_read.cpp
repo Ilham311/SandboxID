@@ -656,18 +656,58 @@ bool is_vendor_rom_prop(const char* name) {
         "ro.display.mimotion",
         "vendor.boostfwk.frameprefetcher",
         "miui.usb.dialog",
+        // Measured on the reference device; each names the real OEM, the real
+        // SoC platform, or both, under a persona that claims neither.
+        //   ro.com.google.clientidbase.pg        android-xiaomi-deo2
+        //   ro.com.google.lens.oem_image_package com.miui.gallery
+        //   ro.vendor.extension_library          libqti-perfd-client.so
+        //   ro.media.xml_variant.codecs[_performance]  _kona
+        //   vendor.media.target_variant          _kona
+        //   vendor.usb.product_string            POCO F3
+        "ro.com.google.clientidbase.pg",
+        "ro.com.google.lens.oem_image_package",
+        "ro.vendor.extension_library",
+        "vendor.media.target_variant",
+        "vendor.usb.product_string",
     };
     for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
     if (std::strncmp(name, "ro.miui.", 8) == 0)          return true;
     if (std::strncmp(name, "ro.vendor.miui.", 15) == 0) return true;
     if (std::strncmp(name, "ro.ril.miui.", 12) == 0)    return true;
-    if (std::strncmp(name, "persist.sys.miui.", 17) == 0) return true;
-    // The underscore form. "persist.sys.miui_animator_sched.*" (2 props on the
-    // reference device) is a different namespace from "persist.sys.miui.*" and
-    // slipped past the dot-prefixed test above while a target app read it.
-    if (std::strncmp(name, "persist.sys.miui_", 18) == 0) return true;
+    // One prefix for the whole "persist.sys.miui" family. It covers the dotted
+    // form (persist.sys.miui.*), the underscore form
+    // (persist.sys.miui_animator_sched.*, which is a DIFFERENT namespace and
+    // slipped past a dot-only test while a target app read it), and the
+    // run-together form (persist.sys.miuibooster.name) that neither of those
+    // matched. Enumerating the separators is what kept leaving holes.
+    if (std::strncmp(name, "persist.sys.miui", 16) == 0) return true;
     // "persist.miui.*" (no ".sys"): persist.miui.density_v2, persist.miui.extm.*
     if (std::strncmp(name, "persist.miui.", 13) == 0)    return true;
+    // The updatable-graphics-driver family. ro.gfx.driver.1 names the SoC
+    // platform in its middle segment (com.qualcomm.qti.gpudrivers.<platform>.
+    // api30) and ro.gfx.driver.0 names the OEM's UGD package (com.xiaomi.ugd).
+    // Both are read by android.os.GraphicsEnvironment.get(), which then asks
+    // PackageManager whether that package is installed.
+    //
+    // They are HIDDEN, never spoofed. Deriving a persona-shaped package name
+    // produces one that is not installed on this device, and GraphicsEnvironment
+    // logs "updatable driver package '<name>' not installed" - a fresh tell in
+    // place of the leak. A device that simply ships no UGD is an ordinary,
+    // coherent state, so absent is the safe answer. The prefix also covers
+    // ro.gfx.driver_build_time, which this device does not set at all.
+    // Two prefixes, not one bare "ro.gfx.driver": the real names are
+    // ro.gfx.driver.0/.1 (dot) and ro.gfx.driver_build_time (underscore), and
+    // matching the bare stem would also swallow a name that is not a property.
+    if (std::strncmp(name, "ro.gfx.driver.", 14) == 0)   return true;
+    if (std::strncmp(name, "ro.gfx.driver_", 14) == 0)   return true;
+    // Camera module paths and package allowlists embed the device codename and
+    // the vendor (com.qti.sensormodule.alioth_*, com.xiaomi.cameratest).
+    // A target app read vendor.camera.aux.packagelist directly.
+    if (std::strncmp(name, "persist.vendor.camera.", 22) == 0) return true;
+    if (std::strncmp(name, "vendor.camera.", 14) == 0)        return true;
+    // ro.csc.spotify.music.{partnerid,referrerid} = xiaomi_mobile
+    if (std::strncmp(name, "ro.csc.spotify.", 15) == 0)       return true;
+    if (std::strncmp(name, "ro.media.xml_variant.", 21) == 0) return true;
     // The HyperOS scheduler and its siblings. Each prefix was measured on the
     // device; a stock Pixel has none of them.
     if (std::strncmp(name, "persist.sys.turbosched.", 23) == 0) return true;

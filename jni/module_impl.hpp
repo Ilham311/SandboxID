@@ -67,35 +67,32 @@ extern bool spoof_prop_value(const std::string& k, std::string& out);
 // that function is pure and has no access to the identity, and it is also
 // compiled into the CLI. The JNI layer is where the persona is known.
 //
-// Measured on the reference device: ro.gfx.driver.0=com.xiaomi.ugd and
+// Measured on the reference device:
 // ro.appsflyer.preinstall.path=/data/miui/pai/pre_install.appsflyer. A target
-// app read both and got the real Xiaomi/MIUI values back while every other
-// surface showed the OPPO persona.
+// app read it and got the real Xiaomi/MIUI value back while every other surface
+// showed the OPPO persona.
 inline bool sbx_oem_prop_hidden(const char* name) {
     if (!name) return false;
     const std::string& man = val("MANUFACTURER");
     const std::string& brd = val("BRAND");
-    const std::string& soc = val("SOC_MANUFACTURER");
-    const std::string& mod = val("SOC_MODEL");
 
     const bool xiaomi = man == "Xiaomi" || man == "Redmi" || man == "POCO" ||
                         brd == "Xiaomi" || brd == "Redmi" || brd == "POCO";
     if (!xiaomi) {
         static const char* const xiaomi_only[] = {
-            "ro.gfx.driver.0",              // com.xiaomi.ugd
             "ro.appsflyer.preinstall.path", // /data/miui/pai/...
         };
         for (const char* e : xiaomi_only)
             if (std::strcmp(name, e) == 0) return true;
     }
 
-    // The Qualcomm GPU driver package only exists on a Qualcomm device, so a
-    // MediaTek/Tensor/Exynos persona must not advertise one at all. When it IS
-    // Qualcomm, spoof_prop_value() derives the package and wins before this is
-    // reached, so hiding here cannot suppress a valid value.
-    if (std::strcmp(name, "ro.gfx.driver.1") == 0)
-        return !sbxhw::is_qualcomm(soc, mod);
-
+    // ro.gfx.driver.0/.1 used to be handled here, hidden only when the persona
+    // was non-Qualcomm. That was the wrong shape twice over: a Qualcomm persona
+    // then DERIVED a package name (com.qualcomm.qti.gpudrivers.<platform>.api30)
+    // that is not installed on this device, and GraphicsEnvironment.get() logs
+    // "updatable driver package '<name>' not installed" for it. The whole
+    // ro.gfx.driver.* family is now hidden unconditionally, by the pure
+    // is_vendor_rom_prop() list in native/native_read.cpp. See prop_defs.hpp.
     return false;
 }
 

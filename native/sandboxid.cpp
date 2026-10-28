@@ -437,10 +437,10 @@ static Identity derive_identity(const PixelEntry& p) {
     id.kv["SDK_INT"]         = std::to_string(p.sdk);
     id.kv["SECURITY_PATCH"]  = p.security_patch;
 
-    // The GPU driver package carries the SoC platform in its name, so it has to
-    // move with the persona. Empty for a non-Qualcomm persona: the prop is then
-    // hidden rather than replaced, since no such package exists there.
-    id.kv["GPU_DRIVER"] = sbxhw::gpu_driver_pkg(p.platform, soc_man, soc_mod);
+    // ro.gfx.driver.0/.1 get no identity key on purpose. They name an INSTALLED
+    // package and GraphicsEnvironment.get() verifies that with PackageManager,
+    // so a derived name is reported as "not installed" - a louder tell than the
+    // leak it would close. The family is hidden instead; see prop_defs.hpp.
     // ro.appsflyer.preinstall.path is deliberately NOT derived here: the only
     // value ever observed is the vendor's own (/data/miui/pai/... on HyperOS),
     // and inventing "/data/<brand>/pai/..." for an OEM that does not ship one

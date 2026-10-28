@@ -72,13 +72,18 @@ dalvik_arm64_variant() {
 dalvik_arm_variant() {
   echo "cortex-a55"
 }
-# $1=platform $2=soc_manufacturer $3=soc_model -> ro.gfx.driver.1
-# api30 is the UGD API level, not the Android SDK: the reference device runs
-# Android 15 and still reports api30, as does every device tree checked.
-gpu_driver_pkg() {
-  if ! _soc_is_qualcomm "$2" "$3"; then echo ""; return; fi
-  echo "com.qualcomm.qti.gpudrivers.$1.api30"
-}
+# There is deliberately NO gpu_driver_pkg() here any more, matching
+# native/include/hw_naming.hpp and HwNaming.java.
+#
+# ro.gfx.driver.1 names an INSTALLED package
+# (com.qualcomm.qti.gpudrivers.kona.api30 on the reference device) and
+# android.os.GraphicsEnvironment.get() asks PackageManager whether it exists.
+# Deriving a persona-shaped name produced one that is not installed on this
+# device, and the framework then logs
+#     updatable driver package '<name>' not installed
+# which is a louder tell than the real value it replaced. The whole
+# ro.gfx.driver.* family is hidden instead - see is_vendor_rom_prop() in
+# native/native_read.cpp.
 
 rand_below() {
   _n="$1"
@@ -351,7 +356,7 @@ assemble_identity() {
   SOC_MANUFACTURER=$(soc_manuf_name "$SOC_MANUF" "$SOC_MODEL")
   DALVIK_ARM64_VARIANT=$(dalvik_arm64_variant "$SOC_MANUF" "$SOC_MODEL" "$BOARD_PLATFORM")
   DALVIK_ARM_VARIANT=$(dalvik_arm_variant)
-  GPU_DRIVER=$(gpu_driver_pkg "$BOARD_PLATFORM" "$SOC_MANUF" "$SOC_MODEL")
+  # No GPU_DRIVER: ro.gfx.driver.* is hidden, never derived. See the note above.
 
   IDENTITY_KV=$(cat <<EOF
 BRAND=$BRAND
@@ -367,7 +372,6 @@ SOC_MANUFACTURER=$SOC_MANUFACTURER
 SOC_MODEL=$SOC_MODEL
 DALVIK_ARM64_VARIANT=$DALVIK_ARM64_VARIANT
 DALVIK_ARM_VARIANT=$DALVIK_ARM_VARIANT
-GPU_DRIVER=$GPU_DRIVER
 FINGERPRINT=$FINGERPRINT
 ID=$BUILD_ID
 DISPLAY=$BUILD_ID

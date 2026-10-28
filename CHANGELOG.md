@@ -125,18 +125,17 @@ di-spoof maupun di-hide:
   dan token platform untuk MediaTek/Tensor/Exynos; `product_board()` memakai
   kodename kecuali Samsung (yang menaruh platform di sana, termasuk di perangkat
   Snapdragon-nya — Galaxy S23 = dm1q/SM8550 tapi `ro.product.board=kalama`);
-  `soc_manufacturer_name()` menulis `QTI`; `dalvik_arm64_variant()` dan
-  `gpu_driver_pkg()` menurunkan sisanya.
+  `soc_manufacturer_name()` menulis `QTI`; `dalvik_arm64_variant()` menurunkan
+  sisanya. **`gpu_driver_pkg()` dihapus** — lihat temuan ketiga di bawah.
 - `native/sandboxid.cpp` — blok hardware di `derive_identity()` memakai aturan
   di atas; `ro.hardware` tidak lagi menyalin platform.
 - `native/include/prop_defs.hpp` — `ro.gfx.driver.1`,
   `dalvik.vm.isa.arm64.variant`, `dalvik.vm.isa.arm.variant` dipetakan.
 - `jni/prop_hooks.cpp` — `derive_hw_value()` menurunkan ketiganya saat identitas
   di disk belum punya field itu, jadi perbaikan berlaku **tanpa perlu re-roll**.
-- `jni/module_impl.hpp` — `sbx_oem_prop_hidden()`: `ro.gfx.driver.0` dan
-  `ro.appsflyer.preinstall.path` hanya di-hide bila persona bukan vendor itu;
-  `ro.gfx.driver.1` di-hide bila persona bukan Qualcomm (paket GPU Qualcomm
-  tidak ada di perangkat MediaTek/Tensor/Exynos).
+- `jni/module_impl.hpp` — `sbx_oem_prop_hidden()`: `ro.appsflyer.preinstall.path`
+  hanya di-hide bila persona bukan vendor itu. `ro.gfx.driver.*` **tidak lagi**
+  di sini (lihat temuan ketiga).
 - `native/native_read.cpp` — `is_vendor_rom_prop()` diperluas dengan 3 nama
   eksak dan 7 prefix HyperOS yang terukur di perangkat.
 - `sh/identity/autopif.sh` — cermin shell dari aturan yang sama. Nilai turunan
@@ -162,6 +161,85 @@ di-spoof maupun di-hide:
 `lsp/app/src/test/java/id/sandboxid/tt/HwNamingTest.java` (JDK murni, dijalankan
 CI) mem-pin nilai yang sama. `product_board()` awalnya di-key pada Exynos dan
 langsung tertangkap oleh suite baru (`got 'dm1q', want 'kalama'`).
+
+### Fix: `ro.gfx.driver.*` di-spoof → framework mengeluh paketnya "not installed"
+
+**Temuan ketiga, dan ini cacat dari perbaikan di atas.** Perbaikan pertama
+memetakan `ro.gfx.driver.1` ke identitas `GPU_DRIVER` dan menurunkannya dari
+platform persona menjadi `com.qualcomm.qti.gpudrivers.<platform>.api30`. Itu
+**salah arah**, dan lebih buruk daripada kebocoran yang hendak ditutup.
+
+`ro.gfx.driver.0/.1` bukan nama platform yang perlu disamarkan — keduanya nama
+**paket yang harus terpasang**. Buktinya dari `framework.jar` (dex
+`android/os/GraphicsEnvironment;`), satu-satunya pembacanya di seluruh framework:
+
+```
+'ro.gfx.driver.0'   'ro.gfx.driver.1'   'ro.gfx.driver_build_time'
+"updatable driver package '" ... "' not installed"
+'App is not on the allowlist for updatable production driver.'
+'Neither updatable production driver nor prerelease driver is supported.'
+```
+
+`GraphicsEnvironment.get()` membaca prop itu lalu menanyakan PackageManager
+apakah paketnya ada. Di perangkat referensi yang terpasang hanya
+`com.xiaomi.ugd` dan `com.qualcomm.qti.gpudrivers.kona.api30` — **tidak ada**
+`...gpudrivers.taro.api30`. Jadi menurunkan nilainya dari persona `taro`
+membuat framework mencatat `updatable driver package
+'com.qualcomm.qti.gpudrivers.taro.api30' not installed`: pesan yang **lebih
+spesifik** daripada nilai asli yang digantikannya, karena ia menyebut platform
+persona yang memang tidak punya paket driver di perangkat ini.
+
+Bentuk yang benar adalah **hide, bukan spoof**. "Device ini tidak mengirim paket
+UGD" adalah keadaan perangkat yang wajar dan koheren; "device ini menyebut paket
+UGD yang tidak terpasang" bukan. Karena itu:
+
+- `native/include/hw_naming.hpp` — `gpu_driver_pkg()` **dihapus**, bukan
+  dibiarkan tak terpakai: helper yang menghitung nama paket adalah jebakan bagi
+  pembaca berikutnya.
+- `native/include/prop_defs.hpp` — entri `ro.gfx.driver.1` → `GPU_DRIVER` dibuang.
+- `jni/prop_hooks.cpp`, `lsp/.../PropHook.java`, `lsp/.../PropMap.java`,
+  `lsp/.../PersonaGenerator.java`, `native/sandboxid.cpp`,
+  `sh/identity/autopif.sh` — tidak ada lagi yang menurunkan `GPU_DRIVER`.
+- `native/native_read.cpp` — `is_vendor_rom_prop()` men-hide seluruh keluarga
+  `ro.gfx.driver.` dan `ro.gfx.driver_` (dua prefix, bukan satu batang
+  `ro.gfx.driver`, supaya nama yang bukan property tidak ikut tertelan). Ini
+  juga menutup `ro.gfx.driver_build_time`, yang di perangkat referensi bahkan
+  tidak diset.
+- `jni/module_impl.hpp` — `sbx_oem_prop_hidden()` tidak lagi menangani
+  `ro.gfx.driver.1`. Bentuk lamanya ("hide hanya bila persona bukan Qualcomm")
+  salah dua kali: persona Qualcomm justru menurunkan paket yang tidak terpasang.
+
+**Temuan keempat — daftar hide yang dienumerasi manual terus bocor.** Sapuan
+2514 property perangkat terhadap daftar spoof/hide menemukan 23 prop yang
+membawa jejak OEM/SoC asli dan tidak tercakup, di antaranya:
+
+| prop | nilai asli | jejak |
+|---|---|---|
+| `ro.media.xml_variant.codecs[_performance]` | `_kona` | platform asli |
+| `vendor.media.target_variant` | `_kona` | platform asli |
+| `ro.vendor.extension_library` | `libqti-perfd-client.so` | Qualcomm |
+| `vendor.usb.product_string` | `POCO F3` | model asli |
+| `ro.com.google.clientidbase.pg` | `android-xiaomi-deo2` | Xiaomi |
+| `ro.com.google.lens.oem_image_package` | `com.miui.gallery` | MIUI |
+| `ro.csc.spotify.music.{partnerid,referrerid}` | `xiaomi_mobile` | Xiaomi |
+| `persist.sys.miuibooster.name` | `miui_booster` | MIUI |
+| `persist.vendor.camera.*.info` (4) | `com.qti.sensormodule.alioth_*` | kodename + vendor |
+| `vendor.camera.aux.packagelist[ext]` | `com.xiaomi.cameratest` | Xiaomi |
+| `ro.miui.pai.preinstall.path`, `ro.miui.product.home` | `/data/miui/...` | MIUI |
+
+Akar polanya: setiap namespace MIUI ditulis sebagai daftar separator
+(`persist.sys.miui.`, lalu `persist.sys.miui_`), sehingga bentuk tanpa pemisah
+(`persist.sys.miuibooster.name`) lolos dari keduanya. Sekarang satu prefix
+`persist.sys.miui` menutup ketiga bentuk, dan keluarga baru ditambahkan sebagai
+prefix (`persist.vendor.camera.`, `vendor.camera.`, `ro.csc.spotify.`,
+`ro.media.xml_variant.`, `ro.gfx.driver.`/`_`) alih-alih nama satu per satu.
+
+**Regression test.** `tests/host/sbx_pure.cpp` mem-pin daftar hide yang baru —
+termasuk near-miss yang **tidak boleh** ikut tertelan (`ro.gfx.driver` dan
+`vendor.camera` telanjang). Diverifikasi dengan mutation testing: menghapus
+baris hide `ro.gfx.driver.*` menghasilkan 3 FAIL, dan mengembalikan bentuk
+separator lama menghasilkan 2 FAIL — jadi cek ini benar-benar mendiskriminasi,
+bukan lulus kosong.
 
 
 ## v2.2.18 (2026-10-06)
