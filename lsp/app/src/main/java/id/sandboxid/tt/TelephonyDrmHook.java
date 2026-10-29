@@ -87,15 +87,29 @@ final class TelephonyDrmHook {
         // the hook a no-op that still costs a resolution, and — worse — a hook
         // that answers "" is not the same as no hook: getSubscriberId() on a
         // real device with no SIM returns null, not "".
-        if (!imsi.isEmpty())  n += hook0(cl, tel, "getSubscriberId", imsi);
-        if (!iccid.isEmpty()) n += hook0(cl, tel, "getSimSerialNumber", iccid);
+        //
+        // Both overloads, not just the no-arg one. The (int) form takes a subId
+        // and is what a multi-SIM-aware caller uses; Grab's device-parameter
+        // builder is one, and it recorded the REAL IMSI while every other
+        // identifier on the same request was spoofed. See the matching comment
+        // in jni/sbx_lsplant.hpp.
+        if (!imsi.isEmpty()) {
+            n += hook0(cl, tel, "getSubscriberId", imsi);
+            n += hook(cl, tel, "getSubscriberId", int.class, new Const<>(imsi));
+        }
+        if (!iccid.isEmpty()) {
+            n += hook0(cl, tel, "getSimSerialNumber", iccid);
+            n += hook(cl, tel, "getSimSerialNumber", int.class, new Const<>(iccid));
+        }
 
         String opNum = id.get("GSM_OPERATOR_NUMERIC");
         String opAlpha = id.get("GSM_OPERATOR_ALPHA");
         String opIso = id.get("GSM_OPERATOR_ISO");
         if (opNum != null && !opNum.isEmpty()) {
             n += hook0(cl, tel, "getNetworkOperator", opNum);
+            n += hook(cl, tel, "getNetworkOperator", int.class, new Const<>(opNum));
             n += hook0(cl, tel, "getSimOperator", opNum);
+            n += hook(cl, tel, "getSimOperator", int.class, new Const<>(opNum));
         }
         if (opAlpha != null && !opAlpha.isEmpty()) {
             n += hook0(cl, tel, "getNetworkOperatorName", opAlpha);
