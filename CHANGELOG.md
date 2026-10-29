@@ -9,6 +9,11 @@ hanya membawa satu sisi dari tiap pasangan. Pasangannya struktural, bukan
 tebakan: tiap pasangan punya set metode identik dan hanya berbeda di nama tipe
 yang disebut.
 
+**Write-back did.** `X.07Wv` adalah kembaran `X.088K` di build trill — lima
+metode yang sama, hanya nama tipe yang berganti. Varian LSPosed hanya meng-hook
+`X.088K`, jadi di build trill merge did dari server berjalan tanpa lawan dan
+nilai yang dikembalikan server mengalahkan persona untuk sisa umur proses.
+
 **Register body rewrite.** `sbx_lsplant.hpp:1408-1420` memasang `post` pada
 empat kelas — `X.087U`/`X.085T` (musically 47.1.4) dan `X.07WK`/`X.07Tq` (trill
 47.0.3). Varian LSPosed hanya punya dua yang pertama, jadi pada build trill body

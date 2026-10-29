@@ -165,24 +165,40 @@ final class RegisterHook {
         // Force any long numeric key back to "0" so the stored did can never
         // outrank the persona. This hook is load-bearing: without it, the
         // write-back silently undoes (1) for the rest of the process lifetime.
-        try {
-            XposedHelpers.findAndHookMethod("X.088K", cl, "LIZIZ",
-                    String.class, String.class, new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam p) {
-                            try {
-                                String k = (String) p.args[0];
-                                if (k != null && k.length() >= 10
-                                        && isAllDigits(k)) {
-                                    p.setResult("0");
+        //
+        // Two class names, because the pairing is per-build and structural —
+        // both classes carry the same five methods (<init>, LIZ, LIZIZ, LIZJ,
+        // LIZLLL), differing only in the names of the types they mention:
+        //
+        //   musically 47.1.4 : LX/088K;  LIZIZ(String,String)String
+        //   trill     47.0.3 : LX/07Wv;  LIZIZ(String,String)String
+        //
+        // Hooking only X.088K left the trill build's write-back unopposed, so
+        // the server-minted did outranked the persona there.
+        //
+        // Arg index 0, not 1: Xposed omits the receiver, so the first declared
+        // parameter (the key) is args[0]. The native spec says keyArgIndex=1
+        // only because LSPlant's args[] starts with `this`.
+        for (String c : new String[] { "X.088K", "X.07Wv" }) {
+            try {
+                XposedHelpers.findAndHookMethod(c, cl, "LIZIZ",
+                        String.class, String.class, new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam p) {
+                                try {
+                                    String k = (String) p.args[0];
+                                    if (k != null && k.length() >= 10
+                                            && isAllDigits(k)) {
+                                        p.setResult("0");
+                                    }
+                                } catch (Throwable ignored) {
                                 }
-                            } catch (Throwable ignored) {
                             }
-                        }
-                    });
-            n++;
-        } catch (Throwable t) {
-            Log.w(TAG, "RegisterHook: X.088K.LIZIZ unavailable", t);
+                        });
+                n++;
+            } catch (Throwable t) {
+                Log.w(TAG, "RegisterHook: " + c + ".LIZIZ unavailable", t);
+            }
         }
 
         // (2b) The replay gate. LJII(params, boolean, boolean) decides whether
