@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.50 (2026-10-29)
+
 ### Fix: varian LSPosed tidak punya hook resolusi layar sama sekali
 
 Modul Zygisk membawa tujuh spec untuk geometri layar
