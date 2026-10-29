@@ -2,6 +2,140 @@
 
 ## Unreleased
 
+### Fix: hook "deny" dan "cloak" tidak pernah menolak apa pun
+
+Ini bug paling serius yang ditemukan sejauh ini, dan bentuknya sama di dua
+tempat: `hookDenyClasses` (OEM class deny) dan `singleFilter` (cloaking paket
+root). Keduanya melempar exception dari `beforeHookedMethod`.
+
+XposedBridge membungkus setiap callback:
+
+```java
+try { cb.beforeHookedMethod(param); }
+catch (Throwable t) {
+    log(t);
+    param.setResult(null);
+    param.returnEarly = false;
+    continue;
+}
+```
+
+Jadi lemparan itu **dicatat lalu dibuang**, `returnEarly` direset, dan metode
+aslinya tetap berjalan. Akibatnya:
+
+- `miui.os.Build` tetap berhasil dimuat pada persona Pixel, sehingga
+  `LX/00kR;->p2()` tetap menghasilkan `rom = "MIUI-…"`;
+- `getPackageInfo("com.topjohnwu.magisk")` tetap mengembalikan paketnya, jadi
+  Magisk/KernelSU/LSPosed tetap terlihat.
+
+Yang membuat ini sulit terlihat: tidak ada yang gagal. Log berisi
+`ClassNotFoundException` dan `NameNotFoundException` yang terlihat seperti bukti
+hook bekerja, padahal itu justru bukti hook **gagal** — exception-nya ditelan
+lalu nilainya dikembalikan seperti biasa.
+
+Perbaikannya `param.setThrowable(...)`, API yang memang mencegah pemanggilan
+metode asli. Stub `XC_MethodHook` di `lsp/api` juga belum punya metode itu; kini
+ada, dengan perilaku yang sama seperti LSPosed asli (mengosongkan `result` dan
+menandai `returnEarly`).
+
+Diuji oleh `HookSemanticsChk` (10 check) yang memodelkan loop dispatch
+XposedBridge secara harfiah — regresi ke `throw` akan gagal di situ, bukan di
+perangkat. Terpasang sebagai langkah CI tersendiri.
+
+### Fix: seluruh keluarga prop MIUI/HyperOS tidak tersembunyi
+
+Aturan hide prop memakai daftar prefiks, dan daftar itu dibangun dengan siklus
+"ukur, tambahkan yang bocor, ukur lagi" yang tidak pernah konvergen. Setelah
+daftar terlihat lengkap, **12 prop di perangkat referensi masih melaporkan ROM
+aslinya**:
+
+```
+init.svc.miuibooster                       sys.miui.gki_ndcd
+persist.sys.enable_miui_booster            sys.miui_bpf_ready
+persist.sys.stability.miui_fbo_enable      ro.com.miui.rsa.feature
+persist.sys.stability.miui_fbo_start_count ro.com.miui.rsa.search
+ro.config.miui_activity_embedding_enable   ro.vendor.audio.miui.karaoke.show
+ro.config.miui_orientation_projection_enable
+ro.vendor.audio.miui.karaoke.tencent.show
+```
+
+Penyebabnya: `ro.miui.` tidak menangkap `ro.com.miui.*` maupun
+`ro.config.miui_*`; `persist.sys.miui` tidak menangkap `init.svc.miuibooster`
+maupun `sys.miui_*`.
+
+Aturannya kini **substring**, bukan prefiks: nama prop yang mengandung "miui"
+(tanpa peduli huruf besar/kecil) disembunyikan. Ini aman karena tidak ada prop
+yang dibutuhkan persona yang mengandung "miui" — peta identitas diturunkan dari
+field `Build`, dan tidak satu pun mengandung kata itu. Biaya menyembunyikan prop
+yang memang tidak dimiliki Pixel adalah nol; biaya membocorkannya adalah tell ROM
+yang koheren.
+
+Diterapkan di **kedua varian** (`PropHook.java` dan `native/native_read.cpp`),
+karena keduanya membawa daftar yang sama dan akan menyimpang kalau hanya satu
+yang diperbaiki. Diuji oleh `sbx_prop_hide` (99 check) yang memakai 57 nama prop
+asli dari `getprop` perangkat, plus penjaga bahwa prop persona tidak ikut
+tersembunyi. Varian Java dipatok terpisah oleh `PropHookTest` (102 check) dengan
+daftar nama prop yang sama, jadi kalau salah satu varian tertinggal, CI gagal.
+
+### Fix: aturan hide prop membaca ulang persona dari disk setiap kali dipanggil
+
+`isOemPropHidden()` memanggil `IdentityStore.load()` untuk memeriksa apakah
+persona-nya Xiaomi. `IdentityStore.load()` membangun `XSharedPreferences` baru,
+yang berarti mem-parse file XML, menghitung MD5-nya, dan mendaftarkan file
+watcher. Fungsi itu dipanggil dari `isHidden()`, dan `isHidden()` dipanggil pada
+**setiap** `SystemProperties.get()` yang tidak dipetakan — jalur panas di proses
+yang banyak membaca prop.
+
+Persona-nya sudah ada di tangan: `apply()` menerimanya sebagai argumen. Kini
+disimpan di field `volatile persona` dan dibaca langsung. Tidak ada perubahan
+perilaku; `PropHookTest` memastikan nilai yang dibaca memang peta yang
+di-capture saat install, dengan mengganti peta itu dan melihat jawabannya
+berubah tanpa menyentuh disk.
+
+### Fix: lima varian `marketname` tidak dipetakan
+
+`PropMap` hanya memetakan `ro.product.marketname`. Di perangkat referensi:
+
+```
+ro.product.vendor.marketname = Redmi K40
+ro.product.odm.marketname    = POCO F3
+```
+
+Aplikasi yang membaca salah satunya mendapat nama pemasaran perangkat asli
+berdampingan dengan `Build.MODEL` persona. Tabel native sudah membawa keenam
+bentuk (`prop_defs.hpp:62-67`); kini `PropMap` juga.
+
+### Fix: hanya satu dari tiga overload query GSF yang terpasang
+
+`ContentResolver` mendeklarasikan tiga bentuk `query` (diperiksa langsung
+terhadap `framework.jar` perangkat):
+
+```
+query(Uri, String[], String, String[], String)
+query(Uri, String[], String, String[], String, CancellationSignal)
+query(Uri, String[], Bundle, CancellationSignal)
+```
+
+Hook GSF hanya memasang bentuk 5-argumen. Pemanggil yang menyertakan
+`CancellationSignal`, atau yang memakai API `Bundle` (bentuk yang dianjurkan
+untuk `targetSdk` 26+), tetap sampai ke provider asli dan membaca GSF id
+sungguhan — kegagalan "terpasang tapi tidak berefek" yang sudah dua kali
+melanda varian ini.
+
+Ketiganya kini terpasang, dengan satu gate (`wantsGsfId`) dan satu pembangun
+cursor (`newGsfCursor`). Bentuk `Bundle` membaca selection args dari kunci
+terdokumentasi `android:query-arg-sql-selection-args`, bukan dari `args[3]` yang
+di sana berisi `CancellationSignal`. Keberadaan kunci itu dipastikan lewat
+`strings` pada `framework.jar` perangkat (API 35).
+
+`Class.forName` satu-argumen juga diganti literal kelas framework: bentuk itu
+me-resolve lewat classloader modul, bukan classloader aplikasi.
+
+Gate dan pembangun cursor dipindah ke `GsfAnswer` supaya bisa diuji tanpa
+`ContentResolver`, dan diuji oleh `GsfChk` (16 check) yang kini ikut repo dan
+terpasang sebagai langkah CI. Sebelumnya `GsfChk` hanya ada di direktori kerja
+scratch, jadi klaim changelog ini tidak punya bukti yang bisa dijalankan ulang.
+
 
 ## v2.2.55 (2026-10-29)
 
