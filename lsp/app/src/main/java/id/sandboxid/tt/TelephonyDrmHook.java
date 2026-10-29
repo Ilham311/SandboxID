@@ -972,16 +972,20 @@ final class TelephonyDrmHook {
                 if (!SeedId.isHiddenPackage((String) a, vendorKeep)) return;
                 // Throw exactly what the framework throws for an absent
                 // package, so cloaking is indistinguishable from not installed.
+                //
+                // setThrowable, not a throw: XposedBridge catches anything the
+                // callback throws, logs it, and lets the original method run —
+                // so the first version of this hook logged a
+                // NameNotFoundException for every root package and then
+                // returned the package anyway. Cloaking never worked.
                 try {
                     Class<?> ex = Class.forName(
                             "android.content.pm.PackageManager$NameNotFoundException");
-                    java.lang.reflect.Constructor<?> c =
-                            ex.getConstructor(String.class);
-                    throw (Throwable) c.newInstance(a);
-                } catch (java.lang.reflect.InvocationTargetException e) {
-                    sneakyThrow(e.getCause() != null ? e.getCause() : e);
+                    p.setThrowable((Throwable) ex.getConstructor(String.class)
+                            .newInstance(a));
                 } catch (Throwable t) {
-                    sneakyThrow(t);
+                    // Cannot build the framework's own exception: let the real
+                    // method answer rather than invent a different failure.
                 }
             }
         };
@@ -1318,6 +1322,15 @@ final class TelephonyDrmHook {
      * lacks the class does, so the app's OEM branch takes its "not this ROM"
      * path rather than seeing an anomaly.
      *
+     * <p><b>{@code setThrowable}, not a throw.</b> XposedBridge wraps every
+     * callback in {@code catch (Throwable t) { log(t); param.setResult(null);
+     * param.returnEarly = false; continue; }} — an exception thrown from
+     * {@code beforeHookedMethod} is swallowed, and the real method then runs as
+     * if nothing happened. The first version of this hook did exactly that, so
+     * it logged a ClassNotFoundException on every OEM probe and still let
+     * {@code miui.os.Build} load. {@code setThrowable} is the API that makes the
+     * hooked call itself fail. See {@code XposedBridge.handleHookedMethod}.
+     *
      * <p>Arg index 0: Xposed omits the receiver, and the method is static, so
      * the class name is the first argument.
      */
@@ -1335,7 +1348,8 @@ final class TelephonyDrmHook {
                             String want = (String) a;
                             for (String d : deny) {
                                 if (want.equals(d)) {
-                                    sneakyThrow(new ClassNotFoundException(want));
+                                    p.setThrowable(new ClassNotFoundException(want));
+                                    return;
                                 }
                             }
                         }
@@ -1344,15 +1358,6 @@ final class TelephonyDrmHook {
         } catch (Throwable t) {
             return 0;
         }
-    }
-
-    /** Rethrows a checked exception without declaring it. */
-    private static void sneakyThrow(Throwable t) {
-        TelephonyDrmHook.<RuntimeException>doThrow(t);
-    }
-    @SuppressWarnings("unchecked")
-    private static <T extends Throwable> void doThrow(Throwable t) throws T {
-        throw (T) t;
     }
 
     private static byte[] hexToBytes(String hex) {

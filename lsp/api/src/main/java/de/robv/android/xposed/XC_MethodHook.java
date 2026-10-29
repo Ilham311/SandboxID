@@ -27,6 +27,25 @@ public abstract class XC_MethodHook {
         public Object getResult() { return mResult; }
         public void setResult(Object result) { mResult = result; }
         public Throwable getThrowable() { return mThrowable; }
+        /**
+         * Makes the hooked call throw {@code throwable} instead of running.
+         *
+         * <p>From {@link #beforeHookedMethod} this prevents the original call
+         * entirely — the only way to make a hooked method <i>fail</i>. Throwing
+         * from inside the callback does NOT do this: XposedBridge catches
+         * anything the callback throws, logs it, and resets the result, so the
+         * original method runs anyway. See {@code XposedBridge.handleHookedMethod}.
+         *
+         * <p>Clears the result and sets {@code returnEarly}, exactly as LSPosed
+         * does ({@code XC_MethodHook.java:165-169}): a caller that sets a result
+         * and then a throwable must get the throwable, not a half-applied result.
+         * The stub has no {@code returnEarly} field of its own, so the flag is
+         * modelled by {@link #hasThrowable()}, which the dispatch consults.
+         */
+        public void setThrowable(Throwable throwable) {
+            mThrowable = throwable;
+            mResult = null;
+        }
         public boolean hasThrowable() { return mThrowable != null; }
         public Object getObjectField(Object obj, String name) { return null; }
         public void setObjectField(Object obj, String name, Object value) { }
