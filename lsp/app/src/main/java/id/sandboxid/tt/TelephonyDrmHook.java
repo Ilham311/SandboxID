@@ -34,6 +34,26 @@ final class TelephonyDrmHook {
 
     private static final String TAG = "SandboxID-TT";
 
+    /**
+     * The objects that expose the cell's and the SIM's own view of the
+     * operator: four {@code CellIdentity*} types plus {@code SubscriptionInfo}.
+     * Each has {@code getMccString}/{@code getMncString} (API 28+) and
+     * {@code getMcc}/{@code getMnc}, and all of them have to agree with
+     * {@code TelephonyManager.getSimOperator()} — otherwise the app sees one
+     * network from the manager and another from the cell.
+     *
+     * <p>{@code CellIdentityNr} is 5G NR; {@code CellIdentityCdma} has no
+     * MCC/MNC accessors at all, which is why it is absent here despite Grab
+     * referencing it.
+     */
+    private static final String[] CELL_IDENTITY_CLASSES = {
+            "android.telephony.CellIdentityLte",
+            "android.telephony.CellIdentityWcdma",
+            "android.telephony.CellIdentityGsm",
+            "android.telephony.CellIdentityNr",
+            "android.telephony.SubscriptionInfo",
+    };
+
     private TelephonyDrmHook() {}
 
     static void apply(ClassLoader cl, Map<String, String> id) {
@@ -180,6 +200,59 @@ final class TelephonyDrmHook {
             n += hook0(cl, tel, "getNetworkCountryIso", opIso);
         }
 
+        // ---- P1b: carrier id ----
+        //
+        // getSimCarrierId() answers a small integer naming the carrier, and it
+        // is a DIFFERENT surface from getSimOperator(): Grab reads both, and
+        // hooking only the numeric left the id describing the real SIM. There
+        // is no safe synthetic value for it — -1 is the framework's own
+        // "unknown", and 0 is a real carrier (T-Mobile US) — so it is installed
+        // only when the persona (or carrier.conf) supplies one. Absent, the
+        // hook falls through to the framework's own answer.
+        String carrierId = id.get("GSM_CARRIER_ID");
+        if (carrierId != null && !carrierId.isEmpty()) {
+            // Integer, not String: getSimCarrierId() returns int, and a String
+            // result would throw ClassCastException inside the framework. The
+            // native spec expresses the same thing as ret_type=2, which makes
+            // SandboxIDHook.spoofValue() do Integer.parseInt.
+            try {
+                n += hook(cl, tel, "getSimCarrierId",
+                        new Const<>(Integer.valueOf(carrierId.trim())));
+            } catch (NumberFormatException ignored) {
+                // A malformed persona value must not install a hook that throws
+                // on every call; falling through to the real id is the safe side.
+            }
+        }
+
+        // ---- P1c: cell identity + subscription ----
+        //
+        // The MCC/MNC as the CELL and the SUBSCRIPTION report them. These are
+        // different objects from TelephonyManager and different APIs from
+        // getNetworkOperator(), and hooking only the TelephonyManager getters
+        // left Grab's bare "mnc" field in pax.track.nk.measures.network_calls
+        // reading the real network while every other carrier field on the same
+        // event was spoofed.
+        //
+        // The string forms (getMccString/getMncString, API 28+) are installed
+        // whenever an operator is known. The int forms are installed only then
+        // too, because the int form of an unknown value is Integer.MAX_VALUE:
+        // returning a made-up 0 would be a wrong answer rather than a missing
+        // one. Mirrors the ordering and the reasoning in jni/sbx_lsplant.hpp.
+        String opMcc = SeedId.operatorMcc(opNum);
+        String opMnc = SeedId.operatorMnc(opNum);
+        if (!opMcc.isEmpty()) {
+            for (String cell : CELL_IDENTITY_CLASSES) {
+                n += hook0(cl, cell, "getMccString", opMcc);
+                n += hook(cl, cell, "getMcc", new Const<>(Integer.valueOf(opMcc)));
+            }
+        }
+        if (!opMnc.isEmpty()) {
+            for (String cell : CELL_IDENTITY_CLASSES) {
+                n += hook0(cl, cell, "getMncString", opMnc);
+                n += hook(cl, cell, "getMnc", new Const<>(Integer.valueOf(opMnc)));
+            }
+        }
+
         // ---- P1: MAC addresses ----
         //
         // Both are installed unconditionally now. They used to be gated on the
@@ -320,6 +393,16 @@ final class TelephonyDrmHook {
             return 1;
         } catch (Throwable t) {
             // Method hidden/removed on this API level — skip, keep going.
+            return 0;
+        }
+    }
+
+    /** No-parameter overload, for e.g. {@code TelephonyManager.getSimCarrierId()}. */
+    private static int hook(ClassLoader cl, String cls, String name, XC_MethodHook cb) {
+        try {
+            XposedHelpers.findAndHookMethod(cls, cl, name, cb);
+            return 1;
+        } catch (Throwable t) {
             return 0;
         }
     }

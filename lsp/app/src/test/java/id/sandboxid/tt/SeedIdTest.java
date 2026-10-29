@@ -141,6 +141,25 @@ public class SeedIdTest {
         eq("widevine matches native", SeedId.widevineHex(SEED),
                 "92ce2df31baa7714377d9544e2dea027f0aca28072b1c94eb7c732cc0883fa81");
 
+        // ---- operatorMcc / operatorMnc: the cell-identity split -----------
+        // sbxid::operator_mcc/operator_mnc, same inputs. Positional split after
+        // three digits, and BOTH halves empty for anything that is not a valid
+        // 5-6 digit numeric — a 4-digit or non-numeric value must not yield a
+        // half-populated pair, or the cell hooks would answer an MCC with no MNC.
+        eq("mcc of 51011", SeedId.operatorMcc("51011"), "510");
+        eq("mnc of 51011", SeedId.operatorMnc("51011"), "11");
+        eq("mcc of 310260", SeedId.operatorMcc("310260"), "310");
+        eq("mnc of 310260", SeedId.operatorMnc("310260"), "260");
+        eq("mcc of 510110", SeedId.operatorMcc("510110"), "510");
+        eq("mnc of 510110", SeedId.operatorMnc("510110"), "110");
+        eq("mcc of 4-digit", SeedId.operatorMcc("5101"), "");
+        eq("mnc of 4-digit", SeedId.operatorMnc("5101"), "");
+        eq("mcc of non-numeric", SeedId.operatorMcc("5101X"), "");
+        eq("mnc of non-numeric", SeedId.operatorMnc("5101X"), "");
+        eq("mcc of empty", SeedId.operatorMcc(""), "");
+        eq("mcc of null", SeedId.operatorMcc(null), "");
+        eq("mnc of null", SeedId.operatorMnc(null), "");
+
         System.out.println("-- pickMac: the persona address wins, or a safe fallback --");
         // The Bluetooth asymmetry, in the other variant. The Zygisk side built
         // its Bluetooth address from the seed unconditionally and ignored the

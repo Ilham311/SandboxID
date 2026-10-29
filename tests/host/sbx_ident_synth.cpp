@@ -267,6 +267,20 @@ int main() {
               "imsi matches the LSPosed variant");
         CHECK(synth_iccid(crossSeed, "51011") == "8962767996665767591",
               "iccid matches the LSPosed variant");
+
+        // The cell-identity split. Positional after three digits, and BOTH
+        // halves empty for anything that is not a valid 5-6 digit numeric, so
+        // the cell hooks can never answer an MCC with no MNC.
+        CHECK(operator_mcc("51011") == "510" && operator_mnc("51011") == "11",
+              "operator split matches the LSPosed variant (51011)");
+        CHECK(operator_mcc("310260") == "310" && operator_mnc("310260") == "260",
+              "operator split matches the LSPosed variant (310260)");
+        CHECK(operator_mcc("510110") == "510" && operator_mnc("510110") == "110",
+              "operator split matches the LSPosed variant (510110)");
+        CHECK(operator_mcc("5101").empty() && operator_mnc("5101").empty(),
+              "4-digit numeric yields no operator split");
+        CHECK(operator_mcc("5101X").empty() && operator_mnc("5101X").empty(),
+              "non-numeric yields no operator split");
     }
 
     printf("\n%d checks, %d failures\n", checks, fails);

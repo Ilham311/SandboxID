@@ -234,6 +234,26 @@ final class SeedId {
         return true;
     }
 
+    /**
+     * The MCC half of {@code mccmnc}, or empty when it is not a valid numeric.
+     * Exactly {@code sbxid::operator_mcc()} in sbx_ident_synth.hpp:130-134.
+     */
+    static String operatorMcc(String mccmnc) {
+        return isOperatorNumeric(mccmnc) ? mccmnc.substring(0, 3) : "";
+    }
+
+    /**
+     * The MNC half of {@code mccmnc}, or empty when it is not a valid numeric.
+     * Exactly {@code sbxid::operator_mnc()} in sbx_ident_synth.hpp:136-140.
+     *
+     * <p>Two or three digits, depending on the MCC: the split is positional
+     * (first three are the MCC), not a fixed 2/3 guess, so an MNC like {@code 11}
+     * and one like {@code 260} both come out right.
+     */
+    static String operatorMnc(String mccmnc) {
+        return isOperatorNumeric(mccmnc) ? mccmnc.substring(3) : "";
+    }
+
     static String meid(long seed) {
         return hexFromSeed(seed ^ 0x4D454944L, 7).toUpperCase();   // 14 hex
     }

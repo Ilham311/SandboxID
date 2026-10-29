@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### Fix: varian LSPosed melewatkan hook cell identity dan carrier id
+
+**Gejala.** Perbaikan v2.2.38 ("`getMnc()` / `getMcc()` / `getSimCarrierId()`
+tidak di-hook") hanya masuk ke tabel hook modul Zygisk. Varian LSPosed tidak
+pernah menerimanya, jadi dengan varian itu terpasang field `"mnc"` di
+`pax.track.nk.measures.network_calls` kembali berisi MNC asli — persis gejala
+yang v2.2.38 tutup, muncul lagi di varian yang lain.
+
+**Akar masalah.** `TelephonyDrmHook` hanya meng-hook `TelephonyManager`:
+`getNetworkOperator`, `getSimOperator`, `getNetworkOperatorName`,
+`getSimOperatorName`, `getSimCountryIso`, `getNetworkCountryIso`. Tujuh belas
+spesifikasi native untuk `CellIdentityLte/Wcdma/Gsm/Nr` dan `SubscriptionInfo`
+(`getMcc`/`getMnc`/`getMccString`/`getMncString`) serta
+`TelephonyManager.getSimCarrierId()` tidak punya padanan sama sekali. Objek dan
+API-nya berbeda: `getSimOperator()` menjawab dari `TelephonyManager`, sedangkan
+MNC yang dicatat Grab dibaca dari objek cell/subscription.
+
+**Perbaikan.** `SeedId` mendapat `operatorMcc()`/`operatorMnc()` — port
+`sbxid::operator_mcc/mnc`, pemisahan posisional setelah tiga digit, dan
+**kedua** bagian kosong untuk apa pun yang bukan numerik 5–6 digit. Lalu:
+
+- `getSimCarrierId()` di-hook sebagai `Integer`, bukan `String` — metode itu
+  mengembalikan `int`, dan hasil `String` akan melempar `ClassCastException` di
+  dalam framework. Nilai persona yang tidak bisa di-parse dilewati, bukan
+  dipasang sebagai hook yang selalu melempar. Ini padanan `ret_type=2` di
+  spesifikasi native.
+- `CellIdentityLte/Wcdma/Gsm/Nr` dan `SubscriptionInfo`: bentuk string
+  (`getMccString`/`getMncString`, API 28+) dan bentuk int (`getMcc`/`getMnc`),
+  keduanya hanya dipasang bila operator diketahui. Bentuk int dari nilai tak
+  diketahui adalah `Integer.MAX_VALUE`, dan `0` adalah carrier nyata (T-Mobile
+  US) — jadi mengarang angka lebih buruk daripada tidak menjawab.
+
+**Bukti.** `SeedIdTest` naik 89 → 102 pemeriksaan; `sbx_ident_synth` 88 → 93.
+Tiga belas pemeriksaan baru membandingkan `operatorMcc`/`operatorMnc` dengan
+keluaran `sbxid::operator_mcc/mnc` untuk `51011`, `310260`, `510110`, `5101`
+(4 digit), `5101X` (non-numerik), string kosong, dan `null`.
+
 ### Fix: tiga dari enam AppLog id berbeda antara varian Zygisk dan LSPosed
 
 **Gejala.** Untuk persona yang sama, `SeedId.applogIds()` menghasilkan
