@@ -56,11 +56,29 @@ berlawanan, sehingga pergeseran di salah satu sisi menggagalkan tes:
   (epoch +1 harus menggeser `did`/`cdid`/`clientudid`/`openudid`), tiga
   pemeriksaan keterpisahan aliran (`did` ≠ `clientudid`, `cdid` ≠
   `clientudid`), dan dua pemeriksaan bentuk (UUID v4, openudid 16 hex).
-  Suite naik 71 → 86 pemeriksaan, `ALL PASS`.
+  Suite naik 71 → 89 pemeriksaan, `ALL PASS`.
 
 Nilai jangkar itu bukan hasil hitung tangan: diambil dengan mengompilasi dan
 menjalankan `native/native_read.cpp` sendiri, lalu membandingkan keluarannya
 dengan `SeedIdTest`.
+
+**Celah yang sama, ditutup sekalian.** Saat memeriksa ini, `imei()`, `meid()`,
+dan `widevineHex()` ternyata **hanya** diuji bentuknya (panjang, semua digit,
+Luhn, pola hex) — dan pemeriksaan bentuk lolos untuk seed apa pun, jadi tidak
+mungkin menangkap drift antar-varian. Itu persis bagaimana tiga AppLog id di
+atas lolos sekian lama. Ketiganya kini dipatok nilainya, dari kedua sisi:
+
+| Fungsi | Nilai untuk seed `0x1234ABCD` |
+|---|---|
+| `synth_imei` / `SeedId.imei` | `354381107373819` |
+| `synth_meid` / `SeedId.meid` | `0EE1910E29C47B` |
+| `synth_widevine_hex` / `widevineHex` | `92ce2df3…0883fa81` (64 hex) |
+| `synth_imsi(…, "51011")` | `510115509216614` |
+| `synth_iccid(…, "51011")` | `8962767996665767591` |
+
+Kelima nilai itu **sudah** sepakat sebelum perubahan ini — ini penjaga, bukan
+perbaikan. Suite host `sbx_ident_synth` 83 → 88 pemeriksaan; `SeedIdTest`
+71 → 89.
 
 ## v2.2.42 (2026-10-29)
 

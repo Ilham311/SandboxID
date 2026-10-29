@@ -131,6 +131,16 @@ public class SeedIdTest {
         check("widevine is lowercase hex",
                 SeedId.widevineHex(SEED).matches("[0-9a-f]{64}"));
 
+        // Value anchors, not just shape. Shape checks pass for ANY seed, so
+        // they cannot catch a drift between this variant and the Zygisk module
+        // — which is exactly how the AppLog ids diverged unnoticed. These five
+        // strings are what sbxid::synth_imei/synth_meid/synth_widevine_hex
+        // return for the same seed.
+        eq("imei matches native", imei, "354381107373819");
+        eq("meid matches native", meid, "0EE1910E29C47B");
+        eq("widevine matches native", SeedId.widevineHex(SEED),
+                "92ce2df31baa7714377d9544e2dea027f0aca28072b1c94eb7c732cc0883fa81");
+
         System.out.println("-- pickMac: the persona address wins, or a safe fallback --");
         // The Bluetooth asymmetry, in the other variant. The Zygisk side built
         // its Bluetooth address from the seed unconditionally and ignored the

@@ -253,6 +253,20 @@ int main() {
               "wifi fallback matches the LSPosed variant");
         CHECK(pick_mac("", crossSeed, 0x424C554554ULL, true) == "02:0F:A0:CA:3B:D1",
               "bluetooth fallback matches the LSPosed variant");
+
+        // Same idea for the identifiers that are not MACs. Shape checks pass
+        // for ANY seed, so they cannot catch a drift; only a pinned value can.
+        CHECK(synth_imei(crossSeed) == "354381107373819",
+              "imei matches the LSPosed variant");
+        CHECK(synth_meid(crossSeed) == "0EE1910E29C47B",
+              "meid matches the LSPosed variant");
+        CHECK(synth_widevine_hex(crossSeed) ==
+              "92ce2df31baa7714377d9544e2dea027f0aca28072b1c94eb7c732cc0883fa81",
+              "widevine matches the LSPosed variant");
+        CHECK(synth_imsi(crossSeed, "51011") == "510115509216614",
+              "imsi matches the LSPosed variant");
+        CHECK(synth_iccid(crossSeed, "51011") == "8962767996665767591",
+              "iccid matches the LSPosed variant");
     }
 
     printf("\n%d checks, %d failures\n", checks, fails);
