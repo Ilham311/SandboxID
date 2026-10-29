@@ -81,6 +81,17 @@ final class PropMap {
         id.put("ro.soc.manufacturer", "SOC_MANUFACTURER");
         id.put("ro.soc.model", "SOC_MODEL");
         id.put("ro.product.marketname", "MARKETNAME");
+        // The partition-namespaced marketname family. Measured on the reference
+        // device: ro.product.vendor.marketname="Redmi K40" and
+        // ro.product.odm.marketname="POCO F3" while every other surface already
+        // showed the persona — a target app reading either got the real phone's
+        // marketing name beside a spoofed Build.MODEL. The native table carries
+        // all six (prop_defs.hpp:62-67); this one carried only the bare form.
+        id.put("ro.product.system.marketname", "MARKETNAME");
+        id.put("ro.product.vendor.marketname", "MARKETNAME");
+        id.put("ro.product.odm.marketname", "MARKETNAME");
+        id.put("ro.product.product.marketname", "MARKETNAME");
+        id.put("ro.product.system_ext.marketname", "MARKETNAME");
         id.put("ro.product.mod_device", "MOD_DEVICE");
         id.put("ro.product.system.mod_device", "MOD_DEVICE");
         id.put("ro.product.vendor.mod_device", "MOD_DEVICE");
