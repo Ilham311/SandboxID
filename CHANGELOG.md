@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.49 (2026-10-29)
+
 ### Fix: varian LSPosed melewatkan replay gate register dan rewrite User-Agent
 
 Dua hook yang modul Zygisk punya **tidak pernah dipasang** di varian LSPosed,
