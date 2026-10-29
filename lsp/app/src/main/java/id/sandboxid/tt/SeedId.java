@@ -314,19 +314,36 @@ final class SeedId {
     }
 
     /**
-     * The four salts are the SplitMix64 increment and the two output mix
-     * constants — exactly native_read.cpp:90-99. Note {@code did} and
-     * {@code clientudid} share a salt but take different formatters
-     * (snowflake vs UUID), and {@code openudid} uses the UN-XORed seed.
+     * Exactly {@code make_applog_ids()} in native_read.cpp:110-133.
+     *
+     * <p>Two properties are load-bearing and easy to lose:
+     *
+     * <ul>
+     *   <li><b>Every</b> field mixes in {@code epochMs}, including the three
+     *       that were once frozen. The register server binds
+     *       (openudid, install_id cookie) permanently on first sight, so a
+     *       frozen openudid would make {@code rotate_ids.sh applog} rewrite
+     *       did/iid/ssid and then silently re-bind the new registration to the
+     *       old did.
+     *   <li>Each id has its own salt, so two ids can never collapse onto the
+     *       same stream. {@code did} and {@code clientudid} once shared one.
+     * </ul>
+     *
+     * <p>This must stay byte-identical to the native module: the LSPosed
+     * variant writes these into the persona ({@code PERSONA_OPENUDID},
+     * {@code PERSONA_CLIENTUDID}, {@code PERSONA_CDID}), and the Zygisk
+     * variant serves the same persona. If they diverge, the same persona
+     * registers as two different devices depending on which variant is
+     * installed.
      */
     static ApplogIds applogIds(long seed, long epochMs) {
         return new ApplogIds(
-                snowflake(seed ^ 0x9E3779B97F4A7C15L, epochMs),   // did
-                snowflake(seed ^ 0xBF58476D1CE4E5B9L, epochMs),   // iid
-                snowflake(seed ^ 0x94D049BB133111EBL, epochMs),   // ssid
-                uuid(seed ^ 0x2545F4914F6CDD1DL),                 // cdid
-                uuid(seed ^ 0x9E3779B97F4A7C15L),                 // clientudid
-                hexFromSeed(seed, 8));                            // openudid (16 hex)
+                snowflake(seed ^ 0x9E3779B97F4A7C15L, epochMs),      // did
+                snowflake(seed ^ 0xBF58476D1CE4E5B9L, epochMs),      // iid
+                snowflake(seed ^ 0x94D049BB133111EBL, epochMs),      // ssid
+                uuid(seed ^ 0x2545F4914F6CDD1DL ^ epochMs),          // cdid
+                uuid(seed ^ 0x6A09E667F3BCC909L ^ epochMs),          // clientudid
+                hexFromSeed(seed ^ 0xBB67AE8584CAA73BL ^ epochMs, 8)); // openudid (16 hex)
     }
 
     /**

@@ -97,8 +97,14 @@ jobs:
         # against the same rule tests/host/sbx_ident_synth.cpp asserts — a
         # synthesized identifier is consistent with its operator, or empty. The
         # expected strings are cross-checked against the native synth_imsi()/
-        # synth_iccid(), so a drift between the two variants fails. See
-        # lsp/app/src/test/java/id/sandboxid/tt/SeedIdTest.java.
+        # synth_iccid(), so a drift between the two variants fails.
+        #
+        # It also pins applogIds() against make_applog_ids(): openudid,
+        # clientudid and cdid had drifted (missing epoch mixing and a wrong
+        # salt), so the same persona registered as two different devices
+        # depending on which variant was installed. The six anchor strings are
+        # asserted here AND in tests/host/sbx_pure.cpp, from opposite sides.
+        # See lsp/app/src/test/java/id/sandboxid/tt/SeedIdTest.java.
         run: |
           set -eu
           mkdir -p out3/id/sandboxid/tt

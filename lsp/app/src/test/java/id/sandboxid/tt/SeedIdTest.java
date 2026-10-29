@@ -182,6 +182,47 @@ public class SeedIdTest {
                 SeedId.pickMac(null, SEED, 0x424C554554L, true),
                 "02:0F:A0:CA:3B:D1");
 
+        // AppLog ids. These six strings were produced by compiling and running
+        // native/native_read.cpp's make_applog_ids() itself, not by hand.
+        //
+        // The LSPosed variant writes openudid/clientudid/cdid into the persona
+        // that the Zygisk variant also serves, so a mismatch here means the
+        // same persona registers as two different devices depending on which
+        // variant is installed — and the register server binds (openudid,
+        // install_id cookie) permanently on first sight, so the second variant
+        // silently inherits the first variant's did.
+        SeedId.ApplogIds reg = SeedId.applogIds(SEED, 1700000000000L);
+        eq("applog did matches native", reg.did, "7130316800001884825");
+        eq("applog iid matches native", reg.iid, "7130316800001862035");
+        eq("applog ssid matches native", reg.ssid, "7130316800001309879");
+        eq("applog cdid matches native", reg.cdid,
+                "4831a5e5-ae29-49e6-897e-a50292a4cb12");
+        eq("applog clientudid matches native", reg.clientudid,
+                "383d033e-ba38-45ea-9f41-a82f20ede5ce");
+        eq("applog openudid matches native", reg.openudid, "52c5eb42a728473b");
+
+        // A bumped epoch must move the three formerly-frozen ids too, or
+        // rotate_ids.sh applog would rewrite did/iid/ssid and then re-bind the
+        // new registration to the old did via an unchanged openudid.
+        SeedId.ApplogIds rot = SeedId.applogIds(SEED, 1700000000001L);
+        check("epoch bump moves did", !reg.did.equals(rot.did));
+        check("epoch bump moves cdid", !reg.cdid.equals(rot.cdid));
+        check("epoch bump moves clientudid",
+                !reg.clientudid.equals(rot.clientudid));
+        check("epoch bump moves openudid", !reg.openudid.equals(rot.openudid));
+
+        // Each id must have its own stream: did and clientudid once shared a
+        // salt, which made two "different" ids the same value.
+        check("did != clientudid stream",
+                !reg.did.equals(reg.clientudid));
+        check("cdid != clientudid", !reg.cdid.equals(reg.clientudid));
+        check("openudid is 16 hex",
+                reg.openudid.matches("[0-9a-f]{16}"));
+        check("cdid is a uuid", reg.cdid.matches(
+                "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"));
+        check("clientudid is a uuid", reg.clientudid.matches(
+                "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"));
+
         System.out.println();
         if (fails == 0) System.out.println("ALL PASS");
         else System.out.println(fails + " check(s) FAILED");

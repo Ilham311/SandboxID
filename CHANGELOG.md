@@ -2,6 +2,65 @@
 
 ## Unreleased
 
+### Fix: tiga dari enam AppLog id berbeda antara varian Zygisk dan LSPosed
+
+**Gejala.** Untuk persona yang sama, `SeedId.applogIds()` menghasilkan
+`openudid`, `clientudid`, dan `cdid` yang berbeda dari
+`sbxnr::make_applog_ids()`. `PersonaGenerator` menulis ketiganya ke persona
+(`PERSONA_OPENUDID`, `PERSONA_CLIENTUDID`, `PERSONA_CDID`), lalu `RegisterHook`
+mengirimnya ke `device_register`; modul Zygisk membaca persona yang sama dan
+menyajikan nilai yang lain. Akibatnya persona yang sama mendaftar sebagai dua
+perangkat berbeda, tergantung varian mana yang terpasang.
+
+**Akar masalah.** `native_read.cpp:110-133` memakai salt tersendiri untuk tiap
+id **dan** meng-XOR `epoch_ms` ke keenamnya. Sisi Java tertinggal di bentuk
+lama:
+
+```java
+uuid(seed ^ 0x2545F4914F6CDD1DL),   // cdid       — tanpa ^ epochMs
+uuid(seed ^ 0x9E3779B97F4A7C15L),   // clientudid — salt salah, tanpa ^ epochMs
+hexFromSeed(seed, 8)                // openudid   — tanpa salt, tanpa epoch
+```
+
+Javadoc-nya pun menyatakan "exactly native_read.cpp:90-99 … `openudid` uses the
+UN-XORed seed" — benar saat commit `e22034a`, salah sejak `55c68c8` memindahkan
+native ke salt terpisah + pencampuran epoch. Tidak ada satu pun pemeriksaan di
+`SeedIdTest` yang menyentuh `applogIds()`, jadi tidak ada yang menangkapnya.
+
+Selisih terukur untuk seed `0x1234ABCD`, epoch `1700000000000`:
+
+| id | Java (lama) | Native |
+|---|---|---|
+| `did` | `7130316800001884825` | sama |
+| `iid` | `7130316800001862035` | sama |
+| `ssid` | `7130316800001309879` | sama |
+| `cdid` | `32459f40-30c6-4bc9-b181-63ce2af04480` | `4831a5e5-ae29-49e6-897e-a50292a4cb12` |
+| `clientudid` | `99c21cd8-ee14-491c-a47d-c04428a4ceaa` | `383d033e-ba38-45ea-9f41-a82f20ede5ce` |
+| `openudid` | `a1b19b645b16becc` | `52c5eb42a728473b` |
+
+**Perbaikan.** `applogIds()` kini menyalin `make_applog_ids()` baris per baris,
+termasuk `^ epochMs` pada ketiga id yang dulu beku, dan javadoc-nya diganti
+dengan alasan yang sebenarnya (bukan nomor baris yang bergeser): server
+mengikat pasangan (openudid, cookie `install_id`) secara permanen pada
+pertemuan pertama, sehingga openudid yang tidak ikut berputar membuat
+`rotate_ids.sh applog` menjadi no-op yang senyap di sisi server — berkas lokal
+tampak berubah, tetapi `device_register` tetap mengembalikan did lama.
+
+**Bukti.** Enam string jangkar dipatok di **dua** suite sekaligus, dari arah
+berlawanan, sehingga pergeseran di salah satu sisi menggagalkan tes:
+
+- `tests/host/sbx_pure.cpp` — `make_applog_ids(0x1234ABCD, 1700000000000)`
+  dibandingkan dengan keenam literal. Suite host 131 → 137 pemeriksaan.
+- `lsp/app/src/test/java/id/sandboxid/tt/SeedIdTest.java` — `SeedId.applogIds()`
+  dibandingkan dengan keenam literal yang sama, plus empat pemeriksaan rotasi
+  (epoch +1 harus menggeser `did`/`cdid`/`clientudid`/`openudid`), tiga
+  pemeriksaan keterpisahan aliran (`did` ≠ `clientudid`, `cdid` ≠
+  `clientudid`), dan dua pemeriksaan bentuk (UUID v4, openudid 16 hex).
+  Suite naik 71 → 86 pemeriksaan, `ALL PASS`.
+
+Nilai jangkar itu bukan hasil hitung tangan: diambil dengan mengompilasi dan
+menjalankan `native/native_read.cpp` sendiri, lalu membandingkan keluarannya
+dengan `SeedIdTest`.
 
 ## v2.2.42 (2026-10-29)
 

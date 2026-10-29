@@ -79,6 +79,21 @@ int main() {
     CHECK(a.cdid != a.clientudid, "cdid and clientudid are distinct");
     CHECK(a.openudid.size() == 16, "openudid is 8 bytes of hex");
 
+    // ---- cross-variant anchor ------------------------------------------
+    // The LSPosed variant (SeedId.applogIds) must produce byte-identical ids
+    // for the same seed, because it writes openudid/clientudid/cdid into the
+    // persona that this module also serves. SeedIdTest.java pins these exact
+    // six strings; this pins them from the native side. If either side drifts,
+    // one of the two suites fails instead of the device silently registering
+    // as two different devices.
+    ApplogIds anchor = make_applog_ids(0x1234ABCDULL, 1700000000000ULL);
+    CHECK(anchor.did        == "7130316800001884825", "anchor did");
+    CHECK(anchor.iid        == "7130316800001862035", "anchor iid");
+    CHECK(anchor.ssid       == "7130316800001309879", "anchor ssid");
+    CHECK(anchor.cdid       == "4831a5e5-ae29-49e6-897e-a50292a4cb12", "anchor cdid");
+    CHECK(anchor.clientudid == "383d033e-ba38-45ea-9f41-a82f20ede5ce", "anchor clientudid");
+    CHECK(anchor.openudid   == "52c5eb42a728473b", "anchor openudid");
+
     // ---- patch_applog_xml round-trip -------------------------------------
     const std::string real_xml =
         "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
