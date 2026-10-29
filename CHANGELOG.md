@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.44 (2026-10-29)
+
 ### Fix: tiga dari enam AppLog id berbeda antara varian Zygisk dan LSPosed
 
 **Gejala.** Untuk persona yang sama, `SeedId.applogIds()` menghasilkan
