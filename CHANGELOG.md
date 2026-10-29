@@ -9,6 +9,23 @@ hanya membawa satu sisi dari tiap pasangan. Pasangannya struktural, bukan
 tebakan: tiap pasangan punya set metode identik dan hanya berbeda di nama tipe
 yang disebut.
 
+**Endpoint SDK publik.** Native memasang enam spec `M_VALUE` pada
+`com.bytedance.applog.AppLog` (`getOpenUdid`, `getClientUdid`) dan
+`com.ss.android.deviceregister.DeviceRegisterManager` (`getOpenUdId`,
+`getClientUDID`, `getClientUDIDWithBackup`, `getCdid`). Varian LSPosed tidak
+punya satu pun. Ini berbeda dari jalur KEVA di `KevaHook`: KEVA adalah
+penyimpanan di disk, sedangkan ini getter in-memory yang dipakai SDK di seluruh
+aplikasi. Nilai yang sudah di-cache SDK sebelum hook terpasang, atau yang
+disimpannya di field, dibaca kembali lewat sini dan tidak menyentuh KEVA lagi —
+jadi meng-hook penyimpanannya saja membuat nilai itu bocor sepanjang umur
+proses.
+
+`getDid()`/`getIid()` sengaja **tidak** di-hook ke `"0"`: itu membuat modul
+aplikasi (termasuk TikTok Shop/Lynx checkout dan PIPO security SDK) mengirim
+`device_id="0"` saat submit order, yang memicu
+`ecom_order_create_account_risk`. Zero-did untuk registrasi ditangani
+`AbsDeviceParamsProvider.getDeviceId()`, permukaan yang berbeda.
+
 **Write-back did.** `X.07Wv` adalah kembaran `X.088K` di build trill — lima
 metode yang sama, hanya nama tipe yang berganti. Varian LSPosed hanya meng-hook
 `X.088K`, jadi di build trill merge did dari server berjalan tanpa lawan dan

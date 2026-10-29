@@ -131,6 +131,50 @@ final class RegisterHook {
 
         int n = 0;
 
+        // (0) The SDK's own public endpoints. These are separate from the KEVA
+        // read path in KevaHook: KEVA is the on-disk store, while these are the
+        // in-memory getters the SDK exposes to the rest of the app. A value the
+        // SDK cached before the hooks went in, or one it holds in a field, is
+        // read back through these and never touches KEVA again — so hooking
+        // only the store leaves it leaking for the rest of the process.
+        //
+        // The native module carries all six as M_VALUE specs
+        // (sbx_lsplant.hpp:1301-1319); the LSPosed variant had none of them.
+        //
+        // getDid()/getIid() are deliberately NOT hooked to "0". Returning "0"
+        // makes application modules (including TikTok Shop / Lynx checkout and
+        // the PIPO security SDK) send device_id="0" on order submission, which
+        // triggers ecom_order_create_account_risk. Device registration's
+        // zero-did is handled by AbsDeviceParamsProvider.getDeviceId() below,
+        // which is a different surface.
+        n += hookConst(cl, "com.bytedance.applog.AppLog",
+                "getOpenUdid", openudid);
+        n += hookConst(cl, "com.bytedance.applog.AppLog",
+                "getClientUdid", clientudid);
+        n += hookConst(cl, "com.ss.android.deviceregister.DeviceRegisterManager",
+                "getOpenUdId", openudid);
+        n += hookConst(cl, "com.ss.android.deviceregister.DeviceRegisterManager",
+                "getClientUDID", clientudid);
+        n += hookConst(cl, "com.ss.android.deviceregister.DeviceRegisterManager",
+                "getClientUDIDWithBackup", clientudid);
+        // getCdid takes a Context. Hooked by shape rather than by naming the
+        // type, so a build that changes the parameter still resolves.
+        try {
+            Class<?> k = XposedHelpers.findClass(
+                    "com.ss.android.deviceregister.DeviceRegisterManager", cl);
+            XposedBridge.hookAllMethods(k, "getCdid", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam p) {
+                    if (p.args != null && p.args.length == 1) {
+                        p.setResult(cdid);
+                    }
+                }
+            });
+            n++;
+        } catch (Throwable t) {
+            Log.w(TAG, "RegisterHook: DeviceRegisterManager.getCdid unavailable", t);
+        }
+
         // (1) The device-identity provider. Un-obfuscated, and the source the
         // register header reads directly. getDeviceId() must return "0" or the
         // request body advertises the did we are trying to replace.
@@ -301,6 +345,29 @@ final class RegisterHook {
 
         Log.i(TAG, "RegisterHook installed (" + n + " hooks) openudid="
                 + openudid);
+    }
+
+    /**
+     * Hooks a no-argument getter to return {@code value}.
+     *
+     * <p>Returns 1 when installed and 0 when the class or method is absent, so
+     * the caller's hook count stays honest instead of counting an attempt. That
+     * matters here: the SDK classes live in the app's DEX, and a build that
+     * ships a different SDK version legitimately has fewer of them.
+     */
+    private static int hookConst(ClassLoader cl, String cls, String name,
+                                 final String value) {
+        try {
+            XposedHelpers.findAndHookMethod(cls, cl, name, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam p) {
+                    p.setResult(value);
+                }
+            });
+            return 1;
+        } catch (Throwable t) {
+            return 0;
+        }
     }
 
     private static boolean isAllDigits(String s) {
