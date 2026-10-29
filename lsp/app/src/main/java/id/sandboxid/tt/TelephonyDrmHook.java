@@ -249,6 +249,24 @@ final class TelephonyDrmHook {
         // persona's own ROM packages, which is its own tell.
         n += hookPackageFilter(cl, id);
 
+        // ---- P0e: GSF id (gservices provider) ----
+        //
+        // Grab reads the GSF id by querying content://com.google.android.gsf.gservices
+        // for the "android_id" row, then Long.parseLong(cursor.getString(1)).
+        // On a device whose gservices table has no row (no Google account ever
+        // signed in) the parse throws and Grab records gs:"er:103". The Zygisk
+        // module answers that query with a synthesized cursor; the LSPosed
+        // variant did not, so the id stayed absent.
+        //
+        // Gated hard: only the gservices URI, and only when "android_id" is
+        // among the requested keys. Answering any other key with this row would
+        // corrupt an unrelated read — Grab does query other keys through the
+        // same provider.
+        String gsfId = id.get("GSF_ID");
+        if (gsfId != null && !gsfId.isEmpty()) {
+            n += hookGsfCursor(cl, gsfId);
+        }
+
         // ---- P1: TelephonyManager (all instance methods) ----
         String tel = "android.telephony.TelephonyManager";
         n += hook0(cl, tel, "getDeviceId", imei);
@@ -835,6 +853,66 @@ final class TelephonyDrmHook {
             if (v instanceof String) return (String) v;
         } catch (Throwable ignored) { }
         return null;
+    }
+
+    /**
+     * Answers the gservices {@code android_id} query with a synthesized cursor.
+     *
+     * <p>Port of {@code gsfCursor()} in {@code jni/SandboxIDHook.java:784-810}.
+     * The provider's idiom is that {@code selectionArgs} ARE the keys being
+     * looked up, so the hook answers only when {@code "android_id"} is among
+     * them and lets every other query through. A null or empty selectionArgs
+     * means "every row", which this hook cannot honestly serve.
+     *
+     * <p>Arg indices: Xposed omits the receiver, so the declared parameters
+     * {@code (Uri, projection, selection, selectionArgs, sortOrder)} land at
+     * args[0..4] — selectionArgs at 3. The native side uses index 4 because its
+     * args[] includes the receiver.
+     */
+    private static int hookGsfCursor(ClassLoader cl, final String gsfId) {
+        try {
+            XposedHelpers.findAndHookMethod("android.content.ContentResolver", cl,
+                    "query",
+                    android.net.Uri.class,
+                    String[].class, String.class, String[].class, String.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            if (p.args == null || p.args.length < 5) return;
+                            Object uri = p.args[0];
+                            if (uri == null) return;
+                            if (!String.valueOf(uri).equals(
+                                    "content://com.google.android.gsf.gservices")) return;
+
+                            Object sel = p.args[3];
+                            if (!(sel instanceof String[])) return;
+                            boolean wants = false;
+                            for (String k : (String[]) sel) {
+                                if ("android_id".equals(k)) { wants = true; break; }
+                            }
+                            if (!wants) return;
+
+                            try {
+                                Class<?> mc = Class.forName(
+                                        "android.database.MatrixCursor");
+                                Object cursor = mc.getConstructor(
+                                                String[].class, int.class)
+                                        .newInstance(new String[]{"_id", "value"},
+                                                Integer.valueOf(1));
+                                mc.getMethod("addRow", Object[].class)
+                                        .invoke(cursor,
+                                                (Object) new Object[]{"android_id", gsfId});
+                                p.setResult(cursor);
+                            } catch (Throwable ignored) {
+                                // No MatrixCursor: let the real provider answer.
+                                // A real miss beats a crash inside the framework.
+                            }
+                        }
+                    });
+            return 1;
+        } catch (Throwable t) {
+            return 0;
+        }
     }
 
     /** Rethrows a checked exception without declaring it. */

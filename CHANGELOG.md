@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Fix: varian LSPosed tidak menjawab query GSF id
+
+Grab membaca GSF id lewat query `content://com.google.android.gsf.gservices` untuk
+baris `android_id`, lalu `Long.parseLong(cursor.getString(1))`. Di perangkat yang
+tabel gservices-nya tidak punya baris itu (belum pernah ada akun Google), parse
+gagal dan Grab mencatat `gs:"er:103"`. Modul Zygisk menjawab query itu dengan
+cursor sintetis (`M_GSF_CURSOR`); varian LSPosed tidak, sehingga id-nya tetap
+kosong.
+
+Gating-nya ketat dan sama dengan native: hanya URI gservices, dan hanya bila
+`android_id` ada di antara key yang diminta. Menjawab key lain dengan baris ini
+akan merusak pembacaan yang tidak berhubungan — Grab memang membaca key lain
+lewat provider yang sama.
+
+Indeks argumennya berbeda satu dari native: Xposed tidak menyertakan receiver,
+jadi `selectionArgs` ada di `args[3]`, bukan `args[4]`.
+
 ### Fix: varian LSPosed tidak menyembunyikan tool root dan paket vendor asing
 
 Modul Zygisk membawa delapan spec `ApplicationPackageManager`
