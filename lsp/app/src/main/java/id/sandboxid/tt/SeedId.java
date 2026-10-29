@@ -528,4 +528,108 @@ final class SeedId {
         String v = id.get(k);
         return (v == null) ? def : v;
     }
+
+    // ---- PackageManager cloaking -------------------------------------------
+    //
+    // Port of HIDDEN_PACKAGES / isHiddenPackage() / isVendorKept() in
+    // jni/SandboxIDHook.java:138-207, plus the vendor_keep carve-out built in
+    // module.cpp:415-431.
+    //
+    // Two directions, and a variant needs both or it is worse than neither:
+    //   * hide root/modding tooling, so the app cannot see that the phone is
+    //     rooted or that a hooking framework is installed;
+    //   * KEEP the persona's own vendor packages, because a persona claiming a
+    //     Pixel that still reports com.miui.* installed is a contradiction the
+    //     app can read straight off getInstalledPackages().
+
+    /** Root, modding, and foreign-vendor packages to hide from the app. */
+    static final String[] HIDDEN_PACKAGES = {
+            // ---- root / modding tooling ----
+            "com.topjohnwu.magisk",
+            "io.github.vvb2060.magisk",
+            "io.github.vvb2060.kernelsu",
+            "me.weishu.kernelsu",
+            "me.bmax.apatch",
+            "org.lsposed.manager",
+            "org.meowcat.edxposed.manager",
+            "com.solohsu.android.edxp.manager",
+            "de.robv.android.xposed.installer",
+            "com.tsng.hidemyapplist",
+            "com.termux",
+            "bin.mt.plus",
+            "ru.zdevs.zarchiver",
+            "ru.zdevs.zarchiver.pro",
+            "com.lexa.fakegps",
+            "com.rosteam.gpsemulator",
+            "com.incorporateapps.fakegps.fre",
+            "com.incorporateapps.fakegps",
+            "com.applisto.appcloner",
+            // ---- vendor ROM packages ----
+            "com.miui",
+            "com.milink.service",
+            "com.xiaomi",
+            "com.mi.health",
+            "com.mipay.wallet",
+            "com.android.thememanager",
+            "com.oplus",
+            "com.coloros",
+            "com.oneplus",
+            "com.realme",
+            "com.microsoft.appmanager",
+            "com.fufufu.katrina.backup",
+    };
+
+    /**
+     * The vendor prefixes this persona is allowed to keep, from its BRAND.
+     *
+     * <p>Exactly the carve-out {@code module.cpp:415-431} builds: a Xiaomi/
+     * Redmi/POCO persona keeps the MIUI packages, an OPPO/OnePlus/realme
+     * persona keeps the ColorOS ones, and everybody else keeps none. Returning
+     * an empty array is correct for a Pixel persona — it should see no vendor
+     * packages at all.
+     */
+    static String[] vendorKeep(Map<String, String> id) {
+        String brand = id == null ? null : id.get("BRAND");
+        if (brand == null) return new String[0];
+        if (brand.equals("Xiaomi") || brand.equals("Redmi") || brand.equals("POCO")) {
+            return new String[] {
+                    "com.miui", "com.milink.service", "com.xiaomi",
+                    "com.mi.health", "com.mipay.wallet", "com.android.thememanager",
+            };
+        }
+        if (brand.equals("OPPO") || brand.equals("OnePlus") || brand.equals("realme")) {
+            return new String[] {
+                    "com.oplus", "com.coloros", "com.oneplus", "com.realme",
+            };
+        }
+        return new String[0];
+    }
+
+    /**
+     * True when {@code pkg} must be hidden from the app.
+     *
+     * <p>Case-insensitive, and a prefix match on a dot boundary so
+     * {@code com.miui.home} is covered by {@code com.miui} without
+     * {@code com.miuix} being caught. A package the persona's own vendor keeps
+     * is never hidden, even though its prefix is in the list.
+     */
+    static boolean isHiddenPackage(String pkg, String[] vendorKeep) {
+        if (pkg == null) return false;
+        String lower = pkg.toLowerCase(java.util.Locale.US);
+        for (String h : HIDDEN_PACKAGES) {
+            if (!lower.equals(h) && !lower.startsWith(h + ".")) continue;
+            if (isVendorKept(lower, vendorKeep)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isVendorKept(String lower, String[] vendorKeep) {
+        if (vendorKeep == null) return false;
+        for (String k : vendorKeep) {
+            if (k == null || k.isEmpty()) continue;
+            if (lower.equals(k) || lower.startsWith(k + ".")) return true;
+        }
+        return false;
+    }
 }

@@ -354,6 +354,63 @@ public class SeedIdTest {
         eq("zero override ignored", Integer.toString(bo[0]), "1080");
         eq("malformed override ignored", Integer.toString(bo[2]), "420");
 
+        System.out.println("-- package cloaking: hide the tools, keep the persona's vendor --");
+        // Two directions, and a variant needs both or it is worse than neither.
+        // Root tooling must be invisible; a persona's own vendor packages must
+        // STAY visible, or a Xiaomi persona looks like a phone whose ROM was
+        // stripped — itself a tell.
+        String[] none = new String[0];
+        check("magisk is hidden",
+                SeedId.isHiddenPackage("com.topjohnwu.magisk", none));
+        check("kernelsu is hidden",
+                SeedId.isHiddenPackage("me.weishu.kernelsu", none));
+        check("lsposed manager is hidden",
+                SeedId.isHiddenPackage("org.lsposed.manager", none));
+        check("termux is hidden", SeedId.isHiddenPackage("com.termux", none));
+        check("mt manager is hidden", SeedId.isHiddenPackage("bin.mt.plus", none));
+        // Case-insensitive: PackageManager reports lower case, but nothing
+        // guarantees the caller does.
+        check("hiding is case-insensitive",
+                SeedId.isHiddenPackage("COM.TOPJOHNWU.MAGISK", none));
+
+        // Prefix match must respect the dot boundary, or com.miuix would be
+        // caught by com.miui and an innocent app would vanish.
+        check("dot boundary respected",
+                !SeedId.isHiddenPackage("com.miuix", none));
+        check("sub-package is hidden",
+                SeedId.isHiddenPackage("com.miui.home", none));
+
+        // A Xiaomi persona KEEPS its own vendor packages.
+        java.util.Map<String, String> mi = new java.util.HashMap<>();
+        mi.put("BRAND", "Redmi");
+        String[] keepMi = SeedId.vendorKeep(mi);
+        check("xiaomi keeps com.miui",
+                !SeedId.isHiddenPackage("com.miui.home", keepMi));
+        check("xiaomi keeps com.xiaomi",
+                !SeedId.isHiddenPackage("com.xiaomi.market", keepMi));
+        // ...but still hides the root tools.
+        check("xiaomi still hides magisk",
+                SeedId.isHiddenPackage("com.topjohnwu.magisk", keepMi));
+        // ...and hides the OTHER vendor, which it does not keep.
+        check("xiaomi hides oplus",
+                SeedId.isHiddenPackage("com.oplus.something", keepMi));
+
+        // A Pixel persona keeps nothing, so every vendor prefix is hidden.
+        java.util.Map<String, String> px = new java.util.HashMap<>();
+        px.put("BRAND", "google");
+        String[] keepPx = SeedId.vendorKeep(px);
+        eq("pixel keeps nothing", Integer.toString(keepPx.length), "0");
+        check("pixel hides miui",
+                SeedId.isHiddenPackage("com.miui.home", keepPx));
+
+        java.util.Map<String, String> op = new java.util.HashMap<>();
+        op.put("BRAND", "OnePlus");
+        String[] keepOp = SeedId.vendorKeep(op);
+        check("oneplus keeps oplus",
+                !SeedId.isHiddenPackage("com.oplus.something", keepOp));
+        check("oneplus hides miui",
+                SeedId.isHiddenPackage("com.miui.home", keepOp));
+
         System.out.println();
         if (fails == 0) System.out.println("ALL PASS");
         else System.out.println(fails + " check(s) FAILED");

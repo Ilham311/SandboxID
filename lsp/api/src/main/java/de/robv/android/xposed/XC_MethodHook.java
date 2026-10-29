@@ -14,6 +14,13 @@ public abstract class XC_MethodHook {
     public static class MethodHookParam {
         public Object thisObject;
         public Object[] args;
+        /**
+         * The hooked method. Real Xposed exposes this as {@code Member}; it is
+         * widened to {@code Object} here only because the stub must compile
+         * without pulling in a Member subtype. Callers use {@code getName()}
+         * through reflection-free casts to {@code java.lang.reflect.Member}.
+         */
+        public java.lang.reflect.Member method;
         private Object mResult;
         private Throwable mThrowable;
 

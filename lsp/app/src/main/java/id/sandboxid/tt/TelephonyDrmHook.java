@@ -237,6 +237,18 @@ final class TelephonyDrmHook {
             n += hookDisplayMetrics(cl, geo);
         }
 
+        // ---- P0d: PackageManager cloaking ----
+        //
+        // Hides root/modding tooling and foreign-vendor ROM packages from the
+        // app, while keeping the persona's OWN vendor visible. The Zygisk module
+        // carries eight specs for this (four methods x two API shapes); the
+        // LSPosed variant had none, so the app could see Magisk and LSPosed
+        // installed on a device claiming to be a stock Pixel.
+        //
+        // Both directions matter: hiding everything would strip a Xiaomi
+        // persona's own ROM packages, which is its own tell.
+        n += hookPackageFilter(cl, id);
+
         // ---- P1: TelephonyManager (all instance methods) ----
         String tel = "android.telephony.TelephonyManager";
         n += hook0(cl, tel, "getDeviceId", imei);
@@ -705,6 +717,134 @@ final class TelephonyDrmHook {
             java.lang.reflect.Field f = o.getClass().getField(name);
             f.setFloat(o, v);
         } catch (Throwable ignored) { }
+    }
+
+    /**
+     * Installs the PackageManager cloaking hooks, mirroring the eight specs the
+     * Zygisk module carries.
+     *
+     * <p>Two shapes: the list methods ({@code getInstalledPackages},
+     * {@code getInstalledApplications}) return a {@code List} that is filtered,
+     * and the single-item methods ({@code getPackageInfo},
+     * {@code getApplicationInfo}) throw {@code NameNotFoundException} for a
+     * hidden package — the same answer the framework gives for a package that
+     * is not installed, so the app cannot tell cloaking from absence.
+     *
+     * <p>Both the int-flags and the API-33 flags-object overloads are hooked:
+     * the latter is what a modern caller uses, and hooking only the int form
+     * left the list unfiltered for it.
+     */
+    private static int hookPackageFilter(ClassLoader cl, Map<String, String> id) {
+        final String[] vendorKeep = SeedId.vendorKeep(id);
+        final String cls = "android.app.ApplicationPackageManager";
+        int n = 0;
+
+        XC_MethodHook listFilter = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam p) {
+                Object r = p.getResult();
+                if (!(r instanceof java.util.List)) return;
+                java.util.List<?> src = (java.util.List<?>) r;
+                java.util.List<Object> out = new java.util.ArrayList<>(src.size());
+                for (Object item : src) {
+                    if (item == null) continue;
+                    String pkg = packageNameOf(item);
+                    if (pkg != null && SeedId.isHiddenPackage(pkg, vendorKeep)) continue;
+                    out.add(item);
+                }
+                p.setResult(out);
+            }
+        };
+
+        XC_MethodHook singleFilter = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam p) {
+                if (p.args == null || p.args.length == 0) return;
+                Object a = p.args[0];
+                if (!(a instanceof String)) return;
+                if (!SeedId.isHiddenPackage((String) a, vendorKeep)) return;
+                // Throw exactly what the framework throws for an absent
+                // package, so cloaking is indistinguishable from not installed.
+                try {
+                    Class<?> ex = Class.forName(
+                            "android.content.pm.PackageManager$NameNotFoundException");
+                    java.lang.reflect.Constructor<?> c =
+                            ex.getConstructor(String.class);
+                    throw (Throwable) c.newInstance(a);
+                } catch (java.lang.reflect.InvocationTargetException e) {
+                    sneakyThrow(e.getCause() != null ? e.getCause() : e);
+                } catch (Throwable t) {
+                    sneakyThrow(t);
+                }
+            }
+        };
+
+        n += hook(cl, cls, "getInstalledPackages", int.class, listFilter);
+        n += hook(cl, cls, "getInstalledApplications", int.class, listFilter);
+        n += hook(cl, cls, "getPackageInfo", String.class, int.class, singleFilter);
+        n += hook(cl, cls, "getApplicationInfo", String.class, int.class, singleFilter);
+
+        // API 33+ flags-object overloads. Looked up by name so an older
+        // framework simply skips them.
+        n += hookFlags(cl, cls, "getInstalledPackages", listFilter);
+        n += hookFlags(cl, cls, "getInstalledApplications", listFilter);
+        n += hookFlagsSingle(cl, cls, "getPackageInfo", singleFilter);
+        n += hookFlagsSingle(cl, cls, "getApplicationInfo", singleFilter);
+
+        return n;
+    }
+
+    /** {@code getInstalledX(PackageManager.PackageInfoFlags)} shape. */
+    private static int hookFlags(ClassLoader cl, String cls, String name,
+                                 XC_MethodHook cb) {
+        try {
+            Class<?> flags = XposedHelpers.findClass(
+                    "android.content.pm.PackageManager$PackageInfoFlags", cl);
+            XposedHelpers.findAndHookMethod(cls, cl, name, flags, cb);
+            return 1;
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /** {@code getX(String, PackageManager.XInfoFlags)} shape. */
+    private static int hookFlagsSingle(ClassLoader cl, String cls, String name,
+                                       XC_MethodHook cb) {
+        try {
+            Class<?> flags = XposedHelpers.findClass(
+                    "android.content.pm.PackageManager$ApplicationInfoFlags", cl);
+            XposedHelpers.findAndHookMethod(cls, cl, name, String.class, flags, cb);
+            return 1;
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /**
+     * The {@code packageName} of a PackageManager list item, or null.
+     *
+     * <p>{@code PackageInfo} and {@code ApplicationInfo} both carry a public
+     * {@code packageName} field. Nothing else reaches the list methods, so a
+     * null here means an unexpected type and the item is kept — filtering out
+     * something we cannot identify would hide innocent packages.
+     */
+    private static String packageNameOf(Object item) {
+        try {
+            java.lang.reflect.Field f = item.getClass().getField("packageName");
+            Object v = f.get(item);
+            if (v instanceof String) return (String) v;
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
+    /** Rethrows a checked exception without declaring it. */
+    private static void sneakyThrow(Throwable t) {
+        TelephonyDrmHook.<RuntimeException>doThrow(t);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends Throwable> void doThrow(Throwable t) throws T {
+        throw (T) t;
     }
 
     private static byte[] hexToBytes(String hex) {

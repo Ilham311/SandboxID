@@ -19,6 +19,19 @@ public final class XposedHelpers {
         throw new RuntimeException("stub");
     }
 
+    /**
+     * Resolves a class through the app's ClassLoader.
+     *
+     * <p>Signature matches the real API: {@code Class<?> findClass(String,
+     * ClassLoader)}. Required for targets whose name is only known as a string
+     * (obfuscated classes, or the API-33 flags types that may not exist on an
+     * older framework) — {@code Class.forName} would resolve against the
+     * module's own loader and miss them.
+     */
+    public static Class<?> findClass(String className, ClassLoader classLoader) {
+        throw new RuntimeException("stub");
+    }
+
     private static Field field(Class<?> clazz, String name) throws NoSuchFieldException {
         for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
             try {

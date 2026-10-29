@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Fix: varian LSPosed tidak menyembunyikan tool root dan paket vendor asing
+
+Modul Zygisk membawa delapan spec `ApplicationPackageManager`
+(`getInstalledPackages`/`getInstalledApplications`/`getPackageInfo`/
+`getApplicationInfo`, bentuk int-flags dan bentuk flags-object API 33) plus
+`HIDDEN_PACKAGES` dan carve-out `vendor_keep` di `module.cpp:415-431`. Varian
+LSPosed tidak punya satu pun, sehingga aplikasi bisa melihat Magisk, KernelSU,
+LSPosed Manager, Termux, dan MT Manager terpasang di perangkat yang mengaku
+Pixel stok.
+
+Dua arah, dan varian perlu keduanya atau lebih buruk daripada tidak sama sekali:
+tool root harus tidak terlihat, tetapi paket vendor milik persona **harus tetap
+terlihat** — persona Xiaomi yang ROM-nya tampak tercopot juga merupakan tell.
+`SeedId.vendorKeep()` meniru carve-out native: Xiaomi/Redmi/POCO mempertahankan
+paket MIUI, OPPO/OnePlus/realme mempertahankan ColorOS, persona lain tidak
+mempertahankan apa pun.
+
+`getPackageInfo`/`getApplicationInfo` melempar `NameNotFoundException` untuk
+paket tersembunyi — jawaban yang sama dengan paket yang memang tidak terpasang,
+jadi penyembunyian tidak bisa dibedakan dari ketiadaan.
+
+### Fix: stub API LSPosed kurang `findClass` dan `hookAllMethods`
+
+`lsp/api/` adalah stub kompilasi untuk API Xposed, dan dua anggota API nyata
+tidak ada di sana: `XposedHelpers.findClass(String, ClassLoader)` dan
+`XposedBridge.hookAllMethods(Class, String, XC_MethodHook)`. Keduanya dipakai
+hook baru di atas, dan ketiadaannya menggagalkan `lsp-apk` di CI
+(`cannot find symbol`). Signature-nya disamakan dengan API asli, bukan sekadar
+dibuat lolos kompilasi.
+
+`XC_MethodHook.MethodHookParam` juga mendapat `method` (bertipe
+`java.lang.reflect.Member`), yang dipakai untuk membedakan `Display.getWidth`
+dari `getHeight` di satu callback yang sama.
+
 ### Fix: varian LSPosed tidak punya hook resolusi layar sama sekali
 
 Modul Zygisk membawa tujuh spec untuk geometri layar
