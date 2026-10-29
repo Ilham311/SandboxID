@@ -99,6 +99,24 @@ Nilai jangkar itu bukan hasil hitung tangan: diambil dengan mengompilasi dan
 menjalankan `native/native_read.cpp` sendiri, lalu membandingkan keluarannya
 dengan `SeedIdTest`.
 
+**Diuji dengan persona perangkat yang sebenarnya.** Persona aktif di perangkat
+uji (`FINGERPRINT=google/tegu/tegu:15/AP3A.241005.015/12580213:user/release-keys`,
+`SERIAL=1baf177ca94a95fe`, `ANDROID_ID=635346526fab5cd1`,
+`APPLOG_EPOCH=1793266308000`) diumpankan ke tiga pihak: CLI native yang
+terpasang di perangkat, `make_applog_ids()` yang dikompilasi ulang, dan
+`SeedId.applogIds()` yang sudah diperbaiki. Ketiganya sepakat. Untuk
+`com.grabtaxi.passenger`:
+
+| id | Sebelum (Java) | Sesudah = perangkat (native) |
+|---|---|---|
+| `openudid` | `5de2b0211b9d6ffa` | `42517712fe9ca447` |
+| `clientudid` | `156c6ddf-2377-44e3-bd35-53b403fc962b` | `e3ccacdb-5d32-406b-b44c-ac16bb7e76ac` |
+| `cdid` | `b11fff3b-90b0-4a69-99a8-7d19a56462d1` | `75c5286b-4776-4f06-8474-a2d81ca9c49c` |
+
+Dengan perbaikan ini, `sandboxid applog-ids com.grabtaxi.passenger` di perangkat
+dan `SeedId.applogIds()` di varian LSPosed menghasilkan baris yang identik
+byte-per-byte, termasuk `did`/`iid`/`ssid` dan IMEI/MEID/MAC.
+
 **Celah yang sama, ditutup sekalian.** Saat memeriksa ini, `imei()`, `meid()`,
 dan `widevineHex()` ternyata **hanya** diuji bentuknya (panjang, semua digit,
 Luhn, pola hex) — dan pemeriksaan bentuk lolos untuk seed apa pun, jadi tidak
