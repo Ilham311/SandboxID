@@ -234,7 +234,21 @@ final class RegisterHook {
         // code path that assembles it is covered regardless of which loader
         // populated it. The byte[] form is the serialized JSON, so we patch the
         // string and re-encode.
-        for (String c : new String[] { "X.087U", "X.085T" }) {
+        //
+        // Four class names, because the pairing is per-build and structural
+        // rather than guessed — each pair has an identical method set, differing
+        // only in the names of the types mentioned:
+        //
+        //   musically 47.1.4 : X.087U (6 methods)  X.085T (4 methods)
+        //   trill     47.0.3 : X.07WK (6 methods)  X.07Tq (4 methods)
+        //
+        // The 6-method one is the base client with the LIZIZ/LIZJ helpers; the
+        // 4-method one is the plain variant. Both declare post as
+        // (String,Map,byte[])String in both builds. Hooking only the musically
+        // pair left the trill build's register body untouched — the same
+        // "looks installed, does nothing" failure this variant has already hit
+        // twice.
+        for (String c : new String[] { "X.087U", "X.085T", "X.07WK", "X.07Tq" }) {
             try {
                 XposedHelpers.findAndHookMethod(c, cl, "post",
                         String.class, java.util.Map.class, byte[].class,

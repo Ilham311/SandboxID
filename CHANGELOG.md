@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Fix: nama kelas per-build yang belum tercakup di varian LSPosed
+
+Native memakai pasangan nama kelas yang berbeda per build, dan varian LSPosed
+hanya membawa satu sisi dari tiap pasangan. Pasangannya struktural, bukan
+tebakan: tiap pasangan punya set metode identik dan hanya berbeda di nama tipe
+yang disebut.
+
+**Register body rewrite.** `sbx_lsplant.hpp:1408-1420` memasang `post` pada
+empat kelas — `X.087U`/`X.085T` (musically 47.1.4) dan `X.07WK`/`X.07Tq` (trill
+47.0.3). Varian LSPosed hanya punya dua yang pertama, jadi pada build trill body
+register tidak pernah ditulis ulang: openudid/clientudid/cdid yang dikirim ke
+server adalah nilai cache lama, bukan persona. Persis kegagalan "tampak
+terpasang, tidak melakukan apa-apa" yang sudah dua kali muncul di varian ini.
+
+**Adapter KEVA.** `X.02tJ` dan `X.02t3` bukan hal yang sama dengan nama berbeda:
+di trill 47.0.3, `X.02tJ` adalah enum lima metode tanpa `getString` sama sekali.
+Kembarannya adalah `X.02t3` (18 metode, set identik kecuali tiga tipe parameter
+yang ikut berganti nama). Varian LSPosed hanya meng-hook `X.02tJ`, sehingga pada
+build trill pembacaan openudid/clientudid/cdid kembali ke nilai tersimpan.
+
 ### Fix: geometri layar varian LSPosed masih bisa dibaca dari bentuk lain
 
 Tiga celah di hook geometri yang ditambahkan `b0ee4bf`, semuanya ditemukan dengan
