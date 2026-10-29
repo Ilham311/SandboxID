@@ -114,6 +114,128 @@ jobs:
           java -cp out3 id.sandboxid.tt.SeedIdTest | tee seedid.log
           grep -q 'ALL PASS' seedid.log
 
+      - name: LSPosed hook-semantics unit test
+        # Pins the difference between "the hook ran" and "the hook worked".
+        #
+        # XposedBridge wraps every callback in
+        #   catch (Throwable t) { log(t); param.setResult(null);
+        #                         param.returnEarly = false; continue; }
+        # so throwing from beforeHookedMethod is logged and DISCARDED, and the
+        # real method then runs. Both deny-style hooks (OEM class deny, package
+        # cloaking) were written that way and therefore never denied anything —
+        # miui.os.Build still loaded and Magisk stayed visible, with only a log
+        # line to show for it. setThrowable is the API that prevents the call.
+        #
+        # The dispatch in this test is a faithful model of that loop, so a
+        # regression back to throwing fails here instead of on a device.
+        run: |
+          set -eu
+          mkdir -p out4/de/robv/android/xposed
+          cp lsp/api/src/main/java/de/robv/android/xposed/XC_MethodHook.java \
+             out4/de/robv/android/xposed/
+          cp lsp/app/src/test/java/de/robv/android/xposed/HookSemanticsChk.java \
+             out4/de/robv/android/xposed/
+          javac -d out4 out4/de/robv/android/xposed/XC_MethodHook.java \
+                out4/de/robv/android/xposed/HookSemanticsChk.java
+          java -cp out4 de.robv.android.xposed.HookSemanticsChk | tee hooksem.log
+          grep -q 'ALL PASS' hooksem.log
+
+      - name: LSPosed prop-hide unit test
+        # The Java hide rule had the same hole the native one had: it
+        # enumerated MIUI prefixes, and each round of measurement found a
+        # namespace the list did not cover (persist.miui.* vs
+        # persist.sys.miui.*, init.svc.miuibooster, sys.miui_bpf_ready,
+        # ro.com.miui.*, ro.config.miui_*). Both variants now use a
+        # case-insensitive substring test, and this pins it against the exact
+        # 57 prop names measured on the reference HyperOS device — the same
+        # list tests/host/sbx_prop_hide.cpp feeds the native rule, so the two
+        # variants cannot drift apart silently.
+        #
+        # It also pins that the rule reads the persona captured at install
+        # time rather than calling IdentityStore.load(), which constructs an
+        # XSharedPreferences (parses the XML, hashes it, registers a watcher)
+        # on every SystemProperties read.
+        run: |
+          set -eu
+          mkdir -p out5/id/sandboxid/tt out5/de/robv/android/xposed out5/android/util
+          cat > out5/android/util/Log.java <<'JAVA'
+          package android.util;
+          public final class Log {
+              public static int d(String t, String m) { return 0; }
+              public static int i(String t, String m) { return 0; }
+              public static int w(String t, String m) { return 0; }
+              public static int e(String t, String m) { return 0; }
+              public static int e(String t, String m, Throwable x) { return 0; }
+          }
+          JAVA
+          cp lsp/app/src/main/java/id/sandboxid/tt/PropHook.java \
+             lsp/app/src/main/java/id/sandboxid/tt/PropMap.java \
+             lsp/app/src/main/java/id/sandboxid/tt/HwNaming.java \
+             out5/id/sandboxid/tt/
+          cp lsp/app/src/test/java/id/sandboxid/tt/PropHookTest.java out5/id/sandboxid/tt/
+          cp lsp/api/src/main/java/de/robv/android/xposed/XC_MethodHook.java \
+             lsp/api/src/main/java/de/robv/android/xposed/XposedHelpers.java \
+             out5/de/robv/android/xposed/
+          javac -d out5 $(find out5 -name '*.java')
+          java -cp out5 id.sandboxid.tt.PropHookTest | tee prophook.log
+          grep -q 'ALL PASS' prophook.log
+
+      - name: LSPosed GSF answer unit test
+        # The gservices hook has shipped "installed but does nothing" twice in
+        # this variant, both times in the wiring rather than in the answer. The
+        # wiring needs ContentResolver and can only be checked on a device; the
+        # answer does not, and a wrong gate or a malformed cursor would make the
+        # hook silently useless on every device.
+        #
+        # GsfAnswer holds those two pieces (wantsGsfId, newGsfCursor) so they
+        # can be exercised here, against a stubbed MatrixCursor reached by name
+        # through a ClassLoader exactly as on a device. See
+        # lsp/app/src/test/java/id/sandboxid/tt/GsfChk.java.
+        run: |
+          set -eu
+          mkdir -p out6/id/sandboxid/tt out6/android/database
+          cat > out6/android/database/MatrixCursor.java <<'JAVA'
+          package android.database;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /** Minimal stand-in: the constructor, addRow and the read accessors. */
+          public class MatrixCursor {
+              private final String[] mColumns;
+              private final List<Object[]> mRows = new ArrayList<>();
+
+              public MatrixCursor(String[] columnNames, int initialCapacity) {
+                  mColumns = columnNames == null ? new String[0] : columnNames;
+              }
+
+              public void addRow(Object[] columnValues) {
+                  if (columnValues == null) {
+                      throw new IllegalArgumentException("null row");
+                  }
+                  if (columnValues.length != mColumns.length) {
+                      throw new IllegalArgumentException("column mismatch");
+                  }
+                  mRows.add(columnValues);
+              }
+
+              public int getCount() { return mRows.size(); }
+
+              public String[] getColumnNames() { return mColumns.clone(); }
+
+              public String getString(int column) {
+                  if (mRows.isEmpty()) return null;
+                  Object o = mRows.get(0)[column];
+                  return o == null ? null : String.valueOf(o);
+              }
+          }
+          JAVA
+          cp lsp/app/src/main/java/id/sandboxid/tt/GsfAnswer.java out6/id/sandboxid/tt/
+          cp lsp/app/src/test/java/id/sandboxid/tt/GsfChk.java out6/id/sandboxid/tt/
+          javac -d out6 $(find out6 -name '*.java')
+          java -cp out6 id.sandboxid.tt.GsfChk | tee gsfchk.log
+          grep -q 'ALL PASS' gsfchk.log
+
       - name: Shell lint (syntax + shellcheck)
         run: |
           set -eu
