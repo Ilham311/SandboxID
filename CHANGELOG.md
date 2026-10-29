@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.51 (2026-10-29)
+
 ### Fix: varian LSPosed tidak menyembunyikan tool root dan paket vendor asing
 
 Modul Zygisk membawa delapan spec `ApplicationPackageManager`
