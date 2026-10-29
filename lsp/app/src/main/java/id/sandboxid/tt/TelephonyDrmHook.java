@@ -20,7 +20,10 @@ import de.robv.android.xposed.XposedHelpers;
  * <p>Values are deterministic from the persona seed ({@link SeedId}), so a given
  * persona always yields the same IMEI/IMSI/ICCID/MEID — a rotated persona stays
  * internally consistent, and the same persona reproduces the same identifiers
- * across the Zygisk and LSPosed variants.
+ * across the Zygisk and LSPosed variants. That last half is only true because
+ * the seed is {@link SeedId#applogSeed}, which appends the package exactly as
+ * {@code applog_seed()} does in the native module; the package-less seed this
+ * class used to derive produced a different IMEI for the same persona.
  *
  * <p><b>Fail-soft, by design.</b> Every hook is resolved individually; a method
  * hidden or removed on the running API level simply fails resolution and is
@@ -34,7 +37,22 @@ final class TelephonyDrmHook {
     private TelephonyDrmHook() {}
 
     static void apply(ClassLoader cl, Map<String, String> id) {
-        long seed = SeedId.personaSeed(id);
+        apply(cl, id, SandboxIdTT.TARGET);
+    }
+
+    /**
+     * @param pkg the package the hooks are being applied to. Part of the seed,
+     *            because the native module seeds from
+     *            {@code applog_seed(FINGERPRINT|SERIAL|ANDROID_ID|pkg)} — see
+     *            {@code jni/module.cpp}. Using a package-less seed here made the
+     *            two variants disagree: for the same persona the Zygisk module
+     *            served one IMEI and this one served another, which is the
+     *            opposite of what the class docstring promises and would show up
+     *            as two different phones if both variants were ever installed
+     *            together.
+     */
+    static void apply(ClassLoader cl, Map<String, String> id, String pkg) {
+        long seed = SeedId.applogSeed(id, pkg);
         // No fallback operator. A persona with no carrier configured must let
         // the IMSI/ICCID hooks fall through to the real values; substituting a
         // default here is what made the device claim Telkomsel 51010 while the
@@ -55,14 +73,56 @@ final class TelephonyDrmHook {
         final String androidId = id.get("ANDROID_ID");
         final String serial = id.get("SERIAL");
 
+        // Both MACs go through the same selector the native module uses, so a
+        // persona's declared address always wins and the seed-derived fallback
+        // is only for a persona that declares none. Case follows each platform
+        // surface: WifiInfo.getMacAddress() is lowercase, while
+        // BluetoothAdapter.getAddress() and Settings.Secure's bluetooth_address
+        // row are uppercase.
+        //
+        // This used to read id.get("WIFI_MAC")/id.get("BLUETOOTH_ADDR") and pass
+        // them straight through when non-null, which silently served a malformed
+        // value and skipped the fallback entirely for a persona that had none.
+        final String wifiMac = SeedId.pickMac(id.get("WIFI_MAC"), seed,
+                0x5749464931L, false);                       // "WIFI1"
+        final String btAddr  = SeedId.pickMac(id.get("BLUETOOTH_ADDR"), seed,
+                0x424C554554L, true);                        // "BLUET"
+        // The user-visible name. BLUETOOTH_NAME falls back to MODEL, exactly as
+        // sync_device_name() does in rotate_ids.sh, so a persona that predates
+        // the key still reports its model name instead of nothing.
+        String btName = id.get("BLUETOOTH_NAME");
+        if (btName == null || btName.isEmpty()) btName = id.get("MODEL");
+
         int n = 0;
 
         // ---- P0: the classic device identifiers ----
 
-        // Settings.Secure.getString(contentResolver, "android_id")
+        // Settings.Secure.getString(contentResolver, key) — ONE method serving
+        // every secure setting, so it takes a multi-key replacer rather than one
+        // hook per key. Xposed, like LSPlant, refuses a second hook on a method
+        // that already carries one, so separate hooks for android_id and
+        // bluetooth_address would install only the first.
+        //
+        // bluetooth_address is the entry that matters most for Bluetooth: it
+        // needs no permission, unlike BluetoothAdapter.getAddress() which throws
+        // SecurityException without BLUETOOTH_CONNECT. Grab reads it directly in
+        // Lc/g/zuo;->a() and returns the result verbatim, so an unhooked row
+        // hands the app the real adapter address.
+        java.util.LinkedHashMap<String, String> secure = new java.util.LinkedHashMap<>();
+        secure.put("android_id", androidId);
+        secure.put("bluetooth_address", btAddr);
         n += hook(cl, "android.provider.Settings$Secure", "getString",
                 android.content.ContentResolver.class, String.class,
-                new KeyedReplacer(1, "android_id", androidId));
+                new MultiKeyReplacer(1, secure));
+
+        // Settings.Global.getString(contentResolver, key) — the user-visible
+        // device name. sync_device_name() writes the same value to both rows.
+        java.util.LinkedHashMap<String, String> global = new java.util.LinkedHashMap<>();
+        global.put("bluetooth_name", btName);
+        global.put("device_name", btName);
+        n += hook(cl, "android.provider.Settings$Global", "getString",
+                android.content.ContentResolver.class, String.class,
+                new MultiKeyReplacer(1, global));
 
         // Build.getSerial()
         if (serial != null) {
@@ -121,15 +181,17 @@ final class TelephonyDrmHook {
         }
 
         // ---- P1: MAC addresses ----
-        String wifi = id.get("WIFI_MAC");
-        if (wifi != null) {
-            n += hook0(cl, "android.net.wifi.WifiInfo", "getMacAddress",
-                    wifi.toUpperCase());
-        }
-        String bt = id.get("BLUETOOTH_ADDR");
-        if (bt != null) {
-            n += hook0(cl, "android.bluetooth.BluetoothAdapter", "getAddress",
-                    bt.toUpperCase());
+        //
+        // Both are installed unconditionally now. They used to be gated on the
+        // persona key being non-null, which left the REAL address served for a
+        // persona that declared none - the same leak the seed-derived fallback
+        // exists to prevent. pickMac() always returns a valid address.
+        n += hook0(cl, "android.net.wifi.WifiInfo", "getMacAddress", wifiMac);
+        n += hook0(cl, "android.bluetooth.BluetoothAdapter", "getAddress", btAddr);
+        // The user-visible Bluetooth name, which would otherwise report the REAL
+        // model beside a spoofed Build.MODEL.
+        if (btName != null && !btName.isEmpty()) {
+            n += hook0(cl, "android.bluetooth.BluetoothAdapter", "getName", btName);
         }
 
         Log.d(TAG, "Telephony/DRM hooks: " + n + " method(s) installed"
@@ -183,25 +245,38 @@ final class TelephonyDrmHook {
 
     // ------------------------------------------------------------------
 
-    /** Returns the spoof value only when args[keyIdx] equals keyMatch. */
-    private static final class KeyedReplacer extends XC_MethodHook {
+    /**
+     * Returns the spoof value when {@code args[keyIdx]} names one of
+     * {@code values}, and leaves the call alone otherwise.
+     *
+     * <p>One hook, many keys. Xposed — like LSPlant on the Zygisk side — refuses
+     * a second hook on a method that already carries one, so
+     * {@code Settings.Secure.getString(ContentResolver, String)} can only be
+     * hooked once no matter how many settings it serves. A per-key hook would
+     * install the first and silently drop the rest, which is how
+     * {@code bluetooth_address} stayed real.
+     *
+     * <p>A null or empty mapped value falls through to the real method rather
+     * than answering {@code ""}: a device with no value set returns null, and
+     * {@code ""} is not the same thing.
+     */
+    private static final class MultiKeyReplacer extends XC_MethodHook {
         private final int keyIdx;
-        private final String keyMatch;
-        private final String value;
+        private final Map<String, String> values;
 
-        KeyedReplacer(int keyIdx, String keyMatch, String value) {
+        MultiKeyReplacer(int keyIdx, Map<String, String> values) {
             this.keyIdx = keyIdx;
-            this.keyMatch = keyMatch;
-            this.value = value;
+            this.values = values;
         }
 
         @Override
         protected void beforeHookedMethod(MethodHookParam p) {
+            if (values == null || values.isEmpty()) return;
             if (keyIdx < 0 || keyIdx >= p.args.length) return;
             Object a = p.args[keyIdx];
-            if (a != null && keyMatch.equals(a.toString()) && value != null) {
-                p.setResult(value);
-            }
+            if (a == null) return;
+            String v = values.get(a.toString());
+            if (v != null && !v.isEmpty()) p.setResult(v);
         }
     }
 

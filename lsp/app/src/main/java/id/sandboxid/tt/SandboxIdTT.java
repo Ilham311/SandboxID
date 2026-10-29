@@ -47,7 +47,7 @@ public class SandboxIdTT implements IXposedHookLoadPackage {
         BuildHook.apply(lpparam.classLoader, id);
         PropHook.apply(lpparam.classLoader, id);
         ClockHook.apply(lpparam.classLoader, id);
-        TelephonyDrmHook.apply(lpparam.classLoader, id);
+        TelephonyDrmHook.apply(lpparam.classLoader, id, lpparam.packageName);
         KevaHook.apply(lpparam.classLoader, id);
         RegisterHook.apply(lpparam.classLoader, id);
 

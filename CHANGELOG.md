@@ -2,6 +2,156 @@
 
 ## Unreleased
 
+### Fix: MAC Bluetooth tidak pernah memakai persona, dan `bluetooth_address` bocor
+
+Tiga cacat terpisah pada permukaan Bluetooth, semuanya ditemukan dengan
+membongkar 22 DEX Grab 5.430.0 dan membuktikan jalur baca yang benar-benar
+dipakai aplikasi itu.
+
+**A. `BluetoothAdapter.getAddress()` mengabaikan `BLUETOOTH_ADDR`.** `HookValues`
+tidak punya field `bt_mac` sama sekali, dan `install_all()` membangun alamatnya
+tanpa syarat dari seed:
+
+```cpp
+g.bt = sbx_mac_upper(sbxnr::mac_from_seed(v.seed ^ 0x424C554554ULL));
+```
+
+Jadi persona yang mendeklarasikan `BLUETOOTH_ADDR=02:91:1a:ba:67:2a` tetap
+dilaporkan sebagai `02:84:86:7D:02:DC` — nilai yang tidak pernah ada di
+`identity.prop` maupun di `bt_config.conf` yang ditulis `rotate_ids.sh`. Sisi
+Wi-Fi sudah benar (`g.wifi` memakai `v.wifi_mac` lebih dulu); Bluetooth tidak.
+Asimetri ini juga membuat kedua varian berbeda: LSPosed memang memakai
+`BLUETOOTH_ADDR`.
+
+**B. `Settings.Secure.getString(resolver, "bluetooth_address")` tidak di-hook.**
+Ini permukaan yang paling penting, karena **tidak butuh izin** — berbeda dari
+`getAddress()` yang melempar `SecurityException` tanpa `BLUETOOTH_CONNECT`.
+Grab membaca baris itu langsung di `Lc/g/zuo;->a()` dan mengembalikannya apa
+adanya; jalur itu terjangkau dari penyusun device-info Moca wallet SDK
+(`Lc/g/zuo;->a()` ← `DeviceInfoUtils;->a()` ← `Lc/g/fcw;->invoke()` ←
+`Lc/g/eaq;->call()`, yang punya 17 rujukan ke `Lc/g/fcw;`). Sebelum perbaikan
+aplikasi menerima MAC adapter **asli** `8C:AA:CE:2C:19:D5` di perangkat uji,
+sementara setiap field lain pada event yang sama menggambarkan persona.
+
+**C. Nama perangkat tidak di-hook.** `BluetoothAdapter.getName()` dan
+`Settings.Global` `bluetooth_name`/`device_name` semuanya melaporkan nama asli
+`CPH2521`. HyperVerge membaca `device_name` di
+`DeviceExtensionsKt;->getDeviceBasicProperties()`, dan `Lc/g/zuo;->f()` membaca
+`getName()`; `sync_device_name()` di shell sudah menulis ketiganya dari
+`identity.prop`, jadi lapisan hook dan lapisan shell saling bertentangan.
+
+**Perbaikan.**
+
+- `sbxid::pick_mac(persona, seed, salt, upper)` — satu selektor untuk kedua MAC.
+  Nilai persona menang bila valid; bila tidak ada **atau tidak valid**, dipakai
+  fallback turunan seed yang selalu locally-administered (`02:`), sehingga tidak
+  pernah bertabrakan dengan OUI vendor nyata dan tidak pernah menyajikan MAC
+  asli. Kasus huruf mengikuti permukaan platformnya: `WifiInfo.getMacAddress()`
+  huruf kecil, `BluetoothAdapter.getAddress()` dan `bluetooth_address` huruf
+  besar. Port Java-nya `SeedId.pickMac()` memakai algoritma yang identik.
+- `HookValues` mendapat `bt_mac` dan `bt_name`; `jni/module.cpp` mengisinya dari
+  `BLUETOOTH_ADDR` dan `BLUETOOTH_NAME` (fallback `MODEL`, sama seperti shell).
+- Spesifikasi `Settings$Secure.getString` diubah dari `M_VALUE` satu kunci
+  menjadi `M_VALUE_MULTI` dengan tabel `kSecureKeys`/`kSecureVals`
+  (`android_id`, `bluetooth_address`). Ini wajib, bukan preferensi: LSPlant
+  menolak hook kedua pada `ArtMethod` yang sudah di-hook, jadi dua spec terpisah
+  hanya akan memasang yang pertama — persis cara adapter Keva dulu kehilangan
+  `clientudid` dan `cdid`.
+- Spesifikasi baru untuk `BluetoothAdapter.getName()` dan
+  `Settings$Global.getString` (`bluetooth_name`, `device_name`).
+- Varian LSPosed mendapat `MultiKeyReplacer` (pengganti `KeyedReplacer` yang
+  hanya satu kunci) dan perbaikan yang sama. Satu cacat tambahan ikut hilang di
+  sana: `hook0(cl, "android.net.wifi.WifiInfo", "getMacAddress",
+  wifi.toUpperCase())` mengirim MAC Wi-Fi dalam huruf **besar**, padahal
+  `WifiInfo.getMacAddress()` dan `/sys/class/net/*/address` selalu huruf kecil —
+  jadi kedua varian melaporkan string yang berbeda untuk radio yang sama, dan
+  yang LSPosed justru yang tidak sesuai konvensi platform.
+
+**D. Bonus, ditemukan saat mengerjakan ini: seed LSPosed ≠ seed Zygisk.**
+`TelephonyDrmHook` memakai `SeedId.personaSeed()` —
+`fnv1a(FINGERPRINT|SERIAL|ANDROID_ID)` — sementara native memakai
+`applog_seed()` yang **menambahkan nama paket**. Untuk persona yang terpasang di
+perangkat uji keduanya menghasilkan seed yang berbeda (`0xd2977f09334b4cef` vs
+`0x165cfa3d979e66d4`), sehingga IMEI yang dilaporkan berbeda
+(`358765540630080` vs `358473134580916`) dan fallback MAC Bluetooth berbeda
+(`02:66:76:BE:C7:BB` vs `02:84:86:7D:02:DC`). Docstring kelas itu sendiri
+menjanjikan kedua varian menghasilkan identifier yang sama, jadi ini pelanggaran
+kontrak. `personaSeed()` dihapus (tidak ada padanannya di native), dan
+`TelephonyDrmHook.apply()` sekarang menerima paket serta memakai `applogSeed()`.
+
+**Bukti.** `sbx_ident_synth` (suite host) naik dari 54 ke 83 pemeriksaan; `SeedIdTest`
+dari 44 ke 71. Keduanya mengunci dua nilai MAC yang sama persis, jadi pergeseran di
+salah satu sisi menggagalkan test di kedua tempat. Diverifikasi runtime terhadap
+persona yang terpasang di perangkat uji saat audit (persona itu sudah dirotasi
+sejak itu, jadi menjalankan ulang sekarang akan memberi angka lain yang sama
+konsistennya):
+
+| Permukaan | Sebelum | Sesudah |
+|---|---|---|
+| `WifiInfo.getMacAddress()` | `02:90:d5:57:3d:1f` ✓ | `02:90:d5:57:3d:1f` |
+| `BluetoothAdapter.getAddress()` | `02:84:86:7D:02:DC` ✗ | `02:91:1A:BA:67:2A` |
+| `Settings.Secure bluetooth_address` | `8C:AA:CE:2C:19:D5` ✗ (asli) | `02:91:1A:BA:67:2A` |
+| `BluetoothAdapter.getName()` | `CPH2521` ✗ (asli) | `CPH2521` (persona) |
+| `Settings.Global device_name` | `CPH2521` ✗ (asli) | `CPH2521` (persona) |
+
+Catatan jujur soal jangkauan. Pada perangkat uji `BLUETOOTH_CONNECT` untuk Grab
+adalah `granted=false`, jadi `getAddress()` dan `getName()` praktis inert untuk
+aplikasi itu. Anotasi AOSP mengonfirmasi keduanya dijaga izin:
+
+```java
+@RequiresBluetoothConnectPermission
+@RequiresPermission(allOf = {BLUETOOTH_CONNECT, LOCAL_MAC_ADDRESS})
+public String getAddress() { ... }
+
+@RequiresBluetoothConnectPermission
+@RequiresPermission(BLUETOOTH_CONNECT)
+public String getName() { ... }
+```
+
+(`packages/modules/Bluetooth/framework/java/android/bluetooth/BluetoothAdapter.java`,
+`main`.) Anotasi itu **tidak** menegakkan apa pun saat runtime: dex
+`framework-bluetooth.jar` di perangkat tidak memuat `RequiresPermission` sama
+sekali (anotasi dibuang saat build), dan baik `getAddress()` maupun `getName()`
+hanya meneruskan panggilan ke `IBluetoothManager` tanpa pemeriksaan in-process.
+Penegakannya ada di proses Bluetooth sendiri, bukan di aplikasi:
+
+```
+AdapterService$AdapterServiceBinder->getAddress(AttributionSource)
+  -> Utils->checkConnectPermissionForDataDelivery(...)   // BLUETOOTH_CONNECT
+  -> Utils->enforceLocalMacAddressPermission(...)        // LOCAL_MAC_ADDRESS
+AdapterService$AdapterServiceBinder->getName(AttributionSource)
+  -> Utils->checkConnectPermissionForDataDelivery(...)   // BLUETOOTH_CONNECT
+```
+
+(`Utils->checkConnectPermissionForDataDelivery` adalah pembungkus tipis yang
+memang mengoper `android.permission.BLUETOOTH_CONNECT` ke
+`checkPermissionForDataDelivery`, jadi rantai anotasi → penegakan benar-benar
+tersambung, hanya saja di proses lain.)
+
+Itulah sebabnya hook lapisan ini tetap berarti meski izinnya tidak diberikan:
+ia mengganti nilai di sisi aplikasi, sebelum binder dipanggil sama sekali,
+sehingga pemeriksaan service tidak pernah melihat permintaan untuk MAC asli.
+Yang **hidup tanpa izin** justru dua permukaan lain:
+`Settings.Secure`'s `bluetooth_address` dan `Settings.Global`'s
+`device_name`/`bluetooth_name`.
+
+Diperiksa langsung dengan `settings get` di perangkat uji, dan hasilnya
+memisahkan mana yang sudah ditutup shell dan mana yang belum:
+
+| Baris | Nilai | Ditulis oleh |
+|---|---|---|
+| `secure bluetooth_address` | `8C:AA:CE:2C:19:D5` (MAC adapter **asli**) | tidak ada — inilah bocornya |
+| `global device_name` | `Pixel 9a` | `sync_device_name()` |
+| `global bluetooth_name` | `Pixel 9a` | `sync_device_name()` |
+| `persist.bluetooth.adaptername` | `Pixel 9a` | `sync_device_name()` |
+
+Jadi baris nama sudah benar sejak sebelum perubahan ini — yang ditambahkan hook
+adalah **sumbernya** (kini persona di dalam proses, bukan properti sistem yang
+bisa saja belum tersinkron), bukan nilainya. `bluetooth_address` sebaliknya
+tidak pernah ditulis siapa pun: tidak ada `settings put secure bluetooth_address`
+di `sh/`, karena baris itu memang dikelola proses Bluetooth sendiri. Itulah satu-
+satunya permukaan Bluetooth yang benar-benar bocor, dan sekarang ditutup di
+lapisan hook.
 
 ## v2.2.40 (2026-10-29)
 

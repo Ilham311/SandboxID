@@ -131,6 +131,57 @@ public class SeedIdTest {
         check("widevine is lowercase hex",
                 SeedId.widevineHex(SEED).matches("[0-9a-f]{64}"));
 
+        System.out.println("-- pickMac: the persona address wins, or a safe fallback --");
+        // The Bluetooth asymmetry, in the other variant. The Zygisk side built
+        // its Bluetooth address from the seed unconditionally and ignored the
+        // persona's BLUETOOTH_ADDR; this side passed the persona value straight
+        // through and skipped the fallback when it was null. Both are wrong in
+        // opposite directions, and both are pinned by the same rule here and in
+        // tests/host/sbx_ident_synth.cpp.
+        final String persona = "02:91:1a:ba:67:2a";
+        eq("persona address served as declared",
+                SeedId.pickMac(persona, SEED, 0x424C554554L, false), persona);
+        eq("persona address uppercased for Bluetooth",
+                SeedId.pickMac(persona, SEED, 0x424C554554L, true), "02:91:1A:BA:67:2A");
+
+        for (boolean up : new boolean[] {false, true}) {
+            String fb = SeedId.pickMac(null, SEED, 0x424C554554L, up);
+            eq("fallback length", Integer.toString(fb.length()), "17");
+            check("fallback is a valid MAC", SeedId.isValidMac(fb));
+            check("fallback is locally administered", fb.startsWith("02:"));
+            eq("fallback deterministic",
+                    SeedId.pickMac(null, SEED, 0x424C554554L, up), fb);
+            check("fallback rotates with the seed",
+                    !SeedId.pickMac(null, SEED ^ 1, 0x424C554554L, up).equals(fb));
+        }
+
+        // A malformed persona value is treated exactly like an absent one.
+        String[] bad = {"not-a-mac", "02:91:1a:ba:67", "02-91-1a-ba-67-2a",
+                "00:00:00:00:00:00", "02:91:1a:ba:67:zz", ""};
+        for (String b : bad) {
+            String got = SeedId.pickMac(b, SEED, 0x424C554554L, false);
+            eq("malformed falls back", got,
+                    SeedId.pickMac(null, SEED, 0x424C554554L, false));
+            check("never serves a malformed address", SeedId.isValidMac(got));
+        }
+
+        // The two salts must not collide, or a persona declaring neither would
+        // report one address on both radios.
+        check("wifi and bluetooth fallbacks differ",
+                !SeedId.pickMac(null, SEED, 0x5749464931L, false)
+                        .equals(SeedId.pickMac(null, SEED, 0x424C554554L, false)));
+
+        System.out.println("-- cross-variant MAC agreement with the native side --");
+        // These exact strings are what sbxid::pick_mac() returns for the same
+        // seed and salt, and what tests/host/sbx_ident_synth.cpp asserts. A
+        // change on either side that breaks the pair fails here.
+        eq("wifi fallback matches native",
+                SeedId.pickMac(null, SEED, 0x5749464931L, false),
+                "02:f4:87:11:fc:ef");
+        eq("bluetooth fallback matches native",
+                SeedId.pickMac(null, SEED, 0x424C554554L, true),
+                "02:0F:A0:CA:3B:D1");
+
         System.out.println();
         if (fails == 0) System.out.println("ALL PASS");
         else System.out.println(fails + " check(s) FAILED");

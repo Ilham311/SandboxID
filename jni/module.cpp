@@ -300,6 +300,17 @@ private:
         hv.android_id = val("ANDROID_ID");
         hv.serial     = val("SERIAL");
         hv.wifi_mac   = val("WIFI_MAC");
+        // Bluetooth had no field here at all, so install_all() could only build
+        // the address from the seed - a value identity.prop never contained and
+        // bt_config.conf never carried. The persona's own address now wins.
+        hv.bt_mac     = val("BLUETOOTH_ADDR");
+        // The user-visible name, which sync_device_name() writes to
+        // Settings.Global's bluetooth_name/device_name and to bt_config.conf.
+        // BLUETOOTH_NAME falls back to MODEL in the shell, so the same fallback
+        // is applied here: a persona that predates the BLUETOOTH_NAME key still
+        // reports its model name rather than nothing.
+        hv.bt_name    = val("BLUETOOTH_NAME");
+        if (hv.bt_name.empty()) hv.bt_name = val("MODEL");
         hv.op_num     = val("GSM_OPERATOR_NUMERIC");
         hv.op_alpha   = val("GSM_OPERATOR_ALPHA");
         hv.op_iso     = val("GSM_OPERATOR_ISO");

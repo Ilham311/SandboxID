@@ -139,6 +139,37 @@ inline std::string operator_mnc(const std::string& numeric) {
     return numeric.substr(3);
 }
 
+// --- MAC selection: the persona's own value, or a seed-derived fallback -----
+// Both MAC surfaces (WifiInfo.getMacAddress, BluetoothAdapter.getAddress) and
+// the bluetooth_address row of Settings.Secure must report the SAME address the
+// persona declares, or the app sees two different phones in one session.
+//
+// The bug this exists to prevent: install_all() honoured HookValues::wifi_mac
+// but built the Bluetooth address unconditionally from the seed, so a persona
+// declaring BLUETOOTH_ADDR=02:91:1a:ba:67:2a still reported
+// 02:84:86:7D:02:DC from getAddress() - and Settings.Secure's real
+// bluetooth_address (8C:AA:CE:2C:19:D5) was never hooked at all, so the app had
+// THREE different Bluetooth addresses available to it.
+//
+// The fallback is only for a persona that declares no address - or declares one
+// that is not a MAC at all. It stays locally administered (mac_from_seed forces
+// the 02 prefix), so it can never collide with a real vendor OUI. A malformed
+// persona value is treated exactly like an absent one: serving "not-a-mac" from
+// getAddress() is an obvious tell, and serving the REAL address is worse.
+//
+// `upper` is the platform's own convention, not a preference: Android reports
+// BluetoothAdapter.getAddress() and Settings.Secure's bluetooth_address in
+// uppercase hex, while /sys/class/net/wlan0/address and WifiInfo.getMacAddress()
+// are lowercase. Keeping each surface in its native case means the spoofed value
+// is indistinguishable in FORM from the real one it replaces.
+inline std::string pick_mac(const std::string& persona, uint64_t seed,
+                            uint64_t salt, bool upper) {
+    std::string m = sbxnr::is_valid_mac(persona) ? persona
+                                                 : sbxnr::mac_from_seed(seed ^ salt);
+    if (upper) for (char& c : m) if (c >= 'a' && c <= 'f') c = (char)(c - 'a' + 'A');
+    return m;
+}
+
 // Bundle so callers synthesize once.
 struct SynthIds {
     std::string imei, imsi, iccid, meid, widevine_hex;

@@ -67,7 +67,22 @@ namespace sbxlsp {
 struct HookValues {
     std::string android_id;
     std::string serial;
+    // The persona's own MAC addresses, from identity.prop. Empty means the
+    // persona declares none, and install_all() falls back to a seed-derived
+    // locally-administered address. They are separate fields because the two
+    // surfaces are separate values on a real device and rotate separately:
+    // rotate_ids.sh writes WIFI_MAC and BLUETOOTH_ADDR independently.
+    //
+    // Bluetooth used to have no field here at all - the address was built from
+    // the seed unconditionally - so a persona declaring BLUETOOTH_ADDR reported
+    // a different address from getAddress() than the one identity.prop and the
+    // shell-side bt_config.conf rewrite had programmed. See sbxid::pick_mac().
     std::string wifi_mac;
+    std::string bt_mac;
+    // BluetoothAdapter.getName() / Settings.Global bluetooth_name+device_name.
+    // The user-visible device name, which the shell writes to all three
+    // surfaces from identity.prop's BLUETOOTH_NAME (falling back to MODEL).
+    std::string bt_name;
     std::string op_num;     // gsm operator numeric (MCC+MNC), e.g. "51010"
     std::string op_alpha;   // operator display name, e.g. "Telkomsel"
     std::string op_iso;     // operator country iso, e.g. "id"
@@ -285,7 +300,15 @@ enum ValId {
     // list, not the MCC/MNC. A real device reports -1 (UNKNOWN) for an operator
     // absent from that list, which is why an unset value must fall through
     // rather than become 0 - 0 is a real carrier id (T-Mobile US).
-    V_CARRIER_ID
+    V_CARRIER_ID,
+    // The user-visible Bluetooth device name. A separate value from the
+    // address: BluetoothAdapter.getName() and Settings.Global's bluetooth_name
+    // and device_name rows all report it, and the shell writes the same string
+    // to all three from identity.prop's BLUETOOTH_NAME. Grab reads it through
+    // Lc/g/zuo;->f() and through HyperVerge's getDeviceBasicProperties(), so an
+    // unhooked getName() hands the app the real "CPH2521" while every other
+    // field on the same event describes the persona.
+    V_BT_NAME
 };
 
 // Callback behaviour, mirrored by the constants in jni/SandboxIDHook.java.
@@ -602,10 +625,45 @@ inline bool init(JNIEnv* env) {
     return ok;
 }
 
-inline std::string sbx_mac_upper(std::string s) {
-    for (char& c : s) if (c >= 'a' && c <= 'f') c = (char)(c - 'a' + 'A');
-    return s;
-}
+// sbx_mac_upper() used to live here, applied to the Bluetooth address after a
+// seed-derived mac_from_seed(). It is gone because the case conversion is now a
+// parameter of sbxid::pick_mac(), which also decides WHICH address to serve -
+// keeping the two decisions in one place is what stops them drifting apart.
+
+// The Settings.Secure rows that carry device identity, and which of our values
+// each one must return.
+//
+// This is a TABLE rather than one spec per key because LSPlant refuses a second
+// hook on an ArtMethod that already carries one (its backup would be the
+// previous hooker, which recurses). Settings.Secure.getString(ContentResolver,
+// String) is one method serving every secure setting, so separate specs for
+// android_id and bluetooth_address could only ever install the first - exactly
+// the way the Keva adapters lost clientudid and cdid before M_VALUE_MULTI
+// existed. Verified on device: one DoHook for the method, and only android_id
+// was answered.
+//
+// bluetooth_address is the entry that matters most. It needs NO permission -
+// unlike BluetoothAdapter.getAddress(), which throws SecurityException without
+// BLUETOOTH_CONNECT - so it is the one Bluetooth surface a normal app can read
+// unconditionally. Grab does exactly that: Lc/g/zuo;->a() calls
+// Settings.Secure.getString(resolver, "bluetooth_address") and returns it
+// verbatim, and that path is reachable from the Moca wallet SDK's device-info
+// builder. Before this table the app got the REAL adapter address
+// (8C:AA:CE:2C:19:D5 on the test device) while every neighbouring field on the
+// same event described the persona.
+static const char* const kSecureKeys[] = { "android_id", "bluetooth_address" };
+static const int kSecureVals[] = { V_ANDROID_ID, V_BT_ADDR };
+static const int kSecureKeyCount = 2;
+
+// The Settings.Global rows carrying the user-visible device name. Both are
+// written by sync_device_name() to the same value, and both are read by
+// different SDKs in the app: HyperVerge reads device_name, and the framework's
+// own Bluetooth stack reads bluetooth_name. Answering only one would leave the
+// other reporting the real name.
+static const char* const kGlobalKeys[] = { "bluetooth_name", "device_name" };
+static const int kGlobalVals[] = { V_BT_NAME, V_BT_NAME };
+static const int kGlobalKeyCount = 2;
+
 inline jbyteArray sbx_hex_to_jbytes(JNIEnv* env, const std::string& hex) {
     size_t n = hex.size() / 2;
     jbyteArray a = env->NewByteArray((jsize)n);
@@ -647,6 +705,13 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_CARRIER_ID: return v.carrier_id;
         case V_WIFI_MAC:   return wifi;
         case V_BT_ADDR:    return bt;
+        // Read from HookValues, not from State: unlike the MACs there is no
+        // seed-derived fallback worth inventing. A persona with no
+        // BLUETOOTH_NAME leaves this empty, the hook's value stays unset, and
+        // the getter falls through to the real name - which is the honest
+        // answer, because the shell's sync_device_name() writes the same key to
+        // Settings.Global and bt_config.conf and would otherwise disagree.
+        case V_BT_NAME:    return v.bt_name;
         case V_GAID:       return v.gaid;
         case V_GSF_ID:     return v.gsf_id;
         case V_OPENUDID:   return v.openudid;
@@ -893,9 +958,14 @@ inline bool hook_one(JNIEnv* env, const HookSpec& sp) {
 inline const HookSpec* hook_specs(size_t& n) {
     static const HookSpec S[] = {
         // ---- P0: the classic device identifiers ----
+        //
+        // M_VALUE_MULTI, not M_VALUE: this one method serves every secure
+        // setting, and LSPlant cannot stack a second hook on it. See
+        // kSecureKeys above for why android_id alone was not enough.
         { "android/provider/Settings$Secure", "getString",
           "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;",
-          true, M_VALUE, 1, "android_id", false, 0, V_ANDROID_ID, -1, -1, -1, nullptr },
+          true, M_VALUE_MULTI, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr,
+          kSecureKeys, kSecureVals, kSecureKeyCount },
         { "android/os/Build", "getSerial", "()Ljava/lang/String;",
           true, M_VALUE, -1, nullptr, false, 0, V_SERIAL, -1, -1, -1, nullptr },
         { "android/media/MediaDrm", "getPropertyByteArray", "(Ljava/lang/String;)[B",
@@ -1016,6 +1086,21 @@ inline const HookSpec* hook_specs(size_t& n) {
           false, M_VALUE, -1, nullptr, false, 0, V_WIFI_MAC, -1, -1, -1, nullptr },
         { "android/bluetooth/BluetoothAdapter", "getAddress", "()Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_BT_ADDR, -1, -1, -1, nullptr },
+        // The user-visible Bluetooth name. Not an identifier in the MAC sense,
+        // but it is the same class of tell: on a real device it defaults to the
+        // model name, so an unhooked getName() reports the REAL model beside a
+        // spoofed Build.MODEL. Grab reads it in Lc/g/zuo;->f() and HyperVerge's
+        // getDeviceBasicProperties() reads Settings.Global's device_name row,
+        // which the shell already rewrites - so the two surfaces must agree.
+        { "android/bluetooth/BluetoothAdapter", "getName", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_BT_NAME, -1, -1, -1, nullptr },
+        // Settings.Global carries bluetooth_name and device_name, both written
+        // by sync_device_name() in rotate_ids.sh from the same identity key.
+        // Same one-method-many-keys problem as Settings.Secure above.
+        { "android/provider/Settings$Global", "getString",
+          "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;",
+          true, M_VALUE_MULTI, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr,
+          kGlobalKeys, kGlobalVals, kGlobalKeyCount },
 
         // ---- P2: advertising id (Play services) ----
         //
@@ -1574,9 +1659,17 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
     // Telephony/DRM identifiers, synthesized from the persona seed for cross-field
     // consistency and rotated with every fresh identity.
     g.ids  = sbxid::synth_all(v.seed, v.op_num);
-    g.wifi = !v.wifi_mac.empty() ? v.wifi_mac
-                                 : sbxnr::mac_from_seed(v.seed ^ 0x5749464931ULL);
-    g.bt   = sbx_mac_upper(sbxnr::mac_from_seed(v.seed ^ 0x424C554554ULL));
+    // Both MACs go through the same selector, so the persona's declared address
+    // always wins and the seed-derived fallback is only for a persona that
+    // declares none. Before this, Wi-Fi honoured v.wifi_mac while Bluetooth
+    // ignored v.bt_mac entirely - the address the module reported from
+    // getAddress() was not the one identity.prop and bt_config.conf carried.
+    //
+    // Case follows each platform surface: WifiInfo.getMacAddress() and
+    // /sys/class/net/*/address are lowercase, BluetoothAdapter.getAddress() and
+    // Settings.Secure's bluetooth_address row are uppercase.
+    g.wifi = sbxid::pick_mac(v.wifi_mac, v.seed, 0x5749464931ULL, false); // "WIFI1"
+    g.bt   = sbxid::pick_mac(v.bt_mac,   v.seed, 0x424C554554ULL, true);  // "BLUET"
 
     // Denied OEM classes, as a static field on the callback class. Done here
     // rather than per-hooker because the forName hook is process-wide and the

@@ -91,25 +91,92 @@ final class SeedId {
         return sb.toString();
     }
 
-    /** Persona seed: same string the C++ applog_seed() hashes (no package). */
-    static long personaSeed(Map<String, String> id) {
-        String fp = or(id, "FINGERPRINT", "");
-        String serial = or(id, "SERIAL", "");
-        String aid = or(id, "ANDROID_ID", "");
-        return fnv1a(fp + "|" + serial + "|" + aid);
-    }
+    // There is deliberately no package-less "persona seed" here. One used to
+    // exist and TelephonyDrmHook seeded every identifier from it, which made
+    // this variant and the Zygisk module disagree: the native side seeds from
+    // applog_seed() — fnv1a(FINGERPRINT|SERIAL|ANDROID_ID|pkg) — so for the same
+    // persona the two produced different IMEIs and different MAC fallbacks.
+    // Nothing in the native module hashes the package-less form, so a helper
+    // that did was a trap rather than a primitive. Use applogSeed().
 
     /**
-     * AppLog seed — NOT the persona seed. applog_seed() appends the package:
-     * {@code fnv1a(FINGERPRINT|SERIAL|ANDROID_ID|pkg)}. Reusing personaSeed()
-     * here would silently produce wrong did/iid/ssid for every persona.
-     * Exactly native_read.hpp:111-116.
+     * AppLog seed — the ONLY seed the native module has.
+     * {@code fnv1a(FINGERPRINT|SERIAL|ANDROID_ID|pkg)}, exactly
+     * native_read.hpp:118-123. Every synthesized identifier in this variant —
+     * IMEI/IMSI/ICCID/MEID/Widevine and the MAC fallbacks — must come from this
+     * one, or the two variants describe two different phones.
      */
     static long applogSeed(Map<String, String> id, String pkg) {
         String fp = or(id, "FINGERPRINT", "");
         String serial = or(id, "SERIAL", "");
         String aid = or(id, "ANDROID_ID", "");
         return fnv1a(fp + "|" + serial + "|" + aid + "|" + pkg);
+    }
+
+    /**
+     * The MAC address to serve for one surface: the persona's own value when it
+     * declares a valid one, otherwise a seed-derived fallback.
+     *
+     * <p>Port of {@code sbxid::pick_mac()} in {@code jni/sbx_ident_synth.hpp},
+     * so the Zygisk and LSPosed variants report the same address for the same
+     * persona. The two must not drift: an app that reads the address through
+     * both lenses would otherwise see two different phones.
+     *
+     * <p>A malformed persona value is treated exactly like an absent one.
+     * Serving {@code "not-a-mac"} from {@code getAddress()} is an obvious tell,
+     * and serving the REAL address is worse than inventing a plausible one — so
+     * the fallback is always locally administered ({@link #macFromSeed} forces
+     * the {@code 02} prefix) and can never collide with a real vendor OUI.
+     *
+     * @param upper the platform's own convention for this surface:
+     *              {@code WifiInfo.getMacAddress()} is lowercase, while
+     *              {@code BluetoothAdapter.getAddress()} and
+     *              {@code Settings.Secure}'s {@code bluetooth_address} row are
+     *              uppercase. Matching the real form makes the spoofed value
+     *              indistinguishable in shape from the one it replaces.
+     */
+    static String pickMac(String persona, long seed, long salt, boolean upper) {
+        String m = isValidMac(persona) ? persona : macFromSeed(seed ^ salt);
+        return upper ? m.toUpperCase() : m;
+    }
+
+    /**
+     * Exactly {@code sbxnr::mac_from_seed()}: six little-endian bytes from
+     * SplitMix64, with the first forced to {@code 0x02} (locally administered,
+     * unicast). Lowercase, colon-separated.
+     */
+    static String macFromSeed(long seed) {
+        byte[] b = fillBytes(seed, 6);
+        b[0] = 0x02;
+        StringBuilder sb = new StringBuilder(17);
+        for (int i = 0; i < 6; i++) {
+            if (i > 0) sb.append(':');
+            sb.append(Character.forDigit((b[i] >>> 4) & 0xF, 16));
+            sb.append(Character.forDigit(b[i] & 0xF, 16));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Exactly {@code sbxnr::is_valid_mac()}: 17 chars, {@code :} at 2/5/8/11/14,
+     * hex elsewhere, and not all-zero. Case-insensitive, because the persona
+     * file and the platform surfaces disagree on case and both are valid MACs.
+     */
+    static boolean isValidMac(String m) {
+        if (m == null || m.length() != 17) return false;
+        boolean allZero = true;
+        for (int i = 0; i < 17; i++) {
+            char c = m.charAt(i);
+            if ((i % 3) == 2) {
+                if (c != ':') return false;
+            } else {
+                boolean hex = (c >= '0' && c <= '9')
+                        || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!hex) return false;
+                if (c != '0') allZero = false;
+            }
+        }
+        return !allZero;
     }
 
     // ------------------------------------------------------------------

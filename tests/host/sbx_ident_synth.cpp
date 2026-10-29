@@ -171,6 +171,90 @@ int main() {
               "mcc + mnc reassembles the operator numeric");
     }
 
+    // ---- pick_mac: the persona's address wins, or a safe fallback ----------
+    //
+    // This is the regression suite for the Bluetooth asymmetry. install_all()
+    // honoured the persona's WIFI_MAC but built the Bluetooth address from the
+    // seed unconditionally, so a persona declaring BLUETOOTH_ADDR reported a
+    // DIFFERENT address from BluetoothAdapter.getAddress() than the one
+    // identity.prop and bt_config.conf carried. Nothing in CI could see it,
+    // because nothing tested the selector at all.
+    {
+        const char* persona = "02:91:1a:ba:67:2a";
+
+        // The persona's own value is served verbatim, in the surface's case.
+        CHECK(pick_mac(persona, seed, 0x424C554554ULL, false) == persona,
+              "pick_mac serves the persona address as declared");
+        CHECK(pick_mac(persona, seed, 0x424C554554ULL, true) == "02:91:1A:BA:67:2A",
+              "pick_mac uppercases for the Bluetooth surface");
+        // Case is the ONLY thing the flag may change.
+        CHECK(pick_mac(persona, seed, 0x424C554554ULL, true).size() == 17,
+              "pick_mac keeps a 17-char address when uppercasing");
+
+        // No persona value: a seed-derived fallback, never the real address and
+        // never empty. It must be locally administered so it cannot collide
+        // with a real vendor OUI.
+        for (bool up : {false, true}) {
+            const std::string fb = pick_mac("", seed, 0x424C554554ULL, up);
+            CHECK(fb.size() == 17, "pick_mac fallback is a 17-char address");
+            CHECK(sbxnr::is_valid_mac(fb), "pick_mac fallback is a valid MAC");
+            CHECK(fb[0] == '0' && fb[1] == '2',
+                  "pick_mac fallback keeps the locally-administered 02 prefix");
+            CHECK(fb == pick_mac("", seed, 0x424C554554ULL, up),
+                  "pick_mac fallback is deterministic for one seed");
+            CHECK(fb != pick_mac("", seed ^ 1, 0x424C554554ULL, up),
+                  "pick_mac fallback rotates with the seed");
+        }
+
+        // A malformed persona value is treated exactly like an absent one:
+        // serving "not-a-mac" from getAddress() is a tell, and serving the REAL
+        // address is worse than inventing a plausible one.
+        const char* bad[] = {
+            "not-a-mac", "02:91:1a:ba:67", "02-91-1a-ba-67-2a",
+            "00:00:00:00:00:00", "02:91:1a:ba:67:zz", "",
+        };
+        for (const char* b : bad) {
+            const std::string got = pick_mac(b, seed, 0x424C554554ULL, false);
+            CHECK(got == pick_mac("", seed, 0x424C554554ULL, false),
+                  "pick_mac falls back for a malformed persona address");
+            CHECK(sbxnr::is_valid_mac(got),
+                  "pick_mac never serves a malformed address");
+        }
+
+        // The two salts must not collide, or the Wi-Fi and Bluetooth MACs of a
+        // persona that declares neither would be the same address - one phone
+        // cannot have one address on both radios.
+        CHECK(pick_mac("", seed, 0x5749464931ULL, false) !=
+              pick_mac("", seed, 0x424C554554ULL, false),
+              "wifi and bluetooth fallbacks use distinct salts");
+
+        // Uppercasing must be idempotent and must not touch digits/colons.
+        const std::string u = pick_mac(persona, seed, 0x424C554554ULL, true);
+        bool shaped = true;
+        for (size_t i = 0; i < u.size(); ++i) {
+            const char c = u[i];
+            if (i % 3 == 2) { if (c != ':') shaped = false; }
+            else if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')))
+                shaped = false;
+        }
+        CHECK(shaped, "uppercased address keeps the AA:BB:CC:DD:EE:FF shape");
+    }
+
+    // ---- cross-variant agreement with the LSPosed side ---------------------
+    //
+    // These exact strings are what SeedId.pickMac() returns for the same seed
+    // and salt, and what lsp/app/src/test/java/id/sandboxid/tt/SeedIdTest.java
+    // asserts. A change on either side that breaks the pair fails in both
+    // places, which is the only thing stopping the two variants from drifting
+    // into describing two different phones.
+    {
+        const uint64_t crossSeed = 0x1234ABCDULL;   // SeedIdTest.SEED
+        CHECK(pick_mac("", crossSeed, 0x5749464931ULL, false) == "02:f4:87:11:fc:ef",
+              "wifi fallback matches the LSPosed variant");
+        CHECK(pick_mac("", crossSeed, 0x424C554554ULL, true) == "02:0F:A0:CA:3B:D1",
+              "bluetooth fallback matches the LSPosed variant");
+    }
+
     printf("\n%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }
