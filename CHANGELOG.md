@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.38 (2026-10-29)
+
 ### Fix: operator seluler dikarang (Telkomsel 51010) → bertentangan dengan radio asli
 
 **Gejala.** Di dalam satu aliran event milik aplikasi yang sama, telemetri
