@@ -249,6 +249,21 @@ final class TelephonyDrmHook {
         // persona's own ROM packages, which is its own tell.
         n += hookPackageFilter(cl, id);
 
+        // ---- P0d2: OEM class deny ----
+        //
+        // A Pixel cannot load miui.os.Build, and the app's OEM branches key off
+        // exactly that: LX/00kR;->p2() turns "class loads" into the apm field
+        // rom = "MIUI-" + INCREMENTAL, and LX/0D0h;->LIZ() turns it into
+        // rom_version. Hiding the ro.miui.* props does not close this — both
+        // helpers fall back to Runtime.exec("getprop") when SystemProperties
+        // comes back empty, and a subprocess inherits none of our hooks.
+        //
+        // The Zygisk module denies these through its Class.forName observer
+        // (M_OBSERVE, sbx_lsplant.hpp:1163-1165); the LSPosed variant had no
+        // equivalent, so a Pixel persona on this Xiaomi device still reported
+        // rom = "MIUI-…".
+        n += hookDenyClasses(cl, SeedId.denyClasses(id));
+
         // ---- P0e: GSF id (gservices provider) ----
         //
         // Grab reads the GSF id by querying content://com.google.android.gsf.gservices
@@ -1199,6 +1214,50 @@ final class TelephonyDrmHook {
             return c.newInstance(gaid, Boolean.FALSE);
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    /**
+     * Makes {@code Class.forName} reject the persona's foreign OEM classes.
+     *
+     * <p>Hooks the <b>3-arg</b> overload, not the 1-arg one. {@code forName(
+     * String)} is {@code @CallerSensitive} and resolves through
+     * {@code Reflection.getCallerClass()}, which from inside this callback
+     * would see the module's own class rather than the app — every by-name load
+     * would then resolve against the wrong loader. The 3-arg overload takes the
+     * loader as an argument and passes it straight to {@code classForName}, so
+     * it is free of that hazard. Same reasoning as the native spec at
+     * {@code sbx_lsplant.hpp:1155-1165}.
+     *
+     * <p>Throwing {@code ClassNotFoundException} is what a device that genuinely
+     * lacks the class does, so the app's OEM branch takes its "not this ROM"
+     * path rather than seeing an anomaly.
+     *
+     * <p>Arg index 0: Xposed omits the receiver, and the method is static, so
+     * the class name is the first argument.
+     */
+    private static int hookDenyClasses(ClassLoader cl, final String[] deny) {
+        if (deny == null || deny.length == 0) return 0;
+        try {
+            XposedHelpers.findAndHookMethod("java.lang.Class", cl, "forName",
+                    String.class, boolean.class, ClassLoader.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            if (p.args == null || p.args.length < 1) return;
+                            Object a = p.args[0];
+                            if (!(a instanceof String)) return;
+                            String want = (String) a;
+                            for (String d : deny) {
+                                if (want.equals(d)) {
+                                    sneakyThrow(new ClassNotFoundException(want));
+                                }
+                            }
+                        }
+                    });
+            return 1;
+        } catch (Throwable t) {
+            return 0;
         }
     }
 

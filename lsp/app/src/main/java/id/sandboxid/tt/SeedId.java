@@ -641,6 +641,47 @@ final class SeedId {
     }
 
     /**
+     * OEM detection classes this persona must not be able to load.
+     *
+     * <p>Port of the {@code deny_classes} block in {@code module.cpp:387-410}.
+     * A Pixel cannot load {@code miui.os.Build}, and the app's OEM branches key
+     * off exactly that: {@code LX/00kR;->p2()} turns "class loads" into the apm
+     * field {@code rom = "MIUI-" + INCREMENTAL}, and {@code LX/0D0h;->LIZ()}
+     * turns it into {@code rom_version}. Hiding the {@code ro.miui.*} props does
+     * not close this — both helpers fall back to
+     * {@code Runtime.exec("getprop")} when SystemProperties comes back empty,
+     * and a subprocess inherits none of our hooks. Denying the class keeps the
+     * branch unreachable instead.
+     *
+     * <p>Derived from the persona's own MANUFACTURER/BRAND, never hardcoded: a
+     * real Xiaomi persona must keep {@code miui.os.Build}, or the module would
+     * make the device it is imitating look less like itself.
+     */
+    static String[] denyClasses(Map<String, String> id) {
+        String man = id == null ? null : id.get("MANUFACTURER");
+        String brd = id == null ? null : id.get("BRAND");
+        java.util.List<String> out = new java.util.ArrayList<>(3);
+        if (!isVendor(man, brd, "Xiaomi", "Redmi", "POCO")) {
+            out.add("miui.os.Build");
+        }
+        if (!isVendor(man, brd, "Meizu")) {
+            out.add("com.meizu.flyme.reflect.BuildProxy");
+        }
+        if (!isVendor(man, brd, "OPPO", "OnePlus", "realme")) {
+            out.add("com.oplus.os.OplusBuild");
+        }
+        return out.toArray(new String[0]);
+    }
+
+    /** True when MANUFACTURER or BRAND is one of {@code names}. */
+    private static boolean isVendor(String man, String brd, String... names) {
+        for (String n : names) {
+            if (n.equals(man) || n.equals(brd)) return true;
+        }
+        return false;
+    }
+
+    /**
      * True when {@code pkg} must be hidden from the app.
      *
      * <p>Case-insensitive, and a prefix match on a dot boundary so

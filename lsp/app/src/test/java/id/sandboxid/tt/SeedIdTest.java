@@ -467,14 +467,59 @@ public class SeedIdTest {
                 !SeedId.gaid(7L).equals(SeedId.gaid(8L))
                 && !SeedId.gsfId(7L).equals(SeedId.gsfId(8L)));
 
+        System.out.println("-- denyClasses: a persona cannot load a foreign OEM's class --");
+        // A Pixel persona must not be able to load miui.os.Build, because the
+        // app's OEM branch turns "class loads" into rom = "MIUI-…". A Xiaomi
+        // persona must KEEP it, or the device looks less like itself.
+        java.util.Map<String, String> pxDeny = new java.util.HashMap<>();
+        pxDeny.put("BRAND", "google");
+        pxDeny.put("MANUFACTURER", "Google");
+        String[] dx = SeedId.denyClasses(pxDeny);
+        check("pixel denies miui.os.Build", contains(dx, "miui.os.Build"));
+        check("pixel denies OplusBuild",
+                contains(dx, "com.oplus.os.OplusBuild"));
+        check("pixel denies BuildProxy",
+                contains(dx, "com.meizu.flyme.reflect.BuildProxy"));
+
+        java.util.Map<String, String> miDeny = new java.util.HashMap<>();
+        miDeny.put("BRAND", "Redmi");
+        miDeny.put("MANUFACTURER", "Xiaomi");
+        String[] dm = SeedId.denyClasses(miDeny);
+        check("xiaomi KEEPS miui.os.Build", !contains(dm, "miui.os.Build"));
+        check("xiaomi still denies OplusBuild",
+                contains(dm, "com.oplus.os.OplusBuild"));
+
+        // BRAND alone is enough: the native check is `man == s || brd == s`,
+        // and a persona row always carries both but nothing guarantees they
+        // agree.
+        java.util.Map<String, String> brdOnly = new java.util.HashMap<>();
+        brdOnly.put("BRAND", "POCO");
+        check("brand alone keeps miui",
+                !contains(SeedId.denyClasses(brdOnly), "miui.os.Build"));
+
+        java.util.Map<String, String> meizu = new java.util.HashMap<>();
+        meizu.put("MANUFACTURER", "Meizu");
+        check("meizu keeps BuildProxy",
+                !contains(SeedId.denyClasses(meizu),
+                        "com.meizu.flyme.reflect.BuildProxy"));
+
+        check("null map denies nothing it should keep",
+                SeedId.denyClasses(null).length == 3);
+
         System.out.println();
         if (fails == 0) System.out.println("ALL PASS");
         else System.out.println(fails + " check(s) FAILED");
         System.exit(fails == 0 ? 0 : 1);
     }
 
-    static boolean allDigits(String s) {
-        if (s == null || s.isEmpty()) return false;
+    /** True when {@code arr} contains {@code v}. */
+    static boolean contains(String[] arr, String v) {
+        if (arr == null) return false;
+        for (String s : arr) if (v.equals(s)) return true;
+        return false;
+    }
+
+    static boolean allDigits(String s) {        if (s == null || s.isEmpty()) return false;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c < '0' || c > '9') return false;

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Fix: kelas deteksi OEM tidak ditolak di varian LSPosed
+
+Perangkat Xiaomi yang memakai persona Pixel tetap bisa memuat `miui.os.Build`,
+dan cabang OEM aplikasi justru membaca persis itu: `LX/00kR;->p2()` mengubah
+"kelas berhasil dimuat" menjadi field apm `rom = "MIUI-" + INCREMENTAL`, dan
+`LX/0D0h;->LIZ()` mengubahnya menjadi `rom_version`. Menyembunyikan prop
+`ro.miui.*` tidak menutup jalur ini — kedua helper itu jatuh ke
+`Runtime.exec("getprop")` ketika SystemProperties mengembalikan kosong, dan
+subproses tidak mewarisi satu pun hook kita.
+
+Modul Zygisk menolaknya lewat observer `Class.forName` (`M_OBSERVE`,
+`sbx_lsplant.hpp:1163-1165`); varian LSPosed tidak punya padanannya.
+`SeedId.denyClasses()` menurunkan daftarnya dari MANUFACTURER/BRAND persona
+(`module.cpp:387-410`), dan `hookDenyClasses()` memakai overload **3-argumen**:
+`forName(String)` bersifat `@CallerSensitive` dan me-resolve lewat
+`Reflection.getCallerClass()`, yang dari dalam callback akan melihat kelas modul
+alih-alih aplikasi.
+
+Daftarnya diturunkan, bukan di-hardcode: persona Xiaomi asli **harus** tetap bisa
+memuat `miui.os.Build`, kalau tidak modul membuat perangkat yang ditirunya
+terlihat kurang seperti dirinya sendiri.
+
 ### Fix: nama kelas per-build yang belum tercakup di varian LSPosed
 
 Native memakai pasangan nama kelas yang berbeda per build, dan varian LSPosed
