@@ -104,15 +104,33 @@ dipilih** (kecuali dicaftat), karena hook runtime ditulis melawannya:
 
 ## Cakupan vs modul Zygisk
 
-**Hanya di varian LSPosed** (alasan utama varian ini ada):
+> **Koreksi (2026-10-29).** Versi sebelumnya tabel ini mengklaim
+> TelephonyManager/MediaDrm/WifiInfo/BluetoothAdapter/Settings.Secure "hanya
+> bisa dicapai varian LSPosed" karena nilainya datang lewat Binder. **Itu
+> salah.** Modul Zygisk membawa LSPlant (`SBX_ENABLE_LSPLANT`, default **on**
+> di `build.sh:24`) dan menghook permukaan yang sama di dalam proses app dengan
+> ART hook, bukan dengan mengubah nilai di sisi service. Log perangkat
+> membuktikannya:
+>
+> ```
+> L3 hooked android/media/MediaDrm.getPropertyByteArray(Ljava/lang/String;)[B
+> L3 hooked android/telephony/TelephonyManager.getDeviceId()Ljava/lang/String;
+> L3 hooked android/telephony/TelephonyManager.getImei()Ljava/lang/String;
+> L3 hooked android/net/wifi/WifiInfo.getMacAddress()Ljava/lang/String;
+> L3 hooked android/bluetooth/BluetoothAdapter.getAddress()Ljava/lang/String;
+> L3 hooked android/provider/Settings$Secure.getString(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;
+> ```
+>
+> Jadi untuk kelima permukaan itu kedua varian **setara**, bukan saling
+> melengkapi. Yang benar-benar membedakan ada di dua baris tabel bawah.
+
+**Hanya di varian LSPosed:**
 
 | Permukaan | Mengapa Zygisk tidak capai |
 |---|---|
-| `TelephonyManager.getDeviceId/getImei/getMeid/getSubscriberId/getSimSerialNumber` | Diberikan via Binder oleh telephony service |
-| `getNetworkOperator[Name]`/`getSimOperator[Name]`/`getCountryIso` | Sama |
-| `MediaDrm.getPropertyByteArray("deviceUniqueId")` | Widevine L1 ID |
-| `WifiInfo.getMacAddress` / `BluetoothAdapter.getAddress` | Dari service |
-| `Settings.Secure.getString("android_id")` | ContentProvider |
+| `RegisterHook`/`Rewrite` — mint did baru di `device_register` | Zygisk tidak punya padanannya: ia hanya menyamarkan identitas, tidak memaksa register ulang |
+| Tidak butuh root, tidak butuh `/data/adb` | Zygisk adalah modul root |
+
 ### Register: dapat did baru (TERVERIFIKASI di perangkat)
 
 Ini inti varian ini, dan ini yang membedakannya dari sekadar mengubah
