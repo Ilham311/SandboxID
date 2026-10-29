@@ -635,15 +635,50 @@ final class TelephonyDrmHook {
         final int w = geo[0], h = geo[1], dpi = geo[2];
         final int xdpi = geo[3], ydpi = geo[4];
 
-        /** Writes the persona's geometry into a DisplayMetrics instance. */
+        /**
+         * Writes the persona's geometry into a DisplayMetrics instance or a
+         * Point, honouring the orientation the object ALREADY carries.
+         *
+         * <p>The swap is the part that is easy to miss. The framework fills an
+         * out-parameter with the live panel's dimensions and only then hands it
+         * to us, so a landscape {@code getSize(Point)} arrives holding
+         * width > height. Writing the persona's portrait pair into it would
+         * leave the caller reading a portrait panel while the display is
+         * rotated — a contradiction inside one call. The native side swaps in
+         * exactly this case (SandboxIDHook.java:1053-1058, 1084-1088); doing it
+         * from the object's own current shape means it works for every caller
+         * without needing the Display.
+         */
         XC_MethodHook fillMetrics = new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam p) {
                 Object r = p.getResult();
-                if (r != null && r.getClass().getName().endsWith("DisplayMetrics")) {
-                    applyMetrics(r, w, h, dpi, xdpi, ydpi);
+                if (r != null) {
+                    String cn = r.getClass().getName();
+                    // Copy before overwriting. Resources.getConfiguration()
+                    // returns the Resources' OWN Configuration instance and
+                    // Resources.getDisplayMetrics() may hand back a cached one;
+                    // writing the persona's geometry into either would corrupt
+                    // the app's real resource state for every later caller, not
+                    // just this one. The native side copies for the same reason
+                    // (SandboxIDHook.java:486-511).
+                    if (cn.endsWith("DisplayMetrics")) {
+                        Object c = copyMetrics(r);
+                        applyMetrics(c != null ? c : r, w, h, dpi, xdpi, ydpi);
+                        if (c != null) p.setResult(c);
+                    } else if (cn.endsWith("Configuration")) {
+                        Object c = copyConfiguration(r);
+                        applyConfiguration(c != null ? c : r, w, h, dpi);
+                        if (c != null) p.setResult(c);
+                    } else if (cn.endsWith("Point")) {
+                        Object c = copyPoint(r);
+                        applyMetrics(c != null ? c : r, w, h, dpi, xdpi, ydpi);
+                        if (c != null) p.setResult(c);
+                    }
                 }
-                // The out-parameter form: getMetrics(DisplayMetrics), getSize(Point).
+                // The out-parameter form: getMetrics(DisplayMetrics),
+                // getSize(Point). The caller owns that object and expects it
+                // filled, so it is written in place — no copy.
                 if (p.args != null && p.args.length > 0 && p.args[0] != null) {
                     applyMetrics(p.args[0], w, h, dpi, xdpi, ydpi);
                 }
@@ -653,6 +688,12 @@ final class TelephonyDrmHook {
         int n = 0;
         // Resources.getDisplayMetrics() — returns a DisplayMetrics.
         n += hook(cl, "android.content.res.Resources", "getDisplayMetrics", fillMetrics);
+        // Resources.getConfiguration() — returns a Configuration, which carries
+        // screenWidthDp/screenHeightDp/densityDpi. A separate surface from
+        // DisplayMetrics and the one an app uses to size its layout, so leaving
+        // it alone reports the real panel's dp geometry beside a spoofed pixel
+        // geometry. The native module hooks it (sbx_lsplant.hpp:1204-1206).
+        n += hook(cl, "android.content.res.Resources", "getConfiguration", fillMetrics);
         // Display.getMetrics(DisplayMetrics) / getRealMetrics(DisplayMetrics).
         n += hook(cl, "android.view.Display", "getMetrics",
                 android.util.DisplayMetrics.class, fillMetrics);
@@ -721,30 +762,139 @@ final class TelephonyDrmHook {
 
     /**
      * Overwrites the geometry fields of a {@code DisplayMetrics} or a
-     * {@code Point}. Both carry public {@code width}/{@code height}; only
-     * DisplayMetrics has the density fields, so each is set independently and
-     * a missing field is simply skipped.
+     * {@code Point}, swapping the pair when the object is already landscape.
+     *
+     * <p>Both carry public {@code width}/{@code height} (Point: {@code x}/
+     * {@code y}); only DisplayMetrics has the density fields, so each is set
+     * independently and a missing field is simply skipped.
+     *
+     * <p>The swap reads the object's CURRENT shape rather than the Display's
+     * rotation. For an out-parameter that is the more reliable signal — the
+     * framework has just filled it — and it needs no Display reference, so the
+     * same helper serves {@code Resources.getDisplayMetrics()} too.
      */
     private static void applyMetrics(Object o, int w, int h, int dpi,
                                      int xdpi, int ydpi) {
         if (o == null) return;
-        setIntField(o, "widthPixels", w);
-        setIntField(o, "heightPixels", h);
+        int curW = intField(o, "widthPixels");
+        int curH = intField(o, "heightPixels");
+        if (curW == 0 && curH == 0) {          // Point uses x/y
+            curW = intField(o, "x");
+            curH = intField(o, "y");
+        }
+        int tw = w, th = h;
+        if (curW > curH && tw < th) {
+            tw = h;
+            th = w;
+        }
+        setIntField(o, "widthPixels", tw);
+        setIntField(o, "heightPixels", th);
         setIntField(o, "densityDpi", dpi);
-        setIntField(o, "x", w);      // Point
-        setIntField(o, "y", h);      // Point
+        setIntField(o, "x", tw);      // Point
+        setIntField(o, "y", th);      // Point
         setFloatField(o, "density", dpi / 160.0f);
         setFloatField(o, "scaledDensity", dpi / 160.0f);
         setFloatField(o, "xdpi", xdpi);
         setFloatField(o, "ydpi", ydpi);
     }
 
-    /** Overwrites a {@code Rect} to (0,0,w,h). */
+    /**
+     * Writes the persona's geometry into a {@code Configuration}.
+     *
+     * <p>Configuration carries dp units, not pixels, so the conversion is
+     * {@code px / (densityDpi / 160)} — the same arithmetic as
+     * {@code applyConfiguration()} in {@code jni/SandboxIDHook.java:1112-1146}.
+     * {@code smallestScreenWidthDp} is always the PORTRAIT short side, which is
+     * what makes it "smallest": it must not change when the device rotates.
+     */
+    private static void applyConfiguration(Object cfg, int w, int h, int dpi) {
+        if (cfg == null || dpi <= 0) return;
+        int curSw = intField(cfg, "screenWidthDp");
+        int curSh = intField(cfg, "screenHeightDp");
+        boolean land = curSw > curSh && curSh > 0;
+
+        float d = dpi / 160.0f;
+        int minDim = Math.min(w, h), maxDim = Math.max(w, h);
+        int portSwDp = (int) (minDim / d);
+        int portShDp = (int) (maxDim / d);
+
+        setIntField(cfg, "densityDpi", dpi);
+        setIntField(cfg, "screenWidthDp", land ? portShDp : portSwDp);
+        setIntField(cfg, "screenHeightDp", land ? portSwDp : portShDp);
+        setIntField(cfg, "smallestScreenWidthDp", portSwDp);
+    }
+
+    private static int intField(Object o, String name) {
+        try {
+            java.lang.reflect.Field f = o.getClass().getField(name);
+            return f.getInt(o);
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /**
+     * A fresh {@code DisplayMetrics} holding {@code src}'s values, or null when
+     * the class cannot be constructed.
+     *
+     * <p>{@code DisplayMetrics.setTo(DisplayMetrics)} is the framework's own
+     * copy, and it exists on every API level this module supports. Falling back
+     * to null makes the caller write in place, which is the pre-copy behaviour
+     * rather than a crash.
+     */
+    private static Object copyMetrics(Object src) {
+        try {
+            Class<?> c = src.getClass();
+            Object copy = c.getConstructor().newInstance();
+            c.getMethod("setTo", c).invoke(copy, src);
+            return copy;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** A fresh {@code Configuration} copied from {@code src}, or null. */
+    private static Object copyConfiguration(Object src) {
+        try {
+            Class<?> c = src.getClass();
+            return c.getConstructor(c).newInstance(src);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** A fresh {@code Point} copied from {@code src}, or null. */
+    private static Object copyPoint(Object src) {
+        try {
+            Class<?> c = src.getClass();
+            Object copy = c.getConstructor(int.class, int.class)
+                    .newInstance(Integer.valueOf(intField(src, "x")),
+                                 Integer.valueOf(intField(src, "y")));
+            return copy;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Overwrites a {@code Rect} to (0,0,w,h), swapping when the Rect is already
+     * landscape — the same rule and the same reason as {@link #applyMetrics}.
+     *
+     * <p>{@code WindowMetrics.getBounds()} returns the window bounds for the
+     * CURRENT orientation, so a landscape window arrives wider than tall.
+     */
     private static void applyRect(Object o, int w, int h) {
+        int curW = intField(o, "right") - intField(o, "left");
+        int curH = intField(o, "bottom") - intField(o, "top");
+        int tw = w, th = h;
+        if (curW > curH && tw < th) {
+            tw = h;
+            th = w;
+        }
         setIntField(o, "left", 0);
         setIntField(o, "top", 0);
-        setIntField(o, "right", w);
-        setIntField(o, "bottom", h);
+        setIntField(o, "right", tw);
+        setIntField(o, "bottom", th);
     }
 
     private static void setIntField(Object o, String name, int v) {
@@ -833,6 +983,20 @@ final class TelephonyDrmHook {
         n += hookFlagsSingle(cl, cls, "getPackageInfo", singleFilter);
         n += hookFlagsSingle(cl, cls, "getApplicationInfo", singleFilter);
 
+        // AccessibilityManager — the same hidden set has to cover the
+        // accessibility list, or the app sees a service whose package it was
+        // just told does not exist. Grab reads this list
+        // (getInstalledAccessibilityServiceList, reached through c.g.joy1.b in
+        // classes.dex) and records every service id in its scan result, so a
+        // hidden modding tool still showed up as "bin.mt.plus.canary/l.…"
+        // while getInstalledPackages denied it.
+        //
+        // AccessibilityServiceInfo has no packageName field; listFilter's
+        // packageNameOf() reads getId() for that shape.
+        final String am = "android.view.accessibility.AccessibilityManager";
+        n += hook(cl, am, "getInstalledAccessibilityServiceList", listFilter);
+        n += hook(cl, am, "getEnabledAccessibilityServiceList", int.class, listFilter);
+
         return n;
     }
 
@@ -870,11 +1034,36 @@ final class TelephonyDrmHook {
      * null here means an unexpected type and the item is kept — filtering out
      * something we cannot identify would hide innocent packages.
      */
+    /**
+     * The package an item in a PackageManager/AccessibilityManager list belongs
+     * to, or null when neither shape applies.
+     *
+     * <p>Two shapes reach this, and both are needed. {@code PackageInfo} and
+     * {@code ApplicationInfo} carry a public {@code packageName} field.
+     * {@code AccessibilityServiceInfo} does not — it names its owner only
+     * through {@code getId()}, which is "pkg/.Service" or
+     * "pkg/full.Class.Name". Without the second shape, hiding bin.mt.plus from
+     * {@code getInstalledPackages} left its accessibility service fully visible
+     * in {@code getInstalledAccessibilityServiceList}, so the app saw a service
+     * whose package it had just been told does not exist. Grab reads exactly
+     * that list and records every service id in its scan result.
+     *
+     * <p>Port of {@code isHiddenItem()} in {@code jni/SandboxIDHook.java:883-899}.
+     */
     private static String packageNameOf(Object item) {
         try {
             java.lang.reflect.Field f = item.getClass().getField("packageName");
             Object v = f.get(item);
             if (v instanceof String) return (String) v;
+        } catch (Throwable ignored) { }
+        try {
+            java.lang.reflect.Method m = item.getClass().getMethod("getId");
+            Object v = m.invoke(item);
+            if (v instanceof String) {
+                String id = (String) v;
+                int cut = id.indexOf('/');
+                if (cut > 0) return id.substring(0, cut);
+            }
         } catch (Throwable ignored) { }
         return null;
     }

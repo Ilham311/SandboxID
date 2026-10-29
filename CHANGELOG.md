@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Fix: geometri layar varian LSPosed masih bisa dibaca dari bentuk lain
+
+Tiga celah di hook geometri yang ditambahkan `b0ee4bf`, semuanya ditemukan dengan
+membandingkan hasilnya baris per baris dengan `SandboxIDHook.java` alih-alih
+menganggap "sudah ada hook" berarti "sudah benar".
+
+**`Resources.getConfiguration()` tidak di-hook.** Configuration membawa
+`screenWidthDp`/`screenHeightDp`/`densityDpi` — satuan dp, bukan piksel, dan
+inilah permukaan yang dipakai aplikasi untuk menata layout. Tanpa hook ini
+persona yang mengaku Pixel 9 Pro XL tetap melaporkan geometri dp panel asli
+berdampingan dengan geometri piksel yang sudah dipalsukan: dua angka yang saling
+bertentangan dari satu perangkat. Native membawanya sebagai spec tersendiri
+(`sbx_lsplant.hpp:1204-1206`).
+
+**Tidak ada penukaran orientasi.** Framework mengisi out-parameter dengan
+dimensi panel yang sedang aktif, jadi `getSize(Point)` dalam keadaan landscape
+tiba dengan lebar > tinggi. Menulis pasangan portrait persona ke situ membuat
+pemanggil membaca panel portrait sementara display-nya berputar. Native menukar
+di kasus itu (`SandboxIDHook.java:1053-1058`); sekarang `applyMetrics`,
+`applyRect`, dan `applyConfiguration` melakukannya juga, dibaca dari bentuk
+objek itu sendiri sehingga tidak perlu referensi `Display`.
+
+**Objek hasil ditimpa di tempat.** `Resources.getConfiguration()` mengembalikan
+instance Configuration milik Resources itu sendiri. Menimpanya langsung merusak
+status resource aplikasi untuk semua pemanggil berikutnya, bukan hanya yang ini.
+Sekarang hasilnya disalin dulu (`DisplayMetrics.setTo`, konstruktor salin
+Configuration, konstruktor Point) dan salinan itulah yang dikembalikan — sama
+seperti native (`SandboxIDHook.java:486-511`). Bentuk out-parameter tetap ditulis
+di tempat, karena objek itu memang milik pemanggil.
+
+### Fix: daftar accessibility service tidak ikut disembunyikan
+
+`packageNameOf()` hanya membaca field `packageName`, yang tidak dimiliki
+`AccessibilityServiceInfo` — kelas itu menamai pemiliknya lewat `getId()`
+(`"pkg/.Service"`). Dan `AccessibilityManager` tidak di-hook sama sekali. Jadi
+`bin.mt.plus` tetap muncul sebagai `bin.mt.plus.canary/l.…` di
+`getInstalledAccessibilityServiceList` walaupun `getInstalledPackages` sudah
+menyangkal keberadaannya — persis bug yang native perbaiki di `isHiddenItem()`
+(`SandboxIDHook.java:883-899`). Grab membaca daftar itu dan mencatat setiap
+service id di hasil scan-nya.
 
 ## v2.2.52 (2026-10-29)
 
