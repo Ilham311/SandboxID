@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.45 (2026-10-29)
+
 ### Fix: varian LSPosed melewatkan hook cell identity dan carrier id
 
 **Gejala.** Perbaikan v2.2.38 ("`getMnc()` / `getMcc()` / `getSimCarrierId()`
