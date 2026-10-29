@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.40 (2026-10-29)
+
 ### Fix: varian LSPosed mengarang operator yang sama — `SeedId.imsi()`/`iccid()`
 
 **Gejala.** Cacat yang identik dengan entri operator di v2.2.38, tetapi di
