@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.56 (2026-10-29)
+
 ### Fix: hook "deny" dan "cloak" tidak pernah menolak apa pun
 
 Ini bug paling serius yang ditemukan sejauh ini, dan bentuknya sama di dua
