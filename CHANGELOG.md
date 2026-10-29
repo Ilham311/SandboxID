@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.52 (2026-10-29)
+
 ### Fix: hook GSF dan advertising id di varian LSPosed tidak pernah terpasang
 
 Dua kesalahan di commit `98edf0a`, keduanya membuat hook yang tampak terpasang
