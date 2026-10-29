@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.42 (2026-10-29)
+
 ### Fix: MAC Bluetooth tidak pernah memakai persona, dan `bluetooth_address` bocor
 
 Tiga cacat terpisah pada permukaan Bluetooth, semuanya ditemukan dengan
