@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.47 (2026-10-29)
+
 ### Fix: dua spec `CellIdentityNr` yang mustahil selalu MISS
 
 **Gejala.** Log sesi perangkat
