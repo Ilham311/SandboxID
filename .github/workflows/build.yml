@@ -236,6 +236,27 @@ jobs:
           java -cp out6 id.sandboxid.tt.GsfChk | tee gsfchk.log
           grep -q 'ALL PASS' gsfchk.log
 
+      - name: LSPosed class-deny unit test
+        # The OEM class deny has failed twice in ways that looked like success:
+        # first by throwing from the callback (XposedBridge swallows it and runs
+        # the original — see the hook-semantics step above), then by hooking
+        # only Class.forName while the app probed through ClassLoader.loadClass.
+        #
+        # Both entry points are now installed from one table (DenyList), and this
+        # asserts the OUTCOME for each: a denied name makes the call fail with
+        # ClassNotFoundException, a name that is not denied reaches the original.
+        # See lsp/app/src/test/java/id/sandboxid/tt/DenyListTest.java.
+        run: |
+          set -eu
+          mkdir -p out7/id/sandboxid/tt out7/de/robv/android/xposed
+          cp lsp/app/src/main/java/id/sandboxid/tt/DenyList.java out7/id/sandboxid/tt/
+          cp lsp/app/src/test/java/id/sandboxid/tt/DenyListTest.java out7/id/sandboxid/tt/
+          cp lsp/api/src/main/java/de/robv/android/xposed/XC_MethodHook.java \
+             out7/de/robv/android/xposed/
+          javac -d out7 $(find out7 -name '*.java')
+          java -cp out7 id.sandboxid.tt.DenyListTest | tee denylist.log
+          grep -q 'ALL PASS' denylist.log
+
       - name: Shell lint (syntax + shellcheck)
         run: |
           set -eu

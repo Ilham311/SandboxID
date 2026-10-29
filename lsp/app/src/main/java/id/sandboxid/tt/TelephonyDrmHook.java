@@ -258,10 +258,10 @@ final class TelephonyDrmHook {
         // helpers fall back to Runtime.exec("getprop") when SystemProperties
         // comes back empty, and a subprocess inherits none of our hooks.
         //
-        // The Zygisk module denies these through its Class.forName observer
-        // (M_OBSERVE, sbx_lsplant.hpp:1163-1165); the LSPosed variant had no
-        // equivalent, so a Pixel persona on this Xiaomi device still reported
-        // rom = "MIUI-…".
+        // The Zygisk module denies these through its class-load observer, on
+        // BOTH ClassLoader.loadClass and Class.forName (M_OBSERVE,
+        // sbx_lsplant.hpp:1150-1165); the LSPosed variant had no equivalent, so
+        // a Pixel persona on this Xiaomi device still reported rom = "MIUI-…".
         n += hookDenyClasses(cl, SeedId.denyClasses(id));
 
         // ---- P0e: GSF id (gservices provider) ----
@@ -1278,10 +1278,10 @@ final class TelephonyDrmHook {
     }
 
     /**
-     * Makes {@code Class.forName} reject the persona's foreign OEM classes.
+     * Makes the persona's foreign OEM classes fail to load.
      *
-     * <p>Hooks the <b>3-arg</b> overload, not the 1-arg one. {@code forName(
-     * String)} is {@code @CallerSensitive} and resolves through
+     * <p>Hooks the <b>3-arg</b> {@code Class.forName}, not the 1-arg one.
+     * {@code forName(String)} is {@code @CallerSensitive} and resolves through
      * {@code Reflection.getCallerClass()}, which from inside this callback
      * would see the module's own class rather than the app — every by-name load
      * would then resolve against the wrong loader. The 3-arg overload takes the
@@ -1302,33 +1302,37 @@ final class TelephonyDrmHook {
      * {@code miui.os.Build} load. {@code setThrowable} is the API that makes the
      * hooked call itself fail. See {@code XposedBridge.handleHookedMethod}.
      *
-     * <p>Arg index 0: Xposed omits the receiver, and the method is static, so
-     * the class name is the first argument.
+     * <p><b>Two entry points, not one.</b> The native side denies through both
+     * {@code ClassLoader.loadClass(String,boolean)} and {@code Class.forName(
+     * String,boolean,ClassLoader)} ({@code sbx_lsplant.hpp:1150-1165}), and for
+     * good reason: an app probing for an OEM class usually uses
+     * {@code loadClass}, not {@code forName}. Hooking only {@code forName} left
+     * the common path open — {@code miui.os.Build} still loaded and the OEM
+     * branch still fired. Both are installed here, from one table
+     * ({@link DenyList}), so neither can drift from the other.
      */
     private static int hookDenyClasses(ClassLoader cl, final String[] deny) {
         if (deny == null || deny.length == 0) return 0;
-        try {
-            XposedHelpers.findAndHookMethod("java.lang.Class", cl, "forName",
-                    String.class, boolean.class, ClassLoader.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam p) {
-                            if (p.args == null || p.args.length < 1) return;
-                            Object a = p.args[0];
-                            if (!(a instanceof String)) return;
-                            String want = (String) a;
-                            for (String d : deny) {
-                                if (want.equals(d)) {
-                                    p.setThrowable(new ClassNotFoundException(want));
-                                    return;
-                                }
-                            }
-                        }
-                    });
-            return 1;
-        } catch (Throwable t) {
-            return 0;
+
+        int n = 0;
+        for (final DenyList.Target t : DenyList.TARGETS) {
+            try {
+                Object[] sig = new Object[t.paramTypes.length + 1];
+                System.arraycopy(t.paramTypes, 0, sig, 0, t.paramTypes.length);
+                sig[t.paramTypes.length] = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam p) {
+                        String want = DenyList.nameAt(p.args, t);
+                        if (want == null) return;
+                        if (!DenyList.isDenied(want, deny)) return;
+                        p.setThrowable(new ClassNotFoundException(want));
+                    }
+                };
+                XposedHelpers.findAndHookMethod(t.className, cl, t.methodName, sig);
+                n++;
+            } catch (Throwable ignored) { }
         }
+        return n;
     }
 
     private static byte[] hexToBytes(String hex) {
