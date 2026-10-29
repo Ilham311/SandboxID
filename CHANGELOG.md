@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.53 (2026-10-29)
+
 ### Fix: geometri layar varian LSPosed masih bisa dibaca dari bentuk lain
 
 Tiga celah di hook geometri yang ditambahkan `b0ee4bf`, semuanya ditemukan dengan
