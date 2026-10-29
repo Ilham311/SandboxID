@@ -705,6 +705,12 @@ bool is_vendor_rom_prop(const char* name) {
     // value does either (the identity map is derived from Build fields, none of
     // which contain it), so the substring test cannot hide anything the persona
     // needs. Case-insensitive to cover a vendor that ships "MIUI"/"Miui".
+    //
+    // Known gap: this is persona-blind, so a Xiaomi/Redmi/POCO persona also
+    // loses its MIUI props even though deny_classes and vendor_keep keep the
+    // ROM present for it (module.cpp:399-431). See the matching note on
+    // isVendorRomProp() in lsp/.../PropHook.java for why the fix is a derived
+    // ro.miui.ui.version.name rather than a carve-out here.
     {
         static const char kMiui[] = "miui";
         const size_t n = std::strlen(name);

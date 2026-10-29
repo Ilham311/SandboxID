@@ -278,6 +278,16 @@ final class PropHook {
     // persist.sys.miui.* and slipped past a dot-prefixed test while a target app
     // read it, and the HyperOS scheduler prefixes (turbosched, dexpreload,
     // perf_scenario_recognition, perfdebug, smart_gc) are separate again.
+    //
+    // Known gap: the rule is persona-blind, so a Xiaomi/Redmi/POCO persona also
+    // loses its MIUI props while denyClasses() keeps miui.os.Build loadable and
+    // vendorKeep() keeps the com.miui packages visible. Hiding is right for a
+    // Pixel and wrong for a Xiaomi persona whose incremental is
+    // V816.0.12.0.UNCMIXM (a real Xiaomi 14 reports ro.miui.ui.version.name=
+    // V816); the fix is to derive that prop from the incremental the way
+    // deriveHwValue() derives the Dalvik ISA variant. Not done here: it is a
+    // behaviour change needing its own device verification, and this batch's job
+    // is to make the existing rules actually run.
     private static boolean isVendorRomProp(String k) {
         switch (k) {
             case "persist.sys.hardcoder.name":
