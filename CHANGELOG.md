@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Fix: varian LSPosed melewatkan replay gate register dan rewrite User-Agent
+
+Dua hook yang modul Zygisk punya **tidak pernah dipasang** di varian LSPosed,
+padahal target varian itu (`com.zhiliaoapp.musically`) adalah build yang
+keduanya tuju.
+
+**1. Replay gate `X.088c.LJII` / `X.07XI.LJII`.** Native memasangnya sebagai
+`M_FORCE_FALSE` dengan `force_index=2`. Tanpa hook ini, rotasi persona yang
+tidak mengubah `dr_aid`/`dr_channel`/`dr_install_vc` dijawab dari cache lokal
+dan **no-op diam-diam** — terlihat persis seperti "server mengenali perangkat
+ini", padahal permintaannya tidak pernah keluar dari HP. `RegisterHook` sekarang
+memasangnya lewat `hookAllMethods`, dibatasi pada bentuk argumen tepat tiga
+parameter dengan dua Boolean terakhir.
+
+Indeksnya **berbeda satu** antara kedua sisi: `args[]` native (LSPlant)
+menyertakan receiver, `args[]` Xposed tidak. `force_index=2` native setara
+`p.args[1]` di Xposed. Memakai indeks native apa adanya akan membalik boolean
+yang salah.
+
+**2. Rewrite User-Agent.** Native menghook `WebSettings.getDefaultUserAgent`
+dan `X.04vW.LIZ` (musically; `X.04v0` di trill). Keduanya tidak ada di
+LSPosed, sehingga UA tetap menyebut model/build asli. Ditambahkan sebagai
+`SeedId.userAgentPair()` + `hookUa()`.
+
+Jebakan yang sama dengan native: `PropHook` menghook
+`SystemProperties.get`, jadi membaca prop "asli" dari dalam hook akan
+mengembalikan nilai persona dan membuat `from == to` — no-op yang tetap
+membayar satu hook. Karena itu `SandboxIdTT` menangkap
+`ro.build.version.release`/`ro.product.model`/`ro.build.id` **sebelum**
+`PropHook.apply()`. Native mengatasi ini dengan `sbx_raw_prop_get`; di sini
+urutannya yang menjamin.
+
+Kedua sisi kini punya helper yang sama (`user_agent_pair` di
+`jni/sbx_ident_synth.hpp`, `SeedId.userAgentPair` di Java) dengan anchor nilai
+yang dipin di kedua suite, jadi drift ke depan gagal di CI.
+
+### Docs: tabel cakupan LSPosed mengklaim Zygisk tak bisa hook telephony
+
+`lsp/README.md` menyebut TelephonyManager/MediaDrm/WifiInfo/BluetoothAdapter/
+Settings.Secure sebagai permukaan "tidak bisa dicapai Zygisk" karena nilainya
+datang lewat Binder. Itu salah: modul membawa LSPlant (`SBX_ENABLE_LSPLANT`,
+default on) dan menghook kelimanya di dalam proses app. Log sesi perangkat
+memuat baris `L3 hooked` untuk masing-masing. Untuk kelima permukaan itu kedua
+varian setara; pembeda sebenarnya hanya `RegisterHook`/`Rewrite` dan
+ketiadaan kebutuhan root.
 
 ## v2.2.47 (2026-10-29)
 

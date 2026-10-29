@@ -252,6 +252,45 @@ public class SeedIdTest {
         check("clientudid is a uuid", reg.clientudid.matches(
                 "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"));
 
+        System.out.println("-- userAgentPair: the WebView UA rewrite --");
+        // The pair is a literal {from, to} for String.replace, and both halves
+        // must describe the SAME segment shape. A from-without-to (or a pair
+        // built from the persona on both sides) is a silent no-op — exactly the
+        // bug module.cpp:365-372 records hitting on device, where reading the
+        // props back through the module's own hook made from == to.
+        java.util.Map<String, String> uaPersona = new java.util.HashMap<>();
+        uaPersona.put("RELEASE", "13");
+        uaPersona.put("MODEL", "Pixel 7");
+        uaPersona.put("ID", "TQ3A.230805.001");
+
+        String[] ua = SeedId.userAgentPair(
+                "14", "Redmi Note 10", "TKQ1.220829.002", uaPersona);
+        check("ua pair built", ua != null && ua.length == 2);
+        eq("ua from is the real segment", ua[0],
+                "Android 14; Redmi Note 10 Build/TKQ1.220829.002");
+        eq("ua to is the persona segment", ua[1],
+                "Android 13; Pixel 7 Build/TQ3A.230805.001");
+        // The whole point: the two halves must differ, or the rewrite does
+        // nothing while still costing a hook.
+        check("ua halves differ", !ua[0].equals(ua[1]));
+
+        // A partial pair must be refused outright. Substituting a half-built
+        // segment would produce a UA naming neither phone correctly.
+        check("ua null when real release missing",
+                SeedId.userAgentPair(null, "M", "ID", uaPersona) == null);
+        check("ua null when real model missing",
+                SeedId.userAgentPair("14", "", "ID", uaPersona) == null);
+        check("ua null when real id missing",
+                SeedId.userAgentPair("14", "M", null, uaPersona) == null);
+        check("ua null when persona null",
+                SeedId.userAgentPair("14", "M", "ID", null) == null);
+
+        java.util.Map<String, String> noModel = new java.util.HashMap<>();
+        noModel.put("RELEASE", "13");
+        noModel.put("ID", "TQ3A.230805.001");
+        check("ua null when persona lacks MODEL",
+                SeedId.userAgentPair("14", "M", "ID", noModel) == null);
+
         System.out.println();
         if (fails == 0) System.out.println("ALL PASS");
         else System.out.println(fails + " check(s) FAILED");

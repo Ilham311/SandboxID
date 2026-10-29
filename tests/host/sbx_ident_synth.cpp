@@ -283,6 +283,41 @@ int main() {
               "non-numeric yields no operator split");
     }
 
+    // ---- user_agent_pair: the WebView UA rewrite ---------------------------
+    //
+    // The pair is a literal {from, to} for a String.replace, and both halves
+    // must describe the same segment shape. from == to is the failure this
+    // guards: it makes the rewrite a no-op that still costs a hook, and it is
+    // exactly what happened on device when the "real" values were read back
+    // through the module's own prop hook (module.cpp:365-372).
+    {
+        const UaPair ua = user_agent_pair(
+                "14", "Redmi Note 10", "TKQ1.220829.002",
+                "13", "Pixel 7", "TQ3A.230805.001");
+        CHECK(ua.ok(), "ua pair is complete");
+        CHECK(ua.from == "Android 14; Redmi Note 10 Build/TKQ1.220829.002",
+              "ua from is the real segment");
+        CHECK(ua.to == "Android 13; Pixel 7 Build/TQ3A.230805.001",
+              "ua to is the persona segment");
+        // Pinned against SeedId.userAgentPair() in SeedIdTest.java for the same
+        // inputs, so a change on either side fails in both places.
+        CHECK(ua.from != ua.to, "ua halves differ");
+
+        // A partial input must yield nothing at all, not a half-built segment.
+        CHECK(!user_agent_pair("", "M", "ID", "13", "P", "I").ok(),
+              "ua is empty when the real release is missing");
+        CHECK(!user_agent_pair("14", "", "ID", "13", "P", "I").ok(),
+              "ua is empty when the real model is missing");
+        CHECK(!user_agent_pair("14", "M", "", "13", "P", "I").ok(),
+              "ua is empty when the real id is missing");
+        CHECK(!user_agent_pair("14", "M", "ID", "", "P", "I").ok(),
+              "ua is empty when the persona release is missing");
+        CHECK(!user_agent_pair("14", "M", "ID", "13", "", "I").ok(),
+              "ua is empty when the persona model is missing");
+        CHECK(!user_agent_pair("14", "M", "ID", "13", "P", "").ok(),
+              "ua is empty when the persona id is missing");
+    }
+
     printf("\n%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }

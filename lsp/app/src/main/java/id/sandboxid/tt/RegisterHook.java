@@ -185,6 +185,51 @@ final class RegisterHook {
             Log.w(TAG, "RegisterHook: X.088K.LIZIZ unavailable", t);
         }
 
+        // (2b) The replay gate. LJII(params, boolean, boolean) decides whether
+        // the client replays the cached register response or performs a real
+        // round trip; forcing the first boolean to false makes it go to the
+        // network. Without this a persona rotation that leaves dr_aid /
+        // dr_channel / dr_install_vc unchanged is answered from the local cache
+        // and silently no-ops — which looks exactly like "the server recognises
+        // this device", but never leaves the phone.
+        //
+        // The Zygisk module carries the same hook as M_FORCE_FALSE with
+        // force_index=2 (jni/sbx_lsplant.hpp, X.088c/X.07XI). It was missing
+        // here, so the LSPosed variant could mint a new did only when the
+        // process restart happened to clear the gate on its own.
+        //
+        // Hooked by method NAME across overloads rather than by exact
+        // signature: the signature names another obfuscated type (X.085A in
+        // musically, X.07TX in trill), so pinning it would pin the build. The
+        // argument SHAPE is the guard instead — exactly three declared
+        // parameters, the last two Boolean — which also skips the unrelated
+        // LIZIZ(L*;Z)Z on the same class.
+        for (String c : new String[] { "X.088c", "X.07XI" }) {
+            try {
+                Class<?> k = XposedHelpers.findClass(c, cl);
+                XposedBridge.hookAllMethods(k, "LJII", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam p) {
+                        // Xposed's args[] holds the DECLARED parameters only —
+                        // no receiver — so for LJII(X085A, boolean, boolean)
+                        // this is args[0]=params, [1]=first boolean,
+                        // [2]=second. The native spec's force_index=2 is an
+                        // LSPlant index, which DOES include the receiver; the
+                        // two differ by one. Forcing index 2 here would flip
+                        // the wrong boolean.
+                        if (p.args != null && p.args.length == 3
+                                && p.args[1] instanceof Boolean
+                                && p.args[2] instanceof Boolean) {
+                            p.args[1] = Boolean.FALSE;
+                        }
+                    }
+                });
+                n++;
+            } catch (Throwable t) {
+                Log.w(TAG, "RegisterHook: " + c + ".LJII unavailable", t);
+            }
+        }
+
         // (3) The wire. Rewrite the register body at the last moment, so every
         // code path that assembles it is covered regardless of which loader
         // populated it. The byte[] form is the serialized JSON, so we patch the

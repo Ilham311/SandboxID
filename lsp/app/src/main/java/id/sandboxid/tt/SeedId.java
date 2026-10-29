@@ -254,6 +254,53 @@ final class SeedId {
         return isOperatorNumeric(mccmnc) ? mccmnc.substring(3) : "";
     }
 
+    /**
+     * The device-identifying segment of a WebView User-Agent, or empty when it
+     * cannot be built.
+     *
+     * <p>The UA arrives as
+     * {@code Mozilla/5.0 (Linux; Android <release>; <model> Build/<id>; wv) ...}
+     * and the {@code Android <release>; <model> Build/<id>} run is the part that
+     * names the real phone. This builds the two halves of a literal
+     * {@code replace(from, to)} so the caller can rewrite whatever the platform
+     * produced without re-deriving the surrounding boilerplate.
+     *
+     * <p>Mirrors {@code module.cpp:377-386}. The native side reads the "from"
+     * half through {@code sbx_raw_prop_get} — a plain
+     * {@code __system_property_get} — because by the time it runs, the module's
+     * own prop hook already answers the persona's values, which made
+     * {@code from == to} and turned the rewrite into a silent no-op. The Java
+     * variant has the same hazard: {@link PropHook} hooks
+     * {@code SystemProperties.get}, so the caller must pass in the values it
+     * read through a path that hook does not cover.
+     *
+     * <p>Both halves are required. If either is missing the caller must skip
+     * the rewrite entirely rather than substitute a partial segment.
+     *
+     * @param realRelease the platform's real {@code ro.build.version.release}
+     * @param realModel   the platform's real {@code ro.product.model}
+     * @param realId      the platform's real {@code ro.build.id}
+     * @param persona     the persona map
+     * @return {@code {from, to}}, or {@code null} if either half is incomplete
+     */
+    static String[] userAgentPair(String realRelease, String realModel,
+                                  String realId, Map<String, String> persona) {
+        if (isEmpty(realRelease) || isEmpty(realModel) || isEmpty(realId)) return null;
+        if (persona == null) return null;
+        String prel = persona.get("RELEASE");
+        String pmodel = persona.get("MODEL");
+        String pid = persona.get("ID");
+        if (isEmpty(prel) || isEmpty(pmodel) || isEmpty(pid)) return null;
+        return new String[] {
+                "Android " + realRelease + "; " + realModel + " Build/" + realId,
+                "Android " + prel + "; " + pmodel + " Build/" + pid,
+        };
+    }
+
+    private static boolean isEmpty(String s) {
+        return s == null || s.isEmpty();
+    }
+
     static String meid(long seed) {
         return hexFromSeed(seed ^ 0x4D454944L, 7).toUpperCase();   // 14 hex
     }

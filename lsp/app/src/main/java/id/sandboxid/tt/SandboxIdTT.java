@@ -44,13 +44,42 @@ public class SandboxIdTT implements IXposedHookLoadPackage {
         Log.i(TAG, "applying persona to " + lpparam.packageName
                 + " (" + id.size() + " keys)");
 
+        // The REAL build values, read BEFORE PropHook is installed. The
+        // User-Agent rewrite needs a literal {from, to} pair, and its "from"
+        // half must be what the platform actually emits — reading it after
+        // PropHook is in place would return the persona's own values and make
+        // from == to, which is a silent no-op. The native side hit exactly this
+        // and had to add sbx_raw_prop_get (module.cpp:365-372).
+        String realRelease = realProp("ro.build.version.release");
+        String realModel   = realProp("ro.product.model");
+        String realId      = realProp("ro.build.id");
+
         BuildHook.apply(lpparam.classLoader, id);
         PropHook.apply(lpparam.classLoader, id);
         ClockHook.apply(lpparam.classLoader, id);
-        TelephonyDrmHook.apply(lpparam.classLoader, id, lpparam.packageName);
+        TelephonyDrmHook.apply(lpparam.classLoader, id, lpparam.packageName,
+                realRelease, realModel, realId);
         KevaHook.apply(lpparam.classLoader, id);
         RegisterHook.apply(lpparam.classLoader, id);
 
         Log.i(TAG, "persona applied to " + TARGET);
+    }
+
+    /**
+     * One un-spoofed system property, or null.
+     *
+     * <p>Must run before {@link PropHook#apply}. Uses the public
+     * {@code SystemProperties.get} because at this point nothing is hooked yet;
+     * the ordering, not a special API, is what makes the value real.
+     */
+    private static String realProp(String key) {
+        try {
+            Class<?> sp = Class.forName("android.os.SystemProperties");
+            java.lang.reflect.Method get = sp.getMethod("get", String.class);
+            Object v = get.invoke(null, key);
+            if (v instanceof String && !((String) v).isEmpty()) return (String) v;
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 }

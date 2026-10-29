@@ -83,6 +83,11 @@ final class TelephonyDrmHook {
         apply(cl, id, SandboxIdTT.TARGET);
     }
 
+    /** Back-compat overload: no real build values, so the UA rewrite is skipped. */
+    static void apply(ClassLoader cl, Map<String, String> id, String pkg) {
+        apply(cl, id, pkg, null, null, null);
+    }
+
     /**
      * @param pkg the package the hooks are being applied to. Part of the seed,
      *            because the native module seeds from
@@ -93,8 +98,14 @@ final class TelephonyDrmHook {
      *            opposite of what the class docstring promises and would show up
      *            as two different phones if both variants were ever installed
      *            together.
+     * @param realRelease the platform's real {@code ro.build.version.release},
+     *            captured before {@link PropHook} was installed. Null skips the
+     *            User-Agent rewrite — a partial pair would be worse than none.
+     * @param realModel the platform's real {@code ro.product.model}.
+     * @param realId the platform's real {@code ro.build.id}.
      */
-    static void apply(ClassLoader cl, Map<String, String> id, String pkg) {
+    static void apply(ClassLoader cl, Map<String, String> id, String pkg,
+                      String realRelease, String realModel, String realId) {
         long seed = SeedId.applogSeed(id, pkg);
         // No fallback operator. A persona with no carrier configured must let
         // the IMSI/ICCID hooks fall through to the real values; substituting a
@@ -176,6 +187,37 @@ final class TelephonyDrmHook {
         if (widevine != null) {
             n += hook(cl, "android.media.MediaDrm", "getPropertyByteArray",
                     String.class, new KeyedBytes(1, "deviceUniqueId", widevine));
+        }
+
+        // ---- P0b: WebView User-Agent ----
+        //
+        // The UA names the real phone in its "Android <release>; <model>
+        // Build/<id>" run, and libwebviewchromium.so composes it from the
+        // ro.build.* props. On this ROM that library cannot be PLT-hooked (its
+        // segments are mapped from a shared_relro blob and an uncompressed APK
+        // entry, neither of which starts with an ELF header), so the Java
+        // surface is the only place left.
+        //
+        // Two hooks, exactly as the Zygisk module installs them:
+        //   * WebSettings.getDefaultUserAgent(Context) — the framework entry
+        //     point for the "…; wv) … Version/4.0 …" form;
+        //   * X.04vW.LIZ(String) — the app's own cache writer. Rewriting its
+        //     return fixes the read path AND the value the app re-persists,
+        //     which a read-path-only fix cannot do for a populated cache. The
+        //     class is per-build: X.04vW is musically, X.04v0 is trill (where
+        //     X.04v0 is the writer and also has an unrelated LIZ(Context)V).
+        //
+        // The "from" half must be the REAL values. PropHook hooks
+        // SystemProperties.get, so reading them back through it here would
+        // return the persona and make from == to — a silent no-op. The native
+        // side hit exactly this and had to add sbx_raw_prop_get; here the real
+        // values are captured before PropHook is installed (see SandboxIdTT).
+        String[] uaPair = SeedId.userAgentPair(realRelease, realModel, realId, id);
+        if (uaPair != null) {
+            for (String c : new String[] {
+                    "android.webkit.WebSettings", "X.04vW", "X.04v0" }) {
+                n += hookUa(cl, c, uaPair[0], uaPair[1]);
+            }
         }
 
         // ---- P1: TelephonyManager (all instance methods) ----
@@ -432,6 +474,46 @@ final class TelephonyDrmHook {
         } catch (Throwable t) {
             return 0;
         }
+    }
+
+    /**
+     * Installs the User-Agent rewrite on one class, hooking whichever of the
+     * two known shapes it declares.
+     *
+     * <p>{@code android.webkit.WebSettings.getDefaultUserAgent(Context)} is the
+     * framework entry point; {@code X.04vW.LIZ(String)} / {@code X.04v0.LIZ(
+     * String)} is the app's cache writer. Both return a String and take either
+     * one Context or one String, so the shape is tried per class rather than
+     * assumed. A class that declares neither is simply skipped — the other
+     * hook still covers its path.
+     */
+    private static int hookUa(ClassLoader cl, String cls,
+                              final String from, final String to) {
+        XC_MethodHook cb = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam p) {
+                Object r = p.getResult();
+                if (!(r instanceof String)) return;
+                String s = (String) r;
+                if (s.isEmpty() || !s.contains(from)) return;
+                p.setResult(s.replace(from, to));
+            }
+        };
+        int n = 0;
+        try {
+            XposedHelpers.findAndHookMethod(cls, cl, "getDefaultUserAgent",
+                    android.content.Context.class, cb);
+            n++;
+        } catch (Throwable ignored) {
+            // Not the framework class, or the method is gone on this API level.
+        }
+        try {
+            XposedHelpers.findAndHookMethod(cls, cl, "LIZ", String.class, cb);
+            n++;
+        } catch (Throwable ignored) {
+            // Not the app-side writer.
+        }
+        return n;
     }
 
     private static int hook(ClassLoader cl, String cls, String name,

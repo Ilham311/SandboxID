@@ -139,6 +139,42 @@ inline std::string operator_mnc(const std::string& numeric) {
     return numeric.substr(3);
 }
 
+// --- WebView User-Agent: the device-identifying segment ---------------------
+//
+// The UA arrives as "... (Linux; Android <release>; <model> Build/<id>; wv) ..."
+// and that run is the part naming the real phone. This builds the two halves of
+// a literal replace(), so the caller rewrites whatever the platform produced
+// without re-deriving the surrounding boilerplate.
+//
+// Both halves are required. A from-without-to (or the reverse) would make the
+// caller substitute nothing while still paying for the hook, and a half-built
+// segment names neither phone correctly — so an incomplete input yields an
+// empty pair and the caller skips the rewrite entirely.
+//
+// The "real" values must be read through sbx_raw_prop_get, NOT the module's own
+// prop hook: by the time the hook is installed, __system_property_get answers
+// the persona's values, which makes from == to and turns the rewrite into a
+// silent no-op. That exact bug was observed on device (module.cpp:365-372).
+struct UaPair {
+    std::string from;
+    std::string to;
+    bool ok() const { return !from.empty() && !to.empty(); }
+};
+
+inline UaPair user_agent_pair(const std::string& real_release,
+                              const std::string& real_model,
+                              const std::string& real_id,
+                              const std::string& persona_release,
+                              const std::string& persona_model,
+                              const std::string& persona_id) {
+    UaPair p;
+    if (real_release.empty() || real_model.empty() || real_id.empty()) return p;
+    if (persona_release.empty() || persona_model.empty() || persona_id.empty()) return p;
+    p.from = "Android " + real_release + "; " + real_model + " Build/" + real_id;
+    p.to   = "Android " + persona_release + "; " + persona_model + " Build/" + persona_id;
+    return p;
+}
+
 // --- MAC selection: the persona's own value, or a seed-derived fallback -----
 // Both MAC surfaces (WifiInfo.getMacAddress, BluetoothAdapter.getAddress) and
 // the bluetooth_address row of Settings.Secure must report the SAME address the
