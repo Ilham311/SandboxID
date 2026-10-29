@@ -128,16 +128,43 @@ final class SeedId {
         return d.toString();
     }
 
+    /**
+     * IMSI for {@code mccmnc}, or <b>empty</b> when the operator is unknown.
+     *
+     * <p>The empty return is the whole point. This used to substitute
+     * {@code "51010"} (Telkomsel) for any operator it could not parse, which
+     * made every persona claim a network the device was not attached to: the
+     * test SIM is XL {@code 51011}, and an app that reads the MNC from the radio
+     * (a surface no hook here covers) recorded {@code "mnc":"11"} beside a
+     * spoofed Telkomsel name in the same event. A caller that gets an empty
+     * string must skip the hook so the getter falls through to the real value,
+     * exactly as the native {@code synth_imsi()} does.
+     *
+     * <p>A malformed operator is rejected rather than repaired: {@code "51011,"}
+     * is what {@code getprop gsm.sim.operator.numeric} returns on a single-SIM
+     * device (the props are per-slot and comma-joined), and the caller is
+     * responsible for stripping that separator before calling this.
+     */
     static String imsi(long seed, String mccmnc) {
-        if (mccmnc.length() < 5 || mccmnc.length() > 6) mccmnc = "51010";
-        for (int i = 0; i < mccmnc.length(); i++) {
-            char c = mccmnc.charAt(i);
-            if (c < '0' || c > '9') { mccmnc = "51010"; break; }
-        }
+        if (!isOperatorNumeric(mccmnc)) return "";
         long[] st = {seed ^ 0x494D5349L};                     // "IMSI"
         StringBuilder d = new StringBuilder(mccmnc);
         appendDigits(d, st, 15 - mccmnc.length());
         return d.toString();
+    }
+
+    /**
+     * MCC+MNC is 5 or 6 digits and nothing else. Shared by {@link #imsi} and
+     * {@link #iccid} so the two cannot drift into accepting different inputs.
+     */
+    static boolean isOperatorNumeric(String mccmnc) {
+        if (mccmnc == null) return false;
+        if (mccmnc.length() < 5 || mccmnc.length() > 6) return false;
+        for (int i = 0; i < mccmnc.length(); i++) {
+            char c = mccmnc.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
     }
 
     static String meid(long seed) {
@@ -148,7 +175,17 @@ final class SeedId {
         return hexFromSeed(seed ^ 0x57565F4944L, 32);              // "WV_ID"
     }
 
+    /**
+     * ICCID for {@code mccmnc}, or <b>empty</b> when the operator is unknown.
+     *
+     * <p>Same rule and same reason as {@link #imsi}: the country-code half comes
+     * from the MCC, so without one the result would describe a SIM from a
+     * country the device is not in. A device with no SIM reports null from
+     * {@code getSimSerialNumber()}, and an empty return lets the hook fall
+     * through to reproduce exactly that.
+     */
     static String iccid(long seed, String mccmnc) {
+        if (!isOperatorNumeric(mccmnc)) return "";
         long[] st = {seed ^ 0x49434349L};                     // "ICCI"
         StringBuilder d = new StringBuilder("89");
         d.append(ccForMcc(mccmnc));

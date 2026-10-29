@@ -88,6 +88,26 @@ jobs:
           java -cp out2 id.sandboxid.tt.HwNamingTest | tee hwnaming.log
           grep -q 'ALL PASS' hwnaming.log
 
+      - name: LSPosed identifier-synthesis unit test
+        # The same carrier bug the native side had, in the other variant: SeedId
+        # substituted Telkomsel 51010 for any operator it could not parse, and
+        # iccid() had no guard at all, so a persona on an XL SIM (51011, the test
+        # device) advertised an IMSI and ICCID naming a network it was not
+        # attached to. SeedId has no Android dependency, so it is pinned here
+        # against the same rule tests/host/sbx_ident_synth.cpp asserts — a
+        # synthesized identifier is consistent with its operator, or empty. The
+        # expected strings are cross-checked against the native synth_imsi()/
+        # synth_iccid(), so a drift between the two variants fails. See
+        # lsp/app/src/test/java/id/sandboxid/tt/SeedIdTest.java.
+        run: |
+          set -eu
+          mkdir -p out3/id/sandboxid/tt
+          cp lsp/app/src/main/java/id/sandboxid/tt/SeedId.java out3/id/sandboxid/tt/
+          cp lsp/app/src/test/java/id/sandboxid/tt/SeedIdTest.java out3/
+          javac -d out3 out3/id/sandboxid/tt/SeedId.java out3/SeedIdTest.java
+          java -cp out3 id.sandboxid.tt.SeedIdTest | tee seedid.log
+          grep -q 'ALL PASS' seedid.log
+
       - name: Shell lint (syntax + shellcheck)
         run: |
           set -eu

@@ -1,0 +1,164 @@
+package id.sandboxid.tt;
+
+/**
+ * Pins {@link SeedId}'s identifier synthesis — the Java counterpart of the
+ * native suite {@code tests/host/sbx_ident_synth.cpp}.
+ *
+ * <p><b>Why this test exists.</b> The LSPosed variant carried the identical bug
+ * the native side had, in two places at once:
+ *
+ * <ul>
+ *   <li>{@code SeedId.imsi()} substituted {@code "51010"} (Telkomsel) for any
+ *       operator it could not parse, so a persona on an XL SIM — {@code 51011},
+ *       the test device — advertised an IMSI naming a network it was not
+ *       attached to. {@code SeedId.iccid()} had no guard at all and produced
+ *       {@code 8901...} with a fabricated country code {@code 01}.</li>
+ *   <li>{@code TelephonyDrmHook} defaulted a missing
+ *       {@code GSM_OPERATOR_NUMERIC} to {@code "51010"} and
+ *       {@code PersonaGenerator} wrote that key unconditionally, so the bug was
+ *       reachable from every persona the UI ever generated.</li>
+ * </ul>
+ *
+ * <p>The rule this test locks: a synthesized identifier is <b>consistent with
+ * its operator, or empty</b>. Empty makes the caller skip the hook so the getter
+ * falls through to the real value — never a third thing that merely looks
+ * plausible.
+ *
+ * <p>Deliberately JDK-only, like {@code RewriteTest3} and {@code HwNamingTest}:
+ * {@link SeedId} imports nothing from Android, so CI can pin it without an SDK.
+ * The expected values were cross-checked against the native
+ * {@code synth_imsi()}/{@code synth_iccid()} for the same seed, so a drift
+ * between the two variants fails here.
+ */
+public class SeedIdTest {
+
+    static int fails = 0;
+
+    static void check(String name, boolean ok) {
+        System.out.println((ok ? "ok  " : "FAIL") + " " + name);
+        if (!ok) fails++;
+    }
+
+    static void eq(String name, String got, String want) {
+        boolean ok = want.equals(got);
+        System.out.println((ok ? "ok  " : "FAIL") + " " + name
+                + (ok ? "" : "  (got '" + got + "', want '" + want + "')"));
+        if (!ok) fails++;
+    }
+
+    // Same seed the native cross-check used, so the two variants' outputs are
+    // directly comparable.
+    static final long SEED = 0x1234ABCDL;
+
+    public static void main(String[] a) {
+        System.out.println("-- operator numeric validation --");
+        check("51011 is valid", SeedId.isOperatorNumeric("51011"));
+        check("310260 is valid", SeedId.isOperatorNumeric("310260"));
+        check("null is not valid", !SeedId.isOperatorNumeric(null));
+        check("empty is not valid", !SeedId.isOperatorNumeric(""));
+        check("truncated is not valid", !SeedId.isOperatorNumeric("510"));
+        check("over-long is not valid", !SeedId.isOperatorNumeric("5101111"));
+        // The single-SIM per-slot form: getprop returns "51011," with the
+        // separator still attached. The caller strips it; this must reject it.
+        check("comma-joined is not valid", !SeedId.isOperatorNumeric("51011,"));
+        check("non-numeric is not valid", !SeedId.isOperatorNumeric("51O11"));
+
+        System.out.println("-- IMSI --");
+        // The regression: these two used to come back as 51010-prefixed.
+        eq("no operator -> empty", SeedId.imsi(SEED, ""), "");
+        eq("null operator -> empty", SeedId.imsi(SEED, null), "");
+        eq("comma-joined -> empty", SeedId.imsi(SEED, "51011,"), "");
+        eq("truncated -> empty", SeedId.imsi(SEED, "510"), "");
+        eq("non-numeric -> empty", SeedId.imsi(SEED, "51O11"), "");
+
+        // A known operator yields a 15-digit IMSI carrying that operator.
+        String imsi = SeedId.imsi(SEED, "51011");
+        eq("imsi length", Integer.toString(imsi.length()), "15");
+        check("imsi carries its operator", imsi.startsWith("51011"));
+        check("imsi is all digits", allDigits(imsi));
+        // Never the Telkomsel prefix unless the operator IS Telkomsel.
+        check("imsi is not Telkomsel for an XL SIM", !imsi.startsWith("51010"));
+        eq("imsi is deterministic", SeedId.imsi(SEED, "51011"), imsi);
+        check("imsi follows the operator, not a constant",
+                !SeedId.imsi(SEED, "51010").equals(imsi));
+
+        // 3-digit MNC (North America) still produces 15 digits.
+        String us = SeedId.imsi(SEED, "310260");
+        eq("3-digit MNC imsi length", Integer.toString(us.length()), "15");
+        check("3-digit MNC imsi carries its operator", us.startsWith("310260"));
+
+        System.out.println("-- ICCID --");
+        eq("no operator -> empty", SeedId.iccid(SEED, ""), "");
+        eq("null operator -> empty", SeedId.iccid(SEED, null), "");
+        eq("comma-joined -> empty", SeedId.iccid(SEED, "51011,"), "");
+        eq("truncated -> empty", SeedId.iccid(SEED, "510"), "");
+
+        String iccid = SeedId.iccid(SEED, "51011");
+        eq("iccid length", Integer.toString(iccid.length()), "19");
+        check("iccid starts with 89", iccid.startsWith("89"));
+        // 89 + country 62 (Indonesia) for MCC 510. The fabricated "01" that the
+        // unguarded path produced for an unknown operator is the regression.
+        check("iccid country code follows the MCC", iccid.startsWith("8962"));
+        check("iccid is all digits", allDigits(iccid));
+        check("iccid Luhn valid", luhnOk(iccid));
+        eq("iccid is deterministic", SeedId.iccid(SEED, "51011"), iccid);
+
+        check("US iccid uses country 1", SeedId.iccid(SEED, "310260").startsWith("891"));
+        check("US iccid Luhn valid", luhnOk(SeedId.iccid(SEED, "310260")));
+
+        System.out.println("-- cross-variant agreement with the native side --");
+        // These exact strings are what sbxid::synth_imsi / synth_iccid return for
+        // the same seed. A change on either side that breaks the pair fails here.
+        eq("imsi matches native", SeedId.imsi(SEED, "51011"), "510115509216614");
+        eq("iccid matches native", SeedId.iccid(SEED, "51011"), "8962767996665767591");
+        eq("iccid matches native (US)",
+                SeedId.iccid(SEED, "310260"), "8917679966657675913");
+
+        System.out.println("-- IMEI / MEID / Widevine are operator-independent --");
+        // These must still synthesize with no operator: a device with no SIM
+        // still has an IMEI, so emptying them would be wrong.
+        String imei = SeedId.imei(SEED);
+        eq("imei length", Integer.toString(imei.length()), "15");
+        check("imei is all digits", allDigits(imei));
+        check("imei Luhn valid", luhnOk(imei));
+        eq("imei is deterministic", SeedId.imei(SEED), imei);
+
+        String meid = SeedId.meid(SEED);
+        eq("meid length", Integer.toString(meid.length()), "14");
+        check("meid is uppercase hex", meid.matches("[0-9A-F]{14}"));
+
+        eq("widevine length", Integer.toString(SeedId.widevineHex(SEED).length()), "64");
+        check("widevine is lowercase hex",
+                SeedId.widevineHex(SEED).matches("[0-9a-f]{64}"));
+
+        System.out.println();
+        if (fails == 0) System.out.println("ALL PASS");
+        else System.out.println(fails + " check(s) FAILED");
+        System.exit(fails == 0 ? 0 : 1);
+    }
+
+    static boolean allDigits(String s) {
+        if (s == null || s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
+    }
+
+    /** Luhn over the whole string, check digit included: sum % 10 == 0. */
+    static boolean luhnOk(String s) {
+        int sum = 0;
+        boolean dbl = false;
+        for (int i = s.length() - 1; i >= 0; i--) {
+            int n = s.charAt(i) - '0';
+            if (dbl) {
+                n *= 2;
+                if (n > 9) n -= 9;
+            }
+            sum += n;
+            dbl = !dbl;
+        }
+        return sum % 10 == 0;
+    }
+}

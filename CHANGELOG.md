@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Fix: varian LSPosed mengarang operator yang sama — `SeedId.imsi()`/`iccid()`
+
+**Gejala.** Cacat yang identik dengan entri operator di v2.2.38, tetapi di
+varian LSPosed: `SeedId.imsi()` mengganti operator apa pun yang tidak bisa
+di-parse dengan `"51010"` (Telkomsel), dan `SeedId.iccid()` sama sekali tidak
+punya penjaga sehingga menghasilkan `8901…` dengan kode negara karangan `01`.
+`TelephonyDrmHook` juga memberi default `"51010"` saat
+`GSM_OPERATOR_NUMERIC` tidak ada, dan `PersonaGenerator` **selalu** menulis
+keempat key itu — jadi setiap persona yang pernah dibuat UI membawa bug ini.
+
+**Dibuktikan, bukan diduga.** `SeedId` murni Java tanpa dependensi Android, jadi
+bisa dijalankan di JDK host. Sebelum perbaikan: `imsi(seed, "")` →
+`510105509216614` (prefix Telkomsel), `iccid(seed, "")` → `8901767996665767599`
+(kode negara `01`).
+
+**Perbaikan.**
+
+- `SeedId.imsi()` dan `iccid()` mengembalikan string **kosong** untuk operator
+  yang tidak diketahui, memakai satu predikat bersama `isOperatorNumeric()`
+  supaya keduanya tidak bisa menyimpang. Aturannya sama dengan sisi native:
+  identifier sintesis konsisten dengan operatornya, atau kosong.
+- `TelephonyDrmHook` tidak lagi memberi default. Saat persona tidak punya
+  operator, ia membaca MCC+MNC **asli** lewat `android.os.SystemProperties`
+  (refleksi, karena itu API tersembunyi) dan membuang koma per-slot, meniru
+  `install_java_hooks()` di `jni/module.cpp`. Hook IMSI/ICCID hanya dipasang
+  bila nilainya tidak kosong — hook yang menjawab `""` bukan sama dengan tidak
+  ada hook, karena `getSubscriberId()` tanpa SIM mengembalikan `null`.
+- `PersonaGenerator` tidak lagi menulis `GSM_OPERATOR_*` / `GSM_CARRIER_ID`.
+- Suite baru `lsp/app/src/test/java/id/sandboxid/tt/SeedIdTest.java` (44
+  pemeriksaan) dikunci di CI sebagai langkah "LSPosed identifier-synthesis unit
+  test". Nilai harapannya diambil dari `synth_imsi()`/`synth_iccid()` native
+  untuk seed yang sama, jadi pergeseran di salah satu sisi menggagalkan test.
 
 ## v2.2.38 (2026-10-29)
 

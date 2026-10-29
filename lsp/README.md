@@ -85,7 +85,7 @@ yang seperti di sisi root saling berbeda.
 |---|---|---|
 | `devices.tsv` (40 device, 8 brand) | **Ya**, dibundle sebagai asset | 15 kolom; bawa brand/SoC/marketname/release_date |
 | `personas.tsv` (16 Pixel) | Tidak | subset devices.tsv dengan urutan kolom beda — memakai keduanya adalah sumber bug yang dikomentari sendiri di `autopif.sh:314-318` |
-| Carrier | Default `config.hpp` (51010/Telkomsel/id/787) | Tidak ada `carrier.conf` tanpa root; UI picker bisa ditambah nanti |
+| Carrier | **Tidak dikarang** — operator ASLI perangkat dibaca saat hook dipasang | `config.hpp` tidak lagi punya default 51010/Telkomsel. Persona tanpa `GSM_OPERATOR_NUMERIC` memakai MCC+MNC dari properti `gsm.sim.operator.numeric`, sehingga IMSI/ICCID konsisten dengan SIM yang benar-benar ada. Tanpa operator yang terbaca, hook IMSI/ICCID **tidak dipasang** dan getter jatuh ke nilai asli |
 
 **Setiap key yang rumusnya berbeda antar shell dan native, sisi native yang
 dipilih** (kecuali dicaftat), karena hook runtime ditulis melawannya:

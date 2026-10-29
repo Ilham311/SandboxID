@@ -35,8 +35,17 @@ final class TelephonyDrmHook {
 
     static void apply(ClassLoader cl, Map<String, String> id) {
         long seed = SeedId.personaSeed(id);
-        String mccmnc = id.containsKey("GSM_OPERATOR_NUMERIC")
-                ? id.get("GSM_OPERATOR_NUMERIC") : "51010";
+        // No fallback operator. A persona with no carrier configured must let
+        // the IMSI/ICCID hooks fall through to the real values; substituting a
+        // default here is what made the device claim Telkomsel 51010 while the
+        // radio reported XL 51011. See SeedId.imsi().
+        String mccmnc = id.get("GSM_OPERATOR_NUMERIC");
+        if (mccmnc == null || mccmnc.isEmpty()) {
+            // Persona has no carrier: use the one the modem actually reports, so
+            // the synthesized IMSI/ICCID name the network the phone is on. This
+            // mirrors install_java_hooks() in jni/module.cpp.
+            mccmnc = realOperatorNumeric();
+        }
 
         final String imei = SeedId.imei(seed);
         final String imsi = SeedId.imsi(seed, mccmnc);
@@ -74,21 +83,25 @@ final class TelephonyDrmHook {
         n += hook(cl, tel, "getImei", int.class, new Const<>(imei));
         n += hook0(cl, tel, "getMeid", meid);
         n += hook(cl, tel, "getMeid", int.class, new Const<>(meid));
-        n += hook0(cl, tel, "getSubscriberId", imsi);
-        n += hook0(cl, tel, "getSimSerialNumber", iccid);
+        // Installed only when the operator is known. An empty value would make
+        // the hook a no-op that still costs a resolution, and — worse — a hook
+        // that answers "" is not the same as no hook: getSubscriberId() on a
+        // real device with no SIM returns null, not "".
+        if (!imsi.isEmpty())  n += hook0(cl, tel, "getSubscriberId", imsi);
+        if (!iccid.isEmpty()) n += hook0(cl, tel, "getSimSerialNumber", iccid);
 
         String opNum = id.get("GSM_OPERATOR_NUMERIC");
         String opAlpha = id.get("GSM_OPERATOR_ALPHA");
         String opIso = id.get("GSM_OPERATOR_ISO");
-        if (opNum != null) {
+        if (opNum != null && !opNum.isEmpty()) {
             n += hook0(cl, tel, "getNetworkOperator", opNum);
             n += hook0(cl, tel, "getSimOperator", opNum);
         }
-        if (opAlpha != null) {
+        if (opAlpha != null && !opAlpha.isEmpty()) {
             n += hook0(cl, tel, "getNetworkOperatorName", opAlpha);
             n += hook0(cl, tel, "getSimOperatorName", opAlpha);
         }
-        if (opIso != null) {
+        if (opIso != null && !opIso.isEmpty()) {
             n += hook0(cl, tel, "getSimCountryIso", opIso);
             n += hook0(cl, tel, "getNetworkCountryIso", opIso);
         }
@@ -105,7 +118,53 @@ final class TelephonyDrmHook {
                     bt.toUpperCase());
         }
 
-        Log.d(TAG, "Telephony/DRM hooks: " + n + " method(s) installed");
+        Log.d(TAG, "Telephony/DRM hooks: " + n + " method(s) installed"
+                + (mccmnc == null || mccmnc.isEmpty()
+                        ? " (no operator configured: IMSI/ICCID pass through"
+                          + " to the real values)" : ""));
+    }
+
+    // ------------------------------------------------------------------
+
+    /**
+     * The device's real MCC+MNC, read from the property service.
+     *
+     * <p>Used when the persona carries no operator, so the synthesized
+     * IMSI/ICCID describe the network the phone is actually on instead of a
+     * made-up one. Read through {@code android.os.SystemProperties.get} — the
+     * same surface {@link PropHook} hooks — which means a persona that DOES set
+     * GSM_OPERATOR_NUMERIC never reaches this path (the caller passes its own
+     * value), and a persona that does not gets the real one.
+     *
+     * <p>The GSM props are per-slot and comma-joined: a single-SIM device still
+     * writes the separator, so {@code gsm.sim.operator.numeric} returns
+     * {@code "51011,"}. TelephonyManager reports the slot's value without it, so
+     * the comma has to go here or {@link SeedId#isOperatorNumeric} rejects a
+     * string that is actually valid.
+     *
+     * <p>Reflection, not a direct call: {@code android.os.SystemProperties} is a
+     * hidden API, and this class is compiled against the SDK stub where it does
+     * not exist. Fail-soft — any failure yields null, which makes the caller
+     * leave the IMSI/ICCID hooks uninstalled.
+     */
+    private static String realOperatorNumeric() {
+        String[] keys = {"gsm.sim.operator.numeric", "gsm.operator.numeric"};
+        for (String key : keys) {
+            try {
+                Class<?> sp = Class.forName("android.os.SystemProperties");
+                java.lang.reflect.Method get = sp.getMethod("get", String.class);
+                Object v = get.invoke(null, key);
+                if (v == null) continue;
+                String s = v.toString();
+                int comma = s.indexOf(',');
+                if (comma >= 0) s = s.substring(0, comma);
+                s = s.trim();
+                if (SeedId.isOperatorNumeric(s)) return s;
+            } catch (Throwable ignored) {
+                // Hidden API missing or blocked on this ROM — try the next key.
+            }
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------

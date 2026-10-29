@@ -191,12 +191,18 @@ final class PersonaGenerator {
         put(id, "PREVIEW_SDK_FINGERPRINT", "REL");
         put(id, "MEDIA_PERFORMANCE_CLASS", mediaPerfClass(model));
 
-        // --- carrier defaults (config.hpp VAL_DEFAULTS; no carrier.conf here) ---
-        put(id, "GSM_OPERATOR_NUMERIC", "51010");
-        put(id, "GSM_OPERATOR_ALPHA", "Telkomsel");
-        put(id, "GSM_OPERATOR_ISO", "id");
-        put(id, "GSM_CARRIER_ID", "787");
-
+        // --- carrier: deliberately NOT part of the persona ---
+        // These four keys used to be written here as Telkomsel 51010 / id / 787,
+        // mirroring the Zygisk module's old VAL_DEFAULTS. That made every
+        // persona claim a network the device is not attached to, and the
+        // contradiction is visible from inside one app: the radio surface
+        // reports the real MNC while the hooked getters report the spoofed one.
+        // The native side dropped those defaults (see config.hpp); this side
+        // drops them too, and TelephonyDrmHook reads the device's REAL operator
+        // at hook time so the synthesized IMSI/ICCID stay consistent with the
+        // SIM actually in the phone. A user who wants a different carrier can
+        // still set GSM_OPERATOR_* by hand in the persona blob.
+        //
         // --- AppLog epoch: rotation knob + determinism salt, NOT device age ---
         long epoch = Math.max(System.currentTimeMillis(), 1700000000000L);
         put(id, "APPLOG_EPOCH", Long.toString(epoch));
