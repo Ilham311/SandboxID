@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.55 (2026-10-29)
+
 ### Fix: overload flags API 33 memakai tipe flags yang salah
 
 `hookFlags` selalu mencari `PackageManager$PackageInfoFlags`, dan
