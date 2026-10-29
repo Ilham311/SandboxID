@@ -367,6 +367,41 @@ final class SeedId {
         }
     }
 
+    /**
+     * The advertising id: a UUID v4 derived from the seed.
+     *
+     * <p>Port of {@code hv.gaid = uuid_from_seed(seed ^ 0x47414944)} in
+     * module.cpp:443. Derived, not read from the persona: the persona has a
+     * {@code GOOGLE_AID} key, but that key is the identity.prop row the shell
+     * writes and the native module never reads it for this value — it derives
+     * the GAID from the seed so the two variants agree. Reading the persona key
+     * here would make the LSPosed variant report a different advertising id
+     * than the Zygisk module for the same persona.
+     */
+    static String gaid(long seed) {
+        return uuid(seed ^ 0x47414944L);                            // "GAID"
+    }
+
+    /**
+     * The GSF id: decimal digits, because the gservices provider serves a
+     * decimal long and every client parses it with {@code Long.parseLong}.
+     *
+     * <p>Port of {@code hv.gsf_id = decimal_from_seed(seed ^ 0x4753464944)} in
+     * module.cpp:447, which is
+     * {@code splitmix64(seed) & 0x7FFFFFFFFFFFFFFF} printed unsigned
+     * (native/native_read.cpp:96-101). Masking the sign bit is what keeps the
+     * value parseable: {@code Long.parseLong} accepts a leading '-' but the
+     * provider never emits one, so a negative id would be a shape no real
+     * device produces.
+     *
+     * <p>Again derived rather than read from the persona — the native module
+     * has no {@code GSF_ID} key at all.
+     */
+    static String gsfId(long seed) {
+        long v = splitmix64(new long[] {seed ^ 0x4753464944L}, 0) & 0x7FFFFFFFFFFFFFFFL;
+        return Long.toUnsignedString(v);
+    }
+
     static String meid(long seed) {
         return hexFromSeed(seed ^ 0x4D454944L, 7).toUpperCase();   // 14 hex
     }

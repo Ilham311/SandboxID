@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Fix: hook GSF dan advertising id di varian LSPosed tidak pernah terpasang
+
+Dua kesalahan di commit `98edf0a`, keduanya membuat hook yang tampak terpasang
+sebenarnya tidak pernah jalan.
+
+**GSF id dibaca dari key persona yang tidak ada.** `TelephonyDrmHook` mengambil
+`id.get("GSF_ID")` dan melewati hook bila null. Native tidak pernah membaca key
+itu: `module.cpp:447` menurunkan nilainya dari seed
+(`decimal_from_seed(seed ^ 0x4753464944)`), dan `PersonaGenerator` tidak
+menulis `GSF_ID` sama sekali. Hasilnya `id.get("GSF_ID")` selalu null, sehingga
+`hookGsfCursor` tidak pernah dipanggil — persis kegagalan yang commit itu
+maksudkan untuk diperbaiki. Sekarang nilainya diturunkan lewat
+`SeedId.gsfId(seed)`, port dari `decimal_from_seed`.
+
+**Advertising id tidak punya hook sama sekali.** Native memasang dua spec
+(`AdvertisingIdClient$Info.getId` dan `AdvertisingIdClient.getAdvertisingIdInfo`,
+`sbx_lsplant.hpp:1125-1129`); varian LSPosed tidak punya keduanya. Yang kedua
+yang menentukan: Grab membundel client-nya sendiri, dan
+`getAdvertisingIdInfo` memanggil `b(false)` yang bind ke layanan Play services
+dan melempar `IOException` sebelum `Info` mana pun ada — sehingga `getId()`
+tidak pernah dipanggil dan Grab mencatat `er:109`. Sekarang `hookGaid()`
+memasang keduanya, dan kelas `Info` diambil dari
+`p.method.getReturnType()` (di-resolve oleh loader aplikasi, satu-satunya yang
+bisa melihat kelas di DEX Grab), bukan `Class.forName` yang akan mencari di
+loader modul.
+
+Keduanya diturunkan dari seed yang sama dengan native, dan diverifikasi
+byte-identik: `uuid_from_seed`/`decimal_from_seed` dikompilasi dari
+`native/native_read.cpp` lalu dibandingkan dengan port Java untuk enam seed,
+termasuk yang bit tertingginya menyala. `SeedIdTest` naik dari 144 ke 157
+check, semuanya lulus.
+
 ### Fix: varian LSPosed tidak menjawab query GSF id
 
 Grab membaca GSF id lewat query `content://com.google.android.gsf.gservices` untuk

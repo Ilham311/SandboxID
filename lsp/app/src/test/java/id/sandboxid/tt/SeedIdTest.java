@@ -411,6 +411,62 @@ public class SeedIdTest {
         check("oneplus hides miui",
                 SeedId.isHiddenPackage("com.miui.home", keepOp));
 
+        System.out.println("-- gaid / gsf: derived from the seed, not the persona --");
+        // Both values are ports of module.cpp:443/447. The expected strings
+        // below were produced by compiling native_read.cpp and running
+        // uuid_from_seed(seed ^ 0x47414944) / decimal_from_seed(seed ^
+        // 0x4753464944) directly, so these are cross-language equality checks
+        // rather than self-consistency ones.
+        //
+        // The seeds cover the cases that break a naive port: zero, a plain
+        // small value, one with the high bit set (negative as a Java long), and
+        // all-ones (also negative). A Java port that forgot the unsigned
+        // handling diverges on exactly those.
+        eq("gaid(0)", SeedId.gaid(0L),
+                "50614efe-c4c8-4266-97d7-c260f0f6680f");
+        eq("gaid(42)", SeedId.gaid(42L),
+                "38734a72-573b-4379-979c-93909e3328b7");
+        eq("gaid(0xDEADBEEFCAFEBABE)", SeedId.gaid(0xDEADBEEFCAFEBABEL),
+                "0ffd5628-dfc2-44cb-8bdc-f0a879d2d92e");
+        eq("gaid(0x8000000000000000)", SeedId.gaid(0x8000000000000000L),
+                "d0ab3314-2433-4421-98c8-9c60b749446c");
+        eq("gaid(0xFFFFFFFFFFFFFFFF)", SeedId.gaid(-1L),
+                "99cdc836-4cb4-4095-8e61-eb31d17b9c1b");
+
+        eq("gsfId(0)", SeedId.gsfId(0L), "8241377713769384376");
+        eq("gsfId(42)", SeedId.gsfId(42L), "7116952353057361013");
+        eq("gsfId(0xDEADBEEFCAFEBABE)", SeedId.gsfId(0xDEADBEEFCAFEBABEL),
+                "5987585303632030171");
+        eq("gsfId(0x8000000000000000)", SeedId.gsfId(0x8000000000000000L),
+                "3852164641703448809");
+        eq("gsfId(0xFFFFFFFFFFFFFFFF)", SeedId.gsfId(-1L),
+                "753038900989011990");
+
+        // Shape, swept over many seeds rather than one. Grab does
+        // Long.parseLong(cursor.getString(1)) then Long.toHexString(); a
+        // negative value would render as a 16-digit two's-complement string no
+        // device produces, and a non-digit would throw NumberFormatException —
+        // which is the gs:"er:103" this hook exists to remove.
+        boolean gsfShapeOk = true, gaidShapeOk = true;
+        for (long s = 0; s < 2048; s++) {
+            String gsf = SeedId.gsfId(s * 0x9E3779B97F4A7C15L);
+            if (!allDigits(gsf) || gsf.length() >= 20) gsfShapeOk = false;
+            String u = SeedId.gaid(s * 0x9E3779B97F4A7C15L);
+            if (u.length() != 36 || u.charAt(14) != '4'
+                    || u.charAt(8) != '-' || u.charAt(13) != '-'
+                    || u.charAt(18) != '-' || u.charAt(23) != '-') {
+                gaidShapeOk = false;
+            }
+        }
+        check("gsf id is always decimal digits and fits a signed long", gsfShapeOk);
+        check("gaid is always a v4 uuid", gaidShapeOk);
+
+        // Distinct salts: the two ids must not be visibly related, which is why
+        // the native side uses 0x47414944 and 0x4753464944 rather than one salt.
+        check("gaid and gsf use different salts",
+                !SeedId.gaid(7L).equals(SeedId.gaid(8L))
+                && !SeedId.gsfId(7L).equals(SeedId.gsfId(8L)));
+
         System.out.println();
         if (fails == 0) System.out.println("ALL PASS");
         else System.out.println(fails + " check(s) FAILED");

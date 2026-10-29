@@ -262,10 +262,34 @@ final class TelephonyDrmHook {
         // among the requested keys. Answering any other key with this row would
         // corrupt an unrelated read — Grab does query other keys through the
         // same provider.
-        String gsfId = id.get("GSF_ID");
-        if (gsfId != null && !gsfId.isEmpty()) {
-            n += hookGsfCursor(cl, gsfId);
-        }
+        //
+        // The id is DERIVED from the seed, not read from the persona. The native
+        // module derives it the same way (module.cpp:447) and carries no
+        // GSF_ID persona key at all, so reading one here would have left this
+        // hook permanently uninstalled — id.get("GSF_ID") is null for every
+        // persona PersonaGenerator can produce.
+        n += hookGsfCursor(cl, SeedId.gsfId(seed));
+
+        // ---- P0f: advertising id (Play services) ----
+        //
+        // Two hooks, and the second is the one that matters for an app that
+        // bundles the client — exactly as the Zygisk module installs them
+        // (sbx_lsplant.hpp:1125-1129).
+        //
+        // $Info.getId() only covers a caller that already obtained an Info,
+        // i.e. one whose getAdvertisingIdInfo() succeeded. Grab ships its own
+        // AdvertisingIdClient, and its getAdvertisingIdInfo calls b(false),
+        // which binds to the Play-services advertising-id service and throws
+        // java.io.IOException ("Google Play services not available",
+        // "Connection failure") before any Info exists. The exception leaves
+        // the method, getId() is never reached, and Grab's caller records
+        // GENERAL_EXCEPTION (er:109) for both the adId and the flag. Hooking
+        // the static entry point is what removes that.
+        //
+        // Both hooks are installed unconditionally and allowed to fail: the
+        // classes live in the APP's DEX (Grab bundles them), so a build that
+        // does not ship them simply misses and the hook count stays honest.
+        n += hookGaid(cl, SeedId.gaid(seed));
 
         // ---- P1: TelephonyManager (all instance methods) ----
         String tel = "android.telephony.TelephonyManager";
@@ -915,11 +939,84 @@ final class TelephonyDrmHook {
         }
     }
 
+    /**
+     * Installs the two advertising-id hooks, mirroring the Zygisk module's
+     * {@code M_VALUE}/{@code M_GAID_INFO} pair.
+     *
+     * <p>The second hook is the load-bearing one. {@code AdvertisingIdClient}
+     * lives in Grab's own DEX, so {@code Class.forName} from this callback
+     * would resolve against the module's loader and miss it. The Info class is
+     * therefore taken from the hooked method's return type:
+     * {@code p.method.getReturnType()} was resolved by the app's loader, which
+     * is the loader that can see it. The native side does the same thing from
+     * {@code backup.getReturnType()} (SandboxIDHook.java:731-753).
+     *
+     * <p>Returning null would make Grab dereference a null Info and crash, and
+     * letting the original IOException escape is the er:109 this replaces — so
+     * a failure to build the Info falls through to the original, which is the
+     * pre-fix behaviour rather than a new one.
+     *
+     * <p>The limit-tracking flag is always {@code false}: a real device that has
+     * not opted out reports false, and Grab records the flag as "f"/"t". An
+     * exception there is a far louder tell than either value.
+     */
+    private static int hookGaid(ClassLoader cl, final String gaid) {
+        int n = 0;
+
+        // AdvertisingIdClient$Info.getId() — covers a caller that already has
+        // an Info.
+        n += hook(cl, "com.google.android.gms.ads.identifier.AdvertisingIdClient$Info",
+                "getId", new Const<>(gaid));
+
+        // AdvertisingIdClient.getAdvertisingIdInfo(Context) — the static entry
+        // point. Replaces the whole call, so the bind that would throw never
+        // runs.
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "com.google.android.gms.ads.identifier.AdvertisingIdClient", cl,
+                    "getAdvertisingIdInfo", android.content.Context.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            // Replace the whole call, so the bind that would
+                            // throw never runs. Same semantics as the native
+                            // gaidInfo(): build the Info when possible, else
+                            // leave the original alone.
+                            Object info = buildInfo(p.method, gaid);
+                            if (info != null) p.setResult(info);
+                        }
+                    });
+            n++;
+        } catch (Throwable ignored) {
+            // Class absent from this build — the getId() hook still stands.
+        }
+        return n;
+    }
+
+    /**
+     * Builds an {@code AdvertisingIdClient$Info} for the return type of
+     * {@code m}, or null when the type cannot be resolved or constructed.
+     *
+     * <p>{@code m} is the hooked method, whose return type the app's own loader
+     * resolved. That is the only loader that can see the class: Grab bundles
+     * it, so it is not on the module's path.
+     */
+    private static Object buildInfo(java.lang.reflect.Member m, String gaid) {
+        try {
+            Class<?> infoCls = ((java.lang.reflect.Method) m).getReturnType();
+            if (infoCls == null || infoCls == Object.class) return null;
+            java.lang.reflect.Constructor<?> c =
+                    infoCls.getConstructor(String.class, boolean.class);
+            return c.newInstance(gaid, Boolean.FALSE);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     /** Rethrows a checked exception without declaring it. */
     private static void sneakyThrow(Throwable t) {
         TelephonyDrmHook.<RuntimeException>doThrow(t);
     }
-
     @SuppressWarnings("unchecked")
     private static <T extends Throwable> void doThrow(Throwable t) throws T {
         throw (T) t;
