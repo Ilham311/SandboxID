@@ -42,6 +42,28 @@ Diuji oleh `HookSemanticsChk` (10 check) yang memodelkan loop dispatch
 XposedBridge secara harfiah — regresi ke `throw` akan gagal di situ, bukan di
 perangkat. Terpasang sebagai langkah CI tersendiri.
 
+### Fix: deny kelas OEM hanya lewat `Class.forName`, bukan `loadClass`
+
+Perbaikan di atas membuat `setThrowable` benar-benar menolak — tetapi hanya pada
+satu dari dua jalur yang dipakai aplikasi untuk memuat kelas.
+
+Modul Zygisk menolak lewat **dua** spec `M_OBSERVE`
+(`sbx_lsplant.hpp:1150-1165`): `ClassLoader.loadClass(String, boolean)` dan
+`Class.forName(String, boolean, ClassLoader)`. Varian LSPosed hanya memasang
+yang kedua. Aplikasi yang memeriksa keberadaan kelas OEM hampir selalu memakai
+`loadClass`, jadi `miui.os.Build` tetap dimuat pada persona Pixel dan cabang OEM
+tetap menyala — kegagalan yang sama, satu lapis lebih dalam.
+
+Keduanya kini dipasang dari satu tabel (`DenyList.TARGETS`), supaya tidak bisa
+menyimpang lagi. `loadClass(String)` tidak dipasang terpisah: framework
+mendeklarasikannya sebagai `loadClass(name, false)`, jadi hook 2-argumen sudah
+mencakupnya.
+
+`DenyListTest` (25 check) menguji **hasil**, bukan pemasangan: untuk setiap entry
+point, nama yang ditolak harus membuat panggilan gagal dengan
+`ClassNotFoundException`, dan nama yang tidak ada di daftar harus sampai ke
+metode asli.
+
 ### Fix: seluruh keluarga prop MIUI/HyperOS tidak tersembunyi
 
 Aturan hide prop memakai daftar prefiks, dan daftar itu dibangun dengan siklus
