@@ -691,18 +691,32 @@ bool is_vendor_rom_prop(const char* name) {
         "vendor.usb.product_string",
     };
     for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
-    if (std::strncmp(name, "ro.miui.", 8) == 0)          return true;
-    if (std::strncmp(name, "ro.vendor.miui.", 15) == 0) return true;
-    if (std::strncmp(name, "ro.ril.miui.", 12) == 0)    return true;
-    // One prefix for the whole "persist.sys.miui" family. It covers the dotted
-    // form (persist.sys.miui.*), the underscore form
-    // (persist.sys.miui_animator_sched.*, which is a DIFFERENT namespace and
-    // slipped past a dot-only test while a target app read it), and the
-    // run-together form (persist.sys.miuibooster.name) that neither of those
-    // matched. Enumerating the separators is what kept leaving holes.
-    if (std::strncmp(name, "persist.sys.miui", 16) == 0) return true;
-    // "persist.miui.*" (no ".sys"): persist.miui.density_v2, persist.miui.extm.*
-    if (std::strncmp(name, "persist.miui.", 13) == 0)    return true;
+    // The MIUI/HyperOS family, by SUBSTRING rather than prefix.
+    //
+    // The prefix list this replaces was built by measuring, adding what leaked,
+    // and measuring again — and it kept leaking. "ro.miui." missed
+    // ro.com.miui.rsa.feature and ro.config.miui_*; "persist.sys.miui" missed
+    // persist.miui.*; adding that still missed init.svc.miuibooster,
+    // sys.miui_bpf_ready, sys.miui.gki_ndcd and ro.vendor.audio.miui.*. On the
+    // reference device 12 props still reported the ROM after the prefix list
+    // looked complete.
+    //
+    // A stock Pixel has no property whose NAME contains "miui", and no persona
+    // value does either (the identity map is derived from Build fields, none of
+    // which contain it), so the substring test cannot hide anything the persona
+    // needs. Case-insensitive to cover a vendor that ships "MIUI"/"Miui".
+    {
+        static const char kMiui[] = "miui";
+        const size_t n = std::strlen(name);
+        for (size_t i = 0; i + 4 <= n; ++i) {
+            if (std::tolower((unsigned char)name[i])     == kMiui[0] &&
+                std::tolower((unsigned char)name[i + 1]) == kMiui[1] &&
+                std::tolower((unsigned char)name[i + 2]) == kMiui[2] &&
+                std::tolower((unsigned char)name[i + 3]) == kMiui[3]) {
+                return true;
+            }
+        }
+    }
     // The updatable-graphics-driver family. ro.gfx.driver.1 names the SoC
     // platform in its middle segment (com.qualcomm.qti.gpudrivers.<platform>.
     // api30) and ro.gfx.driver.0 names the OEM's UGD package (com.xiaomi.ugd).

@@ -37,6 +37,10 @@ final class PropHook {
     private PropHook() {}
 
     static void apply(ClassLoader cl, final Map<String, String> id) {
+        // Captured once, for the persona-aware hide rule below. Every property
+        // read consults that rule, and re-reading the persona from disk each
+        // time meant parsing the XML file and hashing it per call.
+        persona = id;
         // String get(String, String)
         XposedHelpers.findAndHookMethod("android.os.SystemProperties", cl,
                 "get", String.class, String.class, new XC_MethodHook() {
@@ -106,7 +110,8 @@ final class PropHook {
         if (key == null) return null;
         String idk = PropMap.IDENTITY.get(key);
         if (idk != null) {
-            Map<String, String> id = IdentityStore.load();
+            Map<String, String> id = persona;
+            if (id == null) return null;
             String v = id.get(idk);
             if (v != null && !v.isEmpty()) return v;
             // Derived from the SoC rather than stored. A persona written before
@@ -178,13 +183,54 @@ final class PropHook {
      * '<name>' not installed" for it.
      */
     private static boolean isOemPropHidden(String k) {
-        // Only ONE name is persona-aware now, so check it before paying for the
-        // identity load: this runs on every SystemProperties.get() miss.
+        // Only ONE name is persona-aware, so check it before touching the
+        // persona at all: this runs on every SystemProperties.get() miss.
         if (!"ro.appsflyer.preinstall.path".equals(k)) return false;
-        Map<String, String> id = IdentityStore.load();
+        // Read the persona captured at install time, NOT IdentityStore.load().
+        // That call constructs a fresh XSharedPreferences, which parses the XML
+        // file, hashes it and registers a file watcher — on every property read
+        // the app makes. The map is already in hand; re-reading it from disk in
+        // a hot path was pure waste and a real cost on a property-heavy process.
+        Map<String, String> id = persona;
+        if (id == null) return false;
         String man = orEmpty(id.get("MANUFACTURER")), brd = orEmpty(id.get("BRAND"));
         boolean xiaomi = man.matches("Xiaomi|Redmi|POCO") || brd.matches("Xiaomi|Redmi|POCO");
         return !xiaomi;
+    }
+
+    /**
+     * The persona this process was hooked with, captured once in
+     * {@link #apply}. Never null after install; null only if a callback somehow
+     * runs before it is assigned, in which case the caller falls through to the
+     * real value rather than guessing.
+     */
+    private static volatile Map<String, String> persona;
+
+    /**
+     * Case-insensitive {@code "miui"} substring test, without allocating.
+     *
+     * <p>{@code k.toLowerCase(Locale.ROOT).contains("miui")} is the obvious
+     * form and the one the native side mirrors, but it copies the whole string
+     * on every call — and this runs on every {@code SystemProperties.get()}
+     * miss, which is the hottest path the module touches. A four-byte window
+     * scan over ASCII is enough: property names are ASCII, and a non-ASCII byte
+     * can never match one of the four letters anyway.
+     */
+    private static boolean containsMiui(String k) {
+        final int n = k.length() - 3;
+        for (int i = 0; i < n; i++) {
+            if (lower(k.charAt(i)) == 'm'
+                    && lower(k.charAt(i + 1)) == 'i'
+                    && lower(k.charAt(i + 2)) == 'u'
+                    && lower(k.charAt(i + 3)) == 'i') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static char lower(char c) {
+        return (c >= 'A' && c <= 'Z') ? (char) (c + 32) : c;
     }
 
     private static boolean isEmulatorProp(String k) {
@@ -252,17 +298,26 @@ final class PropHook {
             case "vendor.usb.product_string":            // POCO F3
                 return true;
             default:
-                return k.startsWith("ro.miui.")
-                        || k.startsWith("ro.vendor.miui.")
-                        || k.startsWith("ro.ril.miui.")
-                        // One prefix for the whole "persist.sys.miui" family:
-                        // the dotted form, the underscore form
-                        // (persist.sys.miui_animator_sched.*, a different
-                        // namespace) and the run-together form
-                        // (persist.sys.miuibooster.name) that neither matched.
-                        || k.startsWith("persist.sys.miui")
-                        || k.startsWith("persist.miui.")
-                        || k.startsWith("persist.sys.turbosched.")
+                // The MIUI/HyperOS family, by SUBSTRING rather than prefix.
+                //
+                // Enumerating prefixes kept leaving holes, and each hole was
+                // only found by measuring again: "persist.sys.miui" missed
+                // persist.miui.*; adding that missed init.svc.miuibooster and
+                // sys.miui_bpf_ready; the ro.* forms missed
+                // ro.com.miui.rsa.feature, ro.config.miui_*, and
+                // ro.vendor.audio.miui.*. On the reference device 12 props
+                // still leaked the ROM after the prefix list was "complete".
+                //
+                // A stock Pixel has no property whose NAME contains "miui",
+                // and no persona value does either (the identity map is
+                // derived from Build fields), so the substring test cannot
+                // hide anything the persona needs. This is the same reasoning
+                // the native side reached; see is_vendor_rom_prop() in
+                // native/native_read.cpp.
+                if (containsMiui(k)) {
+                    return true;
+                }
+                return k.startsWith("persist.sys.turbosched.")
                         || k.startsWith("persist.sys.dexpreload.")
                         || k.startsWith("persist.sys.perf_scenario_recognition.")
                         || k.startsWith("persist.sys.perfdebug.")

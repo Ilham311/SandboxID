@@ -29,6 +29,16 @@
 #                  driver package. Pure header test; no module TU, no device.
 #                  Deriving all of them from one column made a Qualcomm persona
 #                  advertise ro.hardware=taro, a token no Qualcomm device ships.
+#   sbx_ident_synth  jni/ident_synth.hpp: a synthesized IMSI/ICCID is consistent
+#                  with its operator or empty. Substituting Telkomsel 51010 for
+#                  any operator it could not parse put an XL-SIM persona on a
+#                  network it was not attached to.
+#   sbx_prop_hide  jni/module_impl.hpp sbx_prop_hidden(): feeds the 57 prop
+#                  names measured on a real HyperOS device through the hide
+#                  rule, and guards that the persona's own Build props survive.
+#                  The prefix lists leaked 12 of them; the rule is now a
+#                  case-insensitive substring test, mirrored in the LSPosed
+#                  variant by lsp/.../PropHookTest.java.
 #   console_check  the WebUI console module (webroot/console.js) under a stubbed
 #                  DOM: capture, badge semantics, stream guards, save transport.
 #                  Skipped unless node is on PATH.
@@ -131,7 +141,7 @@ mkdir -p "$OUT"
 
 exit_code=0
 
-for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe sbx_process_name sbx_hw_naming sbx_ident_synth; do
+for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe sbx_process_name sbx_hw_naming sbx_ident_synth sbx_prop_hide; do
     src="$REPO/tests/host/$suite.cpp"
     bin="$OUT/$suite"
 
