@@ -1065,10 +1065,16 @@ inline const HookSpec* hook_specs(size_t& n) {
           false, M_VALUE, -1, nullptr, false, 0, V_OP_MCC, -1, -1, -1, nullptr },
         { "android/telephony/CellIdentityNr", "getMncString", "()Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_OP_MNC, -1, -1, -1, nullptr },
-        { "android/telephony/CellIdentityNr", "getMcc", "()I",
-          false, M_VALUE, -1, nullptr, false, 2, V_OP_MCC, -1, -1, -1, nullptr },
-        { "android/telephony/CellIdentityNr", "getMnc", "()I",
-          false, M_VALUE, -1, nullptr, false, 2, V_OP_MNC, -1, -1, -1, nullptr },
+        // NO getMcc()/getMnc() for CellIdentityNr. Unlike the LTE/WCDMA/GSM
+        // variants, the NR class never had the int accessors: its method list
+        // (verified on the test device's framework.jar, API 35) is
+        // getMccString/getMncString plus NCI/NRARFCN/PCI/TAC — no getMcc, no
+        // getMnc. The two specs that used to sit here could therefore never
+        // resolve, and they logged "L3 MISS android/telephony/CellIdentityNr
+        // .getMcc()I" on every app start. A spec that cannot resolve is not
+        // harmless: it inflates the miss count that the L3 diagnostics use to
+        // decide whether a class layout changed, and it hides a real MISS when
+        // one appears.
         // SubscriptionInfo carries the SIM's own view of the operator. Grab
         // references the class directly, and its getMcc()/getMnc() are the
         // subscription's, not the cell's - a third surface that has to agree.

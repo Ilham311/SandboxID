@@ -44,21 +44,36 @@ final class TelephonyDrmHook {
 
     /**
      * The objects that expose the cell's and the SIM's own view of the
-     * operator: four {@code CellIdentity*} types plus {@code SubscriptionInfo}.
-     * Each has {@code getMccString}/{@code getMncString} (API 28+) and
-     * {@code getMcc}/{@code getMnc}, and all of them have to agree with
+     * operator. Each has {@code getMccString}/{@code getMncString} (API 28+),
+     * and all of them have to agree with
      * {@code TelephonyManager.getSimOperator()} — otherwise the app sees one
      * network from the manager and another from the cell.
      *
-     * <p>{@code CellIdentityNr} is 5G NR; {@code CellIdentityCdma} has no
-     * MCC/MNC accessors at all, which is why it is absent here despite Grab
-     * referencing it.
+     * <p>{@code CellIdentityCdma} is absent: it has no MCC/MNC accessors at
+     * all, despite Grab referencing it.
      */
     private static final String[] CELL_IDENTITY_CLASSES = {
             "android.telephony.CellIdentityLte",
             "android.telephony.CellIdentityWcdma",
             "android.telephony.CellIdentityGsm",
             "android.telephony.CellIdentityNr",
+            "android.telephony.SubscriptionInfo",
+    };
+
+    /**
+     * The subset that also has the int accessors {@code getMcc()}/{@code getMnc()}.
+     *
+     * <p>{@code CellIdentityNr} is deliberately NOT here. Its method list on
+     * API 35 (verified against the test device's framework.jar) is
+     * getMccString/getMncString plus NCI/NRARFCN/PCI/TAC — the NR class never
+     * had the int forms that LTE/WCDMA/GSM carry. Hooking a method that does
+     * not exist costs a failed resolution on every app start and, worse, hides
+     * a real resolution failure in the L3 diagnostics.
+     */
+    private static final String[] CELL_IDENTITY_INT_CLASSES = {
+            "android.telephony.CellIdentityLte",
+            "android.telephony.CellIdentityWcdma",
+            "android.telephony.CellIdentityGsm",
             "android.telephony.SubscriptionInfo",
     };
 
@@ -251,12 +266,16 @@ final class TelephonyDrmHook {
         if (!opMcc.isEmpty()) {
             for (String cell : CELL_IDENTITY_CLASSES) {
                 n += hook0(cl, cell, "getMccString", opMcc);
+            }
+            for (String cell : CELL_IDENTITY_INT_CLASSES) {
                 n += hook(cl, cell, "getMcc", new Const<>(Integer.valueOf(opMcc)));
             }
         }
         if (!opMnc.isEmpty()) {
             for (String cell : CELL_IDENTITY_CLASSES) {
                 n += hook0(cl, cell, "getMncString", opMnc);
+            }
+            for (String cell : CELL_IDENTITY_INT_CLASSES) {
                 n += hook(cl, cell, "getMnc", new Const<>(Integer.valueOf(opMnc)));
             }
         }

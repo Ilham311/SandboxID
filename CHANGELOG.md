@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Fix: dua spec `CellIdentityNr` yang mustahil selalu MISS
+
+**Gejala.** Log sesi perangkat
+(`debug/session-20261029-163257.log`) menunjukkan `L3 MISS
+android/telephony/CellIdentityNr.getMcc()I` dan `.getMnc()I` masing-masing 20
+kali — setiap kali aplikasi start. Penyebabnya bukan bug hook: kelas
+`CellIdentityNr` **tidak punya** `getMcc()`/`getMnc()`. Daftar metode kelas itu
+di `framework.jar` perangkat (API 35) adalah `getMccString`, `getMncString`,
+`getNci`, `getNrarfcn`, `getPci`, `getTac` — varian NR tidak pernah membawa
+bentuk int yang dimiliki LTE/WCDMA/GSM. Kedua spec dihapus dari
+`jni/sbx_lsplant.hpp`, dan sisi LSPosed memakai daftar kelas terpisah
+(`CELL_IDENTITY_INT_CLASSES`) yang tidak memuat NR.
+
+Ini bukan kosmetik: spec yang tidak bisa resolve menggelembungkan hitungan MISS
+yang dipakai diagnostik L3 untuk menyimpulkan "layout kelas berubah", sehingga
+MISS sungguhan bisa tersamarkan. Spec native turun 95 → 93.
 
 ## v2.2.46 (2026-10-29)
 
