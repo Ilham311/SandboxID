@@ -8,14 +8,22 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
 
 /**
- * Telephony and DRM identifiers — the layer the Zygisk module does NOT cover.
+ * Telephony and DRM identifiers, for the LSPosed variant.
  *
- * <p>The Zygisk side spoofs {@code Build.*}, {@code SystemProperties} and file
- * reads, but never hooks {@link android.telephony.TelephonyManager},
- * {@link android.media.MediaDrm} or {@link android.net.wifi.WifiInfo}: those are
- * the module's former LSPlant layer (removed in the source-layout cleanup as
- * "unused experimental", because it was never built). That layer's hook spec is
- * restored here.
+ * <p><b>This does NOT cover ground the Zygisk module leaves bare.</b> Since
+ * commit {@code 55c68c8} the module carries the same Java-method layer
+ * ({@code SBX_ENABLE_LSPLANT}, on by default in {@code build.sh}), so it hooks
+ * {@link android.telephony.TelephonyManager}, {@link android.media.MediaDrm},
+ * {@link android.net.wifi.WifiInfo} and {@link android.bluetooth.BluetoothAdapter}
+ * too. This class is the LSPosed equivalent of that layer, not a superset of a
+ * smaller module — an earlier version of this docstring claimed the opposite and
+ * was simply out of date.
+ *
+ * <p>Because the two are equivalents, every surface here has to be kept in
+ * step with {@code jni/sbx_lsplant.hpp}. That is not automatic, and it has
+ * already failed twice: the cell-identity and {@code getSimCarrierId} specs from
+ * v2.2.38 were never ported here, and the AppLog ids drifted. When adding a
+ * surface on one side, add it on the other.
  *
  * <p>Values are deterministic from the persona seed ({@link SeedId}), so a given
  * persona always yields the same IMEI/IMSI/ICCID/MEID — a rotated persona stays
