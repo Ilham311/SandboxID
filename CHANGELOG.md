@@ -2,6 +2,96 @@
 
 ## Unreleased
 
+### Fix: operator seluler dikarang (Telkomsel 51010) → bertentangan dengan radio asli
+
+**Gejala.** Di dalam satu aliran event milik aplikasi yang sama, telemetri
+jaringan mencatat `"mnc":"11"` (XL, dibaca dari permukaan radio yang tidak
+di-hook) sementara event pax di sebelahnya mencatat `"crn":"Telkomsel"` dan
+`"mcc":"510"` (di-spoof lewat properti dan `TelephonyManager`). Dua nilai itu
+tidak mungkin benar bersamaan untuk satu perangkat.
+
+**Akar masalah.** `VAL_DEFAULTS` di `native/include/config.hpp` memuat
+`GSM_OPERATOR_NUMERIC=51010`, `GSM_OPERATOR_ALPHA=Telkomsel`,
+`GSM_OPERATOR_ISO=id`, `GSM_CARRIER_ID=787`. Selama tidak ada `carrier.conf`,
+`val()` mengembalikan nilai bawaan itu, sehingga modul mengklaim operator yang
+tidak pernah dipilih siapa pun. SIM uji adalah XL `51011`. `synth_imsi()` punya
+masalah yang sama dari arah lain: saat string operator kosong atau tidak valid,
+ia mengganti prefix dengan `"51010"`, jadi IMSI yang disajikan menamai jaringan
+yang perangkatnya tidak tersambung.
+
+**Perbaikan.**
+
+- `GSM_OPERATOR_*` dan `GSM_CARRIER_ID` **dihapus** dari `VAL_DEFAULTS`. Tanpa
+  operator terkonfigurasi, `val()` mengembalikan string kosong,
+  `spoof_prop_value()` menolak, dan **nilai asli** yang disajikan — sehingga
+  setiap permukaan, yang di-hook maupun tidak, sepakat.
+- `install_java_hooks()` mengisi `hv.op_num` / `op_alpha` / `op_iso` dari
+  properti **asli** lewat `sbx_raw_prop_get` ketika persona tidak punya
+  operator, supaya IMSI/ICCID yang disintesis tetap koheren dengan SIM.
+  Properti GSM bersifat per-slot dan digabung koma — perangkat ini
+  mengembalikan `"51011,"` — jadi koma pemisah dibuang sebelum dipakai.
+- `synth_imsi()` dan `synth_iccid()` mengembalikan string **kosong** untuk
+  operator yang tidak diketahui, bukan prefix Telkomsel. Hook lalu jatuh ke
+  nilai asli, yang konsisten dengan dirinya sendiri.
+
+### Fix: `getMnc()` / `getMcc()` / `getSimCarrierId()` tidak di-hook — MNC asli bocor
+
+**Gejala.** Sama seperti di atas, tetapi dari sisi cakupan: field `"mnc"` di
+`pax.track.nk.measures.network_calls` tetap berisi MNC asli.
+
+**Akar masalah.** `TelephonyManager.getNetworkOperator()` memang di-hook, tetapi
+itu API dan objek yang berbeda dari yang dipakai aplikasi untuk membaca MNC
+secara terpisah. Grab mereferensikan `android.telephony.CellIdentityCdma`,
+`CellInfoCdma`, `SubscriptionInfo`, dan `getSimCarrierId`; tidak satu pun
+tercakup tabel hook.
+
+**Perbaikan.** `ValId` mendapat `V_OP_MCC` dan `V_OP_MNC` (dipecah dari
+`V_OP_NUM`, 3 digit pertama dan sisanya) serta `V_CARRIER_ID`. Spesifikasi baru
+mencakup `getMccString`/`getMncString` dan `getMcc`/`getMnc` untuk
+`CellIdentityLte`, `CellIdentityWcdma`, `CellIdentityGsm`, `CellIdentityNr`, dan
+`SubscriptionInfo`, plus `TelephonyManager.getSimCarrierId()`. Bentuk int
+memakai `ret_type=2`, yang sudah didukung `spoofValue()`. Semuanya mengembalikan
+string kosong saat operator tidak dikonfigurasi, sehingga jatuh ke nilai asli —
+bukan mengarang angka.
+
+### Fix: `IMEI` berisi ANDROID_ID — `READ_PHONE_STATE` dicabut `pm clear`
+
+**Gejala.** Blob parameter perangkat Grab memuat
+`"IMEI":"d38af538f80a0314"` — 16 karakter heksadesimal di tempat 15 digit
+desimal seharusnya — dan `"andrID"` berisi string yang sama persis. Setiap
+identifier lain pada request yang sama sudah ter-spoof dengan benar.
+
+**Akar masalah.** `dumpsys package` menunjukkan
+`READ_PHONE_STATE: granted=false`. Grab menggerbangi pembacaan IMEI-nya sendiri
+dengan izin itu; saat ditolak ia melewati `getImei()` dan mengisi field IMEI
+dengan satu-satunya identifier yang masih boleh dibaca, yaitu ANDROID_ID. Hook
+IMEI terpasang dan tidak pernah dipanggil. `pm clear` mencabut seluruh izin
+runtime, dan `pkg_restore_permissions()` hanya bisa mengembalikan yang **sudah**
+pernah diberikan — izin yang tidak pernah diberikan pengguna tetap ditolak.
+
+**Perbaikan.** `pkg_persona_permissions()` dan `pkg_grant_persona_permissions()`
+di `sh/lib/helpers.sh`, dipanggil `sh/lifecycle/action.sh` setelah restore.
+Daftarnya sengaja pendek dan berbasis bukti (`READ_PHONE_STATE` saja).
+Memberi izin hanya mengubah apa yang **boleh** dibaca aplikasi; hook L3 tetap
+menjawab setiap getter telepon dengan nilai sintesis, jadi yang dibaca setelah
+izin diberikan adalah identifier persona, bukan radio.
+
+### Fix: `sbx_ident_synth.hpp` tidak punya test host
+
+Ketiga bug di atas lolos karena tidak ada yang menguji header itu. Suite baru
+`tests/host/sbx_ident_synth.cpp` (43 pemeriksaan) mengunci aturannya: sebuah
+identifier sintesis harus konsisten dengan operator yang membangunnya, atau
+**kosong** supaya pemanggil jatuh ke nilai asli — tidak pernah berupa hal ketiga
+yang terlihat masuk akal. Termasuk kasus koma per-slot yang membuat
+`synth_imsi()` menolak string operator yang sebenarnya valid.
+
+### Fix: `debugLog` memakai `android.util.Log` langsung — kelas callback gagal dikompilasi
+
+`jni/SandboxIDHook.java` dikompilasi menjadi DEX tanpa `android.jar`, dan
+`tests/host/EnvCompatStateCheck` mengompilasi berkas yang sama di JDK biasa.
+Referensi langsung ke `android.util.Log.d` menggagalkan keduanya. Diganti
+dengan refleksi `Class.forName("android.util.Log")`, pola yang sudah dipakai
+kelas ini untuk setiap kelas Android lain.
 
 ## v2.2.37 (2026-10-28)
 

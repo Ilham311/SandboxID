@@ -60,7 +60,8 @@ Action button
    │      (native props, in-process per-target — no global resetprop)
    │
    ├─ 4. clear the target app     pm clear <pkg>   (per target.txt line)
-   │      (so it re-reads the new persona on next launch)
+   │      (so it re-reads the new persona on next launch; the permissions it
+   │       had are restored, and the persona's baseline set is granted)
    │
    ├─ 5. rotate shell identifiers rotate_ids.sh all
    │      SSAID + wlan MAC + BT MAC + device name + AppLog epoch
@@ -73,6 +74,16 @@ Action button
 After it finishes, launch the target: it sees a different device. No reboot
 unless the command you ran changed SSAID (`pm clear` + a relaunch is enough
 otherwise).
+
+`pm clear` revokes every runtime permission, so the reset restores the ones the
+app had — and then grants the persona's baseline set on top
+(`pkg_persona_permissions()` in `sh/lib/helpers.sh`). Restoring alone is not
+enough: a permission the user never granted stays denied, and an app that gates
+an identifier read on it takes a different code path. Grab does exactly that
+with `READ_PHONE_STATE` — denied, it skips `getImei()` and records the
+ANDROID_ID in its IMEI field, a 16-hex-char string where a 15-digit decimal
+belongs. Granting the permission only changes what the app may read; the L3
+hooks answer every telephony getter with a synthesized value either way.
 
 The same button works for both shipped flavors. `FLAVOR=tt` builds just preset
 `target.txt` with TikTok Global on first install and rebrand the package; the
@@ -484,6 +495,19 @@ does not run in userspace.
   processes, `system_server`, the RIL itself, and a shell `getprop`. That is a
   mismatch, not a leak of anything else, and the two cannot be reconciled from
   userspace without hooking the RIL process.
+
+  For that reason the module **does not invent a carrier by default**. It used
+  to default to Telkomsel `51010` / `id` / carrier id `787`, which made every
+  persona claim a network the device was not attached to: the test SIM is XL
+  `51011`, and the contradiction showed up inside one app's own telemetry as
+  `"mnc":"11"` (real, from a radio surface the module does not hook) beside a
+  spoofed Telkomsel name in the same event. `carrier` writes an explicit
+  operator into `identity.prop` when you want one; with no operator configured
+  the real values are served, so every surface agrees — hooked or not. The
+  synthesized IMSI and ICCID follow the same rule: they are built from the
+  configured operator, and are left **empty** (so the getter falls through to
+  the real value) when no operator is set, rather than defaulting to a
+  Telkomsel prefix.
 - **A child process is not the target process.** The shell guard covers
   `popen()` in-process — including `popen("getprop")`, whose output is filtered
   key by key — and it denies the whole exec family when the command names a

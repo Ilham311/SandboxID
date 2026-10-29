@@ -263,7 +263,8 @@ set_carrier() {
                 log_info "Carrier ID: ${cid:-(kosong, -1/UNKNOWN)}"
                 [ "$cp" = "1" ] && log_info "Phantom  : aktif (slot kosong lapor SIM ada)"
             else
-                log_info "Belum ada operator dipilih — pakai bawaan (Telkomsel 51010)"
+                log_info "Belum ada operator dipilih — operator ASLI perangkat yang dipakai"
+                log_info "(modul tidak lagi mengarang Telkomsel 51010; lihat README)"
             fi
             log_info "identity GSM_OPERATOR_NUMERIC = $(identity_get GSM_OPERATOR_NUMERIC 2>/dev/null || true)"
             log_info "identity GSM_OPERATOR_ALPHA   = $(identity_get GSM_OPERATOR_ALPHA 2>/dev/null || true)"
@@ -272,7 +273,7 @@ set_carrier() {
             log_step "Nonaktifkan operator kustom"
             rm -f "$CARRIER_CONF" 2>/dev/null
             _carrier_clear_keys
-            log_ok "Operator kustom dihapus — kembali ke bawaan"
+            log_ok "Operator kustom dihapus — operator ASLI perangkat dipakai lagi"
             return 0 ;;
     esac
 

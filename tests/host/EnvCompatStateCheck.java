@@ -422,11 +422,17 @@ public class EnvCompatStateCheck {
                 if (id.startsWith("com.android.systemui.")) hasSysui = true;
             }
             check("MT Manager accessibility service filtered out", !hasMt);
-            // Katrina is NOT in HIDDEN_PACKAGES, so it must survive: the filter
-            // hides exactly the configured set, and a list filter that quietly
-            // widened itself to "anything sideloaded" would be a different
-            // (and unrequested) policy. Whether to add it is a separate call.
-            check("Katrina accessibility service kept (not in the hidden set)", hasKatrina);
+            // Katrina IS in HIDDEN_PACKAGES, and that is deliberate. Grab's HVS
+            // scan result recorded
+            // com.fufufu.katrina.backup/.KatrinaIslandService among the enabled
+            // accessibility services of a device claiming to be an OPPO
+            // CPH2521 - a third-party backup tool riding an accessibility
+            // service, which no retail handset ships. The filter hides exactly
+            // the configured set, so this check pins the set: a list filter that
+            // quietly widened itself to "anything sideloaded" would be a
+            // different policy, and one that dropped the entry would let the
+            // leak back in.
+            check("Katrina accessibility service filtered out", !hasKatrina);
             check("TalkBack accessibility service kept", hasTalkback);
             check("SystemUI accessibility service kept", hasSysui);
         }

@@ -303,6 +303,44 @@ private:
         hv.op_num     = val("GSM_OPERATOR_NUMERIC");
         hv.op_alpha   = val("GSM_OPERATOR_ALPHA");
         hv.op_iso     = val("GSM_OPERATOR_ISO");
+        hv.carrier_id = val("GSM_CARRIER_ID");
+        // No persona carrier configured: fall back to what the modem actually
+        // reports, read through sbx_raw_prop_get so this is the REAL value and
+        // not a value this module would have spoofed. Without this the
+        // synthesized IMSI/ICCID below were built from an empty operator
+        // string, and synth_imsi() then substituted Telkomsel 51010 - an IMSI
+        // naming a network the device is not attached to, in the same request
+        // that carried the real MNC from the radio. See VAL_DEFAULTS in
+        // native/include/config.hpp for why no carrier is invented by default.
+        //
+        // The GSM props are per-slot, comma-joined, and a single-SIM device
+        // still writes the separator: `getprop gsm.sim.operator.numeric` on the
+        // test device returns the five characters "51011,". TelephonyManager
+        // reports the slot's value WITHOUT it, so the comma has to go here or
+        // every hooked getter would return a string no real device produces and
+        // synth_imsi() would reject it as non-numeric and fall back to 51010 -
+        // the exact contradiction this block exists to remove.
+        auto raw_first_slot = [&](const char* name) -> std::string {
+            char buf[PROP_VALUE_MAX] = {0};
+            if (sbx_raw_prop_get(name, buf) <= 0) return std::string();
+            std::string s(buf);
+            auto comma = s.find(',');
+            if (comma != std::string::npos) s.resize(comma);
+            while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+            return s;
+        };
+        if (hv.op_num.empty()) {
+            hv.op_num = raw_first_slot("gsm.sim.operator.numeric");
+            if (hv.op_num.empty()) hv.op_num = raw_first_slot("gsm.operator.numeric");
+        }
+        if (hv.op_alpha.empty()) {
+            hv.op_alpha = raw_first_slot("gsm.sim.operator.alpha");
+            if (hv.op_alpha.empty()) hv.op_alpha = raw_first_slot("gsm.operator.alpha");
+        }
+        if (hv.op_iso.empty()) {
+            hv.op_iso = raw_first_slot("gsm.sim.operator.iso-country");
+            if (hv.op_iso.empty()) hv.op_iso = raw_first_slot("gsm.operator.iso-country");
+        }
         // g_pkg, not pkg_: the canonical base package. sbx_applog_ids() in
         // module_hooks.cpp seeds from g_pkg, and rotate_ids.sh seeds the app's
         // on-disk AppLog cache from the same base name, so all three must agree.
@@ -361,6 +399,27 @@ private:
                 hv.deny_classes.emplace_back("com.meizu.flyme.reflect.BuildProxy");
             if (!is("OPPO") && !is("OnePlus") && !is("realme"))
                 hv.deny_classes.emplace_back("com.oplus.os.OplusBuild");
+
+            // The mirror image of the deny list, for PackageManager. A persona
+            // is ONE device, so packages belonging to a different vendor's ROM
+            // are a contradiction the app can read off
+            // getInstalledAccessibilityServiceList. The Java side hides every
+            // vendor prefix in HIDDEN_PACKAGES; this carves the persona's own
+            // vendor back out so the device keeps looking like itself.
+            if (is("Xiaomi") || is("Redmi") || is("POCO")) {
+                hv.vendor_keep.emplace_back("com.miui");
+                hv.vendor_keep.emplace_back("com.milink.service");
+                hv.vendor_keep.emplace_back("com.xiaomi");
+                hv.vendor_keep.emplace_back("com.mi.health");
+                hv.vendor_keep.emplace_back("com.mipay.wallet");
+                hv.vendor_keep.emplace_back("com.android.thememanager");
+            }
+            if (is("OPPO") || is("OnePlus") || is("realme")) {
+                hv.vendor_keep.emplace_back("com.oplus");
+                hv.vendor_keep.emplace_back("com.coloros");
+                hv.vendor_keep.emplace_back("com.oneplus");
+                hv.vendor_keep.emplace_back("com.realme");
+            }
         }
 
         const sbxnr::ApplogIds ids = sbxnr::make_applog_ids(

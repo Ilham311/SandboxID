@@ -71,6 +71,11 @@ struct HookValues {
     std::string op_num;     // gsm operator numeric (MCC+MNC), e.g. "51010"
     std::string op_alpha;   // operator display name, e.g. "Telkomsel"
     std::string op_iso;     // operator country iso, e.g. "id"
+    // TelephonyManager.getSimCarrierId(), as a decimal string. Empty when the
+    // operator is not in Google's carrier list - a real device reports -1
+    // (UNKNOWN) there, and the hook falls through so the framework's own -1 is
+    // what the app sees. Never defaulted: 0 is a real carrier id.
+    std::string carrier_id;
     std::string gaid;       // advertising id, synthesized from seed
     // GSF id, as the decimal string Grab parses. Grab reads it by querying
     // content://com.google.android.gsf.gservices for the "android_id" row and
@@ -97,6 +102,12 @@ struct HookValues {
     // miui.os.Build, because an OEM branch that loads is an OEM branch that
     // reports. Empty on a persona that IS that OEM.
     std::vector<std::string> deny_classes;
+    // Vendor package prefixes that must stay VISIBLE because the active
+    // persona is that vendor's own device. The Java side hides every vendor
+    // entry in HIDDEN_PACKAGES; this list carves the persona's own vendor back
+    // out, so an OPPO persona keeps com.oplus.* while a Pixel persona hides
+    // it. Built from MANUFACTURER/BRAND, same source as deny_classes.
+    std::vector<std::string> vendor_keep;
     uint64_t    seed = 0;   // fnv1a(FINGERPRINT|SERIAL|ANDROID_ID)
     int         display_width   = 0;
     int         display_height  = 0;
@@ -262,7 +273,19 @@ inline bool sbx_inline_unhooker(void* func) { return DobbyDestroy(func) == 0; }
 enum ValId {
     V_NONE = 0, V_ZERO, V_ANDROID_ID, V_SERIAL, V_IMEI, V_MEID, V_IMSI, V_ICCID,
     V_OP_NUM, V_OP_ALPHA, V_OP_ISO, V_WIFI_MAC, V_BT_ADDR, V_WIDEVINE,
-    V_GAID, V_OPENUDID, V_CLIENTUDID, V_CDID, V_GSF_ID
+    V_GAID, V_OPENUDID, V_CLIENTUDID, V_CDID, V_GSF_ID,
+    // The MCC and MNC halves of V_OP_NUM, for the getters that take them apart
+    // instead of reading the joined string. Grab calls
+    // CellIdentityLte.getMnc()/getMcc() and records the result as the bare
+    // "mnc" field of its network telemetry; that surface is not covered by
+    // hooking TelephonyManager.getNetworkOperator, which is a different API
+    // against a different object.
+    V_OP_MCC, V_OP_MNC,
+    // TelephonyManager.getSimCarrierId(): an int index into Google's carrier
+    // list, not the MCC/MNC. A real device reports -1 (UNKNOWN) for an operator
+    // absent from that list, which is why an unset value must fall through
+    // rather than become 0 - 0 is a real carrier id (T-Mobile US).
+    V_CARRIER_ID
 };
 
 // Callback behaviour, mirrored by the constants in jni/SandboxIDHook.java.
@@ -281,7 +304,11 @@ enum Mode {
     M_GSF_CURSOR      = 11,// answer a gservices query with a synthesized cursor
 };
 
-// ret_type: 0 String, 1 byte[]
+// ret_type: 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence.
+// Mirrors SandboxIDHook.spoofValue(): for 2/3/4 the value travels as a decimal
+// string in sval and the Java side parses it, so a spec can answer an int/long/
+// boolean getter without a second value channel. 5 is the CharSequence case and
+// is handled by the default branch (the String is returned as-is).
 struct HookSpec {
     const char* cls;
     const char* name;
@@ -291,7 +318,7 @@ struct HookSpec {
     int         key_index;   // absolute index into args[] (incl. receiver), or -1
     const char* key_match;   // required value at key_index, or nullptr
     bool        key_contains;
-    int         ret_type;    // 0 String, 1 byte[]
+    int         ret_type;    // 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence
     int         val_id;
     int         force_index; // M_FORCE_FALSE
     int         body_index;  // M_REWRITE_BODY
@@ -318,6 +345,7 @@ struct State {
               f_urlMatch = nullptr, f_openudid = nullptr, f_clientudid = nullptr,
               f_cdid = nullptr, f_rwFrom = nullptr, f_rwTo = nullptr,
               f_deny = nullptr,
+              f_vendorKeep = nullptr,
               f_multiKeys = nullptr, f_multiVals = nullptr,
               f_gaidLimit = nullptr, f_gsfId = nullptr,
               f_dispW = nullptr, f_dispH = nullptr, f_dispDpi = nullptr,
@@ -467,6 +495,7 @@ inline bool resolve_callback_members(JNIEnv* env) {
     g.f_gaidLimit  = env->GetFieldID(g.cb_class, "gaidLimitAdTracking", "Z");
     g.f_gsfId      = env->GetFieldID(g.cb_class, "gsfId",        "Ljava/lang/String;");
     g.f_deny       = env->GetStaticFieldID(g.cb_class, "deny",    "[Ljava/lang/String;");
+    g.f_vendorKeep = env->GetStaticFieldID(g.cb_class, "vendorKeep", "[Ljava/lang/String;");
 
     g.f_dispW          = env->GetFieldID(g.cb_class, "displayWidth",      "I");
     g.f_dispH          = env->GetFieldID(g.cb_class, "displayHeight",     "I");
@@ -608,6 +637,14 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_OP_NUM:     return v.op_num;
         case V_OP_ALPHA:   return v.op_alpha;
         case V_OP_ISO:     return v.op_iso;
+        // MCC is always the first three digits; the MNC is the remainder, which
+        // is 2 or 3 digits depending on the allocation. Both are empty when no
+        // operator is configured, so the getter falls through to the real value
+        // rather than returning a fabricated half. The split itself lives in
+        // sbx_ident_synth.hpp so it can be tested on the host.
+        case V_OP_MCC:     return sbxid::operator_mcc(v.op_num);
+        case V_OP_MNC:     return sbxid::operator_mnc(v.op_num);
+        case V_CARRIER_ID: return v.carrier_id;
         case V_WIFI_MAC:   return wifi;
         case V_BT_ADDR:    return bt;
         case V_GAID:       return v.gaid;
@@ -879,11 +916,26 @@ inline const HookSpec* hook_specs(size_t& n) {
           false, M_VALUE, -1, nullptr, false, 0, V_MEID, -1, -1, -1, nullptr },
         { "android/telephony/TelephonyManager", "getSubscriberId", "()Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_IMSI, -1, -1, -1, nullptr },
+        // The (int) overloads take a subId and are what a multi-SIM-aware
+        // caller uses. Grab's device-parameter builder is one: it resolved
+        // adrIMSI even though the no-arg getSubscriberId() was already hooked,
+        // because the call it makes is getSubscriberId(subId). Same for the
+        // SIM serial. Missing these leaves the IMSI/ICCID unspoofed while every
+        // other identifier on the same request is spoofed - a contradiction
+        // that is worse than not spoofing at all.
+        { "android/telephony/TelephonyManager", "getSubscriberId", "(I)Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_IMSI, -1, -1, -1, nullptr },
         { "android/telephony/TelephonyManager", "getSimSerialNumber", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_ICCID, -1, -1, -1, nullptr },
+        { "android/telephony/TelephonyManager", "getSimSerialNumber", "(I)Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_ICCID, -1, -1, -1, nullptr },
         { "android/telephony/TelephonyManager", "getNetworkOperator", "()Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_OP_NUM, -1, -1, -1, nullptr },
+        { "android/telephony/TelephonyManager", "getNetworkOperator", "(I)Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_NUM, -1, -1, -1, nullptr },
         { "android/telephony/TelephonyManager", "getSimOperator", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_NUM, -1, -1, -1, nullptr },
+        { "android/telephony/TelephonyManager", "getSimOperator", "(I)Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_OP_NUM, -1, -1, -1, nullptr },
         { "android/telephony/TelephonyManager", "getNetworkOperatorName", "()Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_OP_ALPHA, -1, -1, -1, nullptr },
@@ -893,6 +945,71 @@ inline const HookSpec* hook_specs(size_t& n) {
           false, M_VALUE, -1, nullptr, false, 0, V_OP_ISO, -1, -1, -1, nullptr },
         { "android/telephony/TelephonyManager", "getNetworkCountryIso", "()Ljava/lang/String;",
           false, M_VALUE, -1, nullptr, false, 0, V_OP_ISO, -1, -1, -1, nullptr },
+        // getSimCarrierId() is an int index into Google's carrier list, not a
+        // MCC/MNC. Only installed when a carrier id is configured, because the
+        // value has no safe synthetic form: -1 (UNKNOWN) is the framework's own
+        // answer for an operator absent from the list, and 0 is a REAL carrier
+        // (T-Mobile US), so a default here would be a wrong answer rather than
+        // a missing one. With no carrier id set, the spec's value is empty and
+        // the hook falls through to the framework's -1.
+        { "android/telephony/TelephonyManager", "getSimCarrierId", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_CARRIER_ID, -1, -1, -1, nullptr },
+
+        // ---- P1c: cell identity ----
+        //
+        // The MCC/MNC as the CELL reports them, which is a different object from
+        // TelephonyManager and a different API from getNetworkOperator(). Grab
+        // references android.telephony.CellIdentityCdma and CellInfoCdma and
+        // records a bare "mnc" field in pax.track.nk.measures.network_calls;
+        // hooking only the TelephonyManager getters left that field reading the
+        // real network while every other carrier field on the same event was
+        // spoofed. getMccString()/getMncString() are the string forms (API 28+);
+        // getMcc()/getMnc() are the int forms, and the int form of an unknown
+        // value is Integer.MAX_VALUE, which is why the string specs come first
+        // and the int ones are only added when a real operator is configured.
+        { "android/telephony/CellIdentityLte", "getMccString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityLte", "getMncString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MNC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityLte", "getMcc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityLte", "getMnc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MNC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityWcdma", "getMccString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityWcdma", "getMncString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MNC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityWcdma", "getMcc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityWcdma", "getMnc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MNC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityGsm", "getMccString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityGsm", "getMncString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MNC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityGsm", "getMcc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityGsm", "getMnc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MNC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityNr", "getMccString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityNr", "getMncString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MNC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityNr", "getMcc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/CellIdentityNr", "getMnc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MNC, -1, -1, -1, nullptr },
+        // SubscriptionInfo carries the SIM's own view of the operator. Grab
+        // references the class directly, and its getMcc()/getMnc() are the
+        // subscription's, not the cell's - a third surface that has to agree.
+        { "android/telephony/SubscriptionInfo", "getMccString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/SubscriptionInfo", "getMncString", "()Ljava/lang/String;",
+          false, M_VALUE, -1, nullptr, false, 0, V_OP_MNC, -1, -1, -1, nullptr },
+        { "android/telephony/SubscriptionInfo", "getMcc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MCC, -1, -1, -1, nullptr },
+        { "android/telephony/SubscriptionInfo", "getMnc", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_OP_MNC, -1, -1, -1, nullptr },
 
         // ---- P1: MAC addresses ----
         { "android/net/wifi/WifiInfo", "getMacAddress", "()Ljava/lang/String;",
@@ -1475,6 +1592,37 @@ inline bool install_all(JNIEnv* env, const HookValues& v) {
                     if (s) env->SetObjectArrayElement(arr, (jsize)i, s);
                 }
                 env->SetStaticObjectField(g.cb_class, g.f_deny, arr);
+            }
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+
+    // Diagnostic logging inside the Java callback. Compiled in only for a
+    // debug build: a Log line naming the spoofed field is a device tell, and
+    // logcat is readable by anything holding READ_LOGS.
+#ifdef SBX_DEBUG
+    {
+        jfieldID f_dbg = env->GetStaticFieldID(g.cb_class, "debugLog", "Z");
+        if (f_dbg) env->SetStaticBooleanField(g.cb_class, f_dbg, JNI_TRUE);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+#endif
+
+    // Vendor prefixes the persona must keep visible. Always written, including
+    // the empty case: the field defaults to a zero-length array, and an app
+    // whose persona is not that vendor must not inherit a stale keep-list from
+    // an earlier persona in the same process.
+    if (g.f_vendorKeep) {
+        jclass strCls = env->FindClass("java/lang/String");
+        if (strCls) {
+            jobjectArray arr = env->NewObjectArray((jsize)v.vendor_keep.size(),
+                                                   strCls, nullptr);
+            if (arr) {
+                for (size_t i = 0; i < v.vendor_keep.size(); ++i) {
+                    jstring s = env->NewStringUTF(v.vendor_keep[i].c_str());
+                    if (s) env->SetObjectArrayElement(arr, (jsize)i, s);
+                }
+                env->SetStaticObjectField(g.cb_class, g.f_vendorKeep, arr);
             }
         }
         if (env->ExceptionCheck()) env->ExceptionClear();

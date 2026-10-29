@@ -33,11 +33,22 @@ struct KV { const char* k; const char* v; };
 
 inline constexpr KV VAL_DEFAULTS[] = {
     {"SYS_BOOT_COMPLETED",     "1"},
-    {"GSM_OPERATOR_NUMERIC",   "51010"},
-    {"GSM_OPERATOR_ALPHA",     "Telkomsel"},
-    {"GSM_OPERATOR_ISO",       "id"},
-    {"GSM_CARRIER_ID",         "787"},
-    {"GSM_SIM_STATE",          ""},
+    // GSM_OPERATOR_* deliberately absent. They used to default to Telkomsel
+    // 51010 / id / carrier id 787, which made the module claim a carrier the
+    // device is not on: the test SIM is XL 51011, and the contradiction showed
+    // up in Grab's own telemetry as `"mnc":"11"` (real, from a radio surface the
+    // module does not hook) beside `"crn":"Telkomsel"` (spoofed, from the
+    // property and TelephonyManager lenses) in the same event stream. A persona
+    // that invents a carrier also breaks anything carrier-mediated - SNA
+    // verification failed 28 times with "network not validated" - because the
+    // network the modem is actually attached to is not the one being reported.
+    //
+    // No default is the correct default: with the key absent, val() returns
+    // empty, spoof_prop_value() declines, and the REAL property is served. The
+    // device then reports its real carrier consistently through every surface,
+    // hooked or not. A user who wants a different carrier runs `carrier`, which
+    // writes GSM_OPERATOR_* into identity.prop and is honoured everywhere the
+    // module does hook (see README "Known limits" for the surfaces it cannot).
     {"BUILD_CHARACTERISTICS",  "default"},
     {"PERSIST_TIMEZONE",       "Asia/Jakarta"},
     {"CPU_ABI",                "arm64-v8a"},

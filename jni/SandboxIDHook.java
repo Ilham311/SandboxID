@@ -113,7 +113,30 @@ public final class EnvCompatState {
      */
     public static final int M_GSF_CURSOR = 11;
 
+    /**
+     * Packages hidden from every PackageManager query.
+     *
+     * <p>Two groups, and the second is the one that used to leak. The first is
+     * root/modding tooling: naming it is a device tell in itself. The second is
+     * OEM system packages that only exist on ONE vendor's ROM - a persona is a
+     * single device, so a Xiaomi package visible under an OPPO persona is a
+     * contradiction the app can read straight out of
+     * {@code getInstalledAccessibilityServiceList}.
+     *
+     * <p>That list is why the vendor group exists. Grab records every enabled
+     * accessibility service id in its HVS scan result ({@code files/hvs/
+     * scanResult*.txt}, field "as"), and the hook that filters it already
+     * worked - {@code bin.mt.plus} disappeared from the scan after it was
+     * added here. What remained were {@code com.miui.securitycenter},
+     * {@code com.milink.service}, {@code com.microsoft.appmanager} and
+     * {@code com.fufufu.katrina.backup}: real packages on the host MIUI ROM,
+     * absent from the OPPO persona the device was claiming to be.
+     *
+     * <p>Vendor names are matched by prefix, so one entry covers the whole
+     * family (com.miui.securitycenter and com.miui.securitycenter.xxx alike).
+     */
     public static final String[] HIDDEN_PACKAGES = new String[]{
+        // ---- root / modding tooling ----
         "com.topjohnwu.magisk",
         "io.github.vvb2060.magisk",
         "io.github.vvb2060.kernelsu",
@@ -132,16 +155,53 @@ public final class EnvCompatState {
         "com.rosteam.gpsemulator",
         "com.incorporateapps.fakegps.fre",
         "com.incorporateapps.fakegps",
-        "com.applisto.appcloner"
+        "com.applisto.appcloner",
+        // ---- vendor ROM packages ----
+        // MIUI / HyperOS
+        "com.miui",
+        "com.milink.service",
+        "com.xiaomi",
+        "com.mi.health",
+        "com.mipay.wallet",
+        "com.android.thememanager",
+        // ColorOS / OxygenOS
+        "com.oplus",
+        "com.coloros",
+        "com.oneplus",
+        "com.realme",
+        // cross-vendor desktop/screen-mirroring guests
+        "com.microsoft.appmanager",
+        // third-party backup tools that ride an accessibility service
+        "com.fufufu.katrina.backup",
     };
+
+    /**
+     * Vendor prefixes that must stay VISIBLE, because the active persona is
+     * that vendor's own device. Filled from native before Hook() with the
+     * persona's MANUFACTURER/BRAND, so an OPPO persona keeps com.oplus.* while
+     * a Pixel persona hides it. Empty means every vendor entry above is hidden.
+     */
+    public static String[] vendorKeep = new String[0];
 
     public static boolean isHiddenPackage(String pkgName) {
         if (pkgName == null) return false;
         String lower = pkgName.toLowerCase(java.util.Locale.US);
         for (int i = 0; i < HIDDEN_PACKAGES.length; ++i) {
             if (lower.equals(HIDDEN_PACKAGES[i]) || lower.startsWith(HIDDEN_PACKAGES[i] + ".")) {
+                if (isVendorKept(lower)) continue;
                 return true;
             }
+        }
+        return false;
+    }
+
+    private static boolean isVendorKept(String lower) {
+        String[] keep = vendorKeep;
+        if (keep == null) return false;
+        for (int i = 0; i < keep.length; ++i) {
+            String k = keep[i];
+            if (k == null || k.length() == 0) continue;
+            if (lower.equals(k) || lower.startsWith(k + ".")) return true;
         }
         return false;
     }
@@ -309,7 +369,49 @@ public final class EnvCompatState {
 
     public EnvCompatState() {}
 
+    /**
+     * Diagnostic switch, set from native only on a debug build.
+     *
+     * <p>Why this exists: a hook that silently does not fire is
+     * indistinguishable from a hook that fires and returns the wrong value,
+     * and the only evidence left is what the app happened to write to disk.
+     * That is exactly how the missing {@code getSubscriberId(int)} overload
+     * stayed invisible - the no-arg hook was installed and logged, the (int)
+     * call went to the real TelephonyManager, and the only trace was an
+     * adrIMSI built from the real carrier prefix.
+     *
+     * <p>Off by default and never enabled in a release build: a Log line that
+     * names the spoofed field is itself a device tell, and {@code logcat} is
+     * readable by anything with READ_LOGS.
+     */
+    public static boolean debugLog = false;
+
+    // Resolved once, lazily, and by name. The callback is compiled without
+    // android.jar (it is turned into DEX by gen_hook_dex.sh from this source
+    // alone), so a direct `android.util.Log.d` reference does not compile - not
+    // in the build, and not in tests/host/EnvCompatStateCheck, which compiles
+    // this same file on a plain JDK. Reflection is how every other Android
+    // class in here is reached for the same reason.
+    private static volatile Method s_logD;
+    private static volatile boolean s_logTried;
+
+    private static void dbg(String what, Object val) {
+        if (!debugLog) return;
+        try {
+            if (!s_logTried) {
+                s_logTried = true;
+                try {
+                    Class<?> logCls = Class.forName("android.util.Log");
+                    s_logD = logCls.getMethod("d", String.class, String.class);
+                } catch (Throwable ignored) {}
+            }
+            Method m = s_logD;
+            if (m != null) m.invoke(null, "SandboxID-L3", what + " -> " + String.valueOf(val));
+        } catch (Throwable ignored) {}
+    }
+
     public Object handle(Object[] args) {
+        if (debugLog) dbg("hook mode=" + mode, sval);
         if (mode == M_OBSERVE) return observeAndPass(args);
         if (mode == M_FILTER_PACKAGES) return filterPackages(args);
 

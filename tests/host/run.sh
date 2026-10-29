@@ -131,14 +131,16 @@ mkdir -p "$OUT"
 
 exit_code=0
 
-for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe sbx_process_name sbx_hw_naming; do
+for suite in sbx_pure sbx_hook_sm sbx_race_probe sbx_elf_probe sbx_process_name sbx_hw_naming sbx_ident_synth; do
     src="$REPO/tests/host/$suite.cpp"
     bin="$OUT/$suite"
 
     echo "==> building $suite"
     # sbx_elf_probe and sbx_process_name exercise a header on its own and take no
     # module TU; linking native_read.cpp in would pull the whole Zygisk surface
-    # into a test that has nothing to do with it.
+    # into a test that has nothing to do with it. sbx_ident_synth is a pure
+    # header too, but it calls sbxnr::splitmix64 / hex_from_seed, which live in
+    # native_read.cpp — so it takes the default branch.
     extra=""
     case "$suite" in
         sbx_elf_probe|sbx_process_name|sbx_hw_naming) ;;

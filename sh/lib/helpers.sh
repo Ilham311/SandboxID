@@ -223,6 +223,49 @@ pkg_restore_permissions() {
     printf '%s\n%s\n' "$_list" "$_after" | sort | uniq -d | awk 'NF { n++ } END { print n + 0 }'
 }
 
+# Permissions a real device would already have granted to the target app, and
+# which the reset therefore has to grant rather than merely restore.
+#
+# `pm clear` revokes every runtime permission, and pkg_restore_permissions() can
+# only put back what was granted before the wipe. A permission the user never
+# granted is therefore still denied afterwards, and an app that gates an
+# identifier read on it silently takes a different code path. Grab does exactly
+# that with READ_PHONE_STATE: on granted=false it skips getImei() and records the
+# ANDROID_ID in the IMEI field instead, which is why the device-parameter blob
+# carried `"IMEI":"d38af538f80a0314"` — a 16-hex-char string where a 15-digit
+# decimal belongs, identical to `"andrID"` on the same request. Every other
+# identifier on that request was correctly spoofed; the IMEI hook was installed
+# and simply never called.
+#
+# The list is deliberately short and evidence-driven. Granting a permission only
+# changes what the app is allowed to read; the L3 hooks answer every telephony
+# getter with a synthesized value, so what the app reads after the grant is the
+# persona's identifier, not the radio's. Adding permissions speculatively would
+# change app behaviour in ways nothing here has measured.
+pkg_persona_permissions() {
+    printf '%s\n' \
+        android.permission.READ_PHONE_STATE
+}
+
+# Grants pkg_persona_permissions() to a package. Prints how many of them are
+# granted afterwards, so a caller can report the real outcome rather than the
+# number of `pm grant` calls that happened to return 0.
+pkg_grant_persona_permissions() {
+    _pkg="$1"
+    [ -n "$_pkg" ] || return 1
+    command -v pm >/dev/null 2>&1 || { printf '0\n'; return 1; }
+    _want="$(pkg_persona_permissions)"
+    _old_ifs="$IFS"
+    IFS='
+'
+    for _perm in $_want; do
+        pm grant --user 0 "$_pkg" "$_perm" </dev/null >/dev/null 2>&1 || :
+    done
+    IFS="$_old_ifs"
+    _after="$(pkg_granted_permissions "$_pkg" 2>/dev/null)"
+    printf '%s\n%s\n' "$_want" "$_after" | sort | uniq -d | awk 'NF { n++ } END { print n + 0 }'
+}
+
 # Resolves the package's launcher activity ("pkg/.Activity"), or fails.
 pkg_launcher_activity() {
     _pkg="$1"

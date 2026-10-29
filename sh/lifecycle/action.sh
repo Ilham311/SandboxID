@@ -25,6 +25,8 @@ command -v identity_get >/dev/null 2>&1 || identity_get() {
 # no launch means the user opens the app by hand, which is the old behaviour.
 command -v pkg_granted_permissions  >/dev/null 2>&1 || pkg_granted_permissions()  { return 1; }
 command -v pkg_restore_permissions  >/dev/null 2>&1 || pkg_restore_permissions()  { printf '0\n'; return 1; }
+command -v pkg_grant_persona_permissions >/dev/null 2>&1 || pkg_grant_persona_permissions() { printf '0\n'; return 1; }
+command -v pkg_persona_permissions  >/dev/null 2>&1 || pkg_persona_permissions()  { return 1; }
 command -v pkg_launch               >/dev/null 2>&1 || pkg_launch()               { return 1; }
 
 if command -v sbx_bin >/dev/null 2>&1; then
@@ -117,13 +119,25 @@ if [ "$APPLIED" = "multibrand" ]; then
 
             if _fw_run pm clear --user 0 "$_line"; then
                 say "   - $_line — direset"
+                # The package manager is still finishing the clear; a grant
+                # issued in the same breath is dropped.
+                sleep 1
                 if [ "$_nperm" -gt 0 ]; then
-                    # The package manager is still finishing the clear; a grant
-                    # issued in the same breath is dropped.
-                    sleep 1
                     _restored=$(pkg_restore_permissions "$_line" "$_perms" 2>/dev/null)
                     case "$_restored" in ''|*[!0-9]*) _restored=0 ;; esac
                     say "     izin aktif kembali: $_restored dari $_nperm"
+                fi
+                # Restoring only puts back what was granted BEFORE the wipe. A
+                # permission the user never granted stays denied, and an app
+                # that gates an identifier read on it takes a different code
+                # path - Grab records the ANDROID_ID in its IMEI field when
+                # READ_PHONE_STATE is denied. Grant the persona's baseline set
+                # explicitly so the app runs the path a retail device would.
+                _persona_n=$(pkg_grant_persona_permissions "$_line" 2>/dev/null)
+                case "$_persona_n" in ''|*[!0-9]*) _persona_n=0 ;; esac
+                _persona_want=$(pkg_persona_permissions 2>/dev/null | awk 'NF { n++ } END { print n + 0 }')
+                if [ "$_persona_n" -gt 0 ]; then
+                    say "     izin baseline persona: $_persona_n dari $_persona_want"
                 fi
                 # Launched at the very end, after rotate_ids.sh has seeded the
                 # new AppLog files: starting the app first would have it read

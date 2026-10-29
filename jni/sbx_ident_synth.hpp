@@ -62,9 +62,15 @@ inline std::string synth_imei(uint64_t seed) {
 }
 
 // --- IMSI: MCC+MNC (from operator numeric) + MSIN, total 15, no check --------
+// The MCC+MNC prefix is NOT invented. It used to fall back to "51010"
+// (Telkomsel) whenever the operator string was missing or malformed, which
+// produced an IMSI naming a network the device was not attached to - the same
+// request then carried the real MNC read from the radio, so the two halves of
+// the identity disagreed. An empty result is the honest answer: the caller
+// leaves the getter unspoofed and the real (self-consistent) value is served.
 inline std::string synth_imsi(uint64_t seed, std::string mccmnc) {
-    if (mccmnc.size() < 5 || mccmnc.size() > 6) mccmnc = "51010"; // Telkomsel fallback
-    for (char c : mccmnc) if (c < '0' || c > '9') { mccmnc = "51010"; break; }
+    if (mccmnc.size() < 5 || mccmnc.size() > 6) return std::string();
+    for (char c : mccmnc) if (c < '0' || c > '9') return std::string();
     uint64_t s = seed ^ 0x494D5349ULL;                   // "IMSI"
     std::string d = mccmnc;
     append_digits(d, s, (int)(15 - mccmnc.size()));
@@ -82,7 +88,14 @@ inline const char* iccid_cc_for_mcc(const std::string& mccmnc) {
 }
 
 // --- ICCID: 89 + CC + issuer + account + Luhn, 19 digits ---------------------
+// Empty when the operator is unknown, for the same reason as synth_imsi(): the
+// country-code half is derived from the MCC, so without one the result would
+// describe a SIM from a country the device is not in. A device with no SIM
+// reports null from getSimSerialNumber(), and letting the hook fall through to
+// the original reproduces exactly that.
 inline std::string synth_iccid(uint64_t seed, const std::string& mccmnc) {
+    if (mccmnc.size() < 5 || mccmnc.size() > 6) return std::string();
+    for (char c : mccmnc) if (c < '0' || c > '9') return std::string();
     uint64_t s = seed ^ 0x49434349ULL;                   // "ICCI"
     std::string d = "89";                                // Major Industry Id (telecom)
     d += iccid_cc_for_mcc(mccmnc);                        // country (1-2 digits)
@@ -101,6 +114,29 @@ inline std::string synth_meid(uint64_t seed) {
 // --- Widevine deviceUniqueId: 32 bytes -> 64 hex -----------------------------
 inline std::string synth_widevine_hex(uint64_t seed) {
     return sbxnr::hex_from_seed(seed ^ 0x57565F4944ULL, 32); // "WV_ID"
+}
+
+// --- MCC / MNC split of an operator numeric --------------------------------
+// The joined "MCC+MNC" string is what gsm.operator.numeric carries, but several
+// framework getters expose the halves separately (CellIdentityLte.getMnc(),
+// SubscriptionInfo.getMcc(), ...). Those are a different API against a
+// different object than TelephonyManager.getNetworkOperator(), so hooking the
+// joined form does not cover them - and an app that reads the halves recorded
+// the REAL MNC while every other carrier field on the same event was spoofed.
+//
+// MCC is always three digits; the MNC is the remainder, 2 or 3 digits depending
+// on the allocation. An unrecognised string yields empty halves, so the caller
+// falls through to the real value instead of inventing one.
+inline std::string operator_mcc(const std::string& numeric) {
+    if (numeric.size() < 5 || numeric.size() > 6) return std::string();
+    for (char c : numeric) if (c < '0' || c > '9') return std::string();
+    return numeric.substr(0, 3);
+}
+
+inline std::string operator_mnc(const std::string& numeric) {
+    if (numeric.size() < 5 || numeric.size() > 6) return std::string();
+    for (char c : numeric) if (c < '0' || c > '9') return std::string();
+    return numeric.substr(3);
 }
 
 // Bundle so callers synthesize once.
