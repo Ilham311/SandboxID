@@ -1115,48 +1115,116 @@ final class TelephonyDrmHook {
      * args[] includes the receiver.
      */
     private static int hookGsfCursor(ClassLoader cl, final String gsfId) {
+        // ContentResolver declares three query overloads. Verified against the
+        // device's framework.jar (API 35, /data/local/tmp/fwx):
+        //
+        //   query(Uri,String[],String,String[],String)
+        //   query(Uri,String[],String,String[],String,CancellationSignal)
+        //   query(Uri,String[],Bundle,CancellationSignal)
+        //
+        // The first two put the selection args at args[3]. The Bundle form puts
+        // them under "android:query-arg-sql-selection-args" inside args[2].
+        // Hooking only the 5-arg form left the other two answering from the real
+        // provider, so a caller that passed a CancellationSignal — or used the
+        // Bundle API, which is what anything targeting API 26+ is encouraged to
+        // do — would read the real GSF id even with this hook installed.
+        final XC_MethodHook cb = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam p) {
+                if (p.args == null || p.args.length < 5) return;
+                Object uri = p.args[0];
+                if (uri == null) return;
+                if (!String.valueOf(uri).equals(GSF_URI)) return;
+
+                if (!wantsGsfId(p.args[3])) return;
+
+                Object cursor = newGsfCursor(cl, gsfId);
+                if (cursor != null) p.setResult(cursor);
+            }
+        };
+
+        // The Bundle overload. Separate callback because the selection args are
+        // not at args[3] — args[3] is the CancellationSignal there.
+        final XC_MethodHook bundleCb = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam p) {
+                if (p.args == null || p.args.length < 3) return;
+                Object uri = p.args[0];
+                if (uri == null) return;
+                if (!String.valueOf(uri).equals(GSF_URI)) return;
+
+                Object q = p.args[2];
+                if (!(q instanceof android.os.Bundle)) return;
+                Object sel = ((android.os.Bundle) q).get(QUERY_ARG_SELECTION_ARGS);
+                if (!wantsGsfId(sel)) return;
+
+                Object cursor = newGsfCursor(cl, gsfId);
+                if (cursor != null) p.setResult(cursor);
+            }
+        };
+
+        int n = 0;
+        // The 5-arg form. Grab uses this one, so it is the load-bearing hook.
         try {
             XposedHelpers.findAndHookMethod("android.content.ContentResolver", cl,
-                    "query",
-                    android.net.Uri.class,
-                    String[].class, String.class, String[].class, String.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam p) {
-                            if (p.args == null || p.args.length < 5) return;
-                            Object uri = p.args[0];
-                            if (uri == null) return;
-                            if (!String.valueOf(uri).equals(
-                                    "content://com.google.android.gsf.gservices")) return;
+                    "query", android.net.Uri.class, String[].class,
+                    String.class, String[].class, String.class, cb);
+            n++;
+        } catch (Throwable ignored) { }
+        // The 6-arg form with a CancellationSignal.
+        try {
+            XposedHelpers.findAndHookMethod("android.content.ContentResolver", cl,
+                    "query", android.net.Uri.class, String[].class,
+                    String.class, String[].class, String.class,
+                    android.os.CancellationSignal.class, cb);
+            n++;
+        } catch (Throwable ignored) { }
+        // The Bundle form (API 26+).
+        try {
+            XposedHelpers.findAndHookMethod("android.content.ContentResolver", cl,
+                    "query", android.net.Uri.class, String[].class,
+                    android.os.Bundle.class,
+                    android.os.CancellationSignal.class, bundleCb);
+            n++;
+        } catch (Throwable ignored) { }
+        return n;
+    }
 
-                            Object sel = p.args[3];
-                            if (!(sel instanceof String[])) return;
-                            boolean wants = false;
-                            for (String k : (String[]) sel) {
-                                if ("android_id".equals(k)) { wants = true; break; }
-                            }
-                            if (!wants) return;
+    private static final String GSF_URI =
+            "content://com.google.android.gsf.gservices";
 
-                            try {
-                                Class<?> mc = Class.forName(
-                                        "android.database.MatrixCursor");
-                                Object cursor = mc.getConstructor(
-                                                String[].class, int.class)
-                                        .newInstance(new String[]{"_id", "value"},
-                                                Integer.valueOf(1));
-                                mc.getMethod("addRow", Object[].class)
-                                        .invoke(cursor,
-                                                (Object) new Object[]{"android_id", gsfId});
-                                p.setResult(cursor);
-                            } catch (Throwable ignored) {
-                                // No MatrixCursor: let the real provider answer.
-                                // A real miss beats a crash inside the framework.
-                            }
-                        }
-                    });
-            return 1;
-        } catch (Throwable t) {
-            return 0;
+    /** The documented Bundle key for query selection args. */
+    private static final String QUERY_ARG_SELECTION_ARGS =
+            "android:query-arg-sql-selection-args";
+
+    /**
+     * True when {@code sel} is a selection-args array that asks for
+     * {@code android_id}. A null or empty array means "every row", which this
+     * hook cannot honestly serve — the real provider returns all of them.
+     */
+    private static boolean wantsGsfId(Object sel) {
+        if (!(sel instanceof String[])) return false;
+        for (String k : (String[]) sel) {
+            if ("android_id".equals(k)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Builds the one-row cursor the gservices provider would have returned.
+     * Returns null when {@code MatrixCursor} cannot be reached, so the caller
+     * lets the real provider answer instead of crashing the framework.
+     */
+    private static Object newGsfCursor(ClassLoader cl, String gsfId) {
+        try {
+            Class<?> mc = cl.loadClass("android.database.MatrixCursor");
+            Object cursor = mc.getConstructor(String[].class, int.class)
+                    .newInstance(new String[] {"_id", "value"}, Integer.valueOf(1));
+            mc.getMethod("addRow", Object[].class)
+                    .invoke(cursor, (Object) new Object[] {"android_id", gsfId});
+            return cursor;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 

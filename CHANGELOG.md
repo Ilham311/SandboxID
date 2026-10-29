@@ -181,6 +181,34 @@ lewat provider yang sama.
 Indeks argumennya berbeda satu dari native: Xposed tidak menyertakan receiver,
 jadi `selectionArgs` ada di `args[3]`, bukan `args[4]`.
 
+**Hanya satu dari tiga overload yang terpasang.** `ContentResolver` mendeklarasikan
+tiga bentuk `query` (diperiksa langsung terhadap `framework.jar` perangkat):
+
+```
+query(Uri, String[], String, String[], String)
+query(Uri, String[], String, String[], String, CancellationSignal)
+query(Uri, String[], Bundle, CancellationSignal)
+```
+
+Hook lama hanya memasang bentuk 5-argumen. Pemanggil yang menyertakan
+`CancellationSignal`, atau yang memakai API `Bundle` (bentuk yang justru
+dianjurkan untuk `targetSdk` 26+), tetap sampai ke provider asli dan membaca GSF
+id sungguhan — persis kegagalan "terpasang tapi tidak berefek" yang sudah dua
+kali melanda varian ini. Ketiganya kini terpasang, dengan satu gate bersama
+(`wantsGsfId`) dan satu pembangun cursor (`newGsfCursor`). Untuk bentuk `Bundle`,
+selection args dibaca dari kunci terdokumentasi
+`android:query-arg-sql-selection-args` (keberadaannya dipastikan lewat `strings`
+pada `framework.jar` perangkat), bukan dari `args[3]` yang di sana berisi
+`CancellationSignal`.
+
+`Class.forName` untuk `MatrixCursor`/`CancellationSignal` juga diganti
+`cl.loadClass` — `Class.forName` satu-argumen me-resolve lewat classloader modul,
+bukan classloader aplikasi.
+
+Gate dan pembangun cursor diuji terpisah (`GsfChk`, 15 check: pencocokan
+`android_id` persis, bukan prefiks; array kosong/null/bukan-array ditolak; cursor
+berisi satu baris dengan kolom `{_id, value}` dan id yang benar).
+
 ### Fix: varian LSPosed tidak menyembunyikan tool root dan paket vendor asing
 
 Modul Zygisk membawa delapan spec `ApplicationPackageManager`
