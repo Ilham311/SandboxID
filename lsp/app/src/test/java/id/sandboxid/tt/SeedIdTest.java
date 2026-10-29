@@ -291,6 +291,69 @@ public class SeedIdTest {
         check("ua null when persona lacks MODEL",
                 SeedId.userAgentPair("14", "M", "ID", noModel) == null);
 
+        System.out.println("-- screenGeometry: resolution must match the claimed model --");
+        // Screen size is the cheapest cross-check an SDK can make against
+        // Build.MODEL: a persona claiming a Pixel 9 Pro XL while
+        // Display.getRealSize() reports the real 1080x2400 is a contradiction
+        // that needs no privileged access. The table mirrors module.cpp:450-503.
+        java.util.Map<String, String> px9xl = new java.util.HashMap<>();
+        px9xl.put("MODEL", "Pixel 9 Pro XL");
+        int[] g = SeedId.screenGeometry(px9xl);
+        check("geometry built", g != null && g.length == 5);
+        eq("Pixel 9 Pro XL width", Integer.toString(g[0]), "1344");
+        eq("Pixel 9 Pro XL height", Integer.toString(g[1]), "2992");
+        eq("Pixel 9 Pro XL density", Integer.toString(g[2]), "560");
+
+        // Ordering: "Pixel 9 Pro XL" also contains "Pixel 9 Pro", and
+        // "Pixel 9 Pro Fold" contains both. The most specific must win, or a
+        // Pro Fold persona reports the Pro XL's panel.
+        java.util.Map<String, String> fold = new java.util.HashMap<>();
+        fold.put("MODEL", "Pixel 9 Pro Fold");
+        eq("Pixel 9 Pro Fold width",
+                Integer.toString(SeedId.screenGeometry(fold)[0]), "1080");
+        java.util.Map<String, String> p9pro = new java.util.HashMap<>();
+        p9pro.put("MODEL", "Pixel 9 Pro");
+        eq("Pixel 9 Pro width",
+                Integer.toString(SeedId.screenGeometry(p9pro)[0]), "1280");
+        java.util.Map<String, String> p8 = new java.util.HashMap<>();
+        p8.put("MODEL", "Pixel 8");
+        eq("Pixel 8 width", Integer.toString(SeedId.screenGeometry(p8)[0]), "1080");
+        java.util.Map<String, String> p8pro = new java.util.HashMap<>();
+        p8pro.put("MODEL", "Pixel 8 Pro");
+        eq("Pixel 8 Pro width",
+                Integer.toString(SeedId.screenGeometry(p8pro)[0]), "1344");
+
+        // Unknown model: the same 1080x2400/420 default native uses, not null —
+        // a persona for a non-Pixel still needs a plausible panel.
+        java.util.Map<String, String> other = new java.util.HashMap<>();
+        other.put("MODEL", "Redmi Note 10");
+        int[] o = SeedId.screenGeometry(other);
+        eq("unknown model width", Integer.toString(o[0]), "1080");
+        eq("unknown model density", Integer.toString(o[2]), "420");
+
+        // No MODEL at all: nothing to be consistent with, so no geometry.
+        check("no model -> null", SeedId.screenGeometry(new java.util.HashMap<>()) == null);
+        check("null map -> null", SeedId.screenGeometry(null) == null);
+
+        // Persona overrides win, but only when positive and parseable.
+        java.util.Map<String, String> ovr = new java.util.HashMap<>();
+        ovr.put("MODEL", "Pixel 7");
+        ovr.put("SCREEN_WIDTH", "1440");
+        ovr.put("SCREEN_HEIGHT", "3200");
+        ovr.put("LCD_DENSITY", "560");
+        int[] ov = SeedId.screenGeometry(ovr);
+        eq("override width", Integer.toString(ov[0]), "1440");
+        eq("override height", Integer.toString(ov[1]), "3200");
+        eq("override density", Integer.toString(ov[2]), "560");
+
+        java.util.Map<String, String> badOvr = new java.util.HashMap<>();
+        badOvr.put("MODEL", "Pixel 7");
+        badOvr.put("SCREEN_WIDTH", "0");
+        badOvr.put("LCD_DENSITY", "not-a-number");
+        int[] bo = SeedId.screenGeometry(badOvr);
+        eq("zero override ignored", Integer.toString(bo[0]), "1080");
+        eq("malformed override ignored", Integer.toString(bo[2]), "420");
+
         System.out.println();
         if (fails == 0) System.out.println("ALL PASS");
         else System.out.println(fails + " check(s) FAILED");

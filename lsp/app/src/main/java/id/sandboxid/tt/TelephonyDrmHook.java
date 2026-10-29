@@ -220,6 +220,23 @@ final class TelephonyDrmHook {
             }
         }
 
+        // ---- P0c: screen geometry ----
+        //
+        // Screen size is the cheapest cross-check an SDK can make against
+        // Build.MODEL, and the Zygisk module spoofs seven surfaces for it
+        // (Resources.getDisplayMetrics, Display.getMetrics/getRealMetrics/
+        // getSize/getRealSize/getWidth/getHeight, WindowMetrics.getBounds).
+        // The LSPosed variant had NONE of them, so a persona claiming a Pixel 9
+        // Pro XL still reported the real 1080x2400 panel.
+        //
+        // The values come from SeedId.screenGeometry(), the port of the
+        // model->resolution table in module.cpp:450-503, so both variants
+        // describe the same panel for the same persona.
+        int[] geo = SeedId.screenGeometry(id);
+        if (geo != null) {
+            n += hookDisplayMetrics(cl, geo);
+        }
+
         // ---- P1: TelephonyManager (all instance methods) ----
         String tel = "android.telephony.TelephonyManager";
         n += hook0(cl, tel, "getDeviceId", imei);
@@ -536,6 +553,158 @@ final class TelephonyDrmHook {
         } catch (Throwable t) {
             return 0;
         }
+    }
+
+    /**
+     * Installs the screen-geometry hooks, mirroring the seven specs the Zygisk
+     * module carries for this surface.
+     *
+     * <p>Three shapes, because the framework uses three:
+     * <ul>
+     *   <li>{@code Resources.getDisplayMetrics()} returns a {@code DisplayMetrics}
+     *       — fields are overwritten in place;</li>
+     *   <li>{@code Display.getMetrics/getRealMetrics(DisplayMetrics)} and
+     *       {@code getSize/getRealSize(Point)} fill an out-parameter and return
+     *       void — the argument is overwritten;</li>
+     *   <li>{@code Display.getWidth/getHeight()} and
+     *       {@code WindowMetrics.getBounds()} return a value — the result is
+     *       replaced.</li>
+     * </ul>
+     *
+     * <p>Rotation is honoured for the two scalar getters: a display whose
+     * rotation is 1 or 3 is landscape, so width and height swap. The native
+     * side does the same (SandboxIDHook.java:448-468); without it a landscape
+     * read would report a portrait panel and contradict the orientation the
+     * framework just reported.
+     */
+    private static int hookDisplayMetrics(ClassLoader cl, final int[] geo) {
+        final int w = geo[0], h = geo[1], dpi = geo[2];
+        final int xdpi = geo[3], ydpi = geo[4];
+
+        /** Writes the persona's geometry into a DisplayMetrics instance. */
+        XC_MethodHook fillMetrics = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam p) {
+                Object r = p.getResult();
+                if (r != null && r.getClass().getName().endsWith("DisplayMetrics")) {
+                    applyMetrics(r, w, h, dpi, xdpi, ydpi);
+                }
+                // The out-parameter form: getMetrics(DisplayMetrics), getSize(Point).
+                if (p.args != null && p.args.length > 0 && p.args[0] != null) {
+                    applyMetrics(p.args[0], w, h, dpi, xdpi, ydpi);
+                }
+            }
+        };
+
+        int n = 0;
+        // Resources.getDisplayMetrics() — returns a DisplayMetrics.
+        n += hook(cl, "android.content.res.Resources", "getDisplayMetrics", fillMetrics);
+        // Display.getMetrics(DisplayMetrics) / getRealMetrics(DisplayMetrics).
+        n += hook(cl, "android.view.Display", "getMetrics",
+                android.util.DisplayMetrics.class, fillMetrics);
+        n += hook(cl, "android.view.Display", "getRealMetrics",
+                android.util.DisplayMetrics.class, fillMetrics);
+        // Display.getSize(Point) / getRealSize(Point).
+        n += hook(cl, "android.view.Display", "getSize",
+                android.graphics.Point.class, fillMetrics);
+        n += hook(cl, "android.view.Display", "getRealSize",
+                android.graphics.Point.class, fillMetrics);
+
+        // Display.getWidth() / getHeight() — scalars, orientation-aware.
+        XC_MethodHook scalar = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam p) {
+                boolean landscape = isLandscape(p.thisObject);
+                boolean wantWidth = "getWidth".equals(p.method.getName());
+                int min = Math.min(w, h), max = Math.max(w, h);
+                int v = wantWidth ? (landscape ? max : min)
+                                  : (landscape ? min : max);
+                p.setResult(Integer.valueOf(v));
+            }
+        };
+        try {
+            XposedHelpers.findAndHookMethod("android.view.Display", cl,
+                    "getWidth", scalar);
+            n++;
+        } catch (Throwable ignored) { }
+        try {
+            XposedHelpers.findAndHookMethod("android.view.Display", cl,
+                    "getHeight", scalar);
+            n++;
+        } catch (Throwable ignored) { }
+
+        // WindowMetrics.getBounds() -> Rect.
+        XC_MethodHook bounds = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam p) {
+                Object r = p.getResult();
+                if (r != null && r.getClass().getName().endsWith("Rect")) {
+                    applyRect(r, w, h);
+                }
+            }
+        };
+        try {
+            XposedHelpers.findAndHookMethod("android.view.WindowMetrics", cl,
+                    "getBounds", bounds);
+            n++;
+        } catch (Throwable ignored) { }
+
+        return n;
+    }
+
+    /** True when the Display reports a landscape rotation (1 or 3). */
+    private static boolean isLandscape(Object display) {
+        if (display == null) return false;
+        try {
+            Object r = display.getClass().getMethod("getRotation").invoke(display);
+            if (r instanceof Integer) {
+                int rot = (Integer) r;
+                return rot == 1 || rot == 3;
+            }
+        } catch (Throwable ignored) { }
+        return false;
+    }
+
+    /**
+     * Overwrites the geometry fields of a {@code DisplayMetrics} or a
+     * {@code Point}. Both carry public {@code width}/{@code height}; only
+     * DisplayMetrics has the density fields, so each is set independently and
+     * a missing field is simply skipped.
+     */
+    private static void applyMetrics(Object o, int w, int h, int dpi,
+                                     int xdpi, int ydpi) {
+        if (o == null) return;
+        setIntField(o, "widthPixels", w);
+        setIntField(o, "heightPixels", h);
+        setIntField(o, "densityDpi", dpi);
+        setIntField(o, "x", w);      // Point
+        setIntField(o, "y", h);      // Point
+        setFloatField(o, "density", dpi / 160.0f);
+        setFloatField(o, "scaledDensity", dpi / 160.0f);
+        setFloatField(o, "xdpi", xdpi);
+        setFloatField(o, "ydpi", ydpi);
+    }
+
+    /** Overwrites a {@code Rect} to (0,0,w,h). */
+    private static void applyRect(Object o, int w, int h) {
+        setIntField(o, "left", 0);
+        setIntField(o, "top", 0);
+        setIntField(o, "right", w);
+        setIntField(o, "bottom", h);
+    }
+
+    private static void setIntField(Object o, String name, int v) {
+        try {
+            java.lang.reflect.Field f = o.getClass().getField(name);
+            f.setInt(o, v);
+        } catch (Throwable ignored) { }
+    }
+
+    private static void setFloatField(Object o, String name, float v) {
+        try {
+            java.lang.reflect.Field f = o.getClass().getField(name);
+            f.setFloat(o, v);
+        } catch (Throwable ignored) { }
     }
 
     private static byte[] hexToBytes(String hex) {

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Fix: varian LSPosed tidak punya hook resolusi layar sama sekali
+
+Modul Zygisk membawa tujuh spec untuk geometri layar
+(`Resources.getDisplayMetrics`, `Display.getMetrics`/`getRealMetrics`/
+`getSize`/`getRealSize`/`getWidth`/`getHeight`, `WindowMetrics.getBounds`) plus
+tabel model→resolusi di `module.cpp:450-503`. Varian LSPosed **tidak punya satu
+pun**. Akibatnya persona yang mengaku Pixel 9 Pro XL tetap melaporkan panel asli
+1080x2400 — kontradiksi yang bisa dilihat SDK mana pun tanpa akses istimewa,
+karena `Build.MODEL` dan `Display.getRealSize()` ada di API publik yang sama.
+
+Ditambahkan `SeedId.screenGeometry()` (port tabel native, dengan override
+persona `SCREEN_WIDTH`/`SCREEN_HEIGHT`/`LCD_DENSITY`/`SCREEN_XDPI`/`SCREEN_YDPI`
+yang hanya berlaku bila positif dan valid) dan `hookDisplayMetrics()` yang
+menangani ketiga bentuk API: nilai kembalian `DisplayMetrics`, out-parameter
+`DisplayMetrics`/`Point`, dan skalar `getWidth`/`getHeight` yang sadar rotasi.
+
+Urutan pencocokan model penting dan sudah ditiru dari native: `Pixel 9 Pro XL`
+mengandung `Pixel 9 Pro`, dan `Pixel 9 Pro Fold` mengandung keduanya — yang
+paling spesifik harus menang, atau persona Pro Fold melaporkan panel Pro XL.
+
 ### Fix: varian LSPosed melewatkan replay gate register dan rewrite User-Agent
 
 Dua hook yang modul Zygisk punya **tidak pernah dipasang** di varian LSPosed,

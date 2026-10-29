@@ -301,6 +301,72 @@ final class SeedId {
         return s == null || s.isEmpty();
     }
 
+    /**
+     * Screen geometry for a persona's {@code MODEL}, or null when the persona
+     * supplies no usable override and the model is not in the table.
+     *
+     * <p>Port of the resolution table in {@code jni/module.cpp:450-503}. The
+     * table is deliberately small and Pixel-only: it covers the models the
+     * bundled {@code devices.tsv} actually generates. Anything else falls back
+     * to 1080x2400/420dpi — the same default native uses — so the value is
+     * always plausible for the model the persona claims.
+     *
+     * <p>Why this matters: screen size is one of the cheapest cross-checks an
+     * SDK can make against {@code Build.MODEL}. A persona claiming a Pixel 9
+     * Pro XL while {@code Display.getRealSize()} reports the real 1080x2400 is
+     * a contradiction that needs no privileged access to notice.
+     *
+     * <p>Persona keys win over the table, exactly as in {@code module.cpp}:
+     * {@code SCREEN_WIDTH}, {@code SCREEN_HEIGHT}, {@code LCD_DENSITY},
+     * {@code SCREEN_XDPI}, {@code SCREEN_YDPI}, each applied only when positive.
+     *
+     * @return {@code {width, height, density, xdpi, ydpi}}, or null if the
+     *         persona has no MODEL at all (nothing to be consistent with)
+     */
+    static int[] screenGeometry(Map<String, String> id) {
+        if (id == null) return null;
+        String model = id.get("MODEL");
+        if (isEmpty(model)) return null;
+
+        int w, h, d, xd, yd;
+        if (model.contains("Pixel 9 Pro XL"))      { w = 1344; h = 2992; d = 560; xd = 486; yd = 486; }
+        else if (model.contains("Pixel 9 Pro Fold")) { w = 1080; h = 2424; d = 420; xd = 422; yd = 422; }
+        else if (model.contains("Pixel 9 Pro"))    { w = 1280; h = 2856; d = 560; xd = 495; yd = 495; }
+        else if (model.contains("Pixel 9"))        { w = 1080; h = 2424; d = 420; xd = 422; yd = 422; }
+        else if (model.contains("Pixel 8 Pro"))    { w = 1344; h = 2992; d = 560; xd = 489; yd = 489; }
+        else if (model.contains("Pixel 8"))        { w = 1080; h = 2400; d = 420; xd = 428; yd = 428; }
+        else if (model.contains("Pixel 7 Pro"))    { w = 1440; h = 3120; d = 560; xd = 512; yd = 512; }
+        else if (model.contains("Pixel 7"))        { w = 1080; h = 2400; d = 420; xd = 416; yd = 416; }
+        else if (model.contains("Pixel 6 Pro"))    { w = 1440; h = 3120; d = 560; xd = 512; yd = 512; }
+        else if (model.contains("Pixel 6"))        { w = 1080; h = 2400; d = 420; xd = 411; yd = 411; }
+        else                                       { w = 1080; h = 2400; d = 420; xd = 420; yd = 420; }
+
+        // Persona overrides, each only when it parses to a positive number. A
+        // zero or malformed value must not replace a good table entry.
+        int ow = positiveInt(id.get("SCREEN_WIDTH"));
+        if (ow > 0) w = ow;
+        int oh = positiveInt(id.get("SCREEN_HEIGHT"));
+        if (oh > 0) h = oh;
+        int od = positiveInt(id.get("LCD_DENSITY"));
+        if (od > 0) d = od;
+        int ox = positiveInt(id.get("SCREEN_XDPI"));
+        if (ox > 0) xd = ox;
+        int oy = positiveInt(id.get("SCREEN_YDPI"));
+        if (oy > 0) yd = oy;
+
+        return new int[] { w, h, d, xd, yd };
+    }
+
+    /** {@code Integer.parseInt} that yields 0 for null/blank/malformed. */
+    private static int positiveInt(String s) {
+        if (isEmpty(s)) return 0;
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     static String meid(long seed) {
         return hexFromSeed(seed ^ 0x4D454944L, 7).toUpperCase();   // 14 hex
     }
