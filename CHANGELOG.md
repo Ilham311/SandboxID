@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v2.2.54 (2026-10-29)
+
 ### Fix: nama kelas per-build yang belum tercakup di varian LSPosed
 
 Native memakai pasangan nama kelas yang berbeda per build, dan varian LSPosed
