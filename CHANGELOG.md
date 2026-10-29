@@ -82,7 +82,7 @@ izin diberikan adalah identifier persona, bukan radio.
 ### Fix: `sbx_ident_synth.hpp` tidak punya test host
 
 Ketiga bug di atas lolos karena tidak ada yang menguji header itu. Suite baru
-`tests/host/sbx_ident_synth.cpp` (43 pemeriksaan) mengunci aturannya: sebuah
+`tests/host/sbx_ident_synth.cpp` (54 pemeriksaan) mengunci aturannya: sebuah
 identifier sintesis harus konsisten dengan operator yang membangunnya, atau
 **kosong** supaya pemanggil jatuh ke nilai asli — tidak pernah berupa hal ketiga
 yang terlihat masuk akal. Termasuk kasus koma per-slot yang membuat
