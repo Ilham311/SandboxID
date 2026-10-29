@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Fix: overload flags API 33 memakai tipe flags yang salah
+
+`hookFlags` selalu mencari `PackageManager$PackageInfoFlags`, dan
+`hookFlagsSingle` selalu mencari `ApplicationInfoFlags`. Padahal tipe itu
+berpasangan per metode, bukan per bentuk:
+
+| metode | tipe flags |
+|---|---|
+| `getInstalledPackages(flags)` | `PackageInfoFlags` |
+| `getInstalledApplications(flags)` | `ApplicationInfoFlags` |
+| `getPackageInfo(String, flags)` | `PackageInfoFlags` |
+| `getApplicationInfo(String, flags)` | `ApplicationInfoFlags` |
+
+`findAndHookMethod` tidak bisa mencocokkan signature yang tidak ada, jadi dua
+dari empat overload itu **tidak pernah terpasang**: `getInstalledApplications`
+(bentuk flags) dan `getPackageInfo` (bentuk flags) — dan yang kedua justru yang
+dipakai kode modern. Akibatnya paket tersembunyi tetap dikembalikan bila
+pemanggil memakai overload API 33. Spec native menamai tiap tipe secara terpisah
+(`sbx_lsplant.hpp:1234-1245`), jadi kesalahan ini hanya ada di varian LSPosed.
+
 ### Fix: kelas deteksi OEM tidak ditolak di varian LSPosed
 
 Perangkat Xiaomi yang memakai persona Pixel tetap bisa memuat `miui.os.Build`,

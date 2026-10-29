@@ -992,11 +992,17 @@ final class TelephonyDrmHook {
         n += hook(cl, cls, "getApplicationInfo", String.class, int.class, singleFilter);
 
         // API 33+ flags-object overloads. Looked up by name so an older
-        // framework simply skips them.
-        n += hookFlags(cl, cls, "getInstalledPackages", listFilter);
-        n += hookFlags(cl, cls, "getInstalledApplications", listFilter);
-        n += hookFlagsSingle(cl, cls, "getPackageInfo", singleFilter);
-        n += hookFlagsSingle(cl, cls, "getApplicationInfo", singleFilter);
+        // framework simply skips them. The flags type differs per method:
+        // getInstalledPackages takes PackageInfoFlags, getInstalledApplications
+        // takes ApplicationInfoFlags.
+        n += hookFlags(cl, cls, "getInstalledPackages",
+                "android.content.pm.PackageManager$PackageInfoFlags", listFilter);
+        n += hookFlags(cl, cls, "getInstalledApplications",
+                "android.content.pm.PackageManager$ApplicationInfoFlags", listFilter);
+        n += hookFlagsSingle(cl, cls, "getPackageInfo",
+                "android.content.pm.PackageManager$PackageInfoFlags", singleFilter);
+        n += hookFlagsSingle(cl, cls, "getApplicationInfo",
+                "android.content.pm.PackageManager$ApplicationInfoFlags", singleFilter);
 
         // AccessibilityManager — the same hidden set has to cover the
         // accessibility list, or the app sees a service whose package it was
@@ -1016,11 +1022,22 @@ final class TelephonyDrmHook {
     }
 
     /** {@code getInstalledX(PackageManager.PackageInfoFlags)} shape. */
+    /**
+     * {@code getInstalledX(PackageManager.<X>InfoFlags)} shape.
+     *
+     * <p>The flags type is a parameter, not fixed: {@code getInstalledPackages}
+     * takes {@code PackageInfoFlags} while {@code getInstalledApplications}
+     * takes {@code ApplicationInfoFlags}. Hardcoding one for both made the
+     * second lookup fail every time — {@code findAndHookMethod} cannot match a
+     * signature that does not exist — so {@code getInstalledApplications(flags)}
+     * silently stayed unhooked while the code counted the attempt as a miss.
+     * The native specs get this right by naming each type separately
+     * ({@code sbx_lsplant.hpp:1230-1240}).
+     */
     private static int hookFlags(ClassLoader cl, String cls, String name,
-                                 XC_MethodHook cb) {
+                                 String flagsClass, XC_MethodHook cb) {
         try {
-            Class<?> flags = XposedHelpers.findClass(
-                    "android.content.pm.PackageManager$PackageInfoFlags", cl);
+            Class<?> flags = XposedHelpers.findClass(flagsClass, cl);
             XposedHelpers.findAndHookMethod(cls, cl, name, flags, cb);
             return 1;
         } catch (Throwable ignored) {
@@ -1028,12 +1045,20 @@ final class TelephonyDrmHook {
         }
     }
 
-    /** {@code getX(String, PackageManager.XInfoFlags)} shape. */
+    /**
+     * {@code getX(String, PackageManager.<X>InfoFlags)} shape.
+     *
+     * <p>Same per-method type split as {@link #hookFlags}:
+     * {@code getPackageInfo} takes {@code PackageInfoFlags},
+     * {@code getApplicationInfo} takes {@code ApplicationInfoFlags}. Using one
+     * type for both made the {@code getPackageInfo} lookup fail every time, so
+     * a hidden package was still returned when the caller used the API 33
+     * overload — the one modern code actually calls.
+     */
     private static int hookFlagsSingle(ClassLoader cl, String cls, String name,
-                                       XC_MethodHook cb) {
+                                       String flagsClass, XC_MethodHook cb) {
         try {
-            Class<?> flags = XposedHelpers.findClass(
-                    "android.content.pm.PackageManager$ApplicationInfoFlags", cl);
+            Class<?> flags = XposedHelpers.findClass(flagsClass, cl);
             XposedHelpers.findAndHookMethod(cls, cl, name, String.class, flags, cb);
             return 1;
         } catch (Throwable ignored) {
@@ -1041,14 +1066,6 @@ final class TelephonyDrmHook {
         }
     }
 
-    /**
-     * The {@code packageName} of a PackageManager list item, or null.
-     *
-     * <p>{@code PackageInfo} and {@code ApplicationInfo} both carry a public
-     * {@code packageName} field. Nothing else reaches the list methods, so a
-     * null here means an unexpected type and the item is kept — filtering out
-     * something we cannot identify would hide innocent packages.
-     */
     /**
      * The package an item in a PackageManager/AccessibilityManager list belongs
      * to, or null when neither shape applies.
