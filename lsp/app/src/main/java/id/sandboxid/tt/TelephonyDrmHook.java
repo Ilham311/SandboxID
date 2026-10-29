@@ -1140,9 +1140,9 @@ final class TelephonyDrmHook {
                 if (uri == null) return;
                 if (!String.valueOf(uri).equals(GSF_URI)) return;
 
-                if (!wantsGsfId(p.args[3])) return;
+                if (!GsfAnswer.wantsGsfId(p.args[3])) return;
 
-                Object cursor = newGsfCursor(cl, gsfId);
+                Object cursor = GsfAnswer.newGsfCursor(cl, gsfId);
                 if (cursor != null) p.setResult(cursor);
             }
         };
@@ -1160,9 +1160,9 @@ final class TelephonyDrmHook {
                 Object q = p.args[2];
                 if (!(q instanceof android.os.Bundle)) return;
                 Object sel = ((android.os.Bundle) q).get(QUERY_ARG_SELECTION_ARGS);
-                if (!wantsGsfId(sel)) return;
+                if (!GsfAnswer.wantsGsfId(sel)) return;
 
-                Object cursor = newGsfCursor(cl, gsfId);
+                Object cursor = GsfAnswer.newGsfCursor(cl, gsfId);
                 if (cursor != null) p.setResult(cursor);
             }
         };
@@ -1194,43 +1194,14 @@ final class TelephonyDrmHook {
         return n;
     }
 
-    private static final String GSF_URI =
-            "content://com.google.android.gsf.gservices";
-
-    /** The documented Bundle key for query selection args. */
+    // The gate and the cursor builder live in GsfAnswer: they are the two
+    // pieces that decide whether this hook answers at all and what it hands
+    // back, and neither needs a ContentResolver to exercise. The overload
+    // wiring in hookGsfCursor() does, so it stays here and is checked on a
+    // device.
+    private static final String GSF_URI = GsfAnswer.GSF_URI;
     private static final String QUERY_ARG_SELECTION_ARGS =
-            "android:query-arg-sql-selection-args";
-
-    /**
-     * True when {@code sel} is a selection-args array that asks for
-     * {@code android_id}. A null or empty array means "every row", which this
-     * hook cannot honestly serve — the real provider returns all of them.
-     */
-    private static boolean wantsGsfId(Object sel) {
-        if (!(sel instanceof String[])) return false;
-        for (String k : (String[]) sel) {
-            if ("android_id".equals(k)) return true;
-        }
-        return false;
-    }
-
-    /**
-     * Builds the one-row cursor the gservices provider would have returned.
-     * Returns null when {@code MatrixCursor} cannot be reached, so the caller
-     * lets the real provider answer instead of crashing the framework.
-     */
-    private static Object newGsfCursor(ClassLoader cl, String gsfId) {
-        try {
-            Class<?> mc = cl.loadClass("android.database.MatrixCursor");
-            Object cursor = mc.getConstructor(String[].class, int.class)
-                    .newInstance(new String[] {"_id", "value"}, Integer.valueOf(1));
-            mc.getMethod("addRow", Object[].class)
-                    .invoke(cursor, (Object) new Object[] {"android_id", gsfId});
-            return cursor;
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
+            GsfAnswer.QUERY_ARG_SELECTION_ARGS;
 
     /**
      * Installs the two advertising-id hooks, mirroring the Zygisk module's
