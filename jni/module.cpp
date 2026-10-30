@@ -438,9 +438,11 @@ private:
         hv.openudid   = ids.openudid;
         hv.clientudid = ids.clientudid;
         hv.cdid       = ids.cdid;
-        // GAID: a stable UUID per persona. Same derivation the L3 hooks would
-        // otherwise have to invent, kept here so it rotates with the seed.
-        hv.gaid       = sbxnr::uuid_from_seed(hv.seed ^ 0x47414944ULL);   // "GAID"
+        // GAID: use GOOGLE_AID from persona when declared, otherwise fall back
+        // to a stable UUID derived from the seed so it rotates with the seed.
+        hv.gaid       = !val("GOOGLE_AID").empty()
+                            ? val("GOOGLE_AID")
+                            : sbxnr::uuid_from_seed(hv.seed ^ 0x47414944ULL);   // "GAID"
         // GSF id: decimal, because the gservices provider serves a decimal long
         // and every client parses it with Long.parseLong(). Distinct salt from
         // GAID so the two ids are not visibly related.

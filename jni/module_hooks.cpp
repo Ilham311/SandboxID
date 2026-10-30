@@ -1258,21 +1258,72 @@ static bool sbx_popen_readable(const char* type) {
     return type && type[0] == 'r';
 }
 
+static bool sbx_is_compound_cmd(const std::string& cmd) {
+    for (char c : cmd) {
+        if (c == ';' || c == '\n') return true;
+    }
+    if (cmd.find("&&") != std::string::npos || cmd.find("||") != std::string::npos) return true;
+    return false;
+}
+
+static bool sbx_is_lookup_probe_cmd(const std::string& cmd) {
+    static const char* const kProbes[] = {"which", "whereis", "command", "type"};
+    size_t i = 0;
+    while (i < cmd.size() && isspace(static_cast<unsigned char>(cmd[i]))) ++i;
+    size_t start = i;
+    while (i < cmd.size() && !isspace(static_cast<unsigned char>(cmd[i]))) ++i;
+    if (i <= start) return false;
+    std::string first = cmd.substr(start, i - start);
+    const char* slash = strrchr(first.c_str(), '/');
+    const char* base = slash ? slash + 1 : first.c_str();
+    for (const char* p : kProbes) {
+        if (strcmp(base, p) == 0) return true;
+    }
+    return false;
+}
+
+static std::string sbx_first_cmd_base(const std::string& cmd) {
+    size_t i = 0;
+    while (i < cmd.size() && isspace(static_cast<unsigned char>(cmd[i]))) ++i;
+    size_t start = i;
+    while (i < cmd.size() && !isspace(static_cast<unsigned char>(cmd[i]))) ++i;
+    if (i <= start) return "";
+    std::string first = cmd.substr(start, i - start);
+    const char* slash = strrchr(first.c_str(), '/');
+    return slash ? slash + 1 : first;
+}
+
 static FILE* hook_popen(const char* command, const char* type) {
     if (!command) return orig_popen ? orig_popen(command, type) : ::popen(command, type);
     std::string cmd(command);
 
     // 1. Root & binary probing via shell
     if (sbx_cmd_probes_root(cmd) || sbx_cmd_probes_busybox(cmd)) {
-        // LOGI for the same reason as sbx_exec_denied: a blocked probe is the
-        // event this layer exists for, and LOGD vanishes in a release build.
         LOGI("NATIVE_POPEN BLOCKED root tool check: '%s'", command);
-        // The shell's own wording for a command it cannot find, and the exit
-        // status it uses for one (127). Returning the empty string with status
-        // 1 here would be a different, equally detectable answer.
-        std::string first = cmd.substr(0, cmd.find_first_of(" \t"));
-        const char* slash = strrchr(first.c_str(), '/');
-        std::string name = slash ? slash + 1 : first;
+
+        // A compound shell command (e.g. HydraX Grab Defence:
+        // `echo '==7375=='; su -c id; echo '==6c73=='; ls; echo '==6d61=='; magisk -v 2>&1`)
+        // chains multiple commands with hex markers to test if the shell is intercepted.
+        // Synthesizing a single error for the first token drops all markers, drops
+        // intermediate commands like `ls`, and falsely reports `echo: inaccessible or not found`.
+        // Pass it to the real popen, where the child shell runs under the app's unprivileged
+        // UID in its isolated mount namespace and fails root probes naturally.
+        if (sbx_is_compound_cmd(cmd)) {
+            return orig_popen ? orig_popen(command, type) : ::popen(command, type);
+        }
+
+        // Lookup probes: `which su`, `whereis su`, `command -v su`, `which busybox`.
+        // On stock Android, `which` exists and returns empty stdout/stderr with exit code 1.
+        // Falsely reporting `/system/bin/sh: which: inaccessible or not found` with status 127
+        // is an instant tell that a fake hook intercepted the shell.
+        if (sbx_is_lookup_probe_cmd(cmd)) {
+            return create_synthetic_pipe("", 1);
+        }
+
+        // Direct single root binary execution (e.g. `su -c id 2>&1`, `magisk -v 2>&1`).
+        // Report the root binary's own basename as inaccessible or not found with exit 127.
+        std::string name = sbx_first_cmd_base(cmd);
+        if (name.empty()) name = "su";
         return create_synthetic_pipe(
             "/system/bin/sh: " + name + ": inaccessible or not found\n", 127);
     }
@@ -1467,29 +1518,6 @@ static void*           orig_execl = nullptr;
 static void*           orig_execlp = nullptr;
 static void*           orig_execle = nullptr;
 
-// `sh -c "<something>"` hides the real command inside argv[2], where a
-// pathname/argv[0] check cannot see it: Runtime.exec(new String[]{"sh","-c",
-// "su -c id"}) would otherwise sail through. Both -c and --command are
-// accepted, and the string is scanned with the same tokenizer popen uses.
-static bool sbx_shell_c_denied(char* const argv[]) {
-    if (!argv || !argv[0]) return false;
-    const char* b = strrchr(argv[0], '/');
-    b = b ? b + 1 : argv[0];
-    if (strcmp(b, "sh") != 0 && strcmp(b, "ash") != 0) return false;
-    for (int i = 1; argv[i]; ++i) {
-        if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--command") == 0) {
-            if (argv[i + 1]) {
-                if (sbx_cmd_probes_root(argv[i + 1])) return true;
-                std::string s(argv[i + 1]);
-                if (s.find("pm list package") != std::string::npos ||
-                    s.find("cmd package list packages") != std::string::npos) return true;
-            }
-            return false;
-        }
-    }
-    return false;
-}
-
 // `which su`, `whereis su`, `command -v su`, `type su`: the root binary is an
 // ARGUMENT, so the argv[0] test in sbx_exec_denied cannot see it. Scoped to the
 // lookup tools on purpose - a blanket argv scan would deny `grep su notes.txt`
@@ -1529,6 +1557,59 @@ static bool sbx_argv_lists_packages(char* const argv[]) {
     return has_list && has_pkg;
 }
 
+// Rewrite sensitive lookups or commands in argv rather than denying exec with ENOENT.
+//
+// Denying execve of `/system/bin/which` or `/system/bin/sh` with ENOENT tells the
+// calling Java runtime that the tool binary itself does not exist in the filesystem,
+// causing Runtime.exec to throw `IOException: Cannot run program "which": error=2`.
+// On genuine Android, `which` and `sh` always exist. Rewriting `which su` to
+// `which sbx_no_root` lets the real `which` execute and return exit status 1 with
+// empty output, exactly matching genuine unrooted behavior without throwing.
+static bool sbx_sanitize_exec_argv(char* const argv[], std::vector<char*>& out_argv) {
+    if (!argv || !argv[0]) return false;
+
+    // Check if it is a lookup probe: `which su`, `whereis su`, `command -v su`, `type su`
+    if (sbx_argv_probes_root(argv)) {
+        LOGI("NATIVE_EXEC SANITIZE root-tool lookup in argv");
+        for (int i = 0; argv[i]; ++i) out_argv.push_back(argv[i]);
+        out_argv.push_back(nullptr);
+        for (size_t i = 1; i + 1 < out_argv.size(); ++i) {
+            if (out_argv[i][0] == '-') continue;
+            if (sbx_is_root_binary(out_argv[i])) {
+                static char s_no_root[] = "sbx_no_root";
+                out_argv[i] = s_no_root;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Check if it is `sh -c` with `pm list package`
+    const char* b = strrchr(argv[0], '/');
+    b = b ? b + 1 : argv[0];
+    if (strcmp(b, "sh") == 0 || strcmp(b, "ash") == 0) {
+        for (int i = 1; argv[i]; ++i) {
+            if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--command") == 0) {
+                if (argv[i + 1]) {
+                    std::string s(argv[i + 1]);
+                    if (s.find("pm list package") != std::string::npos ||
+                        s.find("cmd package list packages") != std::string::npos) {
+                        LOGI("NATIVE_EXEC SANITIZE shell package list probe: '%s'", argv[i + 1]);
+                        for (int j = 0; argv[j]; ++j) out_argv.push_back(argv[j]);
+                        out_argv.push_back(nullptr);
+                        static char s_empty_cmd[] = "echo ''";
+                        out_argv[i + 1] = s_empty_cmd;
+                        return true;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    return false;
+}
+
 // Single decision point for the whole exec family. Returns true to deny.
 static bool sbx_exec_denied(const char* pathname, char* const argv[],
                             const char* tag, const char* what) {
@@ -1546,21 +1627,8 @@ static bool sbx_exec_denied(const char* pathname, char* const argv[],
         LOGI("NATIVE_%s BLOCKED argv[0]='%s'", tag, argv[0]);
         return true;
     }
-    // `which su` / `whereis su` / `command -v su` / `type su`: the root binary is
-    // an ARGUMENT, not the program, so the argv[0] test above cannot see it.
-    // Deliberately restricted to those probe tools - a blanket scan of every
-    // argv element would also deny `grep su notes.txt` or `cat su.log`, which
-    // are ordinary file operations and a visible app bug.
-    if (sbx_argv_probes_root(argv)) {
-        LOGI("NATIVE_%s BLOCKED root-tool lookup in argv", tag);
-        return true;
-    }
     if (argv && argv[0] && sbx_argv_lists_packages(argv)) {
         LOGI("NATIVE_%s BLOCKED package list probe via '%s'", tag, argv[0]);
-        return true;
-    }
-    if (sbx_shell_c_denied(argv)) {
-        LOGI("NATIVE_%s BLOCKED shell -c root/package command", tag);
         return true;
     }
     return false;
@@ -1568,22 +1636,42 @@ static bool sbx_exec_denied(const char* pathname, char* const argv[],
 
 static int hook_execve(const char* pathname, char* const argv[], char* const envp[]) {
     if (sbx_exec_denied(pathname, argv, "EXECVE", "path")) { errno = ENOENT; return -1; }
-    return orig_execve ? orig_execve(pathname, argv, envp) : ::execve(pathname, argv, envp);
+    std::vector<char*> clean_argv;
+    char* const* eff_argv = argv;
+    if (sbx_sanitize_exec_argv(argv, clean_argv)) {
+        eff_argv = clean_argv.data();
+    }
+    return orig_execve ? orig_execve(pathname, eff_argv, envp) : ::execve(pathname, eff_argv, envp);
 }
 
 static int hook_execv(const char* pathname, char* const argv[]) {
     if (sbx_exec_denied(pathname, argv, "EXECV", "path")) { errno = ENOENT; return -1; }
-    return orig_execv ? orig_execv(pathname, argv) : ::execv(pathname, argv);
+    std::vector<char*> clean_argv;
+    char* const* eff_argv = argv;
+    if (sbx_sanitize_exec_argv(argv, clean_argv)) {
+        eff_argv = clean_argv.data();
+    }
+    return orig_execv ? orig_execv(pathname, eff_argv) : ::execv(pathname, eff_argv);
 }
 
 static int hook_execvp(const char* file, char* const argv[]) {
     if (sbx_exec_denied(file, argv, "EXECVP", "file")) { errno = ENOENT; return -1; }
-    return orig_execvp ? orig_execvp(file, argv) : ::execvp(file, argv);
+    std::vector<char*> clean_argv;
+    char* const* eff_argv = argv;
+    if (sbx_sanitize_exec_argv(argv, clean_argv)) {
+        eff_argv = clean_argv.data();
+    }
+    return orig_execvp ? orig_execvp(file, eff_argv) : ::execvp(file, eff_argv);
 }
 
 static int hook_execvpe(const char* file, char* const argv[], char* const envp[]) {
     if (sbx_exec_denied(file, argv, "EXECVPE", "file")) { errno = ENOENT; return -1; }
-    return orig_execvpe ? orig_execvpe(file, argv, envp) : ::execvpe(file, argv, envp);
+    std::vector<char*> clean_argv;
+    char* const* eff_argv = argv;
+    if (sbx_sanitize_exec_argv(argv, clean_argv)) {
+        eff_argv = clean_argv.data();
+    }
+    return orig_execvpe ? orig_execvpe(file, eff_argv, envp) : ::execvpe(file, eff_argv, envp);
 }
 
 // `execl` / `execle` / `execlp` are the varargs spellings, and on bionic they do
@@ -1670,13 +1758,18 @@ static int hook_fexecve(int fd, char* const argv[], char* const envp[]) {
         errno = ENOENT;
         return -1;
     }
+    std::vector<char*> clean_argv;
+    char* const* eff_argv = argv;
+    if (sbx_sanitize_exec_argv(argv, clean_argv)) {
+        eff_argv = clean_argv.data();
+    }
     // The fallback is the by-name resolution, not a direct call: ::fexecve is
     // not declared at MIN_SDK=26. It is only reached if the Dobby pass above
     // failed to install this hook, in which case this body is not on the call
     // path at all - but it still has to compile.
-    if (orig_fexecve) return orig_fexecve(fd, argv, envp);
+    if (orig_fexecve) return orig_fexecve(fd, eff_argv, envp);
     auto real = reinterpret_cast<fexecve_fn>(sbx_libc_sym("fexecve"));
-    return real ? real(fd, argv, envp) : -1;
+    return real ? real(fd, eff_argv, envp) : -1;
 }
 
 static int hook_posix_spawn(pid_t* pid, const char* path,
@@ -1684,10 +1777,15 @@ static int hook_posix_spawn(pid_t* pid, const char* path,
                             const posix_spawnattr_t* attr,
                             char* const argv[], char* const envp[]) {
     if (sbx_exec_denied(path, argv, "POSIX_SPAWN", "path")) return ENOENT;
-    if (orig_posix_spawn) return orig_posix_spawn(pid, path, fa, attr, argv, envp);
+    std::vector<char*> clean_argv;
+    char* const* eff_argv = argv;
+    if (sbx_sanitize_exec_argv(argv, clean_argv)) {
+        eff_argv = clean_argv.data();
+    }
+    if (orig_posix_spawn) return orig_posix_spawn(pid, path, fa, attr, eff_argv, envp);
     // By name: ::posix_spawn is not declared at MIN_SDK=26 (API 28+).
     auto real = reinterpret_cast<posix_spawn_fn>(sbx_libc_sym("posix_spawn"));
-    return real ? real(pid, path, fa, attr, argv, envp) : ENOSYS;
+    return real ? real(pid, path, fa, attr, eff_argv, envp) : ENOSYS;
 }
 
 static int hook_posix_spawnp(pid_t* pid, const char* file,
@@ -1695,7 +1793,12 @@ static int hook_posix_spawnp(pid_t* pid, const char* file,
                              const posix_spawnattr_t* attr,
                              char* const argv[], char* const envp[]) {
     if (sbx_exec_denied(file, argv, "POSIX_SPAWNP", "file")) return ENOENT;
-    if (orig_posix_spawnp) return orig_posix_spawnp(pid, file, fa, attr, argv, envp);
+    std::vector<char*> clean_argv;
+    char* const* eff_argv = argv;
+    if (sbx_sanitize_exec_argv(argv, clean_argv)) {
+        eff_argv = clean_argv.data();
+    }
+    if (orig_posix_spawnp) return orig_posix_spawnp(pid, file, fa, attr, eff_argv, envp);
     // By name: ::posix_spawnp is not declared at MIN_SDK=26 (API 28+).
     auto real = reinterpret_cast<posix_spawn_fn>(sbx_libc_sym("posix_spawnp"));
     return real ? real(pid, file, fa, attr, argv, envp) : ENOSYS;

@@ -455,6 +455,32 @@ int main() {
         keep = {"pm", "path", "com.grabtaxi.passenger"}; CHECK(!sbx_argv_lists_packages(argv_of(v, keep)), "pm path <pkg> is not enumeration");
         keep = {"am", "list", "packages"};              CHECK(!sbx_argv_lists_packages(argv_of(v, keep)), "am list packages is not pm/cmd enumeration");
         CHECK(!sbx_argv_lists_packages(nullptr), "null argv is not enumeration");
+
+        // Sanitization of argv instead of raw ENOENT denial:
+        // `which su` -> `which sbx_no_root`
+        // `sh -c "pm list packages"` -> `sh -c "echo ''"`
+        std::vector<char*> clean_v;
+        keep = {"which", "su"};
+        CHECK(sbx_sanitize_exec_argv(argv_of(v, keep), clean_v), "which su is sanitized");
+        CHECK(clean_v.size() == 3 && std::string(clean_v[1]) == "sbx_no_root", "which su rewrites su to sbx_no_root");
+
+        clean_v.clear();
+        keep = {"which", "-a", "magisk"};
+        CHECK(sbx_sanitize_exec_argv(argv_of(v, keep), clean_v), "which -a magisk is sanitized");
+        CHECK(clean_v.size() == 4 && std::string(clean_v[2]) == "sbx_no_root", "which -a magisk rewrites to sbx_no_root");
+
+        clean_v.clear();
+        keep = {"sh", "-c", "pm list packages"};
+        CHECK(sbx_sanitize_exec_argv(argv_of(v, keep), clean_v), "sh -c pm list packages is sanitized");
+        CHECK(clean_v.size() == 4 && std::string(clean_v[2]) == "echo ''", "sh -c pm list packages rewrites to echo ''");
+
+        clean_v.clear();
+        keep = {"which", "sh"};
+        CHECK(!sbx_sanitize_exec_argv(argv_of(v, keep), clean_v), "which sh is not sanitized");
+
+        clean_v.clear();
+        keep = {"cat", "su.log"};
+        CHECK(!sbx_sanitize_exec_argv(argv_of(v, keep), clean_v), "cat su.log is not sanitized");
     }
 
     // ---- 12. every guarded entry point is actually registered --------------
@@ -502,6 +528,52 @@ int main() {
             int rc = fputc('x', wfp);
             CHECK(rc == 'x', "write-mode stream accepts a write (not a read-only synth)");
             hook_pclose(wfp);
+        }
+    }
+
+    // ---- 13b. compound command & lookup probe popen handling --------------
+    // HydraX (Grab Defence) chains hex markers with root checks:
+    // `echo '==7375=='; su -c id; echo '==6c73=='; ls; echo '==6d61=='; magisk -v 2>&1`
+    // Synthesizing a single error for the first token drops all markers, drops
+    // intermediate commands like `ls`, and falsely reports `echo: inaccessible or not found`.
+    // Compound commands must be passed to the real popen.
+    {
+        CHECK(sbx_is_compound_cmd("echo '==7375=='; su -c id"), "semicolon is a compound command");
+        CHECK(sbx_is_compound_cmd("cmd1\ncmd2"), "newline is a compound command");
+        CHECK(sbx_is_compound_cmd("cmd1 && cmd2"), "&& is a compound command");
+        CHECK(sbx_is_compound_cmd("cmd1 || cmd2"), "|| is a compound command");
+        CHECK(!sbx_is_compound_cmd("su -c id"), "single command is not compound");
+        CHECK(!sbx_is_compound_cmd("which su"), "which su is not compound");
+
+        CHECK(sbx_is_lookup_probe_cmd("which su"), "which su is a lookup probe");
+        CHECK(sbx_is_lookup_probe_cmd("/system/bin/which su"), "path which su is a lookup probe");
+        CHECK(sbx_is_lookup_probe_cmd("whereis magisk"), "whereis magisk is a lookup probe");
+        CHECK(sbx_is_lookup_probe_cmd("command -v su"), "command -v su is a lookup probe");
+        CHECK(sbx_is_lookup_probe_cmd("type ksud"), "type ksud is a lookup probe");
+        CHECK(!sbx_is_lookup_probe_cmd("su -c id"), "su -c id is not a lookup probe");
+
+        // which su via popen: returns empty output and exit status 1 (genuine Android which behavior)
+        FILE* pfp = hook_popen("which su", "r");
+        CHECK(pfp != nullptr, "popen which su returns a stream");
+        if (pfp) {
+            char buf[64] = {0};
+            size_t n = fread(buf, 1, sizeof(buf), pfp);
+            CHECK(n == 0, "popen which su returns 0 bytes (empty output)");
+            int st = hook_pclose(pfp);
+            CHECK(WEXITSTATUS(st) == 1, "popen which su exits with status 1");
+        }
+
+        // su -c id via popen: returns standard shell error and exit status 127
+        pfp = hook_popen("su -c id", "r");
+        CHECK(pfp != nullptr, "popen su -c id returns a stream");
+        if (pfp) {
+            char buf[128] = {0};
+            size_t n = fread(buf, 1, sizeof(buf) - 1, pfp);
+            buf[n] = '\0';
+            CHECK(std::string(buf) == "/system/bin/sh: su: inaccessible or not found\n",
+                  "popen su -c id reports su inaccessible or not found");
+            int st = hook_pclose(pfp);
+            CHECK(WEXITSTATUS(st) == 127, "popen su -c id exits with status 127");
         }
     }
 
