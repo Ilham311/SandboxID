@@ -76,8 +76,9 @@ public class EnvCompatStateCheck {
         public int getBlockSize() { return 1024; }
         public long getTotalBytes() { return 1000000L; }
         public String getVendor() { return "Xiaomi"; }
-        public String getName() { return "Xiaomi alioth traffic_detection sensor"; }
+        public String getName() { return "XiaoMi alioth traffic_detection sensor"; }
         public String getInputName() { return "XiaoMi traffic_detection v2.4"; }
+        public String getInputKona() { return "kona-mtp-snd-card Headset Jack"; }
         public int getVendorId() { return 0x2717; }
         public String[] getCameraIdList() { return new String[]{"0", "1", "2", "3"}; }
         public String glGetString(int name) { return "Adreno (TM) 650"; }
@@ -649,6 +650,10 @@ public class EnvCompatStateCheck {
         Object inpName = inp.handle(new Object[]{ t });
         check("M_INPUT_DEVICE getName sanitized", "touchscreen".equals(inpName));
 
+        inp.backup = Target.class.getDeclaredMethod("getInputKona");
+        Object inpKona = inp.handle(new Object[]{ t });
+        check("M_INPUT_DEVICE kona sanitized to headset-jack", "headset-jack".equals(inpKona));
+
         inp.backup = Target.class.getDeclaredMethod("getVendorId");
         Object inpVid = inp.handle(new Object[]{ t });
         check("M_INPUT_DEVICE getVendorId Xiaomi reset to 0", Integer.valueOf(0).equals(inpVid));
@@ -673,7 +678,7 @@ public class EnvCompatStateCheck {
         gl.backup = Target.class.getDeclaredMethod("glGetString", int.class);
         check("M_GL_STRING GL_VENDOR", "Qualcomm".equals(gl.handle(new Object[]{ t, 0x1F00 })));
         check("M_GL_STRING GL_RENDERER", "Adreno (TM) 730".equals(gl.handle(new Object[]{ t, 0x1F01 })));
-        check("M_GL_STRING GL_VERSION", String.valueOf(gl.handle(new Object[]{ t, 0x1F02 })).startsWith("OpenGL ES 3.2"));
+        check("M_GL_STRING Qualcomm GL_VERSION", String.valueOf(gl.handle(new Object[]{ t, 0x1F02 })).startsWith("OpenGL ES 3.2 V@"));
 
         androidx.core.os.EnvCompatState glStatic = new androidx.core.os.EnvCompatState();
         glStatic.mode = androidx.core.os.EnvCompatState.M_GL_STRING;
@@ -682,6 +687,7 @@ public class EnvCompatStateCheck {
         glStatic.gpuRenderer = "Mali-G715";
         glStatic.backup = Target.class.getDeclaredMethod("glGetStringStatic", int.class);
         check("M_GL_STRING static GL_RENDERER", "Mali-G715".equals(glStatic.handle(new Object[]{ 0x1F01 })));
+        check("M_GL_STRING ARM GL_VERSION", String.valueOf(glStatic.handle(new Object[]{ 0x1F02 })).startsWith("OpenGL ES 3.2 v1."));
 
         System.out.println(fails == 0 ? "ALL PASS" : fails + " FAILED");
         if (fails != 0) System.exit(1);

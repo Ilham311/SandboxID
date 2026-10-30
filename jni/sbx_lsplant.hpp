@@ -313,7 +313,7 @@ enum ValId {
     // unhooked getName() hands the app the real "CPH2521" while every other
     // field on the same event describes the persona.
     V_BT_NAME,
-    V_MANUFACTURER, V_MODEL, V_GPU_VENDOR, V_GPU_RENDERER, V_CPU_CORES, V_OS_ARCH
+    V_MANUFACTURER, V_MODEL, V_GPU_VENDOR, V_GPU_RENDERER, V_GPU_INFO, V_CPU_CORES, V_OS_ARCH
 };
 
 // Callback behaviour, mirrored by the constants in jni/SandboxIDHook.java.
@@ -741,6 +741,13 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         case V_MODEL:      return v.model;
         case V_GPU_VENDOR: return v.gpu_vendor;
         case V_GPU_RENDERER: return v.gpu_renderer;
+        case V_GPU_INFO: {
+            std::string ven = !v.gpu_vendor.empty() ? v.gpu_vendor : "Qualcomm";
+            std::string ren = !v.gpu_renderer.empty() ? v.gpu_renderer : "Adreno (TM) 730";
+            std::string ver = (ven == "ARM") ? "OpenGL ES 3.2 v1.r38p1-01eac0.d33190cb6bdf3b92f44ebadcf3bc4727"
+                                             : "OpenGL ES 3.2 V@0615.0 (GIT@8a4fafe, I37c6875887) (Date:11/17/23)";
+            return ven + "," + ver + "," + ren;
+        }
         case V_CPU_CORES:  return "8";
         case V_OS_ARCH:    return "aarch64";
         case V_GAID:       return v.gaid;
@@ -1358,7 +1365,7 @@ inline const HookSpec* hook_specs(size_t& n) {
         // SharedPreferences cached gpuInfo
         { "android/app/SharedPreferencesImpl", "getString",
           "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-          false, M_VALUE, 1, "gpuInfo", false, 0, V_GPU_RENDERER, -1, -1, -1, nullptr },
+          false, M_VALUE, 1, "gpuInfo", false, 0, V_GPU_INFO, -1, -1, -1, nullptr },
 
         // CPU cores & Architecture
         { "java/lang/Runtime", "availableProcessors", "()I",

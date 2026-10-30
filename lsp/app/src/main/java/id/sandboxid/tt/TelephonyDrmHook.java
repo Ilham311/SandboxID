@@ -1393,8 +1393,10 @@ final class TelephonyDrmHook {
                     Object r = p.getResult();
                     if (r instanceof String) {
                         String s = (String) r;
-                        s = s.replace("Xiaomi", man)
+                        s = s.replace("XiaoMi", man)
+                             .replace("Xiaomi", man)
                              .replace("xiaomi", man.toLowerCase(java.util.Locale.ROOT))
+                             .replace("XIAOMI", man.toUpperCase(java.util.Locale.ROOT))
                              .replace("alioth", "device")
                              .replace("traffic_detection", "sensor");
                         p.setResult(s);
@@ -1414,6 +1416,8 @@ final class TelephonyDrmHook {
                         String s = (String) r;
                         if (s.contains("traffic_detection") || s.contains("XiaoMi") || s.contains("xiaomi")) {
                             p.setResult("touchscreen");
+                        } else if (s.contains("kona")) {
+                            p.setResult("headset-jack");
                         }
                     } else {
                         p.setResult("touchscreen");
@@ -1456,7 +1460,11 @@ final class TelephonyDrmHook {
                     } else if (pname == 0x1F01) { // GL_RENDERER
                         p.setResult(gpuRenderer);
                     } else if (pname == 0x1F02) { // GL_VERSION
-                        p.setResult("OpenGL ES 3.2 V@0615.0 (GIT@8a4fafe, I37c6875887) (Date:11/17/23)");
+                        if ("ARM".equals(gpuVendor)) {
+                            p.setResult("OpenGL ES 3.2 v1.r38p1-01eac0.d33190cb6bdf3b92f44ebadcf3bc4727");
+                        } else {
+                            p.setResult("OpenGL ES 3.2 V@0615.0 (GIT@8a4fafe, I37c6875887) (Date:11/17/23)");
+                        }
                     }
                 }
             }
@@ -1478,7 +1486,10 @@ final class TelephonyDrmHook {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam p) {
                             if (p.args != null && p.args.length > 0 && "gpuInfo".equals(p.args[0])) {
-                                p.setResult(gpuRenderer);
+                                String ver = "ARM".equals(gpuVendor)
+                                        ? "OpenGL ES 3.2 v1.r38p1-01eac0.d33190cb6bdf3b92f44ebadcf3bc4727"
+                                        : "OpenGL ES 3.2 V@0615.0 (GIT@8a4fafe, I37c6875887) (Date:11/17/23)";
+                                p.setResult(gpuVendor + "," + ver + "," + gpuRenderer);
                             }
                         }
                     });

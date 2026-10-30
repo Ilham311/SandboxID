@@ -877,8 +877,10 @@ public final class EnvCompatState {
             if (r instanceof String) {
                 String s = (String) r;
                 String man = (sval != null && !sval.isEmpty()) ? sval : "Generic";
-                s = s.replace("Xiaomi", man)
+                s = s.replace("XiaoMi", man)
+                     .replace("Xiaomi", man)
                      .replace("xiaomi", man.toLowerCase(java.util.Locale.ROOT))
+                     .replace("XIAOMI", man.toUpperCase(java.util.Locale.ROOT))
                      .replace("alioth", "device")
                      .replace("traffic_detection", "sensor");
                 return s;
@@ -890,12 +892,15 @@ public final class EnvCompatState {
 
     private Object handleInputDevice(Object[] args) {
         String name = backup != null ? backup.getName() : "";
-        if ("getName".equals(name) || "getInputName".equals(name)) {
+        if ("getName".equals(name) || "getInputName".equals(name) || "getInputKona".equals(name)) {
             Object r = invokeOriginal(args);
             if (r instanceof String) {
                 String s = (String) r;
                 if (s.contains("traffic_detection") || s.contains("XiaoMi") || s.contains("xiaomi")) {
                     return "touchscreen";
+                }
+                if (s.contains("kona")) {
+                    return "headset-jack";
                 }
                 return s;
             }
@@ -935,16 +940,19 @@ public final class EnvCompatState {
         } else if (!isStatic && args != null && args.length > 1 && args[1] instanceof Integer) {
             pname = ((Integer) args[1]).intValue();
         }
+        String ven = (gpuVendor != null && !gpuVendor.isEmpty()) ? gpuVendor
+                   : ((sval != null && !sval.isEmpty()) ? sval : "Qualcomm");
+        String ren = (gpuRenderer != null && !gpuRenderer.isEmpty()) ? gpuRenderer : "Adreno (TM) 730";
         if (pname == 0x1F00) { // GL_VENDOR
-            if (gpuVendor != null && !gpuVendor.isEmpty()) return gpuVendor;
-            if (sval != null && !sval.isEmpty()) return sval;
-            return "Qualcomm";
+            return ven;
         }
         if (pname == 0x1F01) { // GL_RENDERER
-            if (gpuRenderer != null && !gpuRenderer.isEmpty()) return gpuRenderer;
-            return "Adreno (TM) 730";
+            return ren;
         }
         if (pname == 0x1F02) { // GL_VERSION
+            if ("ARM".equals(ven)) {
+                return "OpenGL ES 3.2 v1.r38p1-01eac0.d33190cb6bdf3b92f44ebadcf3bc4727";
+            }
             return "OpenGL ES 3.2 V@0615.0 (GIT@8a4fafe, I37c6875887) (Date:11/17/23)";
         }
         return invokeOriginal(args);
