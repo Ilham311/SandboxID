@@ -41,13 +41,20 @@ dan satu lapisan saja tidak cukup:
   hook menutup jalur baca di dalam proses target; baris di disk tetap harus
   benar untuk pembaca di luar jangkauan hook.
 
-**Batasnya, dan ini perlu dinyatakan.** Tidak ada satu pun dari 22 dex Grab yang
-membaca `bluetooth_name` — diverifikasi ulang dengan `dexlib` di seluruh
-`grabdex/*.dex`; yang ada hanya `device_name` di `classes11.dex[43774]` dan
-`classes16.dex[50342]`, plus `bluetooth_address` di `classes11.dex[41789]`. Jadi
-ini menutup **tell yang berdiri**, bukan kebocoran yang sedang dieksploitasi.
-Nilainya tetap: satu pertanyaan tidak boleh punya dua jawaban, terlepas dari
-siapa yang bertanya.
+**Batasnya, dan ini perlu dinyatakan.** Tidak ada satu pun dari 21 dex Grab yang
+membaca `bluetooth_name` — diverifikasi dengan `dexlib` terhadap dex yang
+diekstrak langsung dari `base.apk` terpasang (sertifikat `CN=MyTeksi Sdn Bhd`,
+Source Stamp Google). Yang ada hanya `device_name` di `classes11.dex` dan
+`classes16.dex`, plus `bluetooth_address` di `classes11.dex`. Jadi ini menutup
+**tell yang berdiri**, bukan kebocoran yang sedang dieksploitasi. Nilainya tetap:
+satu pertanyaan tidak boleh punya dua jawaban, terlepas dari siapa yang bertanya.
+
+> **Koreksi (2026-10-30).** Versi pertama catatan ini menyebut "22 dex" dan
+> mengutip `grabdex/*.dex`. Itu salah: `grabdex/` diisi dari APK **modifikasi
+> XMOD** (`CN=xmod`, 22 dex, ada `META-INF/XMOD.SF`), bukan APK Grab. APK
+> terpasang punya 21 dex. Kesimpulan `bluetooth_name` tidak berubah — kunci itu
+> memang tidak dibaca Grab, di kedua versi — tetapi angka dan rujukannya
+> diperbaiki di sini.
 
 ## v2.2.56 (2026-10-29)
 
