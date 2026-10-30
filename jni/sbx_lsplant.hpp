@@ -651,9 +651,20 @@ inline bool init(JNIEnv* env) {
 // builder. Before this table the app got the REAL adapter address
 // (8C:AA:CE:2C:19:D5 on the test device) while every neighbouring field on the
 // same event described the persona.
-static const char* const kSecureKeys[] = { "android_id", "bluetooth_address" };
-static const int kSecureVals[] = { V_ANDROID_ID, V_BT_ADDR };
-static const int kSecureKeyCount = 2;
+//
+// bluetooth_name is the third row, and it is here rather than only in
+// kGlobalKeys below because the two namespaces are independent: sync_device_name()
+// writes Settings.Global, so a reader of Settings.Secure.bluetooth_name got the
+// REAL adapter name. Measured on the test device: Secure answered "POCO F3"
+// while Global answered "Pixel 9a" - two answers to the same question, from one
+// Settings read and one property read. No Grab dex reads this key today (checked
+// across all 22: only device_name in classes11[43774] and classes16[50342], plus
+// bluetooth_address in classes11[41789]), so this closes a standing tell rather
+// than a live leak. V_BT_NAME is the same value the Global rows serve, which is
+// what makes the two namespaces agree instead of merely both being spoofed.
+static const char* const kSecureKeys[] = { "android_id", "bluetooth_address", "bluetooth_name" };
+static const int kSecureVals[] = { V_ANDROID_ID, V_BT_ADDR, V_BT_NAME };
+static const int kSecureKeyCount = 3;
 
 // The Settings.Global rows carrying the user-visible device name. Both are
 // written by sync_device_name() to the same value, and both are read by

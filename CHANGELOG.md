@@ -3,6 +3,49 @@
 ## Unreleased
 
 
+### Fix: `Settings.Secure.bluetooth_name` masih menjawab nama adapter asli
+
+**Gejala.** Satu pertanyaan yang sama dijawab berbeda oleh dua baris `Settings`
+pada persona yang sama di perangkat uji:
+
+```
+settings get --user 0 secure bluetooth_name   -> POCO F3
+settings get --user 0 global bluetooth_name   -> Pixel 9a
+settings get --user 0 global device_name      -> Pixel 9a
+```
+
+**Sebab.** Ketiga lapisan yang seharusnya menutup nama perangkat hanya menyentuh
+satu namespace. `kSecureKeys[]` (`jni/sbx_lsplant.hpp`) berisi `android_id` dan
+`bluetooth_address` saja, `kGlobalKeys[]` mengisi namespace Global, dan
+`sync_device_name()` di `sh/identity/rotate_ids.sh` hanya menulis
+`settings put global ...`. Tidak ada yang menulis baris Secure, jadi pembaca
+yang memakai namespace itu menerima nama adapter fisik.
+
+**Perbaikan.** Tiga lapisan, karena masing-masing melihat permukaan yang berbeda
+dan satu lapisan saja tidak cukup:
+
+- `jni/sbx_lsplant.hpp` — `bluetooth_name` menjadi baris ketiga `kSecureKeys[]`,
+  dilayani `V_BT_NAME` — nilai yang sama dengan yang dilayani baris Global.
+  Inilah yang membuat kedua namespace **sepakat**, bukan sekadar sama-sama
+  dipalsukan. Tabel tetap satu `M_VALUE_MULTI` karena LSPlant menolak hook kedua
+  pada `ArtMethod` yang sudah di-hook.
+- `lsp/app/src/main/java/id/sandboxid/tt/TelephonyDrmHook.java` — baris yang
+  sama masuk ke map `secure` varian LSPosed. Tanpa ini persona yang dipasang
+  lewat LSPosed tetap bocor meski modul Zygisk sudah benar.
+- `sh/identity/rotate_ids.sh` — `sync_device_name()` kini juga menulis
+  `settings put secure bluetooth_name`, dan `status` mencetak baris Secure
+  bersebelahan dengan Global supaya ketidaksepakatan langsung terlihat. Lapisan
+  hook menutup jalur baca di dalam proses target; baris di disk tetap harus
+  benar untuk pembaca di luar jangkauan hook.
+
+**Batasnya, dan ini perlu dinyatakan.** Tidak ada satu pun dari 22 dex Grab yang
+membaca `bluetooth_name` — diverifikasi ulang dengan `dexlib` di seluruh
+`grabdex/*.dex`; yang ada hanya `device_name` di `classes11.dex[43774]` dan
+`classes16.dex[50342]`, plus `bluetooth_address` di `classes11.dex[41789]`. Jadi
+ini menutup **tell yang berdiri**, bukan kebocoran yang sedang dieksploitasi.
+Nilainya tetap: satu pertanyaan tidak boleh punya dua jawaban, terlepas dari
+siapa yang bertanya.
+
 ## v2.2.56 (2026-10-29)
 
 ### Fix: hook "deny" dan "cloak" tidak pernah menolak apa pun

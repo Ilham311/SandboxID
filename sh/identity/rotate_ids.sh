@@ -190,6 +190,15 @@ sync_device_name() {
 
     settings_put global bluetooth_name "$NEW_NAME" || log_warn "settings put bluetooth_name failed"
     settings_put global device_name    "$NEW_NAME" || log_warn "settings put device_name failed"
+    # Settings.Secure.bluetooth_name is a SEPARATE row from the Global one, and
+    # nothing wrote it - so after a rotation Secure still answered the real
+    # adapter name ("POCO F3") while Global answered the persona ("Pixel 9a").
+    # Two answers to the same question from one Settings read. The hook layer
+    # covers the read path (kSecureKeys in sbx_lsplant.hpp, the secure map in
+    # TelephonyDrmHook), but a reader outside the hook scope - a root shell, a
+    # process the module does not target - sees the on-disk row, so the disk
+    # has to agree too.
+    settings_put secure bluetooth_name "$NEW_NAME" || log_warn "settings put secure bluetooth_name failed"
     rp_set persist.bluetooth.adaptername "$NEW_NAME"
     # persist.sys.device_name is the marketing name a reader gets from the
     # property service (see prop_defs.hpp). Before it was covered, this stayed
@@ -345,6 +354,10 @@ cmd_status() {
         log_info "Settings.Global.advertising_id  = $(mask_id "$(settings get --user 0 global advertising_id </dev/null 2>/dev/null)")"
         log_info "Settings.Global.device_name     = $(settings get --user 0 global device_name </dev/null 2>/dev/null)"
         log_info "Settings.Global.bluetooth_name  = $(settings get --user 0 global bluetooth_name </dev/null 2>/dev/null)"
+        # Printed next to the Global row on purpose: the two are the pair that
+        # used to disagree, and a diagnostic that shows only one of them cannot
+        # show that they agree.
+        log_info "Settings.Secure.bluetooth_name  = $(settings get --user 0 secure bluetooth_name </dev/null 2>/dev/null)"
     fi
     log_info "getprop ro.product.model              = $(getprop ro.product.model 2>/dev/null)"
     log_info "getprop persist.bluetooth.adaptername = $(getprop persist.bluetooth.adaptername 2>/dev/null)"

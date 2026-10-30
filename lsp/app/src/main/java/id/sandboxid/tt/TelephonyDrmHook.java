@@ -162,9 +162,19 @@ final class TelephonyDrmHook {
         // SecurityException without BLUETOOTH_CONNECT. Grab reads it directly in
         // Lc/g/zuo;->a() and returns the result verbatim, so an unhooked row
         // hands the app the real adapter address.
+        //
+        // bluetooth_name is the third row, and it is here rather than only in
+        // the Global map below because the two namespaces are independent.
+        // sync_device_name() writes Settings.Global, so a reader of
+        // Settings.Secure.bluetooth_name got the REAL adapter name: measured on
+        // the test device, Secure answered "POCO F3" while Global answered
+        // "Pixel 9a" — two answers to the same question. btName is the same
+        // value the Global rows serve, which is what makes the two namespaces
+        // agree instead of merely both being spoofed.
         java.util.LinkedHashMap<String, String> secure = new java.util.LinkedHashMap<>();
         secure.put("android_id", androidId);
         secure.put("bluetooth_address", btAddr);
+        secure.put("bluetooth_name", btName);
         n += hook(cl, "android.provider.Settings$Secure", "getString",
                 android.content.ContentResolver.class, String.class,
                 new MultiKeyReplacer(1, secure));
