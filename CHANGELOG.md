@@ -3,6 +3,9 @@
 ## Unreleased
 
 
+## v2.2.57 (2026-10-30)
+
+
 ### Fix: `Settings.Secure.bluetooth_name` masih menjawab nama adapter asli
 
 **Gejala.** Satu pertanyaan yang sama dijawab berbeda oleh dua baris `Settings`
