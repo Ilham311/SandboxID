@@ -31,8 +31,23 @@ int main() {
     // classify() deliberately matches the full shared_prefs path, not just the
     // filename — a bare suffix match would hijack unrelated files named applog.xml
     CHECK(classify("/sdcard/applog.xml") == NONE, "classify bare applog.xml outside shared_prefs is NONE");
-    CHECK(classify("/proc/self/maps") == NONE, "classify /proc/self/maps passthrough");
+    CHECK(classify("/proc/self/maps") == MAPS, "classify /proc/self/maps is MAPS");
+    CHECK(classify("/proc/12345/maps") == MAPS, "classify /proc/<pid>/maps is MAPS");
+    CHECK(classify("/proc/self/task/123/maps") == MAPS, "classify /proc/self/task/<tid>/maps is MAPS");
+    CHECK(classify("/proc/self/smaps") == MAPS, "classify /proc/self/smaps is MAPS");
     CHECK(classify(nullptr) == NONE, "classify nullptr");
+
+    {
+        std::string sample_maps =
+            "7749bf8000-7749c06000 r-xp 00000000 103:13 1233796 /data/adb/modules/sandboxid/zygisk/arm64-v8a.so\n"
+            "7749c06000-7749c07000 r--p 0000d000 103:13 1233796 /data/adb/modules/sandboxid/zygisk/arm64-v8a.so\n"
+            "7749c07000-7749c08000 rw-p 0000d000 103:13 1233796 /data/adb/modules/sandboxid/zygisk/arm64-v8a.so\n"
+            "7749c08000-7749c10000 r-xp 00000000 103:13 54321   /system/lib64/libc.so\n";
+        std::string patched = patch_maps(sample_maps);
+        CHECK(patched.find("sandboxid") == std::string::npos, "patch_maps removes sandboxid");
+        CHECK(patched.find("/data/adb/") == std::string::npos, "patch_maps removes /data/adb/");
+        CHECK(patched.find("/system/lib64/libc.so") != std::string::npos, "patch_maps keeps libc.so");
+    }
 
     // ---- is_valid_mac -----------------------------------------------------
     CHECK(is_valid_mac("02:1a:2b:3c:4d:5e"), "valid mac");

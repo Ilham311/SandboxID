@@ -43,6 +43,7 @@ enum CpuAction { CPU_NONE = 0, CPU_QUALCOMM = 1, CPU_MTK = 2, CPU_STRIP = 3 };
 
 enum Kind {
     NONE = 0, BOOTID, MAC, VERSION, MEMINFO, CPUINFO, SELINUX_ENFORCE,
+    MAPS,
     APPLOG_XML,
     BD_RAW_DID,
     BD_RAW_IID,
@@ -102,6 +103,7 @@ std::string cpuinfo_synth(const std::string& platform, const std::string& real,
                           uint64_t seed);
 
 Kind classify(const char* path);
+std::string patch_maps(const std::string& real);
 
 bool is_emulator_prop(const char* name);
 bool is_custom_rom_prop(const char* name);

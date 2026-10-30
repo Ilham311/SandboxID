@@ -582,6 +582,59 @@ std::string cpuinfo_synth(const std::string& platform, const std::string& real,
     return out;
 }
 
+static bool is_proc_maps(const char* path) {
+    if (!path || std::strncmp(path, "/proc/", 6) != 0) return false;
+    const char* p = path + 6;
+    if (std::strncmp(p, "self/", 5) == 0) {
+        p += 5;
+    } else {
+        while (*p >= '0' && *p <= '9') ++p;
+        if (*p != '/') return false;
+        ++p;
+    }
+    if (std::strncmp(p, "task/", 5) == 0) {
+        p += 5;
+        while (*p >= '0' && *p <= '9') ++p;
+        if (*p != '/') return false;
+        ++p;
+    }
+    return std::strcmp(p, "maps") == 0 || std::strcmp(p, "smaps") == 0;
+}
+
+std::string patch_maps(const std::string& real) {
+    if (real.empty()) return real;
+    std::string out;
+    out.reserve(real.size());
+    size_t start = 0;
+    while (start < real.size()) {
+        size_t end = real.find('\n', start);
+        size_t len = (end == std::string::npos) ? (real.size() - start) : (end - start);
+        std::string line = real.substr(start, len);
+
+        bool drop = false;
+        if (line.find("/data/adb/") != std::string::npos ||
+            line.find("sandboxid") != std::string::npos ||
+            line.find("zygisk") != std::string::npos ||
+            line.find("lsposed") != std::string::npos ||
+            line.find("edxposed") != std::string::npos ||
+            line.find("riru") != std::string::npos ||
+            line.find("xposed") != std::string::npos ||
+            line.find("magisk") != std::string::npos ||
+            line.find("ksud") != std::string::npos) {
+            drop = true;
+        }
+
+        if (!drop) {
+            out.append(line);
+            if (end != std::string::npos) out.push_back('\n');
+        }
+
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return out;
+}
+
 Kind classify(const char* path) {
     if (!path) return NONE;
     if (std::strcmp(path, "/proc/sys/kernel/random/boot_id") == 0) return BOOTID;
@@ -589,6 +642,7 @@ Kind classify(const char* path) {
     if (std::strcmp(path, "/proc/meminfo") == 0) return MEMINFO;
     if (std::strcmp(path, "/proc/cpuinfo") == 0) return CPUINFO;
     if (std::strcmp(path, "/sys/fs/selinux/enforce") == 0) return SELINUX_ENFORCE;
+    if (is_proc_maps(path)) return MAPS;
 
     static const char pfx[] = "/sys/class/net/";
     const size_t pl = sizeof(pfx) - 1;

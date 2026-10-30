@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <spawn.h>
+#include <link.h>
 
 #if defined(SBX_ENABLE_LSPLANT) && SBX_ENABLE_LSPLANT
 #include <dobby.h>
@@ -172,7 +173,7 @@ static sbxnr::ApplogIds sbx_applog_ids() {
 
 // Kinds whose synthetic content is derived from the real file bytes.
 static bool synth_needs_real(sbxnr::Kind k) {
-    return k == sbxnr::MEMINFO || k == sbxnr::CPUINFO || k == sbxnr::APPLOG_XML;
+    return k == sbxnr::MEMINFO || k == sbxnr::CPUINFO || k == sbxnr::APPLOG_XML || k == sbxnr::MAPS;
 }
 
 // Computes the synthetic replacement for `kind`; `real` holds the real file
@@ -236,6 +237,8 @@ static std::string synth_content(sbxnr::Kind k, const std::string& real) {
     }
     case sbxnr::SELINUX_ENFORCE:
         return sbxnr::selinux_enforce_content();
+    case sbxnr::MAPS:
+        return sbxnr::patch_maps(real);
     case sbxnr::APPLOG_XML: {
         if (val("SERIAL").empty()) break;      // fail closed
         sbxnr::ApplogIds ids = sbx_applog_ids();
@@ -351,7 +354,7 @@ static void synth_build(int fd) {
     // route to that fallback, which was wrong in a way that mattered: a
     // map-shaped file with foreign keys used to be served verbatim.)
     auto read_real = [fd]() {
-        constexpr size_t kMaxReal = 1u * 1024 * 1024;
+        constexpr size_t kMaxReal = 4u * 1024 * 1024;
         char tmp[8192];
         std::string out;
         for (;;) {
@@ -868,6 +871,44 @@ static int hook_uname(struct utsname* buf) {
     return rc;
 }
 
+// ---------- dl_iterate_phdr (dynamic linker library list) ----------
+// Used by libpsec.so (HydraX Grab Defence) at 0x198530 and libCredolabNative.so
+// to scan loaded shared libraries for blacklisted names (e.g. sandboxid, zygisk,
+// lsposed, xposed, magisk, ksud, riru). We filter out any matching library from
+// the iteration so security SDKs cannot see this module or root injection.
+typedef int (*dl_iterate_phdr_fn)(int (*)(struct dl_phdr_info*, size_t, void*), void*);
+static dl_iterate_phdr_fn orig_dl_iterate_phdr = nullptr;
+
+struct SbxDlIterateCtx {
+    int (*orig_cb)(struct dl_phdr_info*, size_t, void*);
+    void* orig_data;
+};
+
+static int sbx_dl_iterate_cb(struct dl_phdr_info* info, size_t size, void* data) {
+    auto* ctx = static_cast<SbxDlIterateCtx*>(data);
+    if (info && info->dlpi_name) {
+        const char* name = info->dlpi_name;
+        if (std::strstr(name, "/data/adb/") ||
+            std::strstr(name, "sandboxid") ||
+            std::strstr(name, "zygisk") ||
+            std::strstr(name, "lsposed") ||
+            std::strstr(name, "xposed") ||
+            std::strstr(name, "magisk") ||
+            std::strstr(name, "ksud") ||
+            std::strstr(name, "riru")) {
+            return 0; // Filter out hidden modules
+        }
+    }
+    return ctx->orig_cb(info, size, ctx->orig_data);
+}
+
+static int hook_dl_iterate_phdr(int (*callback)(struct dl_phdr_info*, size_t, void*), void* data) {
+    if (!callback) return -1;
+    SbxDlIterateCtx ctx{callback, data};
+    return orig_dl_iterate_phdr ? orig_dl_iterate_phdr(sbx_dl_iterate_cb, &ctx)
+                                : ::dl_iterate_phdr(sbx_dl_iterate_cb, &ctx);
+}
+
 // ---------- __system_property hooks (NATIVE layer) ----------
 // Intercepts __system_property_find and __system_property_read_callback
 // so that native-layer property reads (used by vdinfos NATIVE lens and
@@ -1302,7 +1343,9 @@ static FILE* hook_popen(const char* command, const char* type) {
     }
 
     // 3. pm list packages via shell. Read mode only, for the same reason.
-    if (sbx_popen_readable(type) && cmd.find("pm list packages") != std::string::npos) {
+    if (sbx_popen_readable(type) &&
+        (cmd.find("pm list package") != std::string::npos ||
+         cmd.find("cmd package list packages") != std::string::npos)) {
         FILE* real_fp = orig_popen ? orig_popen(command, type) : ::popen(command, type);
         if (real_fp) {
             std::string filtered;
@@ -1312,7 +1355,8 @@ static FILE* hook_popen(const char* command, const char* type) {
                 static const char* const kHiddenApps[] = {
                     "magisk", "kernelsu", "apatch", "lsposed", "xposed",
                     "hidemyapplist", "termux", "bin.mt.plus", "zarchiver",
-                    "fakegps", "gpsemulator"
+                    "fakegps", "gpsemulator", "revanced", "minminguard",
+                    "hma", "shizuku", "reqable", "probe"
                 };
                 for (const char* h : kHiddenApps) {
                     if (strcasestr(line, h)) { hide = true; break; }
@@ -1434,11 +1478,55 @@ static bool sbx_shell_c_denied(char* const argv[]) {
     if (strcmp(b, "sh") != 0 && strcmp(b, "ash") != 0) return false;
     for (int i = 1; argv[i]; ++i) {
         if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--command") == 0) {
-            if (argv[i + 1] && sbx_cmd_probes_root(argv[i + 1])) return true;
+            if (argv[i + 1]) {
+                if (sbx_cmd_probes_root(argv[i + 1])) return true;
+                std::string s(argv[i + 1]);
+                if (s.find("pm list package") != std::string::npos ||
+                    s.find("cmd package list packages") != std::string::npos) return true;
+            }
             return false;
         }
     }
     return false;
+}
+
+// `which su`, `whereis su`, `command -v su`, `type su`: the root binary is an
+// ARGUMENT, so the argv[0] test in sbx_exec_denied cannot see it. Scoped to the
+// lookup tools on purpose - a blanket argv scan would deny `grep su notes.txt`
+// and `cat su.log`, which are ordinary file operations.
+//
+// The check is positional: only the token immediately after the probe tool is
+// judged, and only when it names a root binary by basename. `which -a su` is
+// covered by skipping leading option tokens.
+static bool sbx_argv_probes_root(char* const argv[]) {
+    if (!argv || !argv[0]) return false;
+    const char* b = strrchr(argv[0], '/');
+    b = b ? b + 1 : argv[0];
+    bool is_probe = strcmp(b, "which") == 0 || strcmp(b, "whereis") == 0 ||
+                    strcmp(b, "type") == 0 || strcmp(b, "command") == 0;
+    if (!is_probe) return false;
+    for (int i = 1; argv[i]; ++i) {
+        if (argv[i][0] == '-') continue;          // -a, -v, -p, --all, ...
+        return sbx_is_root_binary(argv[i]);
+    }
+    return false;
+}
+
+// `pm list package[s]` / `cmd package list packages`: Megvii's FaceID SDK runs
+// this through Runtime.exec to enumerate every installed third-party package,
+// which exposes the root/modding toolchain on the device. Judged on the parsed
+// argv rather than the joined string so a quoted argument cannot hide it.
+static bool sbx_argv_lists_packages(char* const argv[]) {
+    if (!argv || !argv[0]) return false;
+    const char* b = strrchr(argv[0], '/');
+    b = b ? b + 1 : argv[0];
+    if (strcmp(b, "pm") != 0 && strcmp(b, "cmd") != 0) return false;
+    bool has_list = false, has_pkg = false;
+    for (int i = 1; argv[i]; ++i) {
+        if (strcmp(argv[i], "list") == 0) has_list = true;
+        if (strncmp(argv[i], "package", 7) == 0) has_pkg = true;
+    }
+    return has_list && has_pkg;
 }
 
 // Single decision point for the whole exec family. Returns true to deny.
@@ -1458,8 +1546,21 @@ static bool sbx_exec_denied(const char* pathname, char* const argv[],
         LOGI("NATIVE_%s BLOCKED argv[0]='%s'", tag, argv[0]);
         return true;
     }
+    // `which su` / `whereis su` / `command -v su` / `type su`: the root binary is
+    // an ARGUMENT, not the program, so the argv[0] test above cannot see it.
+    // Deliberately restricted to those probe tools - a blanket scan of every
+    // argv element would also deny `grep su notes.txt` or `cat su.log`, which
+    // are ordinary file operations and a visible app bug.
+    if (sbx_argv_probes_root(argv)) {
+        LOGI("NATIVE_%s BLOCKED root-tool lookup in argv", tag);
+        return true;
+    }
+    if (argv && argv[0] && sbx_argv_lists_packages(argv)) {
+        LOGI("NATIVE_%s BLOCKED package list probe via '%s'", tag, argv[0]);
+        return true;
+    }
     if (sbx_shell_c_denied(argv)) {
-        LOGI("NATIVE_%s BLOCKED shell -c root command", tag);
+        LOGI("NATIVE_%s BLOCKED shell -c root/package command", tag);
         return true;
     }
     return false;
@@ -1666,6 +1767,8 @@ static const HookReg kPltRegs[] = {
                  reinterpret_cast<void**>(&orig_readlink)},
     {"uname",    reinterpret_cast<void*>(hook_uname),
                  reinterpret_cast<void**>(&orig_uname)},
+    {"dl_iterate_phdr", reinterpret_cast<void*>(hook_dl_iterate_phdr),
+                 reinterpret_cast<void**>(&orig_dl_iterate_phdr)},
     {"__system_property_read_callback",
                 reinterpret_cast<void*>(hook_system_property_read_callback),
                 reinterpret_cast<void**>(&orig_prop_read_cb)},
@@ -1758,6 +1861,7 @@ static const LateReg kLateRegs[] = {
     {"access",   reinterpret_cast<void*>(hook_access),   reinterpret_cast<void**>(&orig_access)},
     {"readlink", reinterpret_cast<void*>(hook_readlink), reinterpret_cast<void**>(&orig_readlink)},
     {"uname",    reinterpret_cast<void*>(hook_uname),    reinterpret_cast<void**>(&orig_uname)},
+    {"dl_iterate_phdr", reinterpret_cast<void*>(hook_dl_iterate_phdr), reinterpret_cast<void**>(&orig_dl_iterate_phdr)},
 };
 static const size_t kLateRegsN = sizeof(kLateRegs) / sizeof(kLateRegs[0]);
 
@@ -1879,6 +1983,7 @@ void install_native_read_hooks(Api* api) {
     live += landed(reinterpret_cast<void*>(orig_close));
     live += landed(reinterpret_cast<void*>(orig_lseek));
     live += landed(reinterpret_cast<void*>(orig_lseek64));
+    live += landed(reinterpret_cast<void*>(orig_dl_iterate_phdr));
     live += landed(reinterpret_cast<void*>(orig_open_2));
     live += landed(reinterpret_cast<void*>(orig_openat_2));
     live += landed(reinterpret_cast<void*>(orig_prop_find));

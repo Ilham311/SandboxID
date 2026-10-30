@@ -1,4 +1,7 @@
 build/
+# Direktori build CMake lokal (di luar build/ resmi) yang dipakai untuk
+# kompilasi cepat di perangkat. Artefak, bukan sumber.
+build_test/
 pkg/
 *.zip
 *.o

@@ -413,6 +413,50 @@ int main() {
         orig_execve = nullptr;
     }
 
+    // ---- 11b. root-tool lookup and package enumeration in argv ------------
+    // Megvii's FaceID SDK runs `which su` and `pm list package -3` through
+    // Runtime.exec("sh"), so the tell sits in an ARGUMENT, not in argv[0].
+    // Two properties have to hold at once, and they pull in opposite
+    // directions: the probe must be caught, and an ordinary file operation
+    // that merely mentions "su" must NOT be. The second half is the one a
+    // blanket argv scan gets wrong, which is why the check is positional.
+    {
+        auto argv_of = [](std::vector<char*>& v, std::vector<const char*>& keep) {
+            v.clear();
+            for (const char* s : keep) v.push_back(const_cast<char*>(s));
+            v.push_back(nullptr);
+            return v.data();
+        };
+        std::vector<char*> v;
+        std::vector<const char*> keep;
+
+        // The probes that must be denied.
+        keep = {"which", "su"};                 CHECK(sbx_argv_probes_root(argv_of(v, keep)), "which su is a root-tool lookup");
+        keep = {"/system/bin/which", "su"};     CHECK(sbx_argv_probes_root(argv_of(v, keep)), "absolute-path which su is a root-tool lookup");
+        keep = {"which", "-a", "su"};           CHECK(sbx_argv_probes_root(argv_of(v, keep)), "which -a su skips the option token");
+        keep = {"whereis", "magisk"};           CHECK(sbx_argv_probes_root(argv_of(v, keep)), "whereis magisk is a root-tool lookup");
+        keep = {"command", "-v", "su"};         CHECK(sbx_argv_probes_root(argv_of(v, keep)), "command -v su is a root-tool lookup");
+        keep = {"type", "ksud"};                CHECK(sbx_argv_probes_root(argv_of(v, keep)), "type ksud is a root-tool lookup");
+
+        // The false positives a blanket argv scan would produce.
+        keep = {"grep", "su", "notes.txt"};     CHECK(!sbx_argv_probes_root(argv_of(v, keep)), "grep su notes.txt is not a root-tool lookup");
+        keep = {"cat", "su.log"};               CHECK(!sbx_argv_probes_root(argv_of(v, keep)), "cat su.log is not a root-tool lookup");
+        keep = {"which", "sh"};                 CHECK(!sbx_argv_probes_root(argv_of(v, keep)), "which sh is not a root-tool lookup");
+        keep = {"which"};                       CHECK(!sbx_argv_probes_root(argv_of(v, keep)), "bare which is not a root-tool lookup");
+        CHECK(!sbx_argv_probes_root(nullptr), "null argv is not a root-tool lookup");
+
+        // Package enumeration, in both spellings Megvii uses.
+        keep = {"pm", "list", "package", "-3"};         CHECK(sbx_argv_lists_packages(argv_of(v, keep)), "pm list package -3 is package enumeration");
+        keep = {"pm", "list", "packages"};              CHECK(sbx_argv_lists_packages(argv_of(v, keep)), "pm list packages is package enumeration");
+        keep = {"/system/bin/cmd", "package", "list", "packages"};
+        CHECK(sbx_argv_lists_packages(argv_of(v, keep)), "cmd package list packages is package enumeration");
+        // Not enumeration: a single-package query and an unrelated pm call.
+        keep = {"pm", "list", "permission-groups"};     CHECK(!sbx_argv_lists_packages(argv_of(v, keep)), "pm list permission-groups is not enumeration");
+        keep = {"pm", "path", "com.grabtaxi.passenger"}; CHECK(!sbx_argv_lists_packages(argv_of(v, keep)), "pm path <pkg> is not enumeration");
+        keep = {"am", "list", "packages"};              CHECK(!sbx_argv_lists_packages(argv_of(v, keep)), "am list packages is not pm/cmd enumeration");
+        CHECK(!sbx_argv_lists_packages(nullptr), "null argv is not enumeration");
+    }
+
     // ---- 12. every guarded entry point is actually registered --------------
     // A hook body that exists but is never listed in the PLT table is dead
     // code: the guard silently does nothing. That is how execl/execlp/execle
@@ -495,6 +539,7 @@ int main() {
             // stat("/system/bin/su") loop - it never opens anything, so none of
             // the read hooks above can see it.
             "stat", "lstat", "fstatat", "access", "readlink", "uname",
+            "dl_iterate_phdr",
         };
         for (const char* n : plt_expected) {
             bool in_plt = false;
