@@ -125,6 +125,58 @@ final class HwNaming {
         return "cortex-a55";
     }
 
+    /**
+     * GPU Vendor and Renderer string derivation for GL10 / GLES20 and Arkose telemetry.
+     */
+    static String gpuVendor(String socMan, String socModel) {
+        if (isQualcomm(socMan, socModel)) return "Qualcomm";
+        if (isMediatek(socMan, socModel)) return "ARM";
+        if (lower(socMan).contains("google")) return "ARM";
+        if (isExynos(socMan, socModel)) {
+            if ("s5e9945".equals(socModel) || "s5e8845".equals(socModel)) return "Samsung";
+            return "ARM";
+        }
+        return "Qualcomm";
+    }
+
+    static String gpuRenderer(String socMan, String socModel, String platform) {
+        if (isQualcomm(socMan, socModel)) {
+            if ("SM8650".equals(socModel)) return "Adreno (TM) 750";
+            if ("SM8550".equals(socModel)) return "Adreno (TM) 740";
+            if ("SM8475".equals(socModel) || "SM8450".equals(socModel)) return "Adreno (TM) 730";
+            if ("SM8350".equals(socModel)) return "Adreno (TM) 660";
+            if ("SM8250".equals(socModel)) return "Adreno (TM) 650";
+            if ("SM7475".equals(socModel)) return "Adreno (TM) 725";
+            if ("SM7435".equals(socModel)) return "Adreno (TM) 710";
+            if ("SM7325".equals(socModel)) return "Adreno (TM) 642L";
+            if ("SM6225".equals(socModel)) return "Adreno (TM) 610";
+            return "Adreno (TM) 730";
+        }
+        if (isTensorPlatform(platform)) {
+            if ("gs101".equals(platform)) return "Mali-G78";
+            if ("gs201".equals(platform)) return "Mali-G710";
+            if ("zuma".equals(platform) || "zumapro".equals(platform) || "laguna".equals(platform)) return "Mali-G715";
+            return "Mali-G715";
+        }
+        if (isMediatek(socMan, socModel)) {
+            if ("MT6989".equalsIgnoreCase(socModel)) return "Immortalis-G720 MC12";
+            if ("MT6985".equalsIgnoreCase(socModel)) return "Immortalis-G715 MC11";
+            if ("MT6897".equalsIgnoreCase(socModel)) return "Mali-G610 MC6";
+            if ("MT6895".equalsIgnoreCase(socModel)) return "Mali-G610 MC6";
+            if ("MT6893".equalsIgnoreCase(socModel)) return "Mali-G77 MC9";
+            if ("MT6789".equalsIgnoreCase(socModel)) return "Mali-G57 MC2";
+            if ("MT6833".equalsIgnoreCase(socModel)) return "Mali-G57 MC2";
+            if ("MT6769Z".equalsIgnoreCase(socModel) || "MT6768".equalsIgnoreCase(socModel)) return "Mali-G52 MC2";
+            return "Mali-G77";
+        }
+        if (isExynos(socMan, socModel)) {
+            if ("s5e9945".equals(socModel)) return "Samsung Xclipse 940";
+            if ("s5e8845".equals(socModel)) return "Samsung Xclipse 530";
+            return "Mali-G78";
+        }
+        return "Adreno (TM) 730";
+    }
+
     // There is deliberately NO gpuDriverPkg() here any more.
     //
     // ro.gfx.driver.1 names an INSTALLED package, and

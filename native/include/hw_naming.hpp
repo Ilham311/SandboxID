@@ -163,6 +163,58 @@ inline std::string dalvik_arm_variant(const std::string& soc_man,
     return "cortex-a55";
 }
 
+// GPU Vendor and Renderer string derivation for GL10 / GLES20 and Arkose telemetry.
+inline std::string gpu_vendor(const std::string& soc_man, const std::string& soc_model) {
+    if (is_qualcomm(soc_man, soc_model)) return "Qualcomm";
+    if (is_mediatek(soc_man, soc_model)) return "ARM";
+    if (ci_contains(soc_man, "google"))  return "ARM";
+    if (is_exynos(soc_man, soc_model)) {
+        if (soc_model == "s5e9945" || soc_model == "s5e8845") return "Samsung";
+        return "ARM";
+    }
+    return "Qualcomm";
+}
+
+inline std::string gpu_renderer(const std::string& soc_man,
+                                const std::string& soc_model,
+                                const std::string& platform) {
+    if (is_qualcomm(soc_man, soc_model)) {
+        if (soc_model == "SM8650") return "Adreno (TM) 750";
+        if (soc_model == "SM8550") return "Adreno (TM) 740";
+        if (soc_model == "SM8475" || soc_model == "SM8450") return "Adreno (TM) 730";
+        if (soc_model == "SM8350") return "Adreno (TM) 660";
+        if (soc_model == "SM8250") return "Adreno (TM) 650";
+        if (soc_model == "SM7475") return "Adreno (TM) 725";
+        if (soc_model == "SM7435") return "Adreno (TM) 710";
+        if (soc_model == "SM7325") return "Adreno (TM) 642L";
+        if (soc_model == "SM6225") return "Adreno (TM) 610";
+        return "Adreno (TM) 730";
+    }
+    if (is_tensor_platform(platform)) {
+        if (platform == "gs101") return "Mali-G78";
+        if (platform == "gs201") return "Mali-G710";
+        if (platform == "zuma" || platform == "zumapro" || platform == "laguna") return "Mali-G715";
+        return "Mali-G715";
+    }
+    if (is_mediatek(soc_man, soc_model)) {
+        if (soc_model == "MT6989") return "Immortalis-G720 MC12";
+        if (soc_model == "MT6985") return "Immortalis-G715 MC11";
+        if (soc_model == "MT6897") return "Mali-G610 MC6";
+        if (soc_model == "MT6895") return "Mali-G610 MC6";
+        if (soc_model == "MT6893") return "Mali-G77 MC9";
+        if (soc_model == "MT6789") return "Mali-G57 MC2";
+        if (soc_model == "MT6833") return "Mali-G57 MC2";
+        if (soc_model == "MT6769Z" || soc_model == "MT6768") return "Mali-G52 MC2";
+        return "Mali-G77";
+    }
+    if (is_exynos(soc_man, soc_model)) {
+        if (soc_model == "s5e9945") return "Samsung Xclipse 940";
+        if (soc_model == "s5e8845") return "Samsung Xclipse 530";
+        return "Mali-G78";
+    }
+    return "Adreno (TM) 730";
+}
+
 // There is deliberately NO gpu_driver_pkg() here any more.
 //
 // ro.gfx.driver.1 names an INSTALLED package

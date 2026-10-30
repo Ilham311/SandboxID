@@ -501,6 +501,16 @@ private:
             hv.display_ydpi    = yd;
         }
 
+        hv.manufacturer = val("MANUFACTURER");
+        hv.model        = val("MODEL");
+        {
+            const std::string& soc_man = val("SOC_MANUFACTURER");
+            const std::string& soc_mod = val("SOC_MODEL");
+            const std::string& plat    = val("BOARD_PLATFORM");
+            hv.gpu_vendor   = sbxhw::gpu_vendor(soc_man, soc_mod);
+            hv.gpu_renderer = sbxhw::gpu_renderer(soc_man, soc_mod, plat);
+        }
+
         if (sbxlsp::install_all(env, hv))
             LOGI("L3 java hooks active");
         else

@@ -129,6 +129,10 @@ struct HookValues {
     int         display_density = 0;
     float       display_xdpi    = 0.0f;
     float       display_ydpi    = 0.0f;
+    std::string manufacturer;
+    std::string model;
+    std::string gpu_vendor;
+    std::string gpu_renderer;
 };
 
 #ifndef SBX_ENABLE_LSPLANT
@@ -308,7 +312,8 @@ enum ValId {
     // Lc/g/zuo;->f() and through HyperVerge's getDeviceBasicProperties(), so an
     // unhooked getName() hands the app the real "CPH2521" while every other
     // field on the same event describes the persona.
-    V_BT_NAME
+    V_BT_NAME,
+    V_MANUFACTURER, V_MODEL, V_GPU_VENDOR, V_GPU_RENDERER, V_CPU_CORES, V_OS_ARCH
 };
 
 // Callback behaviour, mirrored by the constants in jni/SandboxIDHook.java.
@@ -325,6 +330,11 @@ enum Mode {
     M_VALUE_MULTI     = 9,// return the spoof value for the gated key, from a key->value table
     M_GAID_INFO       = 10,// build an AdvertisingIdClient$Info without calling Play services
     M_GSF_CURSOR      = 11,// answer a gservices query with a synthesized cursor
+    M_STATFS          = 12,// 128GB normalized storage profile
+    M_SENSOR          = 13,// Sensor.getName() / getVendor() sanitation
+    M_INPUT_DEVICE    = 14,// InputDevice peripheral name and VID sanitation
+    M_CAMERA          = 15,// CameraManager.getCameraIdList() standard list
+    M_GL_STRING       = 16,// GL_VENDOR, GL_RENDERER, GL_VERSION strings
 };
 
 // ret_type: 0 String, 1 byte[], 2 int, 3 long, 4 boolean, 5 CharSequence.
@@ -373,7 +383,8 @@ struct State {
               f_gaidLimit = nullptr, f_gsfId = nullptr,
               f_dispW = nullptr, f_dispH = nullptr, f_dispDpi = nullptr,
               f_dispXdpi = nullptr, f_dispYdpi = nullptr,
-              f_dispMetricType = nullptr;
+              f_dispMetricType = nullptr,
+              f_gpuVendor = nullptr, f_gpuRenderer = nullptr;
     // The app's own ClassLoader, learned at Application.attachBaseContext (or
     // from the first observed class load). Needed because FindClass can only
     // ever see the boot class path - see sbx_find_class().
@@ -526,6 +537,8 @@ inline bool resolve_callback_members(JNIEnv* env) {
     g.f_dispXdpi       = env->GetFieldID(g.cb_class, "displayXdpi",       "F");
     g.f_dispYdpi       = env->GetFieldID(g.cb_class, "displayYdpi",       "F");
     g.f_dispMetricType = env->GetFieldID(g.cb_class, "displayMetricType", "I");
+    g.f_gpuVendor      = env->GetFieldID(g.cb_class, "gpuVendor",         "Ljava/lang/String;");
+    g.f_gpuRenderer    = env->GetFieldID(g.cb_class, "gpuRenderer",       "Ljava/lang/String;");
 
     if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
 
@@ -572,7 +585,8 @@ inline bool resolve_callback_members(JNIEnv* env) {
            g.f_bodyIdx && g.f_urlIdx && g.f_urlMatch && g.f_openudid &&
            g.f_clientudid && g.f_cdid && g.f_rwFrom && g.f_rwTo && g.f_deny &&
            g.f_multiKeys && g.f_multiVals && g.f_gaidLimit && g.f_gsfId &&
-           g.f_dispW && g.f_dispH && g.f_dispDpi && g.f_dispMetricType;
+           g.f_dispW && g.f_dispH && g.f_dispDpi && g.f_dispMetricType &&
+           g.f_gpuVendor && g.f_gpuRenderer;
 }
 
 inline bool init(JNIEnv* env) {
@@ -723,6 +737,12 @@ inline std::string sbx_value_for(int val_id, const HookValues& v,
         // answer, because the shell's sync_device_name() writes the same key to
         // Settings.Global and bt_config.conf and would otherwise disagree.
         case V_BT_NAME:    return v.bt_name;
+        case V_MANUFACTURER: return v.manufacturer;
+        case V_MODEL:      return v.model;
+        case V_GPU_VENDOR: return v.gpu_vendor;
+        case V_GPU_RENDERER: return v.gpu_renderer;
+        case V_CPU_CORES:  return "8";
+        case V_OS_ARCH:    return "aarch64";
         case V_GAID:       return v.gaid;
         case V_GSF_ID:     return v.gsf_id;
         case V_OPENUDID:   return v.openudid;
@@ -924,6 +944,21 @@ inline bool hook_one_class(JNIEnv* env, jclass cls, const HookSpec& sp) {
             if (!sval.empty()) {
                 jstring sv = env->NewStringUTF(sval.c_str());
                 if (sv) env->SetObjectField(hooker, g.f_gsfId, sv);
+            }
+        }
+        if (sp.mode == M_SENSOR) {
+            std::string man = !g.vals.manufacturer.empty() ? g.vals.manufacturer : "Generic";
+            jstring jm = env->NewStringUTF(man.c_str());
+            if (jm) env->SetObjectField(hooker, g.f_sval, jm);
+        }
+        if (sp.mode == M_GL_STRING) {
+            if (!g.vals.gpu_vendor.empty()) {
+                jstring gv = env->NewStringUTF(g.vals.gpu_vendor.c_str());
+                if (gv) env->SetObjectField(hooker, g.f_gpuVendor, gv);
+            }
+            if (!g.vals.gpu_renderer.empty()) {
+                jstring gr = env->NewStringUTF(g.vals.gpu_renderer.c_str());
+                if (gr) env->SetObjectField(hooker, g.f_gpuRenderer, gr);
             }
         }
 
@@ -1270,6 +1305,68 @@ inline const HookSpec* hook_specs(size_t& n) {
         { "android/view/accessibility/AccessibilityManager", "getEnabledAccessibilityServiceList",
           "(I)Ljava/util/List;",
           false, M_FILTER_PACKAGES, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+
+        // ---- P8: Arkose Labs Hardware Telemetry (StatFs, Sensors, InputDevice, Camera, GPU, CPU) ----
+        // StatFs block storage normalization (128GB standard profile)
+        { "android/os/StatFs", "getBlockSizeLong", "()J",
+          false, M_STATFS, -1, nullptr, false, 3, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getBlockSize", "()I",
+          false, M_STATFS, -1, nullptr, false, 2, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getBlockCountLong", "()J",
+          false, M_STATFS, -1, nullptr, false, 3, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getBlockCount", "()I",
+          false, M_STATFS, -1, nullptr, false, 2, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getFreeBlocksLong", "()J",
+          false, M_STATFS, -1, nullptr, false, 3, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getFreeBlocks", "()I",
+          false, M_STATFS, -1, nullptr, false, 2, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getAvailableBlocksLong", "()J",
+          false, M_STATFS, -1, nullptr, false, 3, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getAvailableBlocks", "()I",
+          false, M_STATFS, -1, nullptr, false, 2, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getTotalBytes", "()J",
+          false, M_STATFS, -1, nullptr, false, 3, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getFreeBytes", "()J",
+          false, M_STATFS, -1, nullptr, false, 3, V_NONE, -1, -1, -1, nullptr },
+        { "android/os/StatFs", "getAvailableBytes", "()J",
+          false, M_STATFS, -1, nullptr, false, 3, V_NONE, -1, -1, -1, nullptr },
+
+        // SensorManager / Sensor vendor and name sanitation
+        { "android/hardware/Sensor", "getVendor", "()Ljava/lang/String;",
+          false, M_SENSOR, -1, nullptr, false, 0, V_MANUFACTURER, -1, -1, -1, nullptr },
+        { "android/hardware/Sensor", "getName", "()Ljava/lang/String;",
+          false, M_SENSOR, -1, nullptr, false, 0, V_MANUFACTURER, -1, -1, -1, nullptr },
+
+        // InputDevice sanitation
+        { "android/view/InputDevice", "getName", "()Ljava/lang/String;",
+          false, M_INPUT_DEVICE, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/InputDevice", "getVendorId", "()I",
+          false, M_INPUT_DEVICE, -1, nullptr, false, 2, V_NONE, -1, -1, -1, nullptr },
+        { "android/view/InputDevice", "getProductId", "()I",
+          false, M_INPUT_DEVICE, -1, nullptr, false, 2, V_NONE, -1, -1, -1, nullptr },
+
+        // CameraManager standard camera id list
+        { "android/hardware/camera2/CameraManager", "getCameraIdList", "()[Ljava/lang/String;",
+          false, M_CAMERA, -1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+
+        // OpenGL GL10 & GLES20 GPU Strings
+        { "javax/microedition/khronos/opengles/GL10", "glGetString", "(I)Ljava/lang/String;",
+          false, M_GL_STRING, 1, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+        { "android/opengl/GLES20", "glGetString", "(I)Ljava/lang/String;",
+          true, M_GL_STRING, 0, nullptr, false, 0, V_NONE, -1, -1, -1, nullptr },
+
+        // SharedPreferences cached gpuInfo
+        { "android/app/SharedPreferencesImpl", "getString",
+          "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+          false, M_VALUE, 1, "gpuInfo", false, 0, V_GPU_RENDERER, -1, -1, -1, nullptr },
+
+        // CPU cores & Architecture
+        { "java/lang/Runtime", "availableProcessors", "()I",
+          false, M_VALUE, -1, nullptr, false, 2, V_CPU_CORES, -1, -1, -1, nullptr },
+        { "java/lang/System", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;",
+          true, M_VALUE, 0, "os.arch", false, 0, V_OS_ARCH, -1, -1, -1, nullptr },
+        { "java/lang/System", "getProperty", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+          true, M_VALUE, 0, "os.arch", false, 0, V_OS_ARCH, -1, -1, -1, nullptr },
     };
     n = sizeof(S) / sizeof(S[0]);
     return S;

@@ -72,6 +72,17 @@ public class EnvCompatStateCheck {
             return null;
         }
 
+        public long getBlockSizeLong() { return 1024L; }
+        public int getBlockSize() { return 1024; }
+        public long getTotalBytes() { return 1000000L; }
+        public String getVendor() { return "Xiaomi"; }
+        public String getName() { return "Xiaomi alioth traffic_detection sensor"; }
+        public String getInputName() { return "XiaoMi traffic_detection v2.4"; }
+        public int getVendorId() { return 0x2717; }
+        public String[] getCameraIdList() { return new String[]{"0", "1", "2", "3"}; }
+        public String glGetString(int name) { return "Adreno (TM) 650"; }
+        public static String glGetStringStatic(int name) { return "Adreno (TM) 650"; }
+
         public Object error(String n) {
             throw new StackOverflowError("err");
         }
@@ -602,6 +613,75 @@ public class EnvCompatStateCheck {
         check("M_GSF_CURSOR does not answer Settings.Secure's android_id lookup",
                 secureAndroidId instanceof android.database.MatrixCursor
                         && ((android.database.MatrixCursor) secureAndroidId).getCount() == 0);
+
+        // ---- Arkose Labs hardware telemetry modes ----
+        // 1. M_STATFS
+        androidx.core.os.EnvCompatState st = new androidx.core.os.EnvCompatState();
+        st.mode = androidx.core.os.EnvCompatState.M_STATFS;
+        st.backup = Target.class.getDeclaredMethod("getBlockSizeLong");
+        Object bsLong = st.handle(new Object[]{ t });
+        check("M_STATFS getBlockSizeLong", Long.valueOf(4096L).equals(bsLong));
+
+        st.backup = Target.class.getDeclaredMethod("getBlockSize");
+        Object bsInt = st.handle(new Object[]{ t });
+        check("M_STATFS getBlockSize", Integer.valueOf(4096).equals(bsInt));
+
+        st.backup = Target.class.getDeclaredMethod("getTotalBytes");
+        Object tb = st.handle(new Object[]{ t });
+        check("M_STATFS getTotalBytes", Long.valueOf(137438953472L).equals(tb));
+
+        // 2. M_SENSOR
+        androidx.core.os.EnvCompatState sn = new androidx.core.os.EnvCompatState();
+        sn.mode = androidx.core.os.EnvCompatState.M_SENSOR;
+        sn.sval = "Google";
+        sn.backup = Target.class.getDeclaredMethod("getVendor");
+        check("M_SENSOR getVendor", "Google".equals(sn.handle(new Object[]{ t })));
+
+        sn.backup = Target.class.getDeclaredMethod("getName");
+        Object snName = sn.handle(new Object[]{ t });
+        check("M_SENSOR getName sanitized",
+                "Google device sensor sensor".equals(snName));
+
+        // 3. M_INPUT_DEVICE
+        androidx.core.os.EnvCompatState inp = new androidx.core.os.EnvCompatState();
+        inp.mode = androidx.core.os.EnvCompatState.M_INPUT_DEVICE;
+        inp.backup = Target.class.getDeclaredMethod("getInputName");
+        Object inpName = inp.handle(new Object[]{ t });
+        check("M_INPUT_DEVICE getName sanitized", "touchscreen".equals(inpName));
+
+        inp.backup = Target.class.getDeclaredMethod("getVendorId");
+        Object inpVid = inp.handle(new Object[]{ t });
+        check("M_INPUT_DEVICE getVendorId Xiaomi reset to 0", Integer.valueOf(0).equals(inpVid));
+
+        // 4. M_CAMERA
+        androidx.core.os.EnvCompatState cam = new androidx.core.os.EnvCompatState();
+        cam.mode = androidx.core.os.EnvCompatState.M_CAMERA;
+        cam.backup = Target.class.getDeclaredMethod("getCameraIdList");
+        Object camList = cam.handle(new Object[]{ t });
+        check("M_CAMERA getCameraIdList returns 0,1",
+                camList instanceof String[]
+                && ((String[]) camList).length == 2
+                && "0".equals(((String[]) camList)[0])
+                && "1".equals(((String[]) camList)[1]));
+
+        // 5. M_GL_STRING
+        androidx.core.os.EnvCompatState gl = new androidx.core.os.EnvCompatState();
+        gl.mode = androidx.core.os.EnvCompatState.M_GL_STRING;
+        gl.isStatic = false;
+        gl.gpuVendor = "Qualcomm";
+        gl.gpuRenderer = "Adreno (TM) 730";
+        gl.backup = Target.class.getDeclaredMethod("glGetString", int.class);
+        check("M_GL_STRING GL_VENDOR", "Qualcomm".equals(gl.handle(new Object[]{ t, 0x1F00 })));
+        check("M_GL_STRING GL_RENDERER", "Adreno (TM) 730".equals(gl.handle(new Object[]{ t, 0x1F01 })));
+        check("M_GL_STRING GL_VERSION", String.valueOf(gl.handle(new Object[]{ t, 0x1F02 })).startsWith("OpenGL ES 3.2"));
+
+        androidx.core.os.EnvCompatState glStatic = new androidx.core.os.EnvCompatState();
+        glStatic.mode = androidx.core.os.EnvCompatState.M_GL_STRING;
+        glStatic.isStatic = true;
+        glStatic.gpuVendor = "ARM";
+        glStatic.gpuRenderer = "Mali-G715";
+        glStatic.backup = Target.class.getDeclaredMethod("glGetStringStatic", int.class);
+        check("M_GL_STRING static GL_RENDERER", "Mali-G715".equals(glStatic.handle(new Object[]{ 0x1F01 })));
 
         System.out.println(fails == 0 ? "ALL PASS" : fails + " FAILED");
         if (fails != 0) System.exit(1);

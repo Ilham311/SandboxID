@@ -167,6 +167,27 @@ int main() {
     CHECK(!is_tensor_platform("mt6789"));
     CHECK(!is_tensor_platform("erd9945"));
 
+    std::printf("==> gpu_vendor & gpu_renderer\n");
+    CHECK_EQ(gpu_vendor("Qualcomm", "SM8475"), "Qualcomm");
+    CHECK_EQ(gpu_vendor("QTI", "SM8250"), "Qualcomm");
+    CHECK_EQ(gpu_vendor("MediaTek", "MT6789"), "ARM");
+    CHECK_EQ(gpu_vendor("Google", "GS301"), "ARM");
+    CHECK_EQ(gpu_vendor("Samsung", "s5e9945"), "Samsung");
+    CHECK_EQ(gpu_vendor("Samsung", "s5e8845"), "Samsung");
+
+    CHECK_EQ(gpu_renderer("Qualcomm", "SM8650", "pineapple"), "Adreno (TM) 750");
+    CHECK_EQ(gpu_renderer("Qualcomm", "SM8550", "kalama"), "Adreno (TM) 740");
+    CHECK_EQ(gpu_renderer("Qualcomm", "SM8475", "taro"), "Adreno (TM) 730");
+    CHECK_EQ(gpu_renderer("Qualcomm", "SM8250", "kona"), "Adreno (TM) 650");
+    CHECK_EQ(gpu_renderer("Google", "GS101", "gs101"), "Mali-G78");
+    CHECK_EQ(gpu_renderer("Google", "GS201", "gs201"), "Mali-G710");
+    CHECK_EQ(gpu_renderer("Google", "GS301", "zuma"), "Mali-G715");
+    CHECK_EQ(gpu_renderer("Google", "GS401", "zumapro"), "Mali-G715");
+    CHECK_EQ(gpu_renderer("MediaTek", "MT6789", "mt6789"), "Mali-G57 MC2");
+    CHECK_EQ(gpu_renderer("MediaTek", "MT6893", "mt6893"), "Mali-G77 MC9");
+    CHECK_EQ(gpu_renderer("Samsung", "s5e9945", "erd9945"), "Samsung Xclipse 940");
+    CHECK_EQ(gpu_renderer("Samsung", "s5e8845", "erd8845"), "Samsung Xclipse 530");
+
     if (failures == 0) std::printf("all checks passed\n");
     else std::printf("%d check(s) FAILED\n", failures);
     return failures == 0 ? 0 : 1;

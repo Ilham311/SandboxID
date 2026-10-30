@@ -432,6 +432,9 @@ final class TelephonyDrmHook {
             n += hook0(cl, "android.bluetooth.BluetoothAdapter", "getName", btName);
         }
 
+        // ---- P8: Arkose Labs Hardware Telemetry spoofing ----
+        n += hookHardwareTelemetry(cl, id);
+
         Log.d(TAG, "Telephony/DRM hooks: " + n + " method(s) installed"
                 + (mccmnc == null || mccmnc.isEmpty()
                         ? " (no operator configured: IMSI/ICCID pass through"
@@ -1355,5 +1358,156 @@ final class TelephonyDrmHook {
             out[i] = (byte) ((hi << 4) | lo);
         }
         return out;
+    }
+
+    /**
+     * Hardware telemetry spoofing for Arkose Labs / Grab anti-fraud.
+     * Hooks StatFs, Sensor, InputDevice, CameraManager, GL10, GLES20,
+     * SharedPreferences ("gpuInfo"), Runtime.availableProcessors(), and System.getProperty("os.arch").
+     */
+    private static int hookHardwareTelemetry(ClassLoader cl, Map<String, String> id) {
+        int n = 0;
+
+        // ---- 1. StatFs block storage normalization (128GB profile) ----
+        String statFs = "android.os.StatFs";
+        n += hook0(cl, statFs, "getBlockSizeLong", Long.valueOf(4096L));
+        n += hook0(cl, statFs, "getBlockSize", Integer.valueOf(4096));
+        n += hook0(cl, statFs, "getBlockCountLong", Long.valueOf(33554432L));
+        n += hook0(cl, statFs, "getBlockCount", Integer.valueOf(33554432));
+        n += hook0(cl, statFs, "getFreeBlocksLong", Long.valueOf(22440380L));
+        n += hook0(cl, statFs, "getFreeBlocks", Integer.valueOf(22440380));
+        n += hook0(cl, statFs, "getAvailableBlocksLong", Long.valueOf(21810380L));
+        n += hook0(cl, statFs, "getAvailableBlocks", Integer.valueOf(21810380));
+        n += hook0(cl, statFs, "getTotalBytes", Long.valueOf(137438953472L));
+        n += hook0(cl, statFs, "getFreeBytes", Long.valueOf(91915796480L));
+        n += hook0(cl, statFs, "getAvailableBytes", Long.valueOf(89335316480L));
+
+        // ---- 2. Sensor vendor and name sanitation ----
+        final String man = id.get("MANUFACTURER") != null && !id.get("MANUFACTURER").isEmpty()
+                ? id.get("MANUFACTURER") : "Generic";
+        n += hook0(cl, "android.hardware.Sensor", "getVendor", man);
+        try {
+            XposedHelpers.findAndHookMethod("android.hardware.Sensor", cl, "getName", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam p) {
+                    Object r = p.getResult();
+                    if (r instanceof String) {
+                        String s = (String) r;
+                        s = s.replace("Xiaomi", man)
+                             .replace("xiaomi", man.toLowerCase(java.util.Locale.ROOT))
+                             .replace("alioth", "device")
+                             .replace("traffic_detection", "sensor");
+                        p.setResult(s);
+                    }
+                }
+            });
+            n++;
+        } catch (Throwable ignored) { }
+
+        // ---- 3. InputDevice peripheral sanitation ----
+        try {
+            XposedHelpers.findAndHookMethod("android.view.InputDevice", cl, "getName", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam p) {
+                    Object r = p.getResult();
+                    if (r instanceof String) {
+                        String s = (String) r;
+                        if (s.contains("traffic_detection") || s.contains("XiaoMi") || s.contains("xiaomi")) {
+                            p.setResult("touchscreen");
+                        }
+                    } else {
+                        p.setResult("touchscreen");
+                    }
+                }
+            });
+            n++;
+        } catch (Throwable ignored) { }
+
+        try {
+            XposedHelpers.findAndHookMethod("android.view.InputDevice", cl, "getVendorId", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam p) {
+                    Object r = p.getResult();
+                    if (r instanceof Integer && ((Integer) r).intValue() == 0x2717) {
+                        p.setResult(Integer.valueOf(0));
+                    }
+                }
+            });
+            n++;
+        } catch (Throwable ignored) { }
+
+        // ---- 4. CameraManager standard camera id list ----
+        n += hook0(cl, "android.hardware.camera2.CameraManager", "getCameraIdList", new String[]{"0", "1"});
+
+        // ---- 5. GPU Telemetry (OpenGL & SharedPreferences) ----
+        final String socMan = id.get("SOC_MANUFACTURER") != null ? id.get("SOC_MANUFACTURER") : "";
+        final String socModel = id.get("SOC_MODEL") != null ? id.get("SOC_MODEL") : "";
+        final String platform = id.get("BOARD_PLATFORM") != null ? id.get("BOARD_PLATFORM") : "";
+        final String gpuVendor = HwNaming.gpuVendor(socMan, socModel);
+        final String gpuRenderer = HwNaming.gpuRenderer(socMan, socModel, platform);
+
+        XC_MethodHook glStringHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam p) {
+                if (p.args != null && p.args.length > 0 && p.args[0] instanceof Integer) {
+                    int pname = ((Integer) p.args[0]).intValue();
+                    if (pname == 0x1F00) { // GL_VENDOR
+                        p.setResult(gpuVendor);
+                    } else if (pname == 0x1F01) { // GL_RENDERER
+                        p.setResult(gpuRenderer);
+                    } else if (pname == 0x1F02) { // GL_VERSION
+                        p.setResult("OpenGL ES 3.2 V@0615.0 (GIT@8a4fafe, I37c6875887) (Date:11/17/23)");
+                    }
+                }
+            }
+        };
+
+        try {
+            XposedHelpers.findAndHookMethod("javax.microedition.khronos.opengles.GL10", cl, "glGetString", int.class, glStringHook);
+            n++;
+        } catch (Throwable ignored) { }
+
+        try {
+            XposedHelpers.findAndHookMethod("android.opengl.GLES20", cl, "glGetString", int.class, glStringHook);
+            n++;
+        } catch (Throwable ignored) { }
+
+        try {
+            XposedHelpers.findAndHookMethod("android.app.SharedPreferencesImpl", cl, "getString",
+                    String.class, String.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            if (p.args != null && p.args.length > 0 && "gpuInfo".equals(p.args[0])) {
+                                p.setResult(gpuRenderer);
+                            }
+                        }
+                    });
+            n++;
+        } catch (Throwable ignored) { }
+
+        // ---- 6. CPU & Architecture Telemetry ----
+        try {
+            XposedHelpers.findAndHookMethod("java.lang.Runtime", cl, "availableProcessors", new Const<>(Integer.valueOf(8)));
+            n++;
+        } catch (Throwable ignored) { }
+
+        XC_MethodHook sysPropHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam p) {
+                if (p.args != null && p.args.length > 0 && "os.arch".equals(p.args[0])) {
+                    p.setResult("aarch64");
+                }
+            }
+        };
+        try {
+            XposedHelpers.findAndHookMethod("java.lang.System", cl, "getProperty", String.class, sysPropHook);
+            n++;
+        } catch (Throwable ignored) { }
+        try {
+            XposedHelpers.findAndHookMethod("java.lang.System", cl, "getProperty", String.class, String.class, sysPropHook);
+            n++;
+        } catch (Throwable ignored) { }
+
+        return n;
     }
 }

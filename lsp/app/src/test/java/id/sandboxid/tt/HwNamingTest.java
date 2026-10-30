@@ -156,6 +156,23 @@ public class HwNamingTest {
         check("kona not tensor", !HwNaming.isTensorPlatform("kona"));
         check("mt6789 not tensor", !HwNaming.isTensorPlatform("mt6789"));
 
+        System.out.println("-- gpuVendor & gpuRenderer --");
+        eq("gpu vendor qualcomm", HwNaming.gpuVendor("Qualcomm", "SM8475"), "Qualcomm");
+        eq("gpu vendor mediatek", HwNaming.gpuVendor("MediaTek", "MT6789"), "ARM");
+        eq("gpu vendor google", HwNaming.gpuVendor("Google", "GS301"), "ARM");
+        eq("gpu vendor exynos 9945", HwNaming.gpuVendor("Samsung", "s5e9945"), "Samsung");
+
+        eq("gpu renderer SM8650", HwNaming.gpuRenderer("Qualcomm", "SM8650", "pineapple"), "Adreno (TM) 750");
+        eq("gpu renderer SM8550", HwNaming.gpuRenderer("Qualcomm", "SM8550", "kalama"), "Adreno (TM) 740");
+        eq("gpu renderer SM8475", HwNaming.gpuRenderer("Qualcomm", "SM8475", "taro"), "Adreno (TM) 730");
+        eq("gpu renderer SM8250", HwNaming.gpuRenderer("Qualcomm", "SM8250", "kona"), "Adreno (TM) 650");
+        eq("gpu renderer GS101", HwNaming.gpuRenderer("Google", "GS101", "gs101"), "Mali-G78");
+        eq("gpu renderer GS201", HwNaming.gpuRenderer("Google", "GS201", "gs201"), "Mali-G710");
+        eq("gpu renderer GS301", HwNaming.gpuRenderer("Google", "GS301", "zuma"), "Mali-G715");
+        eq("gpu renderer MT6789", HwNaming.gpuRenderer("MediaTek", "MT6789", "mt6789"), "Mali-G57 MC2");
+        eq("gpu renderer s5e9945", HwNaming.gpuRenderer("Samsung", "s5e9945", "erd9945"), "Samsung Xclipse 940");
+        eq("gpu renderer s5e8845", HwNaming.gpuRenderer("Samsung", "s5e8845", "erd8845"), "Samsung Xclipse 530");
+
         System.out.println();
         if (fails == 0) System.out.println("ALL PASS");
         else System.out.println(fails + " check(s) FAILED");

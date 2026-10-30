@@ -112,6 +112,11 @@ public final class EnvCompatState {
      * cover this path: a different API is being used.
      */
     public static final int M_GSF_CURSOR = 11;
+    public static final int M_STATFS = 12;
+    public static final int M_SENSOR = 13;
+    public static final int M_INPUT_DEVICE = 14;
+    public static final int M_CAMERA = 15;
+    public static final int M_GL_STRING = 16;
 
     /**
      * Packages hidden from every PackageManager query.
@@ -242,6 +247,10 @@ public final class EnvCompatState {
     // by the ordinary keyMatch/keyArgIndex gate, so one mechanism covers both
     // String-keyed and URI-keyed hooks.
     public String  gsfId;
+
+    // M_GL_STRING: GPU vendor & renderer strings
+    public String  gpuVendor;
+    public String  gpuRenderer;
 
     // M_FORCE_FALSE
     public int     forceArgIndex = -1;
@@ -442,6 +451,12 @@ public final class EnvCompatState {
         // point is that the original throws or returns nothing usable.
         if (mode == M_GAID_INFO)   return gaidInfo(args);
         if (mode == M_GSF_CURSOR)  return gsfCursor(args);
+
+        if (mode == M_STATFS)       return handleStatFs(args);
+        if (mode == M_SENSOR)       return handleSensor(args);
+        if (mode == M_INPUT_DEVICE) return handleInputDevice(args);
+        if (mode == M_CAMERA)       return handleCamera(args);
+        if (mode == M_GL_STRING)    return handleGlString(args);
 
         if (mode == M_DISPLAY_METRICS) {
             Object r = invokeOriginal(args);
@@ -834,6 +849,107 @@ public final class EnvCompatState {
         }
         return false;
     }
+
+    private Object handleStatFs(Object[] args) {
+        String name = backup != null ? backup.getName() : "";
+        if ("getBlockSizeLong".equals(name)) return Long.valueOf(4096L);
+        if ("getBlockSize".equals(name)) return Integer.valueOf(4096);
+        if ("getBlockCountLong".equals(name)) return Long.valueOf(33554432L);
+        if ("getBlockCount".equals(name)) return Integer.valueOf(33554432);
+        if ("getFreeBlocksLong".equals(name)) return Long.valueOf(22440380L);
+        if ("getFreeBlocks".equals(name)) return Integer.valueOf(22440380);
+        if ("getAvailableBlocksLong".equals(name)) return Long.valueOf(21810380L);
+        if ("getAvailableBlocks".equals(name)) return Integer.valueOf(21810380);
+        if ("getTotalBytes".equals(name)) return Long.valueOf(137438953472L);
+        if ("getFreeBytes".equals(name)) return Long.valueOf(91915796480L);
+        if ("getAvailableBytes".equals(name)) return Long.valueOf(89335316480L);
+        return invokeOriginal(args);
+    }
+
+    private Object handleSensor(Object[] args) {
+        String name = backup != null ? backup.getName() : "";
+        if ("getVendor".equals(name)) {
+            if (sval != null && !sval.isEmpty()) return sval;
+            return invokeOriginal(args);
+        }
+        if ("getName".equals(name)) {
+            Object r = invokeOriginal(args);
+            if (r instanceof String) {
+                String s = (String) r;
+                String man = (sval != null && !sval.isEmpty()) ? sval : "Generic";
+                s = s.replace("Xiaomi", man)
+                     .replace("xiaomi", man.toLowerCase(java.util.Locale.ROOT))
+                     .replace("alioth", "device")
+                     .replace("traffic_detection", "sensor");
+                return s;
+            }
+            return r;
+        }
+        return invokeOriginal(args);
+    }
+
+    private Object handleInputDevice(Object[] args) {
+        String name = backup != null ? backup.getName() : "";
+        if ("getName".equals(name) || "getInputName".equals(name)) {
+            Object r = invokeOriginal(args);
+            if (r instanceof String) {
+                String s = (String) r;
+                if (s.contains("traffic_detection") || s.contains("XiaoMi") || s.contains("xiaomi")) {
+                    return "touchscreen";
+                }
+                return s;
+            }
+            return "touchscreen";
+        }
+        if ("getVendorId".equals(name)) {
+            Object r = invokeOriginal(args);
+            if (r instanceof Integer) {
+                int vid = ((Integer) r).intValue();
+                if (vid == 0x2717) return Integer.valueOf(0);
+                return r;
+            }
+            return Integer.valueOf(0);
+        }
+        if ("getProductId".equals(name)) {
+            Object r = invokeOriginal(args);
+            if (r instanceof Integer) {
+                return r;
+            }
+            return Integer.valueOf(0);
+        }
+        return invokeOriginal(args);
+    }
+
+    private Object handleCamera(Object[] args) {
+        String name = backup != null ? backup.getName() : "";
+        if ("getCameraIdList".equals(name)) {
+            return new String[]{"0", "1"};
+        }
+        return invokeOriginal(args);
+    }
+
+    private Object handleGlString(Object[] args) {
+        int pname = -1;
+        if (isStatic && args != null && args.length > 0 && args[0] instanceof Integer) {
+            pname = ((Integer) args[0]).intValue();
+        } else if (!isStatic && args != null && args.length > 1 && args[1] instanceof Integer) {
+            pname = ((Integer) args[1]).intValue();
+        }
+        if (pname == 0x1F00) { // GL_VENDOR
+            if (gpuVendor != null && !gpuVendor.isEmpty()) return gpuVendor;
+            if (sval != null && !sval.isEmpty()) return sval;
+            return "Qualcomm";
+        }
+        if (pname == 0x1F01) { // GL_RENDERER
+            if (gpuRenderer != null && !gpuRenderer.isEmpty()) return gpuRenderer;
+            return "Adreno (TM) 730";
+        }
+        if (pname == 0x1F02) { // GL_VERSION
+            return "OpenGL ES 3.2 V@0615.0 (GIT@8a4fafe, I37c6875887) (Date:11/17/23)";
+        }
+        return invokeOriginal(args);
+    }
+
     private Object filterPackages(Object[] args) {
         if (args != null && args.length > 1 && args[1] instanceof String) {
             String pkg = (String) args[1];
