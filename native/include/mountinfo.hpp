@@ -11,6 +11,7 @@
 namespace sbxmnt {
 
 struct MountRow {
+    std::string root;
     std::string mount_point;
     std::string fstype;
     std::string source;
@@ -43,6 +44,7 @@ inline bool parse_mountinfo_line(const std::string& line, MountRow& out) {
     size_t dash = std::string::npos;
     for (size_t k = 6; k < tok.size(); ++k) if (tok[k] == "-") { dash = k; break; }
     if (dash == std::string::npos || dash + 2 >= tok.size()) return false;
+    out.root        = tok[3];
     out.mount_point = tok[4];
     out.fstype      = tok[dash + 1];
     out.source      = tok[dash + 2];
@@ -57,20 +59,25 @@ inline bool is_protected(const MountRow& r) {
     };
     for (const char* R : roots) if (mp == R) return true;
 
-    const std::string moddir(sandboxid::MODDIR);
-    if (starts_with(mp, moddir))       return true;
-    if (starts_with(r.source, moddir)) return true;
-
     return false;
 }
 
 inline bool is_trace(const MountRow& r) {
-    const std::string& mp  = r.mount_point;
-    const std::string& src = r.source;
-    const std::string& fs  = r.fstype;
+    const std::string& mp   = r.mount_point;
+    const std::string& root = r.root;
+    const std::string& src  = r.source;
+    const std::string& fs   = r.fstype;
 
     if (mp == "/data/adb" || starts_with(mp, "/data/adb/")) return true;
     if (starts_with(mp, "/debug_ramdisk"))                  return true;
+
+    if (starts_with(root, "/adb/modules/") || starts_with(root, "/data/adb/")) return true;
+    if (icontains(root, "modules/sandboxid") || icontains(root, "reqable") ||
+        icontains(root, "zygisk") || icontains(root, "magisk") ||
+        icontains(root, "apatch") || icontains(root, "ksu"))
+        return true;
+
+    if (icontains(mp, "sandboxid") || icontains(mp, "reqable")) return true;
 
     if (fs == "overlay" || fs == "tmpfs") {
         if (icontains(src, "magisk") || icontains(src, "worker") ||
@@ -79,7 +86,7 @@ inline bool is_trace(const MountRow& r) {
             return true;
     }
 
-    if (icontains(src, "magisk")) return true;
+    if (icontains(src, "magisk") || icontains(src, "/data/adb")) return true;
     return false;
 }
 

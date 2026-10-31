@@ -1,6 +1,7 @@
 // Ad-hoc verification harness for the pure functions the L9 read hook relies
 // on. Links native_read.cpp directly; no device identity needed.
 #include "native_read.hpp"
+#include "mountinfo.hpp"
 #include <cassert>
 #include <cstdio>
 #include <string>
@@ -35,6 +36,12 @@ int main() {
     CHECK(classify("/proc/12345/maps") == MAPS, "classify /proc/<pid>/maps is MAPS");
     CHECK(classify("/proc/self/task/123/maps") == MAPS, "classify /proc/self/task/<tid>/maps is MAPS");
     CHECK(classify("/proc/self/smaps") == MAPS, "classify /proc/self/smaps is MAPS");
+    CHECK(classify("/proc/self/mountinfo") == MOUNTINFO, "classify /proc/self/mountinfo is MOUNTINFO");
+    CHECK(classify("/proc/12345/mountinfo") == MOUNTINFO, "classify /proc/<pid>/mountinfo is MOUNTINFO");
+    CHECK(classify("/proc/self/task/123/mountinfo") == MOUNTINFO, "classify /proc/self/task/<tid>/mountinfo is MOUNTINFO");
+    CHECK(classify("/proc/self/mounts") == MOUNTINFO, "classify /proc/self/mounts is MOUNTINFO");
+    CHECK(classify("/proc/mounts") == MOUNTINFO, "classify /proc/mounts is MOUNTINFO");
+    CHECK(classify("/etc/mtab") == MOUNTINFO, "classify /etc/mtab is MOUNTINFO");
     CHECK(classify(nullptr) == NONE, "classify nullptr");
 
     {
@@ -47,6 +54,39 @@ int main() {
         CHECK(patched.find("sandboxid") == std::string::npos, "patch_maps removes sandboxid");
         CHECK(patched.find("/data/adb/") == std::string::npos, "patch_maps removes /data/adb/");
         CHECK(patched.find("/system/lib64/libc.so") != std::string::npos, "patch_maps keeps libc.so");
+    }
+
+    {
+        std::string sample_mi =
+            "177 34 0:34 /adb/modules/reqable-magisk/system/bin /system/bin rw,noatime master:1 - overlay overlay rw\n"
+            "203 34 0:34 /adb/modules/sandboxid/system/bin/sandboxid /system/bin/sandboxid ro,noatime master:40 - f2fs /dev/block/sda35 rw\n"
+            "312 34 0:34 /adb/modules/zygisk_vector/bin/dex2oat32 /apex/com.android.art/bin/dex2oat32 ro,noatime master:40 - f2fs /dev/block/sda35 rw\n"
+            "9872 9642 252:4 / /system_ext ro,noatime master:10 - ext4 /dev/block/dm-4 ro\n"
+            "9874 9642 252:5 / /vendor ro,noatime master:12 - ext4 /dev/block/dm-5 ro\n";
+        std::string patched = patch_mountinfo(sample_mi);
+        CHECK(patched.find("reqable") == std::string::npos, "patch_mountinfo removes reqable");
+        CHECK(patched.find("sandboxid") == std::string::npos, "patch_mountinfo removes sandboxid");
+        CHECK(patched.find("zygisk") == std::string::npos, "patch_mountinfo removes zygisk");
+        CHECK(patched.find("/system_ext") != std::string::npos, "patch_mountinfo keeps /system_ext");
+        CHECK(patched.find("/vendor") != std::string::npos, "patch_mountinfo keeps /vendor");
+
+        // Test sbxmnt parser and target selector
+        sbxmnt::MountRow row;
+        CHECK(sbxmnt::parse_mountinfo_line(
+            "203 34 0:34 /adb/modules/sandboxid/system/bin/sandboxid /system/bin/sandboxid ro,noatime master:40 - f2fs /dev/block/sda35 rw", row),
+            "parse_mountinfo_line succeeds");
+        CHECK(row.root == "/adb/modules/sandboxid/system/bin/sandboxid", "parse_mountinfo_line captures root (tok[3])");
+        CHECK(row.mount_point == "/system/bin/sandboxid", "parse_mountinfo_line captures mount_point (tok[4])");
+        CHECK(row.fstype == "f2fs", "parse_mountinfo_line captures fstype");
+        CHECK(row.source == "/dev/block/sda35", "parse_mountinfo_line captures source");
+        CHECK(sbxmnt::is_trace(row), "is_trace detects KernelSU module mount");
+
+        std::vector<std::string> umounts = sbxmnt::select_umount_targets(sample_mi);
+        CHECK(umounts.size() == 3, "select_umount_targets finds all 3 module mounts");
+        CHECK(std::find(umounts.begin(), umounts.end(), "/system/bin/sandboxid") != umounts.end(),
+              "select_umount_targets includes sandboxid");
+        CHECK(std::find(umounts.begin(), umounts.end(), "/system_ext") == umounts.end(),
+              "select_umount_targets excludes /system_ext");
     }
 
     // ---- is_valid_mac -----------------------------------------------------

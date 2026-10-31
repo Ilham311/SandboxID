@@ -173,7 +173,7 @@ static sbxnr::ApplogIds sbx_applog_ids() {
 
 // Kinds whose synthetic content is derived from the real file bytes.
 static bool synth_needs_real(sbxnr::Kind k) {
-    return k == sbxnr::MEMINFO || k == sbxnr::CPUINFO || k == sbxnr::APPLOG_XML || k == sbxnr::MAPS;
+    return k == sbxnr::MEMINFO || k == sbxnr::CPUINFO || k == sbxnr::APPLOG_XML || k == sbxnr::MAPS || k == sbxnr::MOUNTINFO;
 }
 
 // Computes the synthetic replacement for `kind`; `real` holds the real file
@@ -239,6 +239,8 @@ static std::string synth_content(sbxnr::Kind k, const std::string& real) {
         return sbxnr::selinux_enforce_content();
     case sbxnr::MAPS:
         return sbxnr::patch_maps(real);
+    case sbxnr::MOUNTINFO:
+        return sbxnr::patch_mountinfo(real);
     case sbxnr::APPLOG_XML: {
         if (val("SERIAL").empty()) break;      // fail closed
         sbxnr::ApplogIds ids = sbx_applog_ids();
