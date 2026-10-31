@@ -178,6 +178,9 @@ public final class EnvCompatState {
         "com.microsoft.appmanager",
         // third-party backup tools that ride an accessibility service
         "com.fufufu.katrina.backup",
+        // accessibility tools flagged as botting / auto-clickers by Grab HVS & Play Integrity
+        "com.google.android.accessibility.switchaccess",
+        "com.google.android.marvin.talkback",
     };
 
     /**

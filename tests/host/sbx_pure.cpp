@@ -476,7 +476,13 @@ int main() {
           "hide vendor.camera.* ext");
 
     // Remaining measured OEM/SoC tells.
+    CHECK(should_hide_prop("bpf.hyperos_progs_loaded"), "hide hyperos bpf progs");
+    CHECK(should_hide_prop("persist.sys.turbosched.coreApp.enable"), "hide turbosched coreApp");
+    CHECK(should_hide_prop("ro.com.google.clientidbase.ms"), "hide clientidbase.ms");
     CHECK(should_hide_prop("ro.com.google.clientidbase.pg"), "hide clientidbase.pg");
+    CHECK(should_hide_prop("ro.vendor.xiaomi.bl.poll"), "hide ro.vendor.xiaomi");
+    CHECK(should_hide_prop("init.svc.vendor.xiaomi.hardware.fingerprintextension-service"),
+          "hide init.svc.vendor.xiaomi");
     CHECK(should_hide_prop("ro.com.google.lens.oem_image_package"), "hide lens oem pkg");
     CHECK(should_hide_prop("ro.vendor.extension_library"), "hide qti extension lib");
     CHECK(should_hide_prop("vendor.media.target_variant"), "hide media target variant");

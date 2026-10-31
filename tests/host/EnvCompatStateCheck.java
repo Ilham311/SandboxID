@@ -445,7 +445,7 @@ public class EnvCompatStateCheck {
             // different policy, and one that dropped the entry would let the
             // leak back in.
             check("Katrina accessibility service filtered out", !hasKatrina);
-            check("TalkBack accessibility service kept", hasTalkback);
+            check("TalkBack accessibility service filtered out", !hasTalkback);
             check("SystemUI accessibility service kept", hasSysui);
         }
 

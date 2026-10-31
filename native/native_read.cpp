@@ -779,6 +779,25 @@ bool is_custom_rom_prop(const char* name) {
 // props above. Observed on a HyperOS device: ro.miui.ui.version.name=V816,
 // persist.sys.hardcoder.name=miui_booster — unambiguous OEM tells that the
 // persona's Build surface contradicts.
+static bool ci_contains(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return false;
+    const size_t nlen = std::strlen(needle);
+    const size_t hlen = std::strlen(haystack);
+    if (nlen > hlen) return false;
+    for (size_t i = 0; i + nlen <= hlen; ++i) {
+        bool match = true;
+        for (size_t j = 0; j < nlen; ++j) {
+            if (std::tolower(static_cast<unsigned char>(haystack[i + j])) !=
+                std::tolower(static_cast<unsigned char>(needle[j]))) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
 bool is_vendor_rom_prop(const char* name) {
     if (!name) return false;
     static const char* const exact[] = {
@@ -812,64 +831,34 @@ bool is_vendor_rom_prop(const char* name) {
     for (const char* e : exact) if (std::strcmp(name, e) == 0) return true;
     // The MIUI/HyperOS family, by SUBSTRING rather than prefix.
     //
-    // The prefix list this replaces was built by measuring, adding what leaked,
-    // and measuring again — and it kept leaking. "ro.miui." missed
-    // ro.com.miui.rsa.feature and ro.config.miui_*; "persist.sys.miui" missed
-    // persist.miui.*; adding that still missed init.svc.miuibooster,
-    // sys.miui_bpf_ready, sys.miui.gki_ndcd and ro.vendor.audio.miui.*. On the
-    // reference device 12 props still reported the ROM after the prefix list
-    // looked complete.
-    //
-    // A stock Pixel has no property whose NAME contains "miui", and no persona
-    // value does either (the identity map is derived from Build fields, none of
-    // which contain it), so the substring test cannot hide anything the persona
-    // needs. Case-insensitive to cover a vendor that ships "MIUI"/"Miui".
-    //
-    // Known gap: this is persona-blind, so a Xiaomi/Redmi/POCO persona also
-    // loses its MIUI props even though deny_classes and vendor_keep keep the
-    // ROM present for it (module.cpp:399-431). See the matching note on
-    // isVendorRomProp() in lsp/.../PropHook.java for why the fix is a derived
-    // ro.miui.ui.version.name rather than a carve-out here.
-    {
-        static const char kMiui[] = "miui";
-        const size_t n = std::strlen(name);
-        for (size_t i = 0; i + 4 <= n; ++i) {
-            if (std::tolower((unsigned char)name[i])     == kMiui[0] &&
-                std::tolower((unsigned char)name[i + 1]) == kMiui[1] &&
-                std::tolower((unsigned char)name[i + 2]) == kMiui[2] &&
-                std::tolower((unsigned char)name[i + 3]) == kMiui[3]) {
-                return true;
-            }
-        }
-    }
-    // The updatable-graphics-driver family. ro.gfx.driver.1 names the SoC
-    // platform in its middle segment (com.qualcomm.qti.gpudrivers.<platform>.
-    // api30) and ro.gfx.driver.0 names the OEM's UGD package (com.xiaomi.ugd).
-    // Both are read by android.os.GraphicsEnvironment.get(), which then asks
-    // PackageManager whether that package is installed.
-    //
-    // They are HIDDEN, never spoofed. Deriving a persona-shaped package name
-    // produces one that is not installed on this device, and GraphicsEnvironment
-    // logs "updatable driver package '<name>' not installed" - a fresh tell in
-    // place of the leak. A device that simply ships no UGD is an ordinary,
-    // coherent state, so absent is the safe answer. The prefix also covers
-    // ro.gfx.driver_build_time, which this device does not set at all.
-    // Two prefixes, not one bare "ro.gfx.driver": the real names are
-    // ro.gfx.driver.0/.1 (dot) and ro.gfx.driver_build_time (underscore), and
-    // matching the bare stem would also swallow a name that is not a property.
+    // A stock Pixel has no property whose NAME contains "miui", "hyperos", or
+    // "turbosched", and no persona value does either. Case-insensitive to cover
+    // vendors shipping different capitalizations.
+    if (ci_contains(name, "miui")) return true;
+    if (ci_contains(name, "hyperos")) return true;
+    if (ci_contains(name, "turbosched")) return true;
+
+    // Updatable graphics driver family.
     if (std::strncmp(name, "ro.gfx.driver.", 14) == 0)   return true;
     if (std::strncmp(name, "ro.gfx.driver_", 14) == 0)   return true;
     // Camera module paths and package allowlists embed the device codename and
     // the vendor (com.qti.sensormodule.alioth_*, com.xiaomi.cameratest).
-    // A target app read vendor.camera.aux.packagelist directly.
     if (std::strncmp(name, "persist.vendor.camera.", 22) == 0) return true;
     if (std::strncmp(name, "vendor.camera.", 14) == 0)        return true;
     // ro.csc.spotify.music.{partnerid,referrerid} = xiaomi_mobile
     if (std::strncmp(name, "ro.csc.spotify.", 15) == 0)       return true;
     if (std::strncmp(name, "ro.media.xml_variant.", 21) == 0) return true;
-    // The HyperOS scheduler and its siblings. Each prefix was measured on the
-    // device; a stock Pixel has none of them.
-    if (std::strncmp(name, "persist.sys.turbosched.", 23) == 0) return true;
+
+    // Google clientidbase partner sub-properties (.ms, .vs, .tx, .pg) that embed
+    // OEM partner ids (e.g. android-xiaomi-rvo2).
+    if (std::strncmp(name, "ro.com.google.clientidbase.", 27) == 0) return true;
+
+    // Explicit Xiaomi vendor and service properties
+    if (std::strncmp(name, "ro.vendor.xiaomi.", 17) == 0) return true;
+    if (std::strncmp(name, "vendor.xiaomi.", 14) == 0)    return true;
+    if (std::strncmp(name, "init.svc.vendor.xiaomi.", 23) == 0) return true;
+
+    // HyperOS schedulers and daemons
     if (std::strncmp(name, "persist.sys.dexpreload.", 23) == 0) return true;
     if (std::strncmp(name, "persist.sys.perf_scenario_recognition.", 38) == 0) return true;
     if (std::strncmp(name, "persist.sys.perfdebug.", 22) == 0) return true;

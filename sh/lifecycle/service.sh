@@ -6,6 +6,7 @@ sleep 5
 # No global property application at boot: spoofing is per-target and in-process
 # now. identity.prop is ensured by post-fs-data.sh (seed) and, failing that, by
 # the companion on-demand at first target launch.
+[ -f "$MODDIR/enable_hide" ] || { touch "$MODDIR/enable_hide" 2>/dev/null && chmod 0644 "$MODDIR/enable_hide" 2>/dev/null; }
 
 if [ -f "$MODDIR/debug_variant" ]; then
     mkdir -p "$MODDIR/debug"

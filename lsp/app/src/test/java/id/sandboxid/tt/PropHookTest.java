@@ -127,6 +127,16 @@ public final class PropHookTest {
                 hidden.invoke(null, "vendor.camera.aux.packagelist"));
         check("hidden: persist.sys.turbosched.x", true,
                 hidden.invoke(null, "persist.sys.turbosched.x"));
+        check("hidden: bpf.hyperos_progs_loaded", true,
+                hidden.invoke(null, "bpf.hyperos_progs_loaded"));
+        check("hidden: persist.sys.turbosched.coreApp.enable", true,
+                hidden.invoke(null, "persist.sys.turbosched.coreApp.enable"));
+        check("hidden: ro.com.google.clientidbase.ms", true,
+                hidden.invoke(null, "ro.com.google.clientidbase.ms"));
+        check("hidden: ro.vendor.xiaomi.bl.poll", true,
+                hidden.invoke(null, "ro.vendor.xiaomi.bl.poll"));
+        check("hidden: init.svc.vendor.xiaomi.hardware.fingerprintextension-service", true,
+                hidden.invoke(null, "init.svc.vendor.xiaomi.hardware.fingerprintextension-service"));
         check("hidden: ro.csc.spotify.music.partnerid", true,
                 hidden.invoke(null, "ro.csc.spotify.music.partnerid"));
         check("hidden: ro.media.xml_variant.codecs", true,

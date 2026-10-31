@@ -720,9 +720,81 @@ cmd_fetch() {
   return 0
 }
 
+cmd_pif() {
+  _pif_src=""
+  if [ -s "/data/adb/pif.prop" ]; then
+    _pif_src="/data/adb/pif.prop"
+  elif [ -s "/data/adb/modules/playintegrityfix/pif.prop" ]; then
+    _pif_src="/data/adb/modules/playintegrityfix/pif.prop"
+  fi
+
+  if [ -z "$_pif_src" ]; then
+    log "tidak ada pif.prop di /data/adb/pif.prop atau /data/adb/modules/playintegrityfix/"
+    return 1
+  fi
+
+  log "deteksi target Play Integrity Fix: $_pif_src"
+  _fp=$(grep '^FINGERPRINT=' "$_pif_src" | cut -d= -f2-)
+  _model=$(grep '^MODEL=' "$_pif_src" | cut -d= -f2-)
+  _manuf=$(grep '^MANUFACTURER=' "$_pif_src" | cut -d= -f2-)
+  _secpatch=$(grep '^SECURITY_PATCH=' "$_pif_src" | cut -d= -f2-)
+  _sdk=$(grep '^DEVICE_INITIAL_SDK_INT=' "$_pif_src" | cut -d= -f2-)
+
+  if [ -z "$_fp" ]; then
+    log "FINGERPRINT kosong di $_pif_src"
+    return 1
+  fi
+
+  _fpleft=$(printf '%s' "$_fp" | cut -d: -f1)
+  _fpmid=$(printf '%s' "$_fp" | cut -d: -f2)
+
+  _brand=$(printf '%s' "$_fpleft" | cut -d/ -f1)
+  _product=$(printf '%s' "$_fpleft" | cut -d/ -f2)
+  _device=$(printf '%s' "$_fpleft" | cut -d/ -f3)
+
+  _rel=$(printf '%s' "$_fpmid" | cut -d/ -f1)
+  _id=$(printf '%s' "$_fpmid" | cut -d/ -f2)
+  _incr=$(printf '%s' "$_fpmid" | cut -d/ -f3)
+
+  [ -z "$_manuf" ] && _manuf="$_brand"
+  [ -z "$_model" ] && _model="$_device"
+  [ -z "$_secpatch" ] && _secpatch="2026-10-05"
+  [ -z "$_sdk" ] && _sdk="34"
+  _plat=$(map_platform "$_device")
+  [ -z "$_plat" ] && _plat="gs101"
+
+  _soc_man="Google"
+  _soc_mod="Tensor"
+  case "$_plat" in
+    gs101)   _soc_mod="GS101" ;;
+    gs201)   _soc_mod="GS201" ;;
+    zuma)    _soc_mod="GS301" ;;
+    zumapro) _soc_mod="GS401" ;;
+    laguna)  _soc_mod="GS501" ;;
+  esac
+
+  _override_line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$_model" "$_device" "$_product" "$_device" "$_plat" \
+    "$_sdk" "$_rel" "$_id" "$_incr" "$_secpatch" \
+    "$_brand" "$_manuf" "$_model" "$_soc_man" "$_soc_mod" "")
+
+  if printf '%s\n' "$_override_line" > "$OVERRIDE_FILE.tmp.$$" 2>/dev/null \
+     && mv -f "$OVERRIDE_FILE.tmp.$$" "$OVERRIDE_FILE" 2>/dev/null; then
+    chmod 0644 "$OVERRIDE_FILE" 2>/dev/null
+    log "persona override berhasil disinkronkan dari PIF ($_model / $_device / patch $_secpatch)"
+    log "jalankan \`sandboxid freshen\` untuk menerapkan identitas yang sama dengan Play Integrity"
+    return 0
+  else
+    rm -f "$OVERRIDE_FILE.tmp.$$" 2>/dev/null
+    log "gagal menulis $OVERRIDE_FILE"
+    return 1
+  fi
+}
+
 case "${1:-device}" in
   device|gen|multibrand|profile|"") cmd_device ;;
   fetch)                            cmd_fetch ;;
-  *) log "subcommand '$1' tidak dikenal (pakai: device | fetch)"; exit 2 ;;
+  pif|sync-pif)                     cmd_pif ;;
+  *) log "subcommand '$1' tidak dikenal (pakai: device | fetch | pif)"; exit 2 ;;
 esac
 exit $?

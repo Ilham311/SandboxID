@@ -216,17 +216,25 @@ final class PropHook {
      * scan over ASCII is enough: property names are ASCII, and a non-ASCII byte
      * can never match one of the four letters anyway.
      */
-    private static boolean containsMiui(String k) {
-        final int n = k.length() - 3;
-        for (int i = 0; i < n; i++) {
-            if (lower(k.charAt(i)) == 'm'
-                    && lower(k.charAt(i + 1)) == 'i'
-                    && lower(k.charAt(i + 2)) == 'u'
-                    && lower(k.charAt(i + 3)) == 'i') {
-                return true;
+    private static boolean containsCi(String k, String needle) {
+        if (k == null || needle == null) return false;
+        final int n = k.length() - needle.length();
+        final int nl = needle.length();
+        for (int i = 0; i <= n; i++) {
+            boolean match = true;
+            for (int j = 0; j < nl; j++) {
+                if (lower(k.charAt(i + j)) != lower(needle.charAt(j))) {
+                    match = false;
+                    break;
+                }
             }
+            if (match) return true;
         }
         return false;
+    }
+
+    private static boolean containsMiui(String k) {
+        return containsCi(k, "miui");
     }
 
     private static char lower(char c) {
@@ -324,15 +332,18 @@ final class PropHook {
                 // hide anything the persona needs. This is the same reasoning
                 // the native side reached; see is_vendor_rom_prop() in
                 // native/native_read.cpp.
-                if (containsMiui(k)) {
+                if (containsCi(k, "miui") || containsCi(k, "hyperos") || containsCi(k, "turbosched")) {
                     return true;
                 }
-                return k.startsWith("persist.sys.turbosched.")
-                        || k.startsWith("persist.sys.dexpreload.")
+                return k.startsWith("persist.sys.dexpreload.")
                         || k.startsWith("persist.sys.perf_scenario_recognition.")
                         || k.startsWith("persist.sys.perfdebug.")
                         || k.startsWith("persist.sys.smart_gc.")
                         || k.startsWith("ro.vendor.mi_sf.")
+                        || k.startsWith("ro.com.google.clientidbase.")
+                        || k.startsWith("ro.vendor.xiaomi.")
+                        || k.startsWith("vendor.xiaomi.")
+                        || k.startsWith("init.svc.vendor.xiaomi.")
                         // ro.gfx.driver.* — hidden, never derived: see the note
                         // in deriveHwValue(). Two prefixes, not one bare stem:
                         // the real names are ro.gfx.driver.0/.1 (dot) and

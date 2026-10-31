@@ -36,6 +36,15 @@ if [ -s "$LIVE_CARRIER" ]; then
     cp -f "$LIVE_CARRIER" "$MODPATH/carrier.conf"
 fi
 
+LIVE_HIDE="/data/adb/modules/sandboxid/enable_hide"
+if [ -f "$LIVE_HIDE" ]; then
+    ui_print "- enable_hide dari instalasi sebelumnya dipertahankan"
+    cp -f "$LIVE_HIDE" "$MODPATH/enable_hide"
+else
+    touch "$MODPATH/enable_hide"
+    ui_print "- Stealth mount hiding aktif secara default (enable_hide dibuat)"
+fi
+
 if [ -f "$MODPATH/debug_variant" ]; then
     ui_print "- ! Varian DEBUG terdeteksi"
     ui_print "-   Auto-log aktif pada boot berikutnya."
@@ -70,6 +79,7 @@ set_perm $MODPATH/service.sh                0 0 0755
 [ -f $MODPATH/devices.tsv ] && set_perm $MODPATH/devices.tsv 0 0 0644
 [ -f $MODPATH/carriers.tsv ] && set_perm $MODPATH/carriers.tsv 0 0 0644
 [ -f $MODPATH/carrier.conf ] && set_perm $MODPATH/carrier.conf 0 0 0644
+[ -f $MODPATH/enable_hide ] && set_perm $MODPATH/enable_hide 0 0 0644
 [ -f $MODPATH/target.txt ] && set_perm $MODPATH/target.txt 0 0 0644
 [ -f $MODPATH/target.tt.example ] && set_perm $MODPATH/target.tt.example 0 0 0644
 [ -f $MODPATH/sbx_flavor ] && set_perm $MODPATH/sbx_flavor 0 0 0644

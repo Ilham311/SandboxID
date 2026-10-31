@@ -169,6 +169,20 @@ int main() {
     check("vendor.usb.product_string hidden",
           sbxnr::should_hide_prop("vendor.usb.product_string"));
 
+    // HyperOS & vendor Xiaomi tells
+    check("bpf.hyperos_progs_loaded hidden",
+          sbxnr::should_hide_prop("bpf.hyperos_progs_loaded"));
+    check("persist.sys.turbosched.coreApp.enable hidden",
+          sbxnr::should_hide_prop("persist.sys.turbosched.coreApp.enable"));
+    check("ro.com.google.clientidbase.ms hidden",
+          sbxnr::should_hide_prop("ro.com.google.clientidbase.ms"));
+    check("ro.vendor.xiaomi.bl.poll hidden",
+          sbxnr::should_hide_prop("ro.vendor.xiaomi.bl.poll"));
+    check("vendor.xiaomi.test hidden",
+          sbxnr::should_hide_prop("vendor.xiaomi.test"));
+    check("init.svc.vendor.xiaomi.hardware.fingerprintextension-service hidden",
+          sbxnr::should_hide_prop("init.svc.vendor.xiaomi.hardware.fingerprintextension-service"));
+
     // Emulator and custom-ROM rules are untouched by this change.
     check("ro.kernel.qemu hidden", sbxnr::should_hide_prop("ro.kernel.qemu"));
     check("ro.lineage.version hidden",
