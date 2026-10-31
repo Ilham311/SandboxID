@@ -100,6 +100,7 @@ inline constexpr KV STATIC_PROP_DEFAULTS[] = {
     {"ro.adb.secure",                  "1"},
     {"ro.crypto.state",                "encrypted"},
     {"ro.treble.enabled",              "true"},
+    {"sys.use_memfd",                  "true"},
 
     {"ro.build.version.codename",       "REL"},
     {"ro.build.version.all_codenames",  "REL"},

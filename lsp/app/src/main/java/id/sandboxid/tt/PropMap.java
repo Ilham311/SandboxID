@@ -215,6 +215,7 @@ final class PropMap {
         c.put("ro.boot.warranty_bit", "0");
         c.put("ro.crypto.state", "encrypted");
         c.put("ro.treble.enabled", "true");
+        c.put("sys.use_memfd", "true");
         c.put("persist.sys.usb.config", "none");
         c.put("ro.boot.mode", "normal");
         c.put("ro.arch", "arm64");

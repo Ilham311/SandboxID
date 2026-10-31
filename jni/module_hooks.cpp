@@ -777,23 +777,29 @@ static int hook_fstatat(int dirfd, const char* path, struct stat* buf, int flags
     // ones the SafeX code uses. A relative path is resolved through
     // /proc/self/fd/<dirfd> so the dirfd form cannot bypass the check.
     //
+    // An empty path ("") is used by Bionic's fstat(fd, buf) via AT_EMPTY_PATH.
+    // It must bypass both the relative-path resolution and sbx_meta_hidden
+    // to avoid spurious /proc/self/fd/ readlinkat syscalls on every fstat.
+    //
     // The resolution uses the raw syscall, not ::readlink(): readlink is itself
     // inline-hooked below, and routing this through the hook would add a frame
     // that has to re-enter sbx_meta_hidden for "/proc/self/fd/N" on every
     // fstatat. The syscall has no such coupling.
-    if (path && path[0] != '/' && dirfd != AT_FDCWD) {
-        char link[64], dir[PATH_MAX];
-        std::snprintf(link, sizeof(link), "/proc/self/fd/%d", dirfd);
-        long r = ::syscall(__NR_readlinkat, AT_FDCWD, link, dir,
-                           static_cast<long>(sizeof(dir) - 1));
-        if (r > 0) {
-            dir[r] = '\0';
-            std::string full = std::string(dir) + "/" + path;
-            if (sbx_meta_hidden(full.c_str())) { errno = ENOENT; return -1; }
+    if (path && path[0] != '\0') {
+        if (path[0] != '/' && dirfd != AT_FDCWD) {
+            char link[64], dir[PATH_MAX];
+            std::snprintf(link, sizeof(link), "/proc/self/fd/%d", dirfd);
+            long r = ::syscall(__NR_readlinkat, AT_FDCWD, link, dir,
+                               static_cast<long>(sizeof(dir) - 1));
+            if (r > 0) {
+                dir[r] = '\0';
+                std::string full = std::string(dir) + "/" + path;
+                if (sbx_meta_hidden(full.c_str())) { errno = ENOENT; return -1; }
+            }
+        } else if (sbx_meta_hidden(path)) {
+            errno = ENOENT;
+            return -1;
         }
-    } else if (sbx_meta_hidden(path)) {
-        errno = ENOENT;
-        return -1;
     }
     return orig_fstatat ? orig_fstatat(dirfd, path, buf, flags)
                         : ::syscall(SBX_NR_FSTATAT, dirfd, path, buf, flags);
